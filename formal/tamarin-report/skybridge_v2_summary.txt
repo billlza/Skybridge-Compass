@@ -2,21 +2,20 @@ summary of summaries:
 
 analyzed: skybridge_v2.spthy
 
-  processing time: 0.24s
+  processing time: 49.07s
   
-  Exists_DefaultClassicTrace (exists-trace): verified (5 steps)
-  Exists_StrictPQCv2Trace (exists-trace): verified (4 steps)
-  Exists_StrictBootstrapRecoveryTrace (exists-trace): verified (5 steps)
-  NoClassicUnderStrictPQC (all-traces): verified (3 steps)
-  NegotiationIntegrity_SelectedWasOffered (all-traces): verified (18 steps)
-  AuthenticationRequiresVerifiedSigB (all-traces): verified (11 steps)
-  ClassicRequiresDowngradeEvent (all-traces): verified (3 steps)
-  ClassicRequiresFallbackGate (all-traces): verified (3 steps)
-  ClassicOnlyUnderDefaultPolicy (all-traces): verified (3 steps)
-  V2HybridSecretComposition (all-traces): verified (6 steps)
-  TimeoutCannotTriggerClassicFallback (all-traces): verified (3 steps)
-  FallbackRateLimitEnforced (all-traces): verified (3 steps)
-  DowngradeEventRequiredWithContext (all-traces): verified (3 steps)
-  BootstrapControlOnlyUntilPQCRekey (all-traces): verified (3 steps)
+  Exists_PQCv1_Session (exists-trace): verified (13 steps)
+  Exists_PQCv2_Session (exists-trace): verified (15 steps)
+  Exists_Default_Classic_Downgrade (exists-trace): verified (14 steps)
+  NegotiationIntegrity_AcceptedWasOffered (all-traces): verified (11 steps)
+  SigB_Authentic_or_Compromised (all-traces): verified (29 steps)
+  Injective_Agreement_I_with_R (all-traces): verified (75 steps)
+  Secrecy_SessionKey_HonestCase (all-traces): verified (203 steps)
+  WeakFS_v1 (all-traces): verified (38 steps)
+  V1_LacksForwardSecrecy_Witness (exists-trace): verified (15 steps)
+  ForwardSecrecy_v2 (all-traces): verified (47 steps)
+  NoClassicUnderStrictPQC (all-traces): verified (5 steps)
+  NoSilentClassicFallback_Default (all-traces): verified (5 steps)
+  ClassicRequiresDowngradeOrClassicPolicy (all-traces): verified (5 steps)
 
 ==============================================================================

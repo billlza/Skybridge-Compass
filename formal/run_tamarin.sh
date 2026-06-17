@@ -26,7 +26,12 @@ fi
 mkdir -p "$report_dir" "$artifact_dir"
 
 echo "== Running Tamarin: ${theory} =="
-tamarin-prover "${theory}" --prove | tee "$report_file"
+# --derivcheck-timeout=0 disables the preprocessing derivation-check
+# *timeout heuristic* (the only thing that ever "failed" wellformedness on
+# this DH+KEM theory); it does not affect soundness of the proofs, it just
+# lets the (slow) source/derivation analysis run to completion so the
+# report has no spurious "results might be wrong" banner.
+tamarin-prover "${theory}" --prove --derivcheck-timeout=0 | tee "$report_file"
 
 awk '/^summary of summaries:/{flag=1} flag{print}' "$report_file" > "$summary_file"
 

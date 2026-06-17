@@ -2,10 +2,12 @@ theory SkyBridge_V2 begin
 
 // Function signature and definition of the equational theory E
 
-functions: SuiteClassic/0, SuitePQCv1/0, SuitePQCv2/0, fst/1, h/1,
-           pair/2, pk/1, sign/2, snd/1, true/0, verify/3
+builtins: diffie-hellman
+functions: fst/1, h/1, kemdec/2, kemenc/2, kempk/1, pair/2, pk/1, sign/2,
+           snd/1, true/0, verify/3
 equations:
     fst(<x.1, x.2>) = x.1,
+    kemdec(kemenc(ss, kempk(sk)), sk) = ss,
     snd(<x.1, x.2>) = x.2,
     verify(sign(x.1, x.2), x.1, pk(x.2)) = true
 
@@ -17,541 +19,5102 @@ equations:
 
 
 
-rule (modulo E) Init_Offer_Default:
-   [ Fr( ~sid ) ]
+
+
+rule (modulo E) Register_Identity:
+   [ Fr( ~sk ) ]
+  --[ RegisterIdentity( $A, pk(~sk) ), OnlyOnceIdentity( $A ) ]->
+   [ !Ltk( $A, ~sk ), !Pk( $A, pk(~sk) ), Out( pk(~sk) ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Register_KEMKey:
+   [ Fr( ~kemsk ) ]
+  --[ RegisterKEM( $A, kempk(~kemsk) ), OnlyOnceKEM( $A ) ]->
+   [
+   !KemLtk( $A, ~kemsk ), !KemPk( $A, kempk(~kemsk) ), Out( kempk(~kemsk) )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+restriction identity_once:
+  "∀ A #i #j.
+    ((OnlyOnceIdentity( A ) @ #i) ∧ (OnlyOnceIdentity( A ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction kem_once:
+  "∀ A #i #j.
+    ((OnlyOnceKEM( A ) @ #i) ∧ (OnlyOnceKEM( A ) @ #j)) ⇒ (#i = #j)"
+  // safety formula
+
+rule (modulo E) Pair_OOB:
+   [ !Pk( $A, pkA ), !KemPk( $A, kpkA ) ]
+  --[ Pair( $A, pkA, kpkA ), OnlyOncePair( $A ) ]->
+   [ !Pin( $A, pkA, kpkA ) ]
+
+  /* has exactly the trivial AC variant */
+
+restriction pair_once:
+  "∀ A #i #j.
+    ((OnlyOncePair( A ) @ #i) ∧ (OnlyOncePair( A ) @ #j)) ⇒ (#i = #j)"
+  // safety formula
+
+rule (modulo E) Reveal_Ltk:
+   [ !Ltk( $A, sk ) ] --[ LtkReveal( $A ) ]-> [ Out( sk ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Reveal_KEM:
+   [ !KemLtk( $A, kemsk ) ] --[ KemReveal( $A ) ]-> [ Out( kemsk ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Reveal_Eph:
+   [ !Eph( x ) ] --[ EphReveal( x ) ]-> [ Out( x ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Init_Session_Strict:
+   [ Fr( ~sid ), !Pin( $B, pkB, kpkB ) ]
   --[
-  Policy( ~sid, 'default' ), OfferIncludes( ~sid, SuiteClassic ),
-  OfferIncludes( ~sid, SuitePQCv1 ), OfferIncludes( ~sid, SuitePQCv2 ),
-  OfferSent( ~sid, 'A' )
+  Policy( ~sid, 'strictPQC' ), Offer( ~sid, 'PQCv1' ),
+  Offer( ~sid, 'PQCv2' ), InitFor( ~sid, $A, $B )
   ]->
-   [ St_Default( ~sid ) ]
+   [ St_Init0( ~sid, $A, $B, 'strictPQC', pkB, kpkB ) ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Init_Offer_Strict:
-   [ Fr( ~sid ) ]
+rule (modulo E) Init_Session_Default:
+   [ Fr( ~sid ), !Pin( $B, pkB, kpkB ) ]
   --[
-  Policy( ~sid, 'strictPQC' ), OfferIncludes( ~sid, SuitePQCv1 ),
-  OfferIncludes( ~sid, SuitePQCv2 ), OfferSent( ~sid, 'A' )
+  Policy( ~sid, 'default' ), Offer( ~sid, 'PQCv1' ),
+  Offer( ~sid, 'PQCv2' ), InitFor( ~sid, $A, $B )
   ]->
-   [ St_Strict( ~sid ) ]
+   [ St_Init0( ~sid, $A, $B, 'default', pkB, kpkB ) ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Default_Timeout_Denied:
-   [ St_Default( sid ) ]
-  --[ TimeoutObserved( sid ), FallbackDenied( sid, 'timeout' ) ]->
-   [ St_Default_PQCOnly( sid ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Default_LocalFailure_Eligible:
-   [ St_Default( sid ) ]
+rule (modulo E) Init_Session_ClassicOnly:
+   [ Fr( ~sid ), !Pin( $B, pkB, kpkB ) ]
   --[
-  LocalFallbackEligible( sid, 'local_capability_error' ),
-  FallbackGatePassed( sid, 'local_capability_error' )
+  Policy( ~sid, 'classicOnly' ), Offer( ~sid, 'Classic' ),
+  InitFor( ~sid, $A, $B )
   ]->
-   [ St_Default_FallbackCandidate( sid ) ]
+   [ St_InitClassic0( ~sid, $A, $B, 'classicOnly', pkB, kpkB ) ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Default_Cooldown_Allows:
-   [ St_Default_FallbackCandidate( sid ) ]
-  --[ CooldownChecked( sid, 'inactive' ), CooldownPermit( sid, 'allow' )
-  ]->
-   [ St_Default_FallbackReady( sid ) ]
+rule (modulo E) I_SendA_PQCv1:
+   [
+   St_Init0( sid, A, B, pol, pkB, kpkB ), !Ltk( A, skA ), Fr( ~na ),
+   Fr( ~ss )
+   ]
+  --[ OfferUsed( sid, 'PQCv1' ), SendA( sid, A, B, 'PQCv1' ) ]->
+   [
+   Out( <sid, '1', A, 'PQCv1', kemenc(~ss, kpkB), ~na, 
+         sign(<'DomA', sid, A, 'PQCv1', kemenc(~ss, kpkB), ~na, pk(skA)>, skA), 
+         pk(skA)>
+   ),
+   St_I_WaitB( sid, A, B, pol, 'PQCv1', pkB, kpkB, ~na, ~ss,
+               h(<sid, A, 'PQCv1', kemenc(~ss, kpkB), ~na, pk(skA)>)
+   )
+   ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Default_Cooldown_Denies:
-   [ St_Default_FallbackCandidate( sid ) ]
+rule (modulo E) R_RecvA_SendB_PQCv1:
+   [
+   In( <sid, '1', A, 'PQCv1', cA, na, sigA, pkA> ), !Ltk( B, skB ),
+   !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+   !Pin( A, pkA, kpkA ), Fr( ~nb )
+   ]
   --[
-  CooldownChecked( sid, 'active' ), CooldownDenied( sid, 'active_window' )
+  Eq( verify(sigA, <'DomA', sid, A, 'PQCv1', cA, na, pkA>, pkA), true ),
+  VerifyA( sid, A, B, 'PQCv1' ), RecvA( sid, A, B, 'PQCv1' ),
+  SelectedSuite( sid, 'PQCv1' ), SigBIssued( sid, B, 'PQCv1' ),
+  Running_R( sid, A, B, 'PQCv1', h(<sid, A, 'PQCv1', cA, na, pkA>) ),
+  RootR( sid, h(<'root1', kemdec(cA, kemsk), na, ~nb>) )
   ]->
-   [ St_Default_PQCOnly( sid ) ]
+   [
+   Out( <sid, '2', B, 'PQCv1', 'noshare', ~nb, 
+         sign(<'DomB', h(<sid, A, 'PQCv1', cA, na, pkA>), 'PQCv1', 'noshare', 
+               ~nb, pk(skB)>,
+              skB), 
+         pk(skB)>
+   ),
+   St_R_WaitFin( sid, A, B, 'PQCv1',
+                 h(<'root1', kemdec(cA, kemsk), na, ~nb>),
+                 h(<sid, A, 'PQCv1', cA, na, pkA>)
+   )
+   ]
 
-  /* has exactly the trivial AC variant */
+  /*
+  rule (modulo AC) R_RecvA_SendB_PQCv1:
+     [
+     In( <sid, '1', A, 'PQCv1', cA, na, sigA, pkA> ), !Ltk( B, skB ),
+     !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+     !Pin( A, pkA, kpkA ), Fr( ~nb )
+     ]
+    --[
+    Eq( z.1, true ), VerifyA( sid, A, B, 'PQCv1' ),
+    RecvA( sid, A, B, 'PQCv1' ), SelectedSuite( sid, 'PQCv1' ),
+    SigBIssued( sid, B, 'PQCv1' ),
+    Running_R( sid, A, B, 'PQCv1', h(<sid, A, 'PQCv1', cA, na, pkA>) ),
+    RootR( sid, h(<'root1', z, na, ~nb>) )
+    ]->
+     [
+     Out( <sid, '2', B, 'PQCv1', 'noshare', ~nb, 
+           sign(<'DomB', h(<sid, A, 'PQCv1', cA, na, pkA>), 'PQCv1', 'noshare', 
+                 ~nb, pk(skB)>,
+                skB), 
+           pk(skB)>
+     ),
+     St_R_WaitFin( sid, A, B, 'PQCv1', h(<'root1', z, na, ~nb>),
+                   h(<sid, A, 'PQCv1', cA, na, pkA>)
+     )
+     ]
+    variants (modulo AC)
+    1. A     = A.29
+       cA    = cA.31
+       kemsk = kemsk.32
+       na    = na.34
+       pkA   = pkA.35
+       sid   = sid.36
+       sigA  = sigA.37
+       z     = kemdec(cA.31, kemsk.32)
+       z.1   = verify(sigA.37,
+                      <'DomA', sid.36, A.29, 'PQCv1', cA.31, na.34, pkA.35>, pkA.35)
+    
+    2. A     = A.37
+       cA    = kemenc(z.53, kempk(kemsk.40))
+       kemsk = kemsk.40
+       na    = na.42
+       pkA   = pkA.43
+       sid   = sid.44
+       sigA  = sigA.45
+       z     = z.53
+       z.1   = verify(sigA.45,
+                      <'DomA', sid.44, A.37, 'PQCv1', kemenc(z.53, kempk(kemsk.40)), na.42, 
+                       pkA.43>,
+                      pkA.43)
+    
+    3. A     = A.117
+       cA    = cA.119
+       kemsk = kemsk.120
+       na    = na.122
+       pkA   = pk(x.231)
+       sid   = sid.124
+       sigA  = sign(<'DomA', sid.124, A.117, 'PQCv1', cA.119, na.122, pk(x.231)
+                    >,
+                    x.231)
+       z     = kemdec(cA.119, kemsk.120)
+       z.1   = true
+    
+    4. A     = A.117
+       cA    = kemenc(z.133, kempk(kemsk.120))
+       kemsk = kemsk.120
+       na    = na.122
+       pkA   = pk(x.231)
+       sid   = sid.124
+       sigA  = sign(<'DomA', sid.124, A.117, 'PQCv1', 
+                     kemenc(z.133, kempk(kemsk.120)), na.122, pk(x.231)>,
+                    x.231)
+       z     = z.133
+       z.1   = true
+  */
 
-rule (modulo E) Neg_Default_Classic:
-   [ St_Default_FallbackReady( sid ) ]
+rule (modulo E) I_RecvB_PQCv1:
+   [
+   St_I_WaitB( sid, A, B, pol, 'PQCv1', pkB, kpkB, na, ss, thA ),
+   In( <sid, '2', B, 'PQCv1', 'noshare', nb, sigB, pkB> )
+   ]
   --[
-  SelectedSuite( sid, SuiteClassic ), SigBOverA( sid, SuiteClassic ),
-  VerifiedSigB( sid, SuiteClassic ), Attempt( sid, SuiteClassic ),
-  DowngradeEvent( sid ),
-  DowngradeEventCtx( sid, 'local_capability_error', 'default',
-                     'cooldown_checked'
+  VerifyB( sid, A, B, 'PQCv1' ),
+  Eq( verify(sigB, <'DomB', thA, 'PQCv1', 'noshare', nb, pkB>, pkB), true
   ),
-  ClassicFallbackAccepted( sid )
+  RootI( sid, h(<'root1', ss, na, nb>) ),
+  Commit_I( sid, A, B, 'PQCv1', thA ),
+  Running_I_Fin( sid, A, B, 'PQCv1', thA )
   ]->
-   [ St_HandshakeDone( sid, SuiteClassic ) ]
+   [
+   Out( <sid, 'finI', h(<'macI', h(<'root1', ss, na, nb>), thA>)> ),
+   St_I_WaitFin( sid, A, B, 'PQCv1', h(<'root1', ss, na, nb>), thA )
+   ]
 
-  /* has exactly the trivial AC variant */
+  /*
+  rule (modulo AC) I_RecvB_PQCv1:
+     [
+     St_I_WaitB( sid, A, B, pol, 'PQCv1', pkB, kpkB, na, ss, thA ),
+     In( <sid, '2', B, 'PQCv1', 'noshare', nb, sigB, pkB> )
+     ]
+    --[
+    VerifyB( sid, A, B, 'PQCv1' ), Eq( z, true ),
+    RootI( sid, h(<'root1', ss, na, nb>) ),
+    Commit_I( sid, A, B, 'PQCv1', thA ),
+    Running_I_Fin( sid, A, B, 'PQCv1', thA )
+    ]->
+     [
+     Out( <sid, 'finI', h(<'macI', h(<'root1', ss, na, nb>), thA>)> ),
+     St_I_WaitFin( sid, A, B, 'PQCv1', h(<'root1', ss, na, nb>), thA )
+     ]
+    variants (modulo AC)
+    1. nb    = nb.26
+       pkB   = pkB.27
+       sigB  = sigB.30
+       thA   = thA.32
+       z     = verify(sigB.30,
+                      <'DomB', thA.32, 'PQCv1', 'noshare', nb.26, pkB.27>, pkB.27)
+    
+    2. nb    = nb.91
+       pkB   = pk(x.176)
+       sigB  = sign(<'DomB', thA.97, 'PQCv1', 'noshare', nb.91, pk(x.176)>,
+                    x.176)
+       thA   = thA.97
+       z     = true
+  */
 
-rule (modulo E) Neg_Default_PQCv1:
-   [ St_Default( sid ) ]
+rule (modulo E) I_SendA_PQCv2:
+   [
+   St_Init0( sid, A, B, pol, pkB, kpkB ), !Ltk( A, skA ), Fr( ~na ),
+   Fr( ~ss ), Fr( ~xa )
+   ]
   --[
-  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
-  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
-  StaticSecretDerived( sid )
+  OfferUsed( sid, 'PQCv2' ), SendA( sid, A, B, 'PQCv2' ), EphI( sid, ~xa )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+   [
+   Out( <sid, '1', A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa, 
+         sign(<'DomA', sid, A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa, pk(skA)>,
+              skA), 
+         pk(skA)>
+   ),
+   !Eph( ~xa ),
+   St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pkB, kpkB, ~na, ~ss, ~xa,
+                  h(<sid, A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa, pk(skA)>)
+   )
+   ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Neg_Default_PQCv2:
-   [ St_Default( sid ) ]
+rule (modulo E) R_RecvA_SendB_PQCv2:
+   [
+   In( <sid, '1', A, 'PQCv2', cA, na, gxa, sigA, pkA> ), !Ltk( B, skB ),
+   !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+   !Pin( A, pkA, kpkA ), Fr( ~nb ), Fr( ~xb )
+   ]
   --[
-  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
-  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
-  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
-  HybridSecretComposed( sid )
+  Eq( verify(sigA, <'DomA', sid, A, 'PQCv2', cA, na, gxa, pkA>, pkA), true
+  ),
+  VerifyA( sid, A, B, 'PQCv2' ), RecvA( sid, A, B, 'PQCv2' ),
+  SelectedSuite( sid, 'PQCv2' ), SigBIssued( sid, B, 'PQCv2' ),
+  EphR( sid, ~xb ),
+  Running_R( sid, A, B, 'PQCv2', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>) ),
+  RootR( sid, h(<'root2', kemdec(cA, kemsk), gxa^~xb, na, ~nb>) )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+   [
+   Out( <sid, '2', B, 'PQCv2', 'g'^~xb, ~nb, 
+         sign(<'DomB', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>), 'PQCv2', 'g'^~xb, 
+               ~nb, pk(skB)>,
+              skB), 
+         pk(skB)>
+   ),
+   !Eph( ~xb ),
+   St_R_WaitFin( sid, A, B, 'PQCv2',
+                 h(<'root2', kemdec(cA, kemsk), gxa^~xb, na, ~nb>),
+                 h(<sid, A, 'PQCv2', cA, na, gxa, pkA>)
+   )
+   ]
 
-  /* has exactly the trivial AC variant */
+  /*
+  rule (modulo AC) R_RecvA_SendB_PQCv2:
+     [
+     In( <sid, '1', A, 'PQCv2', cA, na, gxa, sigA, pkA> ), !Ltk( B, skB ),
+     !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+     !Pin( A, pkA, kpkA ), Fr( ~nb ), Fr( ~xb )
+     ]
+    --[
+    Eq( z.2, true ), VerifyA( sid, A, B, 'PQCv2' ),
+    RecvA( sid, A, B, 'PQCv2' ), SelectedSuite( sid, 'PQCv2' ),
+    SigBIssued( sid, B, 'PQCv2' ), EphR( sid, ~xb ),
+    Running_R( sid, A, B, 'PQCv2', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>) ),
+    RootR( sid, h(<'root2', z, z.1, na, ~nb>) )
+    ]->
+     [
+     Out( <sid, '2', B, 'PQCv2', 'g'^~xb, ~nb, 
+           sign(<'DomB', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>), 'PQCv2', 'g'^~xb, 
+                 ~nb, pk(skB)>,
+                skB), 
+           pk(skB)>
+     ),
+     !Eph( ~xb ),
+     St_R_WaitFin( sid, A, B, 'PQCv2', h(<'root2', z, z.1, na, ~nb>),
+                   h(<sid, A, 'PQCv2', cA, na, gxa, pkA>)
+     )
+     ]
+    variants (modulo AC)
+     1. ~xb   = ~xb.34
+        A     = A.35
+        cA    = cA.37
+        gxa   = gxa.38
+        kemsk = kemsk.39
+        na    = na.41
+        pkA   = pkA.42
+        sid   = sid.43
+        sigA  = sigA.44
+        z     = kemdec(cA.37, kemsk.39)
+        z.1   = gxa.38^~xb.34
+        z.2   = verify(sigA.44,
+                       <'DomA', sid.43, A.35, 'PQCv2', cA.37, na.41, gxa.38, pkA.42>, pkA.42)
+    
+     2. ~xb   = ~xb.42
+        A     = A.43
+        cA    = kemenc(z.60, kempk(kemsk.47))
+        gxa   = gxa.46
+        kemsk = kemsk.47
+        na    = na.49
+        pkA   = pkA.50
+        sid   = sid.51
+        sigA  = sigA.52
+        z     = z.60
+        z.1   = gxa.46^~xb.42
+        z.2   = verify(sigA.52,
+                       <'DomA', sid.51, A.43, 'PQCv2', kemenc(z.60, kempk(kemsk.47)), na.49, 
+                        gxa.46, pkA.50>,
+                       pkA.50)
+    
+     3. ~xb   = ~xb.43
+        A     = A.44
+        cA    = cA.46
+        gxa   = z.62^inv(~xb.43)
+        kemsk = kemsk.48
+        na    = na.50
+        pkA   = pkA.51
+        sid   = sid.52
+        sigA  = sigA.53
+        z     = kemdec(cA.46, kemsk.48)
+        z.1   = z.62
+        z.2   = verify(sigA.53,
+                       <'DomA', sid.52, A.44, 'PQCv2', cA.46, na.50, z.62^inv(~xb.43), pkA.51>,
+                       pkA.51)
+    
+     4. ~xb   = ~xb.43
+        A     = A.44
+        cA    = kemenc(z.61, kempk(kemsk.48))
+        gxa   = z.62^inv(~xb.43)
+        kemsk = kemsk.48
+        na    = na.50
+        pkA   = pkA.51
+        sid   = sid.52
+        sigA  = sigA.53
+        z     = z.61
+        z.1   = z.62
+        z.2   = verify(sigA.53,
+                       <'DomA', sid.52, A.44, 'PQCv2', kemenc(z.61, kempk(kemsk.48)), na.50, 
+                        z.62^inv(~xb.43), pkA.51>,
+                       pkA.51)
+    
+     5. ~xb   = ~xb.207
+        A     = A.208
+        cA    = cA.210
+        gxa   = x.410^x.411
+        kemsk = kemsk.212
+        na    = na.214
+        pkA   = pkA.215
+        sid   = sid.216
+        sigA  = sigA.217
+        z     = kemdec(cA.210, kemsk.212)
+        z.1   = x.410^(~xb.207*x.411)
+        z.2   = verify(sigA.217,
+                       <'DomA', sid.216, A.208, 'PQCv2', cA.210, na.214, x.410^x.411, pkA.215>,
+                       pkA.215)
+    
+     6. ~xb   = ~xb.209
+        A     = A.210
+        cA    = kemenc(z.227, kempk(kemsk.214))
+        gxa   = x.414^x.415
+        kemsk = kemsk.214
+        na    = na.216
+        pkA   = pkA.217
+        sid   = sid.218
+        sigA  = sigA.219
+        z     = z.227
+        z.1   = x.414^(~xb.209*x.415)
+        z.2   = verify(sigA.219,
+                       <'DomA', sid.218, A.210, 'PQCv2', kemenc(z.227, kempk(kemsk.214)), 
+                        na.216, x.414^x.415, pkA.217>,
+                       pkA.217)
+    
+     7. ~xb   = ~xb.211
+        A     = A.212
+        cA    = cA.214
+        gxa   = x.418^inv((~xb.211*x.419))
+        kemsk = kemsk.216
+        na    = na.218
+        pkA   = pkA.219
+        sid   = sid.220
+        sigA  = sigA.221
+        z     = kemdec(cA.214, kemsk.216)
+        z.1   = x.418^inv(x.419)
+        z.2   = verify(sigA.221,
+                       <'DomA', sid.220, A.212, 'PQCv2', cA.214, na.218, 
+                        x.418^inv((~xb.211*x.419)), pkA.219>,
+                       pkA.219)
+    
+     8. ~xb   = ~xb.211
+        A     = A.212
+        cA    = cA.214
+        gxa   = x.418^(x.419*inv(~xb.211))
+        kemsk = kemsk.216
+        na    = na.218
+        pkA   = pkA.219
+        sid   = sid.220
+        sigA  = sigA.221
+        z     = kemdec(cA.214, kemsk.216)
+        z.1   = x.418^x.419
+        z.2   = verify(sigA.221,
+                       <'DomA', sid.220, A.212, 'PQCv2', cA.214, na.218, 
+                        x.418^(x.419*inv(~xb.211)), pkA.219>,
+                       pkA.219)
+    
+     9. ~xb   = ~xb.212
+        A     = A.213
+        cA    = cA.215
+        gxa   = x.419^(x.420*inv((~xb.212*x.421)))
+        kemsk = kemsk.217
+        na    = na.219
+        pkA   = pkA.220
+        sid   = sid.221
+        sigA  = sigA.222
+        z     = kemdec(cA.215, kemsk.217)
+        z.1   = x.419^(x.420*inv(x.421))
+        z.2   = verify(sigA.222,
+                       <'DomA', sid.221, A.213, 'PQCv2', cA.215, na.219, 
+                        x.419^(x.420*inv((~xb.212*x.421))), pkA.220>,
+                       pkA.220)
+    
+    10. ~xb   = ~xb.212
+        A     = A.213
+        cA    = kemenc(z.230, kempk(kemsk.217))
+        gxa   = x.420^inv((~xb.212*x.421))
+        kemsk = kemsk.217
+        na    = na.219
+        pkA   = pkA.220
+        sid   = sid.221
+        sigA  = sigA.222
+        z     = z.230
+        z.1   = x.420^inv(x.421)
+        z.2   = verify(sigA.222,
+                       <'DomA', sid.221, A.213, 'PQCv2', kemenc(z.230, kempk(kemsk.217)), 
+                        na.219, x.420^inv((~xb.212*x.421)), pkA.220>,
+                       pkA.220)
+    
+    11. ~xb   = ~xb.212
+        A     = A.213
+        cA    = kemenc(z.230, kempk(kemsk.217))
+        gxa   = x.420^(x.421*inv(~xb.212))
+        kemsk = kemsk.217
+        na    = na.219
+        pkA   = pkA.220
+        sid   = sid.221
+        sigA  = sigA.222
+        z     = z.230
+        z.1   = x.420^x.421
+        z.2   = verify(sigA.222,
+                       <'DomA', sid.221, A.213, 'PQCv2', kemenc(z.230, kempk(kemsk.217)), 
+                        na.219, x.420^(x.421*inv(~xb.212)), pkA.220>,
+                       pkA.220)
+    
+    12. ~xb   = ~xb.213
+        A     = A.214
+        cA    = cA.216
+        gxa   = gxa.217
+        kemsk = kemsk.218
+        na    = na.220
+        pkA   = pk(x.423)
+        sid   = sid.222
+        sigA  = sign(<'DomA', sid.222, A.214, 'PQCv2', cA.216, na.220, gxa.217, 
+                      pk(x.423)>,
+                     x.423)
+        z     = kemdec(cA.216, kemsk.218)
+        z.1   = gxa.217^~xb.213
+        z.2   = true
+    
+    13. ~xb   = ~xb.213
+        A     = A.214
+        cA    = kemenc(z.231, kempk(kemsk.218))
+        gxa   = gxa.217
+        kemsk = kemsk.218
+        na    = na.220
+        pkA   = pk(x.423)
+        sid   = sid.222
+        sigA  = sign(<'DomA', sid.222, A.214, 'PQCv2', 
+                      kemenc(z.231, kempk(kemsk.218)), na.220, gxa.217, pk(x.423)>,
+                     x.423)
+        z     = z.231
+        z.1   = gxa.217^~xb.213
+        z.2   = true
+    
+    14. ~xb   = ~xb.213
+        A     = A.214
+        cA    = kemenc(z.231, kempk(kemsk.218))
+        gxa   = x.421^(x.422*inv((~xb.213*x.423)))
+        kemsk = kemsk.218
+        na    = na.220
+        pkA   = pkA.221
+        sid   = sid.222
+        sigA  = sigA.223
+        z     = z.231
+        z.1   = x.421^(x.422*inv(x.423))
+        z.2   = verify(sigA.223,
+                       <'DomA', sid.222, A.214, 'PQCv2', kemenc(z.231, kempk(kemsk.218)), 
+                        na.220, x.421^(x.422*inv((~xb.213*x.423))), pkA.221>,
+                       pkA.221)
+    
+    15. ~xb   = ~xb.214
+        A     = A.215
+        cA    = cA.217
+        gxa   = z.233^inv(~xb.214)
+        kemsk = kemsk.219
+        na    = na.221
+        pkA   = pk(x.425)
+        sid   = sid.223
+        sigA  = sign(<'DomA', sid.223, A.215, 'PQCv2', cA.217, na.221, 
+                      z.233^inv(~xb.214), pk(x.425)>,
+                     x.425)
+        z     = kemdec(cA.217, kemsk.219)
+        z.1   = z.233
+        z.2   = true
+    
+    16. ~xb   = ~xb.214
+        A     = A.215
+        cA    = cA.217
+        gxa   = x.420^x.421
+        kemsk = kemsk.219
+        na    = na.221
+        pkA   = pk(x.425)
+        sid   = sid.223
+        sigA  = sign(<'DomA', sid.223, A.215, 'PQCv2', cA.217, na.221, 
+                      x.420^x.421, pk(x.425)>,
+                     x.425)
+        z     = kemdec(cA.217, kemsk.219)
+        z.1   = x.420^(~xb.214*x.421)
+        z.2   = true
+    
+    17. ~xb   = ~xb.214
+        A     = A.215
+        cA    = kemenc(z.232, kempk(kemsk.219))
+        gxa   = z.233^inv(~xb.214)
+        kemsk = kemsk.219
+        na    = na.221
+        pkA   = pk(x.425)
+        sid   = sid.223
+        sigA  = sign(<'DomA', sid.223, A.215, 'PQCv2', 
+                      kemenc(z.232, kempk(kemsk.219)), na.221, z.233^inv(~xb.214), pk(x.425)>,
+                     x.425)
+        z     = z.232
+        z.1   = z.233
+        z.2   = true
+    
+    18. ~xb   = ~xb.214
+        A     = A.215
+        cA    = kemenc(z.232, kempk(kemsk.219))
+        gxa   = x.421^x.422
+        kemsk = kemsk.219
+        na    = na.221
+        pkA   = pk(x.425)
+        sid   = sid.223
+        sigA  = sign(<'DomA', sid.223, A.215, 'PQCv2', 
+                      kemenc(z.232, kempk(kemsk.219)), na.221, x.421^x.422, pk(x.425)>,
+                     x.425)
+        z     = z.232
+        z.1   = x.421^(~xb.214*x.422)
+        z.2   = true
+    
+    19. ~xb   = ~xb.215
+        A     = A.216
+        cA    = cA.218
+        gxa   = x.422^inv((~xb.215*x.423))
+        kemsk = kemsk.220
+        na    = na.222
+        pkA   = pk(x.427)
+        sid   = sid.224
+        sigA  = sign(<'DomA', sid.224, A.216, 'PQCv2', cA.218, na.222, 
+                      x.422^inv((~xb.215*x.423)), pk(x.427)>,
+                     x.427)
+        z     = kemdec(cA.218, kemsk.220)
+        z.1   = x.422^inv(x.423)
+        z.2   = true
+    
+    20. ~xb   = ~xb.215
+        A     = A.216
+        cA    = cA.218
+        gxa   = x.422^(x.423*inv(~xb.215))
+        kemsk = kemsk.220
+        na    = na.222
+        pkA   = pk(x.427)
+        sid   = sid.224
+        sigA  = sign(<'DomA', sid.224, A.216, 'PQCv2', cA.218, na.222, 
+                      x.422^(x.423*inv(~xb.215)), pk(x.427)>,
+                     x.427)
+        z     = kemdec(cA.218, kemsk.220)
+        z.1   = x.422^x.423
+        z.2   = true
+    
+    21. ~xb   = ~xb.215
+        A     = A.216
+        cA    = kemenc(z.233, kempk(kemsk.220))
+        gxa   = x.423^inv((~xb.215*x.424))
+        kemsk = kemsk.220
+        na    = na.222
+        pkA   = pk(x.427)
+        sid   = sid.224
+        sigA  = sign(<'DomA', sid.224, A.216, 'PQCv2', 
+                      kemenc(z.233, kempk(kemsk.220)), na.222, x.423^inv((~xb.215*x.424)), 
+                      pk(x.427)>,
+                     x.427)
+        z     = z.233
+        z.1   = x.423^inv(x.424)
+        z.2   = true
+    
+    22. ~xb   = ~xb.215
+        A     = A.216
+        cA    = kemenc(z.233, kempk(kemsk.220))
+        gxa   = x.423^(x.424*inv(~xb.215))
+        kemsk = kemsk.220
+        na    = na.222
+        pkA   = pk(x.427)
+        sid   = sid.224
+        sigA  = sign(<'DomA', sid.224, A.216, 'PQCv2', 
+                      kemenc(z.233, kempk(kemsk.220)), na.222, x.423^(x.424*inv(~xb.215)), 
+                      pk(x.427)>,
+                     x.427)
+        z     = z.233
+        z.1   = x.423^x.424
+        z.2   = true
+    
+    23. ~xb   = ~xb.216
+        A     = A.217
+        cA    = cA.219
+        gxa   = x.423^(x.424*inv((~xb.216*x.425)))
+        kemsk = kemsk.221
+        na    = na.223
+        pkA   = pk(x.429)
+        sid   = sid.225
+        sigA  = sign(<'DomA', sid.225, A.217, 'PQCv2', cA.219, na.223, 
+                      x.423^(x.424*inv((~xb.216*x.425))), pk(x.429)>,
+                     x.429)
+        z     = kemdec(cA.219, kemsk.221)
+        z.1   = x.423^(x.424*inv(x.425))
+        z.2   = true
+    
+    24. ~xb   = ~xb.216
+        A     = A.217
+        cA    = kemenc(z.234, kempk(kemsk.221))
+        gxa   = x.424^(x.425*inv((~xb.216*x.426)))
+        kemsk = kemsk.221
+        na    = na.223
+        pkA   = pk(x.429)
+        sid   = sid.225
+        sigA  = sign(<'DomA', sid.225, A.217, 'PQCv2', 
+                      kemenc(z.234, kempk(kemsk.221)), na.223, 
+                      x.424^(x.425*inv((~xb.216*x.426))), pk(x.429)>,
+                     x.429)
+        z     = z.234
+        z.1   = x.424^(x.425*inv(x.426))
+        z.2   = true
+    
+    25. A     = A.33
+        cA    = cA.35
+        gxa   = DH_neutral
+        kemsk = kemsk.37
+        na    = na.39
+        pkA   = pkA.40
+        sid   = sid.41
+        sigA  = sigA.42
+        z     = kemdec(cA.35, kemsk.37)
+        z.1   = DH_neutral
+        z.2   = verify(sigA.42,
+                       <'DomA', sid.41, A.33, 'PQCv2', cA.35, na.39, DH_neutral, pkA.40>,
+                       pkA.40)
+    
+    26. A     = A.41
+        cA    = kemenc(z.58, kempk(kemsk.45))
+        gxa   = DH_neutral
+        kemsk = kemsk.45
+        na    = na.47
+        pkA   = pkA.48
+        sid   = sid.49
+        sigA  = sigA.50
+        z     = z.58
+        z.1   = DH_neutral
+        z.2   = verify(sigA.50,
+                       <'DomA', sid.49, A.41, 'PQCv2', kemenc(z.58, kempk(kemsk.45)), na.47, 
+                        DH_neutral, pkA.48>,
+                       pkA.48)
+    
+    27. A     = A.208
+        cA    = cA.210
+        gxa   = DH_neutral
+        kemsk = kemsk.212
+        na    = na.214
+        pkA   = pk(x.412)
+        sid   = sid.216
+        sigA  = sign(<'DomA', sid.216, A.208, 'PQCv2', cA.210, na.214, 
+                      DH_neutral, pk(x.412)>,
+                     x.412)
+        z     = kemdec(cA.210, kemsk.212)
+        z.1   = DH_neutral
+        z.2   = true
+    
+    28. A     = A.208
+        cA    = kemenc(z.225, kempk(kemsk.212))
+        gxa   = DH_neutral
+        kemsk = kemsk.212
+        na    = na.214
+        pkA   = pk(x.412)
+        sid   = sid.216
+        sigA  = sign(<'DomA', sid.216, A.208, 'PQCv2', 
+                      kemenc(z.225, kempk(kemsk.212)), na.214, DH_neutral, pk(x.412)>,
+                     x.412)
+        z     = z.225
+        z.1   = DH_neutral
+        z.2   = true
+  */
 
-rule (modulo E) Neg_Default_PQCv1_AfterFallbackBlock:
-   [ St_Default_PQCOnly( sid ) ]
+rule (modulo E) I_RecvB_PQCv2:
+   [
+   St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pkB, kpkB, na, ss, xa, thA ),
+   In( <sid, '2', B, 'PQCv2', gxb, nb, sigB, pkB> )
+   ]
   --[
-  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
-  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
-  StaticSecretDerived( sid )
+  VerifyB( sid, A, B, 'PQCv2' ),
+  Eq( verify(sigB, <'DomB', thA, 'PQCv2', gxb, nb, pkB>, pkB), true ),
+  RootI( sid, h(<'root2', ss, gxb^xa, na, nb>) ),
+  Commit_I( sid, A, B, 'PQCv2', thA ),
+  Running_I_Fin( sid, A, B, 'PQCv2', thA )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+   [
+   Out( <sid, 'finI', h(<'macI', h(<'root2', ss, gxb^xa, na, nb>), thA>)> ),
+   St_I_WaitFin( sid, A, B, 'PQCv2', h(<'root2', ss, gxb^xa, na, nb>), thA )
+   ]
 
-  /* has exactly the trivial AC variant */
+  /*
+  rule (modulo AC) I_RecvB_PQCv2:
+     [
+     St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pkB, kpkB, na, ss, xa, thA ),
+     In( <sid, '2', B, 'PQCv2', gxb, nb, sigB, pkB> )
+     ]
+    --[
+    VerifyB( sid, A, B, 'PQCv2' ), Eq( z.1, true ),
+    RootI( sid, h(<'root2', ss, z, na, nb>) ),
+    Commit_I( sid, A, B, 'PQCv2', thA ),
+    Running_I_Fin( sid, A, B, 'PQCv2', thA )
+    ]->
+     [
+     Out( <sid, 'finI', h(<'macI', h(<'root2', ss, z, na, nb>), thA>)> ),
+     St_I_WaitFin( sid, A, B, 'PQCv2', h(<'root2', ss, z, na, nb>), thA )
+     ]
+    variants (modulo AC)
+     1. gxb   = gxb.31
+        nb    = nb.34
+        pkB   = pkB.35
+        sigB  = sigB.38
+        thA   = thA.40
+        xa    = one
+        z     = gxb.31
+        z.1   = verify(sigB.38, <'DomB', thA.40, 'PQCv2', gxb.31, nb.34, pkB.35>,
+                       pkB.35)
+    
+     2. gxb   = gxb.32
+        nb    = nb.35
+        pkB   = pkB.36
+        sigB  = sigB.39
+        thA   = thA.41
+        xa    = xa.42
+        z     = gxb.32^xa.42
+        z.1   = verify(sigB.39, <'DomB', thA.41, 'PQCv2', gxb.32, nb.35, pkB.36>,
+                       pkB.36)
+    
+     3. gxb   = gxb.98
+        nb    = nb.101
+        pkB   = pk(x.192)
+        sigB  = sign(<'DomB', thA.107, 'PQCv2', gxb.98, nb.101, pk(x.192)>,
+                     x.192)
+        thA   = thA.107
+        xa    = xa.108
+        z     = gxb.98^xa.108
+        z.1   = true
+    
+     4. gxb   = gxb.98
+        nb    = nb.101
+        pkB   = pk(x.192)
+        sigB  = sign(<'DomB', thA.107, 'PQCv2', gxb.98, nb.101, pk(x.192)>,
+                     x.192)
+        thA   = thA.107
+        xa    = one
+        z     = gxb.98
+        z.1   = true
+    
+     5. gxb   = DH_neutral
+        nb    = nb.28
+        pkB   = pkB.29
+        sigB  = sigB.32
+        thA   = thA.34
+        z     = DH_neutral
+        z.1   = verify(sigB.32,
+                       <'DomB', thA.34, 'PQCv2', DH_neutral, nb.28, pkB.29>, pkB.29)
+    
+     6. gxb   = DH_neutral
+        nb    = nb.83
+        pkB   = pk(x.159)
+        sigB  = sign(<'DomB', thA.89, 'PQCv2', DH_neutral, nb.83, pk(x.159)>,
+                     x.159)
+        thA   = thA.89
+        z     = DH_neutral
+        z.1   = true
+    
+     7. gxb   = z.48^inv(xa.42)
+        nb    = nb.35
+        pkB   = pkB.36
+        sigB  = sigB.39
+        thA   = thA.41
+        xa    = xa.42
+        z     = z.48
+        z.1   = verify(sigB.39,
+                       <'DomB', thA.41, 'PQCv2', z.48^inv(xa.42), nb.35, pkB.36>, pkB.36)
+    
+     8. gxb   = z.96^x.159
+        nb    = nb.83
+        pkB   = pkB.84
+        sigB  = sigB.87
+        thA   = thA.89
+        xa    = inv(x.159)
+        z     = z.96
+        z.1   = verify(sigB.87,
+                       <'DomB', thA.89, 'PQCv2', z.96^x.159, nb.83, pkB.84>, pkB.84)
+    
+     9. gxb   = z.97^(x.160*inv(x.161))
+        nb    = nb.84
+        pkB   = pkB.85
+        sigB  = sigB.88
+        thA   = thA.90
+        xa    = (x.161*inv(x.160))
+        z     = z.97
+        z.1   = verify(sigB.88,
+                       <'DomB', thA.90, 'PQCv2', z.97^(x.160*inv(x.161)), nb.84, pkB.85>,
+                       pkB.85)
+    
+    10. gxb   = z.100^x.163
+        nb    = nb.87
+        pkB   = pk(x.167)
+        sigB  = sign(<'DomB', thA.93, 'PQCv2', z.100^x.163, nb.87, pk(x.167)>,
+                     x.167)
+        thA   = thA.93
+        xa    = inv(x.163)
+        z     = z.100
+        z.1   = true
+    
+    11. gxb   = z.100^inv(xa.94)
+        nb    = nb.87
+        pkB   = pk(x.167)
+        sigB  = sign(<'DomB', thA.93, 'PQCv2', z.100^inv(xa.94), nb.87, pk(x.167)
+                     >,
+                     x.167)
+        thA   = thA.93
+        xa    = xa.94
+        z     = z.100
+        z.1   = true
+    
+    12. gxb   = z.101^(x.164*inv(x.165))
+        nb    = nb.88
+        pkB   = pk(x.169)
+        sigB  = sign(<'DomB', thA.94, 'PQCv2', z.101^(x.164*inv(x.165)), nb.88, 
+                      pk(x.169)>,
+                     x.169)
+        thA   = thA.94
+        xa    = (x.165*inv(x.164))
+        z     = z.101
+        z.1   = true
+    
+    13. gxb   = x.158^x.159
+        nb    = nb.83
+        pkB   = pkB.84
+        sigB  = sigB.87
+        thA   = thA.89
+        xa    = xa.90
+        z     = x.158^(xa.90*x.159)
+        z.1   = verify(sigB.87,
+                       <'DomB', thA.89, 'PQCv2', x.158^x.159, nb.83, pkB.84>, pkB.84)
+    
+    14. gxb   = x.158^(x.159*inv(xa.90))
+        nb    = nb.83
+        pkB   = pkB.84
+        sigB  = sigB.87
+        thA   = thA.89
+        xa    = xa.90
+        z     = x.158^x.159
+        z.1   = verify(sigB.87,
+                       <'DomB', thA.89, 'PQCv2', x.158^(x.159*inv(xa.90)), nb.83, pkB.84>,
+                       pkB.84)
+    
+    15. gxb   = x.159^inv((xa.91*x.161))
+        nb    = nb.84
+        pkB   = pkB.85
+        sigB  = sigB.88
+        thA   = thA.90
+        xa    = xa.91
+        z     = x.159^inv(x.161)
+        z.1   = verify(sigB.88,
+                       <'DomB', thA.90, 'PQCv2', x.159^inv((xa.91*x.161)), nb.84, pkB.85>,
+                       pkB.85)
+    
+    16. gxb   = x.159^(x.160*x.161)
+        nb    = nb.84
+        pkB   = pkB.85
+        sigB  = sigB.88
+        thA   = thA.90
+        xa    = inv(x.160)
+        z     = x.159^x.161
+        z.1   = verify(sigB.88,
+                       <'DomB', thA.90, 'PQCv2', x.159^(x.160*x.161), nb.84, pkB.85>, pkB.85)
+    
+    17. gxb   = x.160^(x.161*x.162*inv(x.163))
+        nb    = nb.85
+        pkB   = pkB.86
+        sigB  = sigB.89
+        thA   = thA.91
+        xa    = (x.163*inv(x.161))
+        z     = x.160^x.162
+        z.1   = verify(sigB.89,
+                       <'DomB', thA.91, 'PQCv2', x.160^(x.161*x.162*inv(x.163)), nb.85, pkB.86>,
+                       pkB.86)
+    
+    18. gxb   = x.160^(x.161*inv((xa.92*x.163)))
+        nb    = nb.85
+        pkB   = pkB.86
+        sigB  = sigB.89
+        thA   = thA.91
+        xa    = xa.92
+        z     = x.160^(x.161*inv(x.163))
+        z.1   = verify(sigB.89,
+                       <'DomB', thA.91, 'PQCv2', x.160^(x.161*inv((xa.92*x.163))), nb.85, pkB.86
+                       >,
+                       pkB.86)
+    
+    19. gxb   = x.160^(x.161*inv((x.162*x.163)))
+        nb    = nb.85
+        pkB   = pkB.86
+        sigB  = sigB.89
+        thA   = thA.91
+        xa    = (x.162*inv(x.161))
+        z     = x.160^inv(x.163)
+        z.1   = verify(sigB.89,
+                       <'DomB', thA.91, 'PQCv2', x.160^(x.161*inv((x.162*x.163))), nb.85, pkB.86
+                       >,
+                       pkB.86)
+    
+    20. gxb   = x.161^(x.162*x.163*inv((x.164*x.165)))
+        nb    = nb.86
+        pkB   = pkB.87
+        sigB  = sigB.90
+        thA   = thA.92
+        xa    = (x.164*inv(x.162))
+        z     = x.161^(x.163*inv(x.165))
+        z.1   = verify(sigB.90,
+                       <'DomB', thA.92, 'PQCv2', x.161^(x.162*x.163*inv((x.164*x.165))), nb.86, 
+                        pkB.87>,
+                       pkB.87)
+    
+    21. gxb   = x.162^x.163
+        nb    = nb.87
+        pkB   = pk(x.167)
+        sigB  = sign(<'DomB', thA.93, 'PQCv2', x.162^x.163, nb.87, pk(x.167)>,
+                     x.167)
+        thA   = thA.93
+        xa    = xa.94
+        z     = x.162^(xa.94*x.163)
+        z.1   = true
+    
+    22. gxb   = x.163^inv((xa.95*x.165))
+        nb    = nb.88
+        pkB   = pk(x.169)
+        sigB  = sign(<'DomB', thA.94, 'PQCv2', x.163^inv((xa.95*x.165)), nb.88, 
+                      pk(x.169)>,
+                     x.169)
+        thA   = thA.94
+        xa    = xa.95
+        z     = x.163^inv(x.165)
+        z.1   = true
+    
+    23. gxb   = x.163^(x.164*x.165)
+        nb    = nb.88
+        pkB   = pk(x.169)
+        sigB  = sign(<'DomB', thA.94, 'PQCv2', x.163^(x.164*x.165), nb.88, 
+                      pk(x.169)>,
+                     x.169)
+        thA   = thA.94
+        xa    = inv(x.164)
+        z     = x.163^x.165
+        z.1   = true
+    
+    24. gxb   = x.163^(x.164*inv(xa.95))
+        nb    = nb.88
+        pkB   = pk(x.169)
+        sigB  = sign(<'DomB', thA.94, 'PQCv2', x.163^(x.164*inv(xa.95)), nb.88, 
+                      pk(x.169)>,
+                     x.169)
+        thA   = thA.94
+        xa    = xa.95
+        z     = x.163^x.164
+        z.1   = true
+    
+    25. gxb   = x.164^(x.165*x.166*inv(x.167))
+        nb    = nb.89
+        pkB   = pk(x.171)
+        sigB  = sign(<'DomB', thA.95, 'PQCv2', x.164^(x.165*x.166*inv(x.167)), 
+                      nb.89, pk(x.171)>,
+                     x.171)
+        thA   = thA.95
+        xa    = (x.167*inv(x.165))
+        z     = x.164^x.166
+        z.1   = true
+    
+    26. gxb   = x.164^(x.165*inv((xa.96*x.167)))
+        nb    = nb.89
+        pkB   = pk(x.171)
+        sigB  = sign(<'DomB', thA.95, 'PQCv2', x.164^(x.165*inv((xa.96*x.167))), 
+                      nb.89, pk(x.171)>,
+                     x.171)
+        thA   = thA.95
+        xa    = xa.96
+        z     = x.164^(x.165*inv(x.167))
+        z.1   = true
+    
+    27. gxb   = x.164^(x.165*inv((x.166*x.167)))
+        nb    = nb.89
+        pkB   = pk(x.171)
+        sigB  = sign(<'DomB', thA.95, 'PQCv2', x.164^(x.165*inv((x.166*x.167))), 
+                      nb.89, pk(x.171)>,
+                     x.171)
+        thA   = thA.95
+        xa    = (x.166*inv(x.165))
+        z     = x.164^inv(x.167)
+        z.1   = true
+    
+    28. gxb   = x.165^(x.166*x.167*inv((x.168*x.169)))
+        nb    = nb.90
+        pkB   = pk(x.173)
+        sigB  = sign(<'DomB', thA.96, 'PQCv2', 
+                      x.165^(x.166*x.167*inv((x.168*x.169))), nb.90, pk(x.173)>,
+                     x.173)
+        thA   = thA.96
+        xa    = (x.168*inv(x.166))
+        z     = x.165^(x.167*inv(x.169))
+        z.1   = true
+    
+    29. gxb   = x.167^x.168
+        nb    = nb.92
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.98, 'PQCv2', x.167^x.168, nb.92, pk(x.172)>,
+                     x.172)
+        thA   = thA.98
+        xa    = inv((x.168*x.177))
+        z     = x.167^inv(x.177)
+        z.1   = true
+    
+    30. gxb   = x.167^x.168
+        nb    = nb.92
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.98, 'PQCv2', x.167^x.168, nb.92, pk(x.172)>,
+                     x.172)
+        thA   = thA.98
+        xa    = (x.177*inv(x.168))
+        z     = x.167^x.177
+        z.1   = true
+    
+    31. gxb   = x.167^inv(x.168)
+        nb    = nb.92
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.98, 'PQCv2', x.167^inv(x.168), nb.92, pk(x.172)
+                     >,
+                     x.172)
+        thA   = thA.98
+        xa    = inv(x.177)
+        z     = x.167^inv((x.168*x.177))
+        z.1   = true
+    
+    32. gxb   = x.167^inv(x.168)
+        nb    = nb.92
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.98, 'PQCv2', x.167^inv(x.168), nb.92, pk(x.172)
+                     >,
+                     x.172)
+        thA   = thA.98
+        xa    = (x.168*x.177)
+        z     = x.167^x.177
+        z.1   = true
+    
+    33. gxb   = x.168^x.169
+        nb    = nb.93
+        pkB   = pkB.94
+        sigB  = sigB.97
+        thA   = thA.99
+        xa    = inv((x.169*x.179))
+        z     = x.168^inv(x.179)
+        z.1   = verify(sigB.97,
+                       <'DomB', thA.99, 'PQCv2', x.168^x.169, nb.93, pkB.94>, pkB.94)
+    
+    34. gxb   = x.168^x.169
+        nb    = nb.93
+        pkB   = pkB.94
+        sigB  = sigB.97
+        thA   = thA.99
+        xa    = (x.179*inv(x.169))
+        z     = x.168^x.179
+        z.1   = verify(sigB.97,
+                       <'DomB', thA.99, 'PQCv2', x.168^x.169, nb.93, pkB.94>, pkB.94)
+    
+    35. gxb   = x.168^x.169
+        nb    = nb.93
+        pkB   = pk(x.173)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^x.169, nb.93, pk(x.173)>,
+                     x.173)
+        thA   = thA.99
+        xa    = (x.178*inv((x.169*x.179)))
+        z     = x.168^(x.178*inv(x.179))
+        z.1   = true
+    
+    36. gxb   = x.168^inv(x.169)
+        nb    = nb.93
+        pkB   = pkB.94
+        sigB  = sigB.97
+        thA   = thA.99
+        xa    = inv(x.179)
+        z     = x.168^inv((x.169*x.179))
+        z.1   = verify(sigB.97,
+                       <'DomB', thA.99, 'PQCv2', x.168^inv(x.169), nb.93, pkB.94>, pkB.94)
+    
+    37. gxb   = x.168^inv(x.169)
+        nb    = nb.93
+        pkB   = pkB.94
+        sigB  = sigB.97
+        thA   = thA.99
+        xa    = (x.169*x.179)
+        z     = x.168^x.179
+        z.1   = verify(sigB.97,
+                       <'DomB', thA.99, 'PQCv2', x.168^inv(x.169), nb.93, pkB.94>, pkB.94)
+    
+    38. gxb   = x.168^inv(x.169)
+        nb    = nb.93
+        pkB   = pk(x.173)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^inv(x.169), nb.93, pk(x.173)
+                     >,
+                     x.173)
+        thA   = thA.99
+        xa    = (x.178*inv(x.179))
+        z     = x.168^(x.178*inv((x.169*x.179)))
+        z.1   = true
+    
+    39. gxb   = x.168^inv((x.169*x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^inv((x.169*x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.169*x.179)
+        z     = x.168^(x.179*inv(x.170))
+        z.1   = true
+    
+    40. gxb   = x.168^inv((x.169*x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^inv((x.169*x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.169*inv(x.179))
+        z     = x.168^inv((x.170*x.179))
+        z.1   = true
+    
+    41. gxb   = x.168^(x.169*x.170)
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*x.170), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = inv((x.169*x.179))
+        z     = x.168^(x.170*inv(x.179))
+        z.1   = true
+    
+    42. gxb   = x.168^(x.169*x.170)
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*x.170), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.179*inv(x.169))
+        z     = x.168^(x.170*x.179)
+        z.1   = true
+    
+    43. gxb   = x.168^(x.169*inv(x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*inv(x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = inv(x.179)
+        z     = x.168^(x.169*inv((x.170*x.179)))
+        z.1   = true
+    
+    44. gxb   = x.168^(x.169*inv(x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*inv(x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = inv((x.169*x.179))
+        z     = x.168^inv((x.170*x.179))
+        z.1   = true
+    
+    45. gxb   = x.168^(x.169*inv(x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*inv(x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.170*x.179)
+        z     = x.168^(x.169*x.179)
+        z.1   = true
+    
+    46. gxb   = x.168^(x.169*inv(x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*inv(x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.170*x.179*inv(x.169))
+        z     = x.168^x.179
+        z.1   = true
+    
+    47. gxb   = x.168^(x.169*inv(x.170))
+        nb    = nb.93
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.99, 'PQCv2', x.168^(x.169*inv(x.170)), nb.93, 
+                      pk(x.174)>,
+                     x.174)
+        thA   = thA.99
+        xa    = (x.170*inv((x.169*x.179)))
+        z     = x.168^inv(x.179)
+        z.1   = true
+    
+    48. gxb   = x.169^x.170
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.180*inv((x.170*x.181)))
+        z     = x.169^(x.180*inv(x.181))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^x.170, nb.94, pkB.95>, pkB.95)
+    
+    49. gxb   = x.169^inv(x.170)
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.180*inv(x.181))
+        z     = x.169^(x.180*inv((x.170*x.181)))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^inv(x.170), nb.94, pkB.95>, pkB.95)
+    
+    50. gxb   = x.169^inv((x.170*x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.170*x.181)
+        z     = x.169^(x.181*inv(x.171))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^inv((x.170*x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    51. gxb   = x.169^inv((x.170*x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.170*inv(x.181))
+        z     = x.169^inv((x.171*x.181))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^inv((x.170*x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    52. gxb   = x.169^inv((x.170*x.171))
+        nb    = nb.94
+        pkB   = pk(x.175)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^inv((x.170*x.171)), nb.94, 
+                      pk(x.175)>,
+                     x.175)
+        thA   = thA.100
+        xa    = (x.170*x.180*inv(x.181))
+        z     = x.169^(x.180*inv((x.171*x.181)))
+        z.1   = true
+    
+    53. gxb   = x.169^(x.170*x.171)
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = inv((x.170*x.181))
+        z     = x.169^(x.171*inv(x.181))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171), nb.94, pkB.95>, pkB.95)
+    
+    54. gxb   = x.169^(x.170*x.171)
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.181*inv(x.170))
+        z     = x.169^(x.171*x.181)
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171), nb.94, pkB.95>, pkB.95)
+    
+    55. gxb   = x.169^(x.170*x.171)
+        nb    = nb.94
+        pkB   = pk(x.175)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171), nb.94, 
+                      pk(x.175)>,
+                     x.175)
+        thA   = thA.100
+        xa    = (x.180*inv((x.170*x.181)))
+        z     = x.169^(x.171*x.180*inv(x.181))
+        z.1   = true
+    
+    56. gxb   = x.169^(x.170*x.171*inv(x.172))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171*inv(x.172)), 
+                      nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = inv((x.170*x.181))
+        z     = x.169^(x.171*inv((x.172*x.181)))
+        z.1   = true
+    
+    57. gxb   = x.169^(x.170*x.171*inv(x.172))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171*inv(x.172)), 
+                      nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.172*x.181*inv(x.170))
+        z     = x.169^(x.171*x.181)
+        z.1   = true
+    
+    58. gxb   = x.169^(x.170*x.171*inv(x.172))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*x.171*inv(x.172)), 
+                      nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.172*inv((x.170*x.181)))
+        z     = x.169^(x.171*inv(x.181))
+        z.1   = true
+    
+    59. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = inv(x.181)
+        z     = x.169^(x.170*inv((x.171*x.181)))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    60. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = inv((x.170*x.181))
+        z     = x.169^inv((x.171*x.181))
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    61. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.171*x.181)
+        z     = x.169^(x.170*x.181)
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    62. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.171*x.181*inv(x.170))
+        z     = x.169^x.181
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    63. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pkB.95
+        sigB  = sigB.98
+        thA   = thA.100
+        xa    = (x.171*inv((x.170*x.181)))
+        z     = x.169^inv(x.181)
+        z.1   = verify(sigB.98,
+                       <'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, pkB.95>,
+                       pkB.95)
+    
+    64. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pk(x.175)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, 
+                      pk(x.175)>,
+                     x.175)
+        thA   = thA.100
+        xa    = (x.171*x.180*inv((x.170*x.181)))
+        z     = x.169^(x.180*inv(x.181))
+        z.1   = true
+    
+    65. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pk(x.175)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, 
+                      pk(x.175)>,
+                     x.175)
+        thA   = thA.100
+        xa    = (x.180*inv(x.181))
+        z     = x.169^(x.170*x.180*inv((x.171*x.181)))
+        z.1   = true
+    
+    66. gxb   = x.169^(x.170*inv(x.171))
+        nb    = nb.94
+        pkB   = pk(x.175)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', x.169^(x.170*inv(x.171)), nb.94, 
+                      pk(x.175)>,
+                     x.175)
+        thA   = thA.100
+        xa    = (x.180*inv((x.170*x.181)))
+        z     = x.169^(x.180*inv((x.171*x.181)))
+        z.1   = true
+    
+    67. gxb   = x.169^(x.170*inv((x.171*x.172)))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', 
+                      x.169^(x.170*inv((x.171*x.172))), nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.171*x.181)
+        z     = x.169^(x.170*x.181*inv(x.172))
+        z.1   = true
+    
+    68. gxb   = x.169^(x.170*inv((x.171*x.172)))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', 
+                      x.169^(x.170*inv((x.171*x.172))), nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.171*x.181*inv(x.170))
+        z     = x.169^(x.181*inv(x.172))
+        z.1   = true
+    
+    69. gxb   = x.169^(x.170*inv((x.171*x.172)))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', 
+                      x.169^(x.170*inv((x.171*x.172))), nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.171*inv(x.181))
+        z     = x.169^(x.170*inv((x.172*x.181)))
+        z.1   = true
+    
+    70. gxb   = x.169^(x.170*inv((x.171*x.172)))
+        nb    = nb.94
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.100, 'PQCv2', 
+                      x.169^(x.170*inv((x.171*x.172))), nb.94, pk(x.176)>,
+                     x.176)
+        thA   = thA.100
+        xa    = (x.171*inv((x.170*x.181)))
+        z     = x.169^inv((x.172*x.181))
+        z.1   = true
+    
+    71. gxb   = x.170^inv((x.171*x.172))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.171*x.182*inv(x.183))
+        z     = x.170^(x.182*inv((x.172*x.183)))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^inv((x.171*x.172)), nb.95, pkB.96>,
+                       pkB.96)
+    
+    72. gxb   = x.170^(x.171*x.172)
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.182*inv((x.171*x.183)))
+        z     = x.170^(x.172*x.182*inv(x.183))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172), nb.95, pkB.96>, pkB.96)
+    
+    73. gxb   = x.170^(x.171*x.172*inv(x.173))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = inv((x.171*x.183))
+        z     = x.170^(x.172*inv((x.173*x.183)))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172*inv(x.173)), nb.95, pkB.96
+                       >,
+                       pkB.96)
+    
+    74. gxb   = x.170^(x.171*x.172*inv(x.173))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.173*x.183*inv(x.171))
+        z     = x.170^(x.172*x.183)
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172*inv(x.173)), nb.95, pkB.96
+                       >,
+                       pkB.96)
+    
+    75. gxb   = x.170^(x.171*x.172*inv(x.173))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.173*inv((x.171*x.183)))
+        z     = x.170^(x.172*inv(x.183))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172*inv(x.173)), nb.95, pkB.96
+                       >,
+                       pkB.96)
+    
+    76. gxb   = x.170^(x.171*x.172*inv(x.173))
+        nb    = nb.95
+        pkB   = pk(x.177)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172*inv(x.173)), 
+                      nb.95, pk(x.177)>,
+                     x.177)
+        thA   = thA.101
+        xa    = (x.173*x.182*inv((x.171*x.183)))
+        z     = x.170^(x.172*x.182*inv(x.183))
+        z.1   = true
+    
+    77. gxb   = x.170^(x.171*x.172*inv(x.173))
+        nb    = nb.95
+        pkB   = pk(x.177)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', x.170^(x.171*x.172*inv(x.173)), 
+                      nb.95, pk(x.177)>,
+                     x.177)
+        thA   = thA.101
+        xa    = (x.182*inv((x.171*x.183)))
+        z     = x.170^(x.172*x.182*inv((x.173*x.183)))
+        z.1   = true
+    
+    78. gxb   = x.170^(x.171*x.172*inv((x.173*x.174)))
+        nb    = nb.95
+        pkB   = pk(x.178)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', 
+                      x.170^(x.171*x.172*inv((x.173*x.174))), nb.95, pk(x.178)>,
+                     x.178)
+        thA   = thA.101
+        xa    = (x.173*x.183*inv(x.171))
+        z     = x.170^(x.172*x.183*inv(x.174))
+        z.1   = true
+    
+    79. gxb   = x.170^(x.171*x.172*inv((x.173*x.174)))
+        nb    = nb.95
+        pkB   = pk(x.178)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', 
+                      x.170^(x.171*x.172*inv((x.173*x.174))), nb.95, pk(x.178)>,
+                     x.178)
+        thA   = thA.101
+        xa    = (x.173*inv((x.171*x.183)))
+        z     = x.170^(x.172*inv((x.174*x.183)))
+        z.1   = true
+    
+    80. gxb   = x.170^(x.171*inv(x.172))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.172*x.182*inv((x.171*x.183)))
+        z     = x.170^(x.182*inv(x.183))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv(x.172)), nb.95, pkB.96>,
+                       pkB.96)
+    
+    81. gxb   = x.170^(x.171*inv(x.172))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.182*inv(x.183))
+        z     = x.170^(x.171*x.182*inv((x.172*x.183)))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv(x.172)), nb.95, pkB.96>,
+                       pkB.96)
+    
+    82. gxb   = x.170^(x.171*inv(x.172))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.182*inv((x.171*x.183)))
+        z     = x.170^(x.182*inv((x.172*x.183)))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv(x.172)), nb.95, pkB.96>,
+                       pkB.96)
+    
+    83. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.172*x.183)
+        z     = x.170^(x.171*x.183*inv(x.173))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv((x.172*x.173))), nb.95, 
+                        pkB.96>,
+                       pkB.96)
+    
+    84. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.172*x.183*inv(x.171))
+        z     = x.170^(x.183*inv(x.173))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv((x.172*x.173))), nb.95, 
+                        pkB.96>,
+                       pkB.96)
+    
+    85. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.172*inv(x.183))
+        z     = x.170^(x.171*inv((x.173*x.183)))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv((x.172*x.173))), nb.95, 
+                        pkB.96>,
+                       pkB.96)
+    
+    86. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pkB.96
+        sigB  = sigB.99
+        thA   = thA.101
+        xa    = (x.172*inv((x.171*x.183)))
+        z     = x.170^inv((x.173*x.183))
+        z.1   = verify(sigB.99,
+                       <'DomB', thA.101, 'PQCv2', x.170^(x.171*inv((x.172*x.173))), nb.95, 
+                        pkB.96>,
+                       pkB.96)
+    
+    87. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pk(x.177)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', 
+                      x.170^(x.171*inv((x.172*x.173))), nb.95, pk(x.177)>,
+                     x.177)
+        thA   = thA.101
+        xa    = (x.172*x.182*inv(x.183))
+        z     = x.170^(x.171*x.182*inv((x.173*x.183)))
+        z.1   = true
+    
+    88. gxb   = x.170^(x.171*inv((x.172*x.173)))
+        nb    = nb.95
+        pkB   = pk(x.177)
+        sigB  = sign(<'DomB', thA.101, 'PQCv2', 
+                      x.170^(x.171*inv((x.172*x.173))), nb.95, pk(x.177)>,
+                     x.177)
+        thA   = thA.101
+        xa    = (x.172*x.182*inv((x.171*x.183)))
+        z     = x.170^(x.182*inv((x.173*x.183)))
+        z.1   = true
+    
+    89. gxb   = x.171^(x.172*x.173*inv(x.174))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.174*x.184*inv((x.172*x.185)))
+        z     = x.171^(x.173*x.184*inv(x.185))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*x.173*inv(x.174)), nb.96, pkB.97
+                       >,
+                       pkB.97)
+    
+    90. gxb   = x.171^(x.172*x.173*inv(x.174))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.184*inv((x.172*x.185)))
+        z     = x.171^(x.173*x.184*inv((x.174*x.185)))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*x.173*inv(x.174)), nb.96, pkB.97
+                       >,
+                       pkB.97)
+    
+    91. gxb   = x.171^(x.172*x.173*inv((x.174*x.175)))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.174*x.185*inv(x.172))
+        z     = x.171^(x.173*x.185*inv(x.175))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*x.173*inv((x.174*x.175))), 
+                        nb.96, pkB.97>,
+                       pkB.97)
+    
+    92. gxb   = x.171^(x.172*x.173*inv((x.174*x.175)))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.174*inv((x.172*x.185)))
+        z     = x.171^(x.173*inv((x.175*x.185)))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*x.173*inv((x.174*x.175))), 
+                        nb.96, pkB.97>,
+                       pkB.97)
+    
+    93. gxb   = x.171^(x.172*x.173*inv((x.174*x.175)))
+        nb    = nb.96
+        pkB   = pk(x.179)
+        sigB  = sign(<'DomB', thA.102, 'PQCv2', 
+                      x.171^(x.172*x.173*inv((x.174*x.175))), nb.96, pk(x.179)>,
+                     x.179)
+        thA   = thA.102
+        xa    = (x.174*x.184*inv((x.172*x.185)))
+        z     = x.171^(x.173*x.184*inv((x.175*x.185)))
+        z.1   = true
+    
+    94. gxb   = x.171^(x.172*inv((x.173*x.174)))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.173*x.184*inv(x.185))
+        z     = x.171^(x.172*x.184*inv((x.174*x.185)))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*inv((x.173*x.174))), nb.96, 
+                        pkB.97>,
+                       pkB.97)
+    
+    95. gxb   = x.171^(x.172*inv((x.173*x.174)))
+        nb    = nb.96
+        pkB   = pkB.97
+        sigB  = sigB.100
+        thA   = thA.102
+        xa    = (x.173*x.184*inv((x.172*x.185)))
+        z     = x.171^(x.184*inv((x.174*x.185)))
+        z.1   = verify(sigB.100,
+                       <'DomB', thA.102, 'PQCv2', x.171^(x.172*inv((x.173*x.174))), nb.96, 
+                        pkB.97>,
+                       pkB.97)
+    
+    96. gxb   = x.172^(x.173*x.174*inv((x.175*x.176)))
+        nb    = nb.97
+        pkB   = pkB.98
+        sigB  = sigB.101
+        thA   = thA.103
+        xa    = (x.175*x.186*inv((x.173*x.187)))
+        z     = x.172^(x.174*x.186*inv((x.176*x.187)))
+        z.1   = verify(sigB.101,
+                       <'DomB', thA.103, 'PQCv2', x.172^(x.173*x.174*inv((x.175*x.176))), 
+                        nb.97, pkB.98>,
+                       pkB.98)
+  */
 
-rule (modulo E) Neg_Default_PQCv2_AfterFallbackBlock:
-   [ St_Default_PQCOnly( sid ) ]
+rule (modulo E) Default_LocalFallback_Gate:
+   [ St_Init0( sid, A, B, 'default', pkB, kpkB ) ]
   --[
-  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
-  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
-  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
-  HybridSecretComposed( sid )
+  FallbackGatePassed( sid, 'local_capability_error' ),
+  LocalFallbackEligible( sid ), CooldownPermit( sid, 'allow' ),
+  Offer( sid, 'Classic' ), DowngradeEvent( sid ),
+  DowngradeCtx( sid, 'local_capability_error', 'default' )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+   [ St_Init_ClassicFallback( sid, A, B, 'default', pkB, kpkB ) ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Neg_Strict_PQCv1:
-   [ St_Strict( sid ) ]
+rule (modulo E) I_SendA_Classic:
+   [
+   St_Init_ClassicFallback( sid, A, B, pol, pkB, kpkB ), !Ltk( A, skA ),
+   Fr( ~na ), Fr( ~ea )
+   ]
   --[
-  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
-  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
-  StaticSecretDerived( sid )
+  OfferUsed( sid, 'Classic' ), SendA( sid, A, B, 'Classic' ),
+  ClassicAttempt( sid ), EphI( sid, ~ea )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+   [
+   Out( <sid, '1', A, 'Classic', 'g'^~ea, ~na, 
+         sign(<'DomA', sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>, skA), pk(skA)>
+   ),
+   !Eph( ~ea ),
+   St_I_WaitB_C( sid, A, B, pol, 'Classic', pkB, ~na, ~ea,
+                 h(<sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>)
+   )
+   ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Neg_Strict_PQCv2:
-   [ St_Strict( sid ) ]
+rule (modulo E) I_SendA_ClassicOnly:
+   [
+   St_InitClassic0( sid, A, B, 'classicOnly', pkB, kpkB ), !Ltk( A, skA ),
+   Fr( ~na ), Fr( ~ea )
+   ]
   --[
-  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
-  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
-  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
-  HybridSecretComposed( sid )
+  OfferUsed( sid, 'Classic' ), SendA( sid, A, B, 'Classic' ),
+  ClassicAttempt( sid ), EphI( sid, ~ea )
   ]->
-   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+   [
+   Out( <sid, '1', A, 'Classic', 'g'^~ea, ~na, 
+         sign(<'DomA', sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>, skA), pk(skA)>
+   ),
+   !Eph( ~ea ),
+   St_I_WaitB_C( sid, A, B, 'classicOnly', 'Classic', pkB, ~na, ~ea,
+                 h(<sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>)
+   )
+   ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Strict_Bootstrap_ControlOnly:
-   [ St_Strict( sid ) ]
+rule (modulo E) R_RecvA_SendB_Classic:
+   [
+   In( <sid, '1', A, 'Classic', gea, na, sigA, pkA> ), !Ltk( B, skB ),
+   !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+   !Pin( A, pkA, kpkA ), Fr( ~nb ), Fr( ~eb )
+   ]
   --[
-  BootstrapTrigger( sid, 'missingKEM' ), BootstrapControlChannel( sid ),
-  BusinessTrafficBlocked( sid )
+  Eq( verify(sigA, <'DomA', sid, A, 'Classic', gea, na, pkA>, pkA), true ),
+  VerifyA( sid, A, B, 'Classic' ), RecvA( sid, A, B, 'Classic' ),
+  SelectedSuite( sid, 'Classic' ), SigBIssued( sid, B, 'Classic' ),
+  EphR( sid, ~eb ),
+  Running_R( sid, A, B, 'Classic', h(<sid, A, 'Classic', gea, na, pkA>) ),
+  RootR( sid, h(<'rootC', gea^~eb, na, ~nb>) )
   ]->
-   [ St_Strict_Bootstrap( sid ) ]
+   [
+   Out( <sid, '2', B, 'Classic', 'g'^~eb, ~nb, 
+         sign(<'DomB', h(<sid, A, 'Classic', gea, na, pkA>), 'Classic', 'g'^~eb, 
+               ~nb, pk(skB)>,
+              skB), 
+         pk(skB)>
+   ),
+   !Eph( ~eb ),
+   St_R_WaitFin( sid, A, B, 'Classic', h(<'rootC', gea^~eb, na, ~nb>),
+                 h(<sid, A, 'Classic', gea, na, pkA>)
+   )
+   ]
+
+  /*
+  rule (modulo AC) R_RecvA_SendB_Classic:
+     [
+     In( <sid, '1', A, 'Classic', gea, na, sigA, pkA> ), !Ltk( B, skB ),
+     !KemLtk( B, kemsk ), !Pin( B, pk(skB), kempk(kemsk) ),
+     !Pin( A, pkA, kpkA ), Fr( ~nb ), Fr( ~eb )
+     ]
+    --[
+    Eq( z.1, true ), VerifyA( sid, A, B, 'Classic' ),
+    RecvA( sid, A, B, 'Classic' ), SelectedSuite( sid, 'Classic' ),
+    SigBIssued( sid, B, 'Classic' ), EphR( sid, ~eb ),
+    Running_R( sid, A, B, 'Classic', h(<sid, A, 'Classic', gea, na, pkA>) ),
+    RootR( sid, h(<'rootC', z, na, ~nb>) )
+    ]->
+     [
+     Out( <sid, '2', B, 'Classic', 'g'^~eb, ~nb, 
+           sign(<'DomB', h(<sid, A, 'Classic', gea, na, pkA>), 'Classic', 'g'^~eb, 
+                 ~nb, pk(skB)>,
+                skB), 
+           pk(skB)>
+     ),
+     !Eph( ~eb ),
+     St_R_WaitFin( sid, A, B, 'Classic', h(<'rootC', z, na, ~nb>),
+                   h(<sid, A, 'Classic', gea, na, pkA>)
+     )
+     ]
+    variants (modulo AC)
+     1. ~eb   = ~eb.32
+        A     = A.34
+        gea   = gea.36
+        na    = na.39
+        pkA   = pkA.40
+        sid   = sid.41
+        sigA  = sigA.42
+        z     = gea.36^~eb.32
+        z.1   = verify(sigA.42,
+                       <'DomA', sid.41, A.34, 'Classic', gea.36, na.39, pkA.40>, pkA.40)
+    
+     2. ~eb   = ~eb.40
+        A     = A.42
+        gea   = z.58^inv(~eb.40)
+        na    = na.47
+        pkA   = pkA.48
+        sid   = sid.49
+        sigA  = sigA.50
+        z     = z.58
+        z.1   = verify(sigA.50,
+                       <'DomA', sid.49, A.42, 'Classic', z.58^inv(~eb.40), na.47, pkA.48>,
+                       pkA.48)
+    
+     3. ~eb   = ~eb.197
+        A     = A.199
+        gea   = x.391^x.392
+        na    = na.204
+        pkA   = pkA.205
+        sid   = sid.206
+        sigA  = sigA.207
+        z     = x.391^(~eb.197*x.392)
+        z.1   = verify(sigA.207,
+                       <'DomA', sid.206, A.199, 'Classic', x.391^x.392, na.204, pkA.205>,
+                       pkA.205)
+    
+     4. ~eb   = ~eb.201
+        A     = A.203
+        gea   = x.399^inv((~eb.201*x.400))
+        na    = na.208
+        pkA   = pkA.209
+        sid   = sid.210
+        sigA  = sigA.211
+        z     = x.399^inv(x.400)
+        z.1   = verify(sigA.211,
+                       <'DomA', sid.210, A.203, 'Classic', x.399^inv((~eb.201*x.400)), na.208, 
+                        pkA.209>,
+                       pkA.209)
+    
+     5. ~eb   = ~eb.201
+        A     = A.203
+        gea   = x.399^(x.400*inv(~eb.201))
+        na    = na.208
+        pkA   = pkA.209
+        sid   = sid.210
+        sigA  = sigA.211
+        z     = x.399^x.400
+        z.1   = verify(sigA.211,
+                       <'DomA', sid.210, A.203, 'Classic', x.399^(x.400*inv(~eb.201)), na.208, 
+                        pkA.209>,
+                       pkA.209)
+    
+     6. ~eb   = ~eb.202
+        A     = A.204
+        gea   = gea.206
+        na    = na.209
+        pkA   = pk(x.402)
+        sid   = sid.211
+        sigA  = sign(<'DomA', sid.211, A.204, 'Classic', gea.206, na.209, 
+                      pk(x.402)>,
+                     x.402)
+        z     = gea.206^~eb.202
+        z.1   = true
+    
+     7. ~eb   = ~eb.202
+        A     = A.204
+        gea   = x.400^(x.401*inv((~eb.202*x.402)))
+        na    = na.209
+        pkA   = pkA.210
+        sid   = sid.211
+        sigA  = sigA.212
+        z     = x.400^(x.401*inv(x.402))
+        z.1   = verify(sigA.212,
+                       <'DomA', sid.211, A.204, 'Classic', x.400^(x.401*inv((~eb.202*x.402))), 
+                        na.209, pkA.210>,
+                       pkA.210)
+    
+     8. ~eb   = ~eb.203
+        A     = A.205
+        gea   = x.399^x.400
+        na    = na.210
+        pkA   = pk(x.404)
+        sid   = sid.212
+        sigA  = sign(<'DomA', sid.212, A.205, 'Classic', x.399^x.400, na.210, 
+                      pk(x.404)>,
+                     x.404)
+        z     = x.399^(~eb.203*x.400)
+        z.1   = true
+    
+     9. ~eb   = ~eb.204
+        A     = A.206
+        gea   = z.222^inv(~eb.204)
+        na    = na.211
+        pkA   = pk(x.406)
+        sid   = sid.213
+        sigA  = sign(<'DomA', sid.213, A.206, 'Classic', z.222^inv(~eb.204), 
+                      na.211, pk(x.406)>,
+                     x.406)
+        z     = z.222
+        z.1   = true
+    
+    10. ~eb   = ~eb.205
+        A     = A.207
+        gea   = x.403^inv((~eb.205*x.404))
+        na    = na.212
+        pkA   = pk(x.408)
+        sid   = sid.214
+        sigA  = sign(<'DomA', sid.214, A.207, 'Classic', 
+                      x.403^inv((~eb.205*x.404)), na.212, pk(x.408)>,
+                     x.408)
+        z     = x.403^inv(x.404)
+        z.1   = true
+    
+    11. ~eb   = ~eb.205
+        A     = A.207
+        gea   = x.403^(x.404*inv(~eb.205))
+        na    = na.212
+        pkA   = pk(x.408)
+        sid   = sid.214
+        sigA  = sign(<'DomA', sid.214, A.207, 'Classic', 
+                      x.403^(x.404*inv(~eb.205)), na.212, pk(x.408)>,
+                     x.408)
+        z     = x.403^x.404
+        z.1   = true
+    
+    12. ~eb   = ~eb.206
+        A     = A.208
+        gea   = x.404^(x.405*inv((~eb.206*x.406)))
+        na    = na.213
+        pkA   = pk(x.410)
+        sid   = sid.215
+        sigA  = sign(<'DomA', sid.215, A.208, 'Classic', 
+                      x.404^(x.405*inv((~eb.206*x.406))), na.213, pk(x.410)>,
+                     x.410)
+        z     = x.404^(x.405*inv(x.406))
+        z.1   = true
+    
+    13. A     = A.30
+        gea   = DH_neutral
+        na    = na.35
+        pkA   = pkA.36
+        sid   = sid.37
+        sigA  = sigA.38
+        z     = DH_neutral
+        z.1   = verify(sigA.38,
+                       <'DomA', sid.37, A.30, 'Classic', DH_neutral, na.35, pkA.36>, pkA.36)
+    
+    14. A     = A.193
+        gea   = DH_neutral
+        na    = na.198
+        pkA   = pk(x.382)
+        sid   = sid.200
+        sigA  = sign(<'DomA', sid.200, A.193, 'Classic', DH_neutral, na.198, 
+                      pk(x.382)>,
+                     x.382)
+        z     = DH_neutral
+        z.1   = true
+  */
+
+rule (modulo E) I_RecvB_Classic:
+   [
+   St_I_WaitB_C( sid, A, B, pol, 'Classic', pkB, na, ea, thA ),
+   In( <sid, '2', B, 'Classic', geb, nb, sigB, pkB> )
+   ]
+  --[
+  VerifyB( sid, A, B, 'Classic' ),
+  Eq( verify(sigB, <'DomB', thA, 'Classic', geb, nb, pkB>, pkB), true ),
+  RootI( sid, h(<'rootC', geb^ea, na, nb>) ),
+  Commit_I( sid, A, B, 'Classic', thA ),
+  Running_I_Fin( sid, A, B, 'Classic', thA )
+  ]->
+   [
+   Out( <sid, 'finI', h(<'macI', h(<'rootC', geb^ea, na, nb>), thA>)> ),
+   St_I_WaitFin( sid, A, B, 'Classic', h(<'rootC', geb^ea, na, nb>), thA )
+   ]
+
+  /*
+  rule (modulo AC) I_RecvB_Classic:
+     [
+     St_I_WaitB_C( sid, A, B, pol, 'Classic', pkB, na, ea, thA ),
+     In( <sid, '2', B, 'Classic', geb, nb, sigB, pkB> )
+     ]
+    --[
+    VerifyB( sid, A, B, 'Classic' ), Eq( z.1, true ),
+    RootI( sid, h(<'rootC', z, na, nb>) ),
+    Commit_I( sid, A, B, 'Classic', thA ),
+    Running_I_Fin( sid, A, B, 'Classic', thA )
+    ]->
+     [
+     Out( <sid, 'finI', h(<'macI', h(<'rootC', z, na, nb>), thA>)> ),
+     St_I_WaitFin( sid, A, B, 'Classic', h(<'rootC', z, na, nb>), thA )
+     ]
+    variants (modulo AC)
+     1. ea    = ea.28
+        geb   = geb.29
+        nb    = nb.31
+        pkB   = pkB.32
+        sigB  = sigB.35
+        thA   = thA.36
+        z     = geb.29^ea.28
+        z.1   = verify(sigB.35,
+                       <'DomB', thA.36, 'Classic', geb.29, nb.31, pkB.32>, pkB.32)
+    
+     2. ea    = ea.34
+        geb   = z.48^inv(ea.34)
+        nb    = nb.37
+        pkB   = pkB.38
+        sigB  = sigB.41
+        thA   = thA.42
+        z     = z.48
+        z.1   = verify(sigB.41,
+                       <'DomB', thA.42, 'Classic', z.48^inv(ea.34), nb.37, pkB.38>, pkB.38)
+    
+     3. ea    = ea.85
+        geb   = x.165^x.166
+        nb    = nb.88
+        pkB   = pkB.89
+        sigB  = sigB.92
+        thA   = thA.93
+        z     = x.165^(ea.85*x.166)
+        z.1   = verify(sigB.92,
+                       <'DomB', thA.93, 'Classic', x.165^x.166, nb.88, pkB.89>, pkB.89)
+    
+     4. ea    = ea.86
+        geb   = x.167^inv((ea.86*x.168))
+        nb    = nb.89
+        pkB   = pkB.90
+        sigB  = sigB.93
+        thA   = thA.94
+        z     = x.167^inv(x.168)
+        z.1   = verify(sigB.93,
+                       <'DomB', thA.94, 'Classic', x.167^inv((ea.86*x.168)), nb.89, pkB.90>,
+                       pkB.90)
+    
+     5. ea    = ea.86
+        geb   = x.167^(x.168*inv(ea.86))
+        nb    = nb.89
+        pkB   = pkB.90
+        sigB  = sigB.93
+        thA   = thA.94
+        z     = x.167^x.168
+        z.1   = verify(sigB.93,
+                       <'DomB', thA.94, 'Classic', x.167^(x.168*inv(ea.86)), nb.89, pkB.90>,
+                       pkB.90)
+    
+     6. ea    = ea.87
+        geb   = geb.88
+        nb    = nb.90
+        pkB   = pk(x.170)
+        sigB  = sign(<'DomB', thA.95, 'Classic', geb.88, nb.90, pk(x.170)>,
+                     x.170)
+        thA   = thA.95
+        z     = geb.88^ea.87
+        z.1   = true
+    
+     7. ea    = ea.87
+        geb   = x.168^(x.169*inv((ea.87*x.170)))
+        nb    = nb.90
+        pkB   = pkB.91
+        sigB  = sigB.94
+        thA   = thA.95
+        z     = x.168^(x.169*inv(x.170))
+        z.1   = verify(sigB.94,
+                       <'DomB', thA.95, 'Classic', x.168^(x.169*inv((ea.87*x.170))), nb.90, 
+                        pkB.91>,
+                       pkB.91)
+    
+     8. ea    = ea.88
+        geb   = z.102^inv(ea.88)
+        nb    = nb.91
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.96, 'Classic', z.102^inv(ea.88), nb.91, 
+                      pk(x.172)>,
+                     x.172)
+        thA   = thA.96
+        z     = z.102
+        z.1   = true
+    
+     9. ea    = ea.88
+        geb   = x.168^x.169
+        nb    = nb.91
+        pkB   = pk(x.172)
+        sigB  = sign(<'DomB', thA.96, 'Classic', x.168^x.169, nb.91, pk(x.172)>,
+                     x.172)
+        thA   = thA.96
+        z     = x.168^(ea.88*x.169)
+        z.1   = true
+    
+    10. ea    = ea.89
+        geb   = x.170^inv((ea.89*x.171))
+        nb    = nb.92
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.97, 'Classic', x.170^inv((ea.89*x.171)), 
+                      nb.92, pk(x.174)>,
+                     x.174)
+        thA   = thA.97
+        z     = x.170^inv(x.171)
+        z.1   = true
+    
+    11. ea    = ea.89
+        geb   = x.170^(x.171*inv(ea.89))
+        nb    = nb.92
+        pkB   = pk(x.174)
+        sigB  = sign(<'DomB', thA.97, 'Classic', x.170^(x.171*inv(ea.89)), 
+                      nb.92, pk(x.174)>,
+                     x.174)
+        thA   = thA.97
+        z     = x.170^x.171
+        z.1   = true
+    
+    12. ea    = ea.90
+        geb   = x.171^(x.172*inv((ea.90*x.173)))
+        nb    = nb.93
+        pkB   = pk(x.176)
+        sigB  = sign(<'DomB', thA.98, 'Classic', 
+                      x.171^(x.172*inv((ea.90*x.173))), nb.93, pk(x.176)>,
+                     x.176)
+        thA   = thA.98
+        z     = x.171^(x.172*inv(x.173))
+        z.1   = true
+    
+    13. ea    = inv(x.137)
+        geb   = z.83^x.137
+        nb    = nb.72
+        pkB   = pkB.73
+        sigB  = sigB.76
+        thA   = thA.77
+        z     = z.83
+        z.1   = verify(sigB.76,
+                       <'DomB', thA.77, 'Classic', z.83^x.137, nb.72, pkB.73>, pkB.73)
+    
+    14. ea    = inv(x.139)
+        geb   = x.140^inv(x.141)
+        nb    = nb.74
+        pkB   = pkB.75
+        sigB  = sigB.78
+        thA   = thA.79
+        z     = x.140^inv((x.139*x.141))
+        z.1   = verify(sigB.78,
+                       <'DomB', thA.79, 'Classic', x.140^inv(x.141), nb.74, pkB.75>, pkB.75)
+    
+    15. ea    = inv(x.139)
+        geb   = x.140^(x.139*x.141)
+        nb    = nb.74
+        pkB   = pkB.75
+        sigB  = sigB.78
+        thA   = thA.79
+        z     = x.140^x.141
+        z.1   = verify(sigB.78,
+                       <'DomB', thA.79, 'Classic', x.140^(x.139*x.141), nb.74, pkB.75>, pkB.75)
+    
+    16. ea    = inv(x.140)
+        geb   = x.141^(x.142*inv(x.143))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.141^(x.142*inv((x.140*x.143)))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.141^(x.142*inv(x.143)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    17. ea    = inv(x.141)
+        geb   = z.87^x.141
+        nb    = nb.76
+        pkB   = pk(x.145)
+        sigB  = sign(<'DomB', thA.81, 'Classic', z.87^x.141, nb.76, pk(x.145)>,
+                     x.145)
+        thA   = thA.81
+        z     = z.87
+        z.1   = true
+    
+    18. ea    = inv(x.142)
+        geb   = x.143^inv(x.144)
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', x.143^inv(x.144), nb.77, 
+                      pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = x.143^inv((x.142*x.144))
+        z.1   = true
+    
+    19. ea    = inv(x.142)
+        geb   = x.143^(x.142*x.144)
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', x.143^(x.142*x.144), nb.77, 
+                      pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = x.143^x.144
+        z.1   = true
+    
+    20. ea    = inv(x.143)
+        geb   = x.144^(x.145*inv(x.146))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.144^(x.145*inv(x.146)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.144^(x.145*inv((x.143*x.146)))
+        z.1   = true
+    
+    21. ea    = inv((x.139*x.140))
+        geb   = x.141^x.139
+        nb    = nb.74
+        pkB   = pkB.75
+        sigB  = sigB.78
+        thA   = thA.79
+        z     = x.141^inv(x.140)
+        z.1   = verify(sigB.78,
+                       <'DomB', thA.79, 'Classic', x.141^x.139, nb.74, pkB.75>, pkB.75)
+    
+    22. ea    = inv((x.140*x.141))
+        geb   = x.142^(x.140*x.143)
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^(x.143*inv(x.141))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.140*x.143), nb.75, pkB.76>, pkB.76)
+    
+    23. ea    = inv((x.140*x.141))
+        geb   = x.142^(x.140*inv(x.143))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^inv((x.141*x.143))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.140*inv(x.143)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    24. ea    = inv((x.141*x.142))
+        geb   = x.143^(x.141*x.144*inv(x.145))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.143^(x.144*inv((x.142*x.145)))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.143^(x.141*x.144*inv(x.145)), nb.76, pkB.77
+                       >,
+                       pkB.77)
+    
+    25. ea    = inv((x.142*x.143))
+        geb   = x.144^x.142
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', x.144^x.142, nb.77, pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = x.144^inv(x.143)
+        z.1   = true
+    
+    26. ea    = inv((x.143*x.144))
+        geb   = x.145^(x.144*x.146)
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^(x.144*x.146), nb.78, 
+                      pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^(x.146*inv(x.143))
+        z.1   = true
+    
+    27. ea    = inv((x.143*x.144))
+        geb   = x.145^(x.144*inv(x.146))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^(x.144*inv(x.146)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^inv((x.143*x.146))
+        z.1   = true
+    
+    28. ea    = inv((x.144*x.145))
+        geb   = x.146^(x.145*x.147*inv(x.148))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.146^(x.145*x.147*inv(x.148)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.146^(x.147*inv((x.144*x.148)))
+        z.1   = true
+    
+    29. ea    = one
+        geb   = geb.27
+        nb    = nb.29
+        pkB   = pkB.30
+        sigB  = sigB.33
+        thA   = thA.34
+        z     = geb.27
+        z.1   = verify(sigB.33,
+                       <'DomB', thA.34, 'Classic', geb.27, nb.29, pkB.30>, pkB.30)
+    
+    30. ea    = one
+        geb   = geb.83
+        nb    = nb.85
+        pkB   = pk(x.161)
+        sigB  = sign(<'DomB', thA.90, 'Classic', geb.83, nb.85, pk(x.161)>,
+                     x.161)
+        thA   = thA.90
+        z     = geb.83
+        z.1   = true
+    
+    31. ea    = (x.138*inv(x.139))
+        geb   = z.84^(x.139*inv(x.138))
+        nb    = nb.73
+        pkB   = pkB.74
+        sigB  = sigB.77
+        thA   = thA.78
+        z     = z.84
+        z.1   = verify(sigB.77,
+                       <'DomB', thA.78, 'Classic', z.84^(x.139*inv(x.138)), nb.73, pkB.74>,
+                       pkB.74)
+    
+    32. ea    = (x.139*x.140)
+        geb   = x.141^inv(x.139)
+        nb    = nb.74
+        pkB   = pkB.75
+        sigB  = sigB.78
+        thA   = thA.79
+        z     = x.141^x.140
+        z.1   = verify(sigB.78,
+                       <'DomB', thA.79, 'Classic', x.141^inv(x.139), nb.74, pkB.75>, pkB.75)
+    
+    33. ea    = (x.139*inv(x.140))
+        geb   = x.141^x.140
+        nb    = nb.74
+        pkB   = pkB.75
+        sigB  = sigB.78
+        thA   = thA.79
+        z     = x.141^x.139
+        z.1   = verify(sigB.78,
+                       <'DomB', thA.79, 'Classic', x.141^x.140, nb.74, pkB.75>, pkB.75)
+    
+    34. ea    = (x.140*x.141)
+        geb   = x.142^inv((x.140*x.143))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^(x.141*inv(x.143))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^inv((x.140*x.143)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    35. ea    = (x.140*x.141)
+        geb   = x.142^(x.143*inv(x.140))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^(x.141*x.143)
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.143*inv(x.140)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    36. ea    = (x.140*x.141*inv(x.142))
+        geb   = x.143^(x.142*inv(x.140))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.143^x.141
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.143^(x.142*inv(x.140)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    37. ea    = (x.140*inv(x.141))
+        geb   = x.142^inv(x.143)
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^(x.140*inv((x.141*x.143)))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^inv(x.143), nb.75, pkB.76>, pkB.76)
+    
+    38. ea    = (x.140*inv(x.141))
+        geb   = x.142^inv((x.140*x.143))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^inv((x.141*x.143))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^inv((x.140*x.143)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    39. ea    = (x.140*inv(x.141))
+        geb   = x.142^(x.141*x.143)
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^(x.140*x.143)
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.141*x.143), nb.75, pkB.76>, pkB.76)
+    
+    40. ea    = (x.140*inv(x.141))
+        geb   = x.142^(x.141*x.143*inv(x.140))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^x.143
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.141*x.143*inv(x.140)), nb.75, pkB.76
+                       >,
+                       pkB.76)
+    
+    41. ea    = (x.140*inv(x.141))
+        geb   = x.142^(x.141*inv((x.140*x.143)))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.142^inv(x.143)
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.142^(x.141*inv((x.140*x.143))), nb.75, 
+                        pkB.76>,
+                       pkB.76)
+    
+    42. ea    = (x.140*inv((x.141*x.142)))
+        geb   = x.143^x.141
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.143^(x.140*inv(x.142))
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.143^x.141, nb.75, pkB.76>, pkB.76)
+    
+    43. ea    = (x.140*inv((x.141*x.142)))
+        geb   = x.143^(x.141*inv(x.140))
+        nb    = nb.75
+        pkB   = pkB.76
+        sigB  = sigB.79
+        thA   = thA.80
+        z     = x.143^inv(x.142)
+        z.1   = verify(sigB.79,
+                       <'DomB', thA.80, 'Classic', x.143^(x.141*inv(x.140)), nb.75, pkB.76>,
+                       pkB.76)
+    
+    44. ea    = (x.141*x.142)
+        geb   = x.143^(x.144*inv((x.141*x.145)))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.143^(x.142*x.144*inv(x.145))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.143^(x.144*inv((x.141*x.145))), nb.76, 
+                        pkB.77>,
+                       pkB.77)
+    
+    45. ea    = (x.141*x.142*inv(x.143))
+        geb   = x.144^inv((x.141*x.145))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.142*inv((x.143*x.145)))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^inv((x.141*x.145)), nb.76, pkB.77>,
+                       pkB.77)
+    
+    46. ea    = (x.141*x.142*inv(x.143))
+        geb   = x.144^(x.143*x.145*inv(x.141))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.142*x.145)
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.143*x.145*inv(x.141)), nb.76, pkB.77
+                       >,
+                       pkB.77)
+    
+    47. ea    = (x.141*x.142*inv(x.143))
+        geb   = x.144^(x.143*inv((x.141*x.145)))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.142*inv(x.145))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.143*inv((x.141*x.145))), nb.76, 
+                        pkB.77>,
+                       pkB.77)
+    
+    48. ea    = (x.141*x.142*inv((x.143*x.144)))
+        geb   = x.145^(x.143*inv(x.141))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.145^(x.142*inv(x.144))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.145^(x.143*inv(x.141)), nb.76, pkB.77>,
+                       pkB.77)
+    
+    49. ea    = (x.141*inv(x.142))
+        geb   = x.143^(x.142*x.144*inv((x.141*x.145)))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.143^(x.144*inv(x.145))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.143^(x.142*x.144*inv((x.141*x.145))), 
+                        nb.76, pkB.77>,
+                       pkB.77)
+    
+    50. ea    = (x.141*inv(x.142))
+        geb   = x.143^(x.144*inv(x.145))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.143^(x.141*x.144*inv((x.142*x.145)))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.143^(x.144*inv(x.145)), nb.76, pkB.77>,
+                       pkB.77)
+    
+    51. ea    = (x.141*inv(x.142))
+        geb   = x.143^(x.144*inv((x.141*x.145)))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.143^(x.144*inv((x.142*x.145)))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.143^(x.144*inv((x.141*x.145))), nb.76, 
+                        pkB.77>,
+                       pkB.77)
+    
+    52. ea    = (x.141*inv((x.142*x.143)))
+        geb   = x.144^(x.142*x.145)
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.141*x.145*inv(x.143))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.142*x.145), nb.76, pkB.77>, pkB.77)
+    
+    53. ea    = (x.141*inv((x.142*x.143)))
+        geb   = x.144^(x.142*x.145*inv(x.141))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.145*inv(x.143))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.142*x.145*inv(x.141)), nb.76, pkB.77
+                       >,
+                       pkB.77)
+    
+    54. ea    = (x.141*inv((x.142*x.143)))
+        geb   = x.144^(x.142*inv(x.145))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^(x.141*inv((x.143*x.145)))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.142*inv(x.145)), nb.76, pkB.77>,
+                       pkB.77)
+    
+    55. ea    = (x.141*inv((x.142*x.143)))
+        geb   = x.144^(x.142*inv((x.141*x.145)))
+        nb    = nb.76
+        pkB   = pkB.77
+        sigB  = sigB.80
+        thA   = thA.81
+        z     = x.144^inv((x.143*x.145))
+        z.1   = verify(sigB.80,
+                       <'DomB', thA.81, 'Classic', x.144^(x.142*inv((x.141*x.145))), nb.76, 
+                        pkB.77>,
+                       pkB.77)
+    
+    56. ea    = (x.142*x.143)
+        geb   = x.144^inv(x.142)
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', x.144^inv(x.142), nb.77, 
+                      pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = x.144^x.143
+        z.1   = true
+    
+    57. ea    = (x.142*x.143*inv(x.144))
+        geb   = x.145^(x.144*x.146*inv((x.142*x.147)))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.145^(x.143*x.146*inv(x.147))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.145^(x.144*x.146*inv((x.142*x.147))), 
+                        nb.77, pkB.78>,
+                       pkB.78)
+    
+    58. ea    = (x.142*x.143*inv(x.144))
+        geb   = x.145^(x.146*inv((x.142*x.147)))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.145^(x.143*x.146*inv((x.144*x.147)))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.145^(x.146*inv((x.142*x.147))), nb.77, 
+                        pkB.78>,
+                       pkB.78)
+    
+    59. ea    = (x.142*x.143*inv((x.144*x.145)))
+        geb   = x.146^(x.144*x.147*inv(x.142))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.146^(x.143*x.147*inv(x.145))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.146^(x.144*x.147*inv(x.142)), nb.77, pkB.78
+                       >,
+                       pkB.78)
+    
+    60. ea    = (x.142*x.143*inv((x.144*x.145)))
+        geb   = x.146^(x.144*inv((x.142*x.147)))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.146^(x.143*inv((x.145*x.147)))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.146^(x.144*inv((x.142*x.147))), nb.77, 
+                        pkB.78>,
+                       pkB.78)
+    
+    61. ea    = (x.142*inv(x.143))
+        geb   = z.88^(x.143*inv(x.142))
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', z.88^(x.143*inv(x.142)), nb.77, 
+                      pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = z.88
+        z.1   = true
+    
+    62. ea    = (x.142*inv(x.143))
+        geb   = x.144^x.143
+        nb    = nb.77
+        pkB   = pk(x.147)
+        sigB  = sign(<'DomB', thA.82, 'Classic', x.144^x.143, nb.77, pk(x.147)>,
+                     x.147)
+        thA   = thA.82
+        z     = x.144^x.142
+        z.1   = true
+    
+    63. ea    = (x.142*inv((x.143*x.144)))
+        geb   = x.145^(x.143*x.146*inv(x.147))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.145^(x.142*x.146*inv((x.144*x.147)))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.145^(x.143*x.146*inv(x.147)), nb.77, pkB.78
+                       >,
+                       pkB.78)
+    
+    64. ea    = (x.142*inv((x.143*x.144)))
+        geb   = x.145^(x.143*x.146*inv((x.142*x.147)))
+        nb    = nb.77
+        pkB   = pkB.78
+        sigB  = sigB.81
+        thA   = thA.82
+        z     = x.145^(x.146*inv((x.144*x.147)))
+        z.1   = verify(sigB.81,
+                       <'DomB', thA.82, 'Classic', x.145^(x.143*x.146*inv((x.142*x.147))), 
+                        nb.77, pkB.78>,
+                       pkB.78)
+    
+    65. ea    = (x.143*x.144)
+        geb   = x.145^inv((x.144*x.146))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^inv((x.144*x.146)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^(x.143*inv(x.146))
+        z.1   = true
+    
+    66. ea    = (x.143*x.144)
+        geb   = x.145^(x.146*inv(x.143))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^(x.146*inv(x.143)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^(x.144*x.146)
+        z.1   = true
+    
+    67. ea    = (x.143*x.144*inv(x.145))
+        geb   = x.146^(x.145*inv(x.143))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.146^(x.145*inv(x.143)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.146^x.144
+        z.1   = true
+    
+    68. ea    = (x.143*x.144*inv((x.145*x.146)))
+        geb   = x.147^(x.145*x.148*inv((x.143*x.149)))
+        nb    = nb.78
+        pkB   = pkB.79
+        sigB  = sigB.82
+        thA   = thA.83
+        z     = x.147^(x.144*x.148*inv((x.146*x.149)))
+        z.1   = verify(sigB.82,
+                       <'DomB', thA.83, 'Classic', x.147^(x.145*x.148*inv((x.143*x.149))), 
+                        nb.78, pkB.79>,
+                       pkB.79)
+    
+    69. ea    = (x.143*inv(x.144))
+        geb   = x.145^inv(x.146)
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^inv(x.146), nb.78, 
+                      pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^(x.143*inv((x.144*x.146)))
+        z.1   = true
+    
+    70. ea    = (x.143*inv(x.144))
+        geb   = x.145^inv((x.143*x.146))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^inv((x.143*x.146)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^inv((x.144*x.146))
+        z.1   = true
+    
+    71. ea    = (x.143*inv(x.144))
+        geb   = x.145^(x.144*x.146)
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^(x.144*x.146), nb.78, 
+                      pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^(x.143*x.146)
+        z.1   = true
+    
+    72. ea    = (x.143*inv(x.144))
+        geb   = x.145^(x.144*x.146*inv(x.143))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.145^(x.144*x.146*inv(x.143)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^x.146
+        z.1   = true
+    
+    73. ea    = (x.143*inv(x.144))
+        geb   = x.145^(x.144*inv((x.143*x.146)))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', 
+                      x.145^(x.144*inv((x.143*x.146))), nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.145^inv(x.146)
+        z.1   = true
+    
+    74. ea    = (x.143*inv((x.144*x.145)))
+        geb   = x.146^x.144
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.146^x.144, nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.146^(x.143*inv(x.145))
+        z.1   = true
+    
+    75. ea    = (x.143*inv((x.144*x.145)))
+        geb   = x.146^(x.145*inv(x.143))
+        nb    = nb.78
+        pkB   = pk(x.149)
+        sigB  = sign(<'DomB', thA.83, 'Classic', x.146^(x.145*inv(x.143)), 
+                      nb.78, pk(x.149)>,
+                     x.149)
+        thA   = thA.83
+        z     = x.146^inv(x.144)
+        z.1   = true
+    
+    76. ea    = (x.144*x.145)
+        geb   = x.146^(x.147*inv((x.145*x.148)))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', 
+                      x.146^(x.147*inv((x.145*x.148))), nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.146^(x.144*x.147*inv(x.148))
+        z.1   = true
+    
+    77. ea    = (x.144*x.145*inv(x.146))
+        geb   = x.147^inv((x.145*x.148))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.147^inv((x.145*x.148)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.144*inv((x.146*x.148)))
+        z.1   = true
+    
+    78. ea    = (x.144*x.145*inv(x.146))
+        geb   = x.147^(x.146*x.148*inv(x.144))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.147^(x.146*x.148*inv(x.144)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.145*x.148)
+        z.1   = true
+    
+    79. ea    = (x.144*x.145*inv(x.146))
+        geb   = x.147^(x.146*inv((x.145*x.148)))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', 
+                      x.147^(x.146*inv((x.145*x.148))), nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.144*inv(x.148))
+        z.1   = true
+    
+    80. ea    = (x.144*x.145*inv((x.146*x.147)))
+        geb   = x.148^(x.147*inv(x.144))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.148^(x.147*inv(x.144)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.148^(x.145*inv(x.146))
+        z.1   = true
+    
+    81. ea    = (x.144*inv(x.145))
+        geb   = x.146^(x.145*x.147*inv((x.144*x.148)))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', 
+                      x.146^(x.145*x.147*inv((x.144*x.148))), nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.146^(x.147*inv(x.148))
+        z.1   = true
+    
+    82. ea    = (x.144*inv(x.145))
+        geb   = x.146^(x.147*inv(x.148))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.146^(x.147*inv(x.148)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.146^(x.144*x.147*inv((x.145*x.148)))
+        z.1   = true
+    
+    83. ea    = (x.144*inv(x.145))
+        geb   = x.146^(x.147*inv((x.144*x.148)))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', 
+                      x.146^(x.147*inv((x.144*x.148))), nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.146^(x.147*inv((x.145*x.148)))
+        z.1   = true
+    
+    84. ea    = (x.144*inv((x.145*x.146)))
+        geb   = x.147^(x.146*x.148)
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.147^(x.146*x.148), nb.79, 
+                      pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.144*x.148*inv(x.145))
+        z.1   = true
+    
+    85. ea    = (x.144*inv((x.145*x.146)))
+        geb   = x.147^(x.146*x.148*inv(x.144))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.147^(x.146*x.148*inv(x.144)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.148*inv(x.145))
+        z.1   = true
+    
+    86. ea    = (x.144*inv((x.145*x.146)))
+        geb   = x.147^(x.146*inv(x.148))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', x.147^(x.146*inv(x.148)), 
+                      nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^(x.144*inv((x.145*x.148)))
+        z.1   = true
+    
+    87. ea    = (x.144*inv((x.145*x.146)))
+        geb   = x.147^(x.146*inv((x.144*x.148)))
+        nb    = nb.79
+        pkB   = pk(x.151)
+        sigB  = sign(<'DomB', thA.84, 'Classic', 
+                      x.147^(x.146*inv((x.144*x.148))), nb.79, pk(x.151)>,
+                     x.151)
+        thA   = thA.84
+        z     = x.147^inv((x.145*x.148))
+        z.1   = true
+    
+    88. ea    = (x.145*x.146*inv(x.147))
+        geb   = x.148^(x.147*x.149*inv((x.146*x.150)))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', 
+                      x.148^(x.147*x.149*inv((x.146*x.150))), nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.148^(x.145*x.149*inv(x.150))
+        z.1   = true
+    
+    89. ea    = (x.145*x.146*inv(x.147))
+        geb   = x.148^(x.149*inv((x.146*x.150)))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', 
+                      x.148^(x.149*inv((x.146*x.150))), nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.148^(x.145*x.149*inv((x.147*x.150)))
+        z.1   = true
+    
+    90. ea    = (x.145*x.146*inv((x.147*x.148)))
+        geb   = x.149^(x.148*x.150*inv(x.145))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', x.149^(x.148*x.150*inv(x.145)), 
+                      nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.149^(x.146*x.150*inv(x.147))
+        z.1   = true
+    
+    91. ea    = (x.145*x.146*inv((x.147*x.148)))
+        geb   = x.149^(x.148*inv((x.146*x.150)))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', 
+                      x.149^(x.148*inv((x.146*x.150))), nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.149^(x.145*inv((x.147*x.150)))
+        z.1   = true
+    
+    92. ea    = (x.145*inv((x.146*x.147)))
+        geb   = x.148^(x.147*x.149*inv(x.150))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', x.148^(x.147*x.149*inv(x.150)), 
+                      nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.148^(x.145*x.149*inv((x.146*x.150)))
+        z.1   = true
+    
+    93. ea    = (x.145*inv((x.146*x.147)))
+        geb   = x.148^(x.147*x.149*inv((x.145*x.150)))
+        nb    = nb.80
+        pkB   = pk(x.153)
+        sigB  = sign(<'DomB', thA.85, 'Classic', 
+                      x.148^(x.147*x.149*inv((x.145*x.150))), nb.80, pk(x.153)>,
+                     x.153)
+        thA   = thA.85
+        z     = x.148^(x.149*inv((x.146*x.150)))
+        z.1   = true
+    
+    94. ea    = (x.146*x.147*inv((x.148*x.149)))
+        geb   = x.150^(x.149*x.151*inv((x.147*x.152)))
+        nb    = nb.81
+        pkB   = pk(x.155)
+        sigB  = sign(<'DomB', thA.86, 'Classic', 
+                      x.150^(x.149*x.151*inv((x.147*x.152))), nb.81, pk(x.155)>,
+                     x.155)
+        thA   = thA.86
+        z     = x.150^(x.146*x.151*inv((x.148*x.152)))
+        z.1   = true
+    
+    95. geb   = DH_neutral
+        nb    = nb.25
+        pkB   = pkB.26
+        sigB  = sigB.29
+        thA   = thA.30
+        z     = DH_neutral
+        z.1   = verify(sigB.29,
+                       <'DomB', thA.30, 'Classic', DH_neutral, nb.25, pkB.26>, pkB.26)
+    
+    96. geb   = DH_neutral
+        nb    = nb.73
+        pkB   = pk(x.139)
+        sigB  = sign(<'DomB', thA.78, 'Classic', DH_neutral, nb.73, pk(x.139)>,
+                     x.139)
+        thA   = thA.78
+        z     = DH_neutral
+        z.1   = true
+  */
+
+rule (modulo E) R_RecvFin_Establish:
+   [ St_R_WaitFin( sid, A, B, suite, root, thA ), In( <sid, 'finI', macI> )
+   ]
+  --[
+  Eq( macI, h(<'macI', root, thA>) ), KeyConfR( sid, A, B, suite ),
+  Commit_R( sid, A, B, suite, thA ), SessionEstablished( sid, suite ),
+  SessionEstablishedFull( sid, A, B, suite ), SecretRoot( sid, root )
+  ]->
+   [
+   Out( <sid, 'finR', h(<'macR', root, thA>)> ),
+   St_R_Done( sid, A, B, suite, root )
+   ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Strict_Bootstrap_Rekey:
-   [ St_Strict_Bootstrap( sid ) ]
-  --[ PQCRekeyCompleted( sid ) ]->
-   [ St_Strict_Rekeyed( sid ) ]
+rule (modulo E) I_RecvFin_Establish:
+   [ St_I_WaitFin( sid, A, B, suite, root, thA ), In( <sid, 'finR', macR> )
+   ]
+  --[
+  Eq( macR, h(<'macR', root, thA>) ), KeyConfI( sid, A, B, suite ),
+  Commit_I_Final( sid, A, B, suite, thA ), SecretRoot( sid, root )
+  ]->
+   [ St_I_Done( sid, A, B, suite, root ) ]
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Strict_Bootstrap_EnableBusiness:
-   [ St_Strict_Rekeyed( sid ) ] --[ BusinessTrafficEnabled( sid ) ]-> [ ]
+restriction Equality:
+  "∀ x y #i. (Eq( x, y ) @ #i) ⇒ (x = y)"
+  // safety formula
 
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Finished_Phase:
-   [ St_HandshakeDone( sid, sel ) ]
-  --[ FinishedSent( sid, 'B' ), FinishedVerified( sid, 'A' ) ]->
-   [ St_Finished( sid, sel ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Session_Established:
-   [ St_Finished( sid, sel ) ] --[ SessionEstablished( sid, sel ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
-lemma Exists_DefaultClassicTrace:
+lemma Exists_PQCv1_Session:
   exists-trace
-  "∃ sid #i #j #k.
-    ((Policy( sid, 'default' ) @ #i) ∧ (DowngradeEvent( sid ) @ #j)) ∧
-    (SessionEstablished( sid, SuiteClassic ) @ #k)"
+  "∃ sid A B #i. SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i"
 /*
 guarded formula characterizing all satisfying traces:
-"∃ sid #i #j #k.
-  (Policy( sid, 'default' ) @ #i) ∧
-  (DowngradeEvent( sid ) @ #j) ∧
-  (SessionEstablished( sid, SuiteClassic ) @ #k)"
+"∃ sid A B #i. (SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i)"
 */
 simplify
-solve( St_Default_FallbackReady( sid ) ▶₀ #j )
-  case Default_Cooldown_Allows
-  solve( St_Finished( ~sid, SuiteClassic ) ▶₀ #k )
-    case Finished_Phase
-    solve( Policy( ~sid, 'default' ) @ #i )
-      case Init_Offer_Default
-      SOLVED // trace found
+solve( St_R_WaitFin( sid, A, B, 'PQCv1', root, thA ) ▶₀ #i )
+  case R_RecvA_SendB_PQCv1
+  solve( splitEqs(1) )
+    case split_case_1
+    solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', kemenc(z, kempk(~kemsk)), 
+                      na, pk(~sk)>,
+                     ~sk)
+           ) @ #vk.17 )
+      case I_SendA_PQCv1_case_1
+      solve( !KU( h(<'macI', h(<'root1', ~ss, ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+             ) @ #vk.6 )
+        case I_RecvB_PQCv1
+        solve( !KU( ~sid ) @ #vk.5 )
+          case I_SendA_PQCv1
+          solve( !KU( ~na ) @ #vk.20 )
+            case I_SendA_PQCv1
+            solve( !KU( ~nb ) @ #vk.28 )
+              case R_RecvA_SendB_PQCv1
+              solve( !KU( sign(<'DomB', 
+                                h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>), 
+                                'PQCv1', 'noshare', ~nb, pk(~sk.1)>,
+                               ~sk.1)
+                     ) @ #vk.30 )
+                case R_RecvA_SendB_PQCv1
+                solve( !KU( pk(~sk) ) @ #vk.25 )
+                  case I_SendA_Classic
+                  solve( !KU( kemenc(~ss, kempk(~kemsk)) ) @ #vk.27 )
+                    case I_SendA_PQCv1
+                    solve( !KU( pk(~sk.1) ) @ #vk.31 )
+                      case I_SendA_Classic
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
     qed
   qed
 qed
 
-lemma Exists_StrictPQCv2Trace:
+lemma Exists_PQCv2_Session:
   exists-trace
-  "∃ sid #i #j.
-    (Policy( sid, 'strictPQC' ) @ #i) ∧
-    (SessionEstablished( sid, SuitePQCv2 ) @ #j)"
+  "∃ sid A B #i. SessionEstablishedFull( sid, A, B, 'PQCv2' ) @ #i"
 /*
 guarded formula characterizing all satisfying traces:
-"∃ sid #i #j.
-  (Policy( sid, 'strictPQC' ) @ #i) ∧
-  (SessionEstablished( sid, SuitePQCv2 ) @ #j)"
+"∃ sid A B #i. (SessionEstablishedFull( sid, A, B, 'PQCv2' ) @ #i)"
 */
 simplify
-solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #j )
-  case Finished_Phase_case_4
-  solve( Policy( ~sid, 'strictPQC' ) @ #i )
-    case Init_Offer_Strict
-    SOLVED // trace found
+solve( St_R_WaitFin( sid, A, B, 'PQCv2', root, thA ) ▶₀ #i )
+  case R_RecvA_SendB_PQCv2
+  solve( !KU( sign(<'DomA', sid, $A, 'PQCv2', cA, na, gxa, pk(~sk)>, ~sk)
+         ) @ #vk.19 )
+    case I_SendA_PQCv2_case_1
+    solve( splitEqs(1) )
+      case split_case_1
+      solve( !KU( h(<'macI', h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                    >)
+             ) @ #vk.7 )
+        case I_RecvB_PQCv2
+        solve( !KU( ~sid ) @ #vk.6 )
+          case I_SendA_PQCv2
+          solve( !KU( ~na ) @ #vk.21 )
+            case I_SendA_PQCv2
+            solve( !KU( ~nb ) @ #vk.30 )
+              case R_RecvA_SendB_PQCv2
+              solve( !KU( sign(<'DomB', 
+                                h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)
+                                  >), 
+                                'PQCv2', 'g'^~xb, ~nb, pk(~sk.1)>,
+                               ~sk.1)
+                     ) @ #vk.32 )
+                case R_RecvA_SendB_PQCv2
+                solve( !KU( pk(~sk) ) @ #vk.27 )
+                  case I_SendA_Classic
+                  solve( !KU( kemenc(~ss, kempk(~kemsk)) ) @ #vk.28 )
+                    case I_SendA_PQCv2
+                    solve( !KU( 'g'^~xa ) @ #vk.29 )
+                      case I_SendA_PQCv2
+                      solve( !KU( 'g'^~xb ) @ #vk.32 )
+                        case R_RecvA_SendB_PQCv2
+                        solve( !KU( pk(~sk.1) ) @ #vk.33 )
+                          case I_SendA_Classic
+                          SOLVED // trace found
+                        qed
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
+    qed
   qed
 qed
 
-lemma Exists_StrictBootstrapRecoveryTrace:
+lemma Exists_Default_Classic_Downgrade:
   exists-trace
-  "∃ sid #i #j #k.
-    ((Policy( sid, 'strictPQC' ) @ #i) ∧
-     (BootstrapControlChannel( sid ) @ #j)) ∧
-    (PQCRekeyCompleted( sid ) @ #k)"
+  "∃ sid A B #i #j.
+    (DowngradeEvent( sid ) @ #i) ∧
+    (SessionEstablishedFull( sid, A, B, 'Classic' ) @ #j)"
 /*
 guarded formula characterizing all satisfying traces:
-"∃ sid #i #j #k.
-  (Policy( sid, 'strictPQC' ) @ #i) ∧
-  (BootstrapControlChannel( sid ) @ #j) ∧
-  (PQCRekeyCompleted( sid ) @ #k)"
+"∃ sid A B #i #j.
+  (DowngradeEvent( sid ) @ #i) ∧
+  (SessionEstablishedFull( sid, A, B, 'Classic' ) @ #j)"
 */
 simplify
-solve( St_Strict( sid ) ▶₀ #j )
-  case Init_Offer_Strict
-  solve( St_Strict_Bootstrap( ~sid ) ▶₀ #k )
-    case Strict_Bootstrap_ControlOnly
-    solve( Policy( ~sid, 'strictPQC' ) @ #i )
-      case Init_Offer_Strict
-      SOLVED // trace found
+solve( St_Init0( sid, A, B, 'default', pkB, kpkB ) ▶₀ #i )
+  case Init_Session_Default
+  solve( St_R_WaitFin( ~sid, A.1, B.1, 'Classic', root, thA ) ▶₀ #j )
+    case R_RecvA_SendB_Classic
+    solve( !KU( ~sid ) @ #vk.1 )
+      case I_SendA_Classic
+      solve( !KU( sign(<'DomA', ~sid, $A.1, 'Classic', gea, na, pk(~sk.1)>,
+                       ~sk.1)
+             ) @ #vk.17 )
+        case I_SendA_Classic
+        solve( !KU( h(<'macI', h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>), 
+                       h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)>)
+               ) @ #vk.6 )
+          case I_RecvB_Classic
+          solve( !KU( sign(<'DomB', 
+                            h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>), 'Classic', 'g'^~eb, 
+                            ~nb, pk(~sk)>,
+                           ~sk)
+                 ) @ #vk.30 )
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~na ) @ #vk.21 )
+              case I_SendA_Classic
+              solve( !KU( ~nb ) @ #vk.30 )
+                case R_RecvA_SendB_Classic
+                solve( !KU( pk(~sk.1) ) @ #vk.27 )
+                  case I_SendA_Classic
+                  solve( !KU( 'g'^~ea ) @ #vk.27 )
+                    case I_SendA_Classic
+                    solve( !KU( 'g'^~eb ) @ #vk.30 )
+                      case R_RecvA_SendB_Classic
+                      solve( !KU( pk(~sk) ) @ #vk.31 )
+                        case I_SendA_Classic
+                        SOLVED // trace found
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma NegotiationIntegrity_AcceptedWasOffered:
+  all-traces
+  "∀ sid A B sel thA #i.
+    (Commit_I( sid, A, B, sel, thA ) @ #i) ⇒ (∃ #j. Offer( sid, sel ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B sel thA #i.
+  (Commit_I( sid, A, B, sel, thA ) @ #i)
+ ∧
+  ∀ #j. (Offer( sid, sel ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( Commit_I( sid, A, B, sel, thA ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
+    by contradiction /* from formulas */
+  next
+    case I_SendA_ClassicOnly
+    by contradiction /* from formulas */
+  qed
+next
+  case I_RecvB_PQCv1
+  solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv1_case_1
+    by contradiction /* from formulas */
+  next
+    case I_SendA_PQCv1_case_2
+    by contradiction /* from formulas */
+  qed
+next
+  case I_RecvB_PQCv2
+  solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                        thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv2_case_1
+    by contradiction /* from formulas */
+  next
+    case I_SendA_PQCv2_case_2
+    by contradiction /* from formulas */
+  qed
+qed
+
+lemma SigB_Authentic_or_Compromised:
+  all-traces
+  "∀ sid A B suite thA #i.
+    (Commit_I( sid, A, B, suite, thA ) @ #i) ⇒
+    ((∃ #j. SigBIssued( sid, B, suite ) @ #j) ∨ (∃ #r. LtkReveal( B ) @ #r))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B suite thA #i.
+  (Commit_I( sid, A, B, suite, thA ) @ #i)
+ ∧
+  (∀ #j. (SigBIssued( sid, B, suite ) @ #j) ⇒ ⊥) ∧
+  (∀ #r. (LtkReveal( B ) @ #r) ⇒ ⊥)"
+*/
+simplify
+solve( Commit_I( sid, A, B, suite, thA ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>), 'Classic', geb, nb, 
+                      pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_Classic
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_SendA_ClassicOnly
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>), 'Classic', geb, nb, 
+                      pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_Classic
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+next
+  case I_RecvB_PQCv1
+  solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv1_case_1
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>), 
+                      'PQCv1', 'noshare', nb, pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_PQCv1
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_SendA_PQCv1_case_2
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>), 
+                      'PQCv1', 'noshare', nb, pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_PQCv1
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+next
+  case I_RecvB_PQCv2
+  solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                        thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv2_case_1
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                        >), 
+                      'PQCv2', gxb, nb, pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_PQCv2
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_SendA_PQCv2_case_2
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                        >), 
+                      'PQCv2', gxb, nb, pk(~sk)>,
+                     ~sk)
+           ) @ #vk.13 )
+      case R_RecvA_SendB_PQCv2
+      by contradiction /* from formulas */
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.19 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+qed
+
+lemma Injective_Agreement_I_with_R:
+  all-traces
+  "∀ sid A B suite thA #i.
+    (Commit_I( sid, A, B, suite, thA ) @ #i) ⇒
+    (((∃ #j. (Running_R( sid, A, B, suite, thA ) @ #j) ∧ (#j < #i)) ∧
+      (¬(∃ sid2 #i2.
+          (Commit_I( sid2, A, B, suite, thA ) @ #i2) ∧ (¬(#i2 = #i))))) ∨
+     (∃ #r. LtkReveal( B ) @ #r))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B suite thA #i.
+  (Commit_I( sid, A, B, suite, thA ) @ #i)
+ ∧
+  (((∀ #j. (Running_R( sid, A, B, suite, thA ) @ #j) ⇒ ¬(#j < #i)) ∨
+    (∃ sid2 #i2.
+      (Commit_I( sid2, A, B, suite, thA ) @ #i2) ∧ ¬(#i2 = #i)))) ∧
+  (∀ #r. (LtkReveal( B ) @ #r) ⇒ ⊥)"
+*/
+simplify
+solve( (∀ #j. (Running_R( sid, A, B, suite, thA ) @ #j) ⇒ ¬(#j < #i))  ∥
+       (∃ sid2 #i2. (Commit_I( sid2, A, B, suite, thA ) @ #i2) ∧ ¬(#i2 = #i)) )
+  case case_1
+  solve( Commit_I( sid, A, B, suite, thA ) @ #i )
+    case I_RecvB_Classic
+    solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+           ) ▶₀ #i )
+      case I_SendA_Classic
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>), 'Classic', geb, nb, 
+                        pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_Classic
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case I_SendA_ClassicOnly
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>), 'Classic', geb, nb, 
+                        pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_Classic
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  next
+    case I_RecvB_PQCv1
+    solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+           ) ▶₀ #i )
+      case I_SendA_PQCv1_case_1
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>), 
+                        'PQCv1', 'noshare', nb, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_PQCv1
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case I_SendA_PQCv1_case_2
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>), 
+                        'PQCv1', 'noshare', nb, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_PQCv1
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  next
+    case I_RecvB_PQCv2
+    solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                          thA
+           ) ▶₀ #i )
+      case I_SendA_PQCv2_case_1
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                          >), 
+                        'PQCv2', gxb, nb, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_PQCv2
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case I_SendA_PQCv2_case_2
+      solve( !KU( sign(<'DomB', 
+                        h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                          >), 
+                        'PQCv2', gxb, nb, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.13 )
+        case R_RecvA_SendB_PQCv2
+        by contradiction /* from formulas */
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.19 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  qed
+next
+  case case_2
+  solve( (#i2 < #i)  ∥ (#i < #i2) )
+    case case_1
+    solve( Commit_I( sid, A, B, suite, thA ) @ #i )
+      case I_RecvB_Classic
+      solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+             ) ▶₀ #i )
+        case I_SendA_Classic
+        solve( Commit_I( sid2, $A, $B, 'Classic',
+                         h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_Classic
+          solve( St_I_WaitB_C( sid2, $A, $B, pol, 'Classic', pk(x), na.1, ea.1,
+                               h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_Classic
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_ClassicOnly
+        solve( Commit_I( sid2, $A, $B, 'Classic',
+                         h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_Classic
+          solve( St_I_WaitB_C( sid2, $A, $B, pol, 'Classic', pk(x), na.1, ea.1,
+                               h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_ClassicOnly
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case I_RecvB_PQCv1
+      solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+             ) ▶₀ #i )
+        case I_SendA_PQCv1_case_1
+        solve( Commit_I( sid2, $A, $B, 'PQCv1',
+                         h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_PQCv1
+          solve( St_I_WaitB( sid2, $A, $B, pol, 'PQCv1', pk(x), kpkB, na.1, ss.1,
+                             h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv1
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( Commit_I( sid2, $A, $B, 'PQCv1',
+                         h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_PQCv1
+          solve( St_I_WaitB( sid2, $A, $B, pol, 'PQCv1', pk(x), kpkB, na.1, ss.1,
+                             h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv1
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case I_RecvB_PQCv2
+      solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                            thA
+             ) ▶₀ #i )
+        case I_SendA_PQCv2_case_1
+        solve( Commit_I( sid2, $A, $B, 'PQCv2',
+                         h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                           >)
+               ) @ #i2 )
+          case I_RecvB_PQCv2
+          solve( St_I_WaitB_v2( sid2, $A, $B, pol, 'PQCv2', pk(x), kpkB, na.1,
+                                ss.1, xa.1,
+                                h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                  >)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv2
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_PQCv2_case_2
+        solve( Commit_I( sid2, $A, $B, 'PQCv2',
+                         h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                           >)
+               ) @ #i2 )
+          case I_RecvB_PQCv2
+          solve( St_I_WaitB_v2( sid2, $A, $B, pol, 'PQCv2', pk(x), kpkB, na.1,
+                                ss.1, xa.1,
+                                h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                  >)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv2
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    qed
+  next
+    case case_2
+    solve( Commit_I( sid, A, B, suite, thA ) @ #i )
+      case I_RecvB_Classic
+      solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+             ) ▶₀ #i )
+        case I_SendA_Classic
+        solve( Commit_I( sid2, $A, $B, 'Classic',
+                         h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_Classic
+          solve( St_I_WaitB_C( sid2, $A, $B, pol, 'Classic', pk(x), na.1, ea.1,
+                               h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_Classic
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_ClassicOnly
+        solve( Commit_I( sid2, $A, $B, 'Classic',
+                         h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_Classic
+          solve( St_I_WaitB_C( sid2, $A, $B, pol, 'Classic', pk(x), na.1, ea.1,
+                               h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_ClassicOnly
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case I_RecvB_PQCv1
+      solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+             ) ▶₀ #i )
+        case I_SendA_PQCv1_case_1
+        solve( Commit_I( sid2, $A, $B, 'PQCv1',
+                         h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_PQCv1
+          solve( St_I_WaitB( sid2, $A, $B, pol, 'PQCv1', pk(x), kpkB, na.1, ss.1,
+                             h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv1
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( Commit_I( sid2, $A, $B, 'PQCv1',
+                         h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+               ) @ #i2 )
+          case I_RecvB_PQCv1
+          solve( St_I_WaitB( sid2, $A, $B, pol, 'PQCv1', pk(x), kpkB, na.1, ss.1,
+                             h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk.1)>)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv1
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case I_RecvB_PQCv2
+      solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                            thA
+             ) ▶₀ #i )
+        case I_SendA_PQCv2_case_1
+        solve( Commit_I( sid2, $A, $B, 'PQCv2',
+                         h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                           >)
+               ) @ #i2 )
+          case I_RecvB_PQCv2
+          solve( St_I_WaitB_v2( sid2, $A, $B, pol, 'PQCv2', pk(x), kpkB, na.1,
+                                ss.1, xa.1,
+                                h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                  >)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv2
+            by contradiction /* cyclic */
+          qed
+        qed
+      next
+        case I_SendA_PQCv2_case_2
+        solve( Commit_I( sid2, $A, $B, 'PQCv2',
+                         h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                           >)
+               ) @ #i2 )
+          case I_RecvB_PQCv2
+          solve( St_I_WaitB_v2( sid2, $A, $B, pol, 'PQCv2', pk(x), kpkB, na.1,
+                                ss.1, xa.1,
+                                h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                  >)
+                 ) ▶₀ #i2 )
+            case I_SendA_PQCv2
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma Secrecy_SessionKey_HonestCase:
+  all-traces
+  "∀ sid root #i.
+    ((((SecretRoot( sid, root ) @ #i) ∧ (¬(∃ A #r. LtkReveal( A ) @ #r))) ∧
+      (¬(∃ A #r. KemReveal( A ) @ #r))) ∧
+     (¬(∃ x #r. EphReveal( x ) @ #r))) ⇒
+    (¬(∃ #k. K( root ) @ #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid root #i.
+  (SecretRoot( sid, root ) @ #i)
+ ∧
+  (∀ A #r. (LtkReveal( A ) @ #r) ⇒ ⊥) ∧
+  (∀ A #r. (KemReveal( A ) @ #r) ⇒ ⊥) ∧
+  (∀ x #r. (EphReveal( x ) @ #r) ⇒ ⊥) ∧
+  (∃ #k. (K( root ) @ #k))"
+*/
+simplify
+solve( SecretRoot( sid, root ) @ #i )
+  case I_RecvFin_Establish
+  solve( St_I_WaitFin( sid, A, B, suite, root, thA ) ▶₀ #i )
+    case I_RecvB_Classic_case_1
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>), 'Classic', geb, nb, 
+                      pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_Classic
+      solve( !KU( h(<'macR', h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>), 
+                     h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>)>)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.41 )
+            case I_SendA_Classic
+            solve( !KU( ~eb ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.44 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.41 )
+            case I_SendA_Classic
+            solve( !KU( ~eb ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.44 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_RecvB_Classic_case_2
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>), 'Classic', geb, nb, 
+                      pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_Classic
+      solve( !KU( h(<'macR', h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>), 
+                     h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>)>)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.41 )
+            case I_SendA_ClassicOnly
+            solve( !KU( ~eb ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.44 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.41 )
+            case I_SendA_ClassicOnly
+            solve( !KU( ~eb ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.42 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.44 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_RecvB_PQCv1_case_1
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>), 
+                      'PQCv1', 'noshare', nb, pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_PQCv1
+      solve( !KU( h(<'macR', h(<'root1', ~ss, ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.41 )
+            case I_SendA_PQCv1
+            solve( !KU( ~kemsk ) @ #vk.42 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.41 )
+            case I_SendA_PQCv1
+            solve( !KU( ~kemsk ) @ #vk.42 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_RecvB_PQCv1_case_2
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>), 
+                      'PQCv1', 'noshare', nb, pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_PQCv1
+      solve( !KU( h(<'macR', h(<'root1', ~ss, ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.41 )
+            case I_SendA_PQCv1
+            solve( !KU( ~kemsk ) @ #vk.42 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.41 )
+            case I_SendA_PQCv1
+            solve( !KU( ~kemsk ) @ #vk.42 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_RecvB_PQCv2_case_1
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)
+                        >), 
+                      'PQCv2', gxb, nb, pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_PQCv2
+      solve( !KU( h(<'macR', h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                    >)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.43 )
+            case I_SendA_PQCv2
+            solve( !KU( ~kemsk ) @ #vk.46 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.43 )
+            case I_SendA_PQCv2
+            solve( !KU( ~kemsk ) @ #vk.46 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case I_RecvB_PQCv2_case_2
+    solve( !KU( sign(<'DomB', 
+                      h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)
+                        >), 
+                      'PQCv2', gxb, nb, pk(~sk.1)>,
+                     ~sk.1)
+           ) @ #vk.18 )
+      case R_RecvA_SendB_PQCv2
+      solve( !KU( h(<'macR', h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>), 
+                     h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                    >)
+             ) @ #vk.8 )
+        case R_RecvFin_Establish
+        solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.43 )
+            case I_SendA_PQCv2
+            solve( !KU( ~kemsk ) @ #vk.46 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( ~ss ) @ #vk.43 )
+            case I_SendA_PQCv2
+            solve( !KU( ~kemsk ) @ #vk.46 )
+              case Reveal_KEM
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk.1 ) @ #vk.24 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+next
+  case R_RecvFin_Establish
+  solve( St_R_WaitFin( sid, A, B, suite, root, thA ) ▶₀ #i )
+    case R_RecvA_SendB_Classic
+    solve( !KU( sign(<'DomA', sid, $A, 'Classic', gea, na, pk(~sk)>, ~sk)
+           ) @ #vk.18 )
+      case I_SendA_Classic
+      solve( !KU( h(<'macI', h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>), 
+                     h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>)>)
+             ) @ #vk.7 )
+        case I_RecvB_Classic
+        solve( !KU( sign(<'DomB', 
+                          h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>), 'Classic', 'g'^~eb, 
+                          ~nb, pk(~sk.2)>,
+                         ~sk.2)
+               ) @ #vk.31 )
+          case R_RecvA_SendB_Classic
+          solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.8 )
+            case c_h
+            solve( !KU( 'g'^(~ea*~eb) ) @ #vk.37 )
+              case I_SendA_Classic
+              solve( !KU( ~eb ) @ #vk.38 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            next
+              case R_RecvA_SendB_Classic
+              solve( !KU( ~ea ) @ #vk.38 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            next
+              case c_exp
+              solve( !KU( ~ea ) @ #vk.40 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_sign
+          solve( !KU( ~sk.2 ) @ #vk.37 )
+            case Reveal_Ltk
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.28 )
+            case I_SendA_Classic
+            solve( !KU( ~eb ) @ #vk.30 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.30 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.32 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case I_SendA_ClassicOnly
+      solve( !KU( h(<'macI', h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>), 
+                     h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>)>)
+             ) @ #vk.7 )
+        case I_RecvB_Classic
+        solve( !KU( sign(<'DomB', 
+                          h(<~sid, $A, 'Classic', 'g'^~ea, ~na, pk(~sk)>), 'Classic', 'g'^~eb, 
+                          ~nb, pk(~sk.2)>,
+                         ~sk.2)
+               ) @ #vk.31 )
+          case R_RecvA_SendB_Classic
+          solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.8 )
+            case c_h
+            solve( !KU( 'g'^(~ea*~eb) ) @ #vk.37 )
+              case I_SendA_ClassicOnly
+              solve( !KU( ~eb ) @ #vk.38 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            next
+              case R_RecvA_SendB_Classic
+              solve( !KU( ~ea ) @ #vk.38 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            next
+              case c_exp
+              solve( !KU( ~ea ) @ #vk.40 )
+                case Reveal_Eph
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_sign
+          solve( !KU( ~sk.2 ) @ #vk.37 )
+            case Reveal_Ltk
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case c_h
+        solve( !KU( h(<'rootC', 'g'^(~ea*~eb), ~na, ~nb>) ) @ #vk.4 )
+          case c_h
+          solve( !KU( 'g'^(~ea*~eb) ) @ #vk.28 )
+            case I_SendA_ClassicOnly
+            solve( !KU( ~eb ) @ #vk.30 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case R_RecvA_SendB_Classic
+            solve( !KU( ~ea ) @ #vk.30 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          next
+            case c_exp
+            solve( !KU( ~ea ) @ #vk.32 )
+              case Reveal_Eph
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.26 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case R_RecvA_SendB_PQCv1
+    solve( splitEqs(1) )
+      case split_case_1
+      solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', kemenc(z, kempk(~kemsk)), 
+                        na, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.18 )
+        case I_SendA_PQCv1_case_1
+        solve( !KU( h(<'macI', h(<'root1', ~ss, ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.7 )
+          case I_RecvB_PQCv1
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.37 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.38 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.28 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( !KU( h(<'macI', h(<'root1', ~ss, ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.7 )
+          case I_RecvB_PQCv1
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.37 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.38 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.4 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.28 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.26 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case split_case_2
+      solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', cA, na, pk(~sk)>, ~sk)
+             ) @ #vk.18 )
+        case I_SendA_PQCv1_case_1
+        solve( !KU( h(<'macI', 
+                       h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.7 )
+          case c_h
+          solve( !KU( h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         ~na, ~nb>)
+                 ) @ #vk.4 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.28 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( !KU( h(<'macI', 
+                       h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.7 )
+          case c_h
+          solve( !KU( h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         ~na, ~nb>)
+                 ) @ #vk.4 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.28 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.26 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  next
+    case R_RecvA_SendB_PQCv2
+    solve( !KU( sign(<'DomA', sid, $A, 'PQCv2', cA, na, gxa, pk(~sk)>, ~sk)
+           ) @ #vk.20 )
+      case I_SendA_PQCv2_case_1
+      solve( splitEqs(1) )
+        case split_case_1
+        solve( !KU( h(<'macI', h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                      >)
+               ) @ #vk.8 )
+          case I_RecvB_PQCv2
+          solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.5 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.39 )
+              case I_SendA_PQCv2
+              solve( !KU( ~kemsk ) @ #vk.42 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.5 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.30 )
+              case I_SendA_PQCv2
+              solve( !KU( ~kemsk ) @ #vk.34 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case split_case_2
+        solve( !KU( h(<'macI', 
+                       h(<'root2', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 'g'^(~xa*~xb), 
+                          ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                      >)
+               ) @ #vk.8 )
+          case c_h
+          solve( !KU( h(<'root2', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         'g'^(~xa*~xb), ~na, ~nb>)
+                 ) @ #vk.5 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.30 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.34 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      qed
+    next
+      case I_SendA_PQCv2_case_2
+      solve( splitEqs(1) )
+        case split_case_1
+        solve( !KU( h(<'macI', h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                      >)
+               ) @ #vk.8 )
+          case I_RecvB_PQCv2
+          solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.5 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.39 )
+              case I_SendA_PQCv2
+              solve( !KU( ~kemsk ) @ #vk.42 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.5 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.30 )
+              case I_SendA_PQCv2
+              solve( !KU( ~kemsk ) @ #vk.34 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case split_case_2
+        solve( !KU( h(<'macI', 
+                       h(<'root2', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 'g'^(~xa*~xb), 
+                          ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk)>)
+                      >)
+               ) @ #vk.8 )
+          case c_h
+          solve( !KU( h(<'root2', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         'g'^(~xa*~xb), ~na, ~nb>)
+                 ) @ #vk.5 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.30 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.34 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      qed
+    next
+      case c_sign
+      solve( !KU( ~sk ) @ #vk.29 )
+        case Reveal_Ltk
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+qed
+
+lemma WeakFS_v1:
+  all-traces
+  "∀ sid A B root #i.
+    ((((SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i) ∧
+       (SecretRoot( sid, root ) @ #i)) ∧
+      (¬(∃ #r. KemReveal( B ) @ #r))) ∧
+     (¬(∃ #r. LtkReveal( A ) @ #r))) ⇒
+    (¬(∃ #k. K( root ) @ #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B root #i.
+  (SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i) ∧
+  (SecretRoot( sid, root ) @ #i)
+ ∧
+  (∀ #r. (KemReveal( B ) @ #r) ⇒ ⊥) ∧
+  (∀ #r. (LtkReveal( A ) @ #r) ⇒ ⊥) ∧
+  (∃ #k. (K( root ) @ #k))"
+*/
+simplify
+solve( St_R_WaitFin( sid, A, B, 'PQCv1', root, thA ) ▶₀ #i )
+  case R_RecvA_SendB_PQCv1
+  solve( SecretRoot( sid, root ) @ #i )
+    case R_RecvFin_Establish
+    solve( splitEqs(1) )
+      case split_case_1
+      solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', kemenc(z, kempk(~kemsk)), 
+                        na, pk(~sk)>,
+                       ~sk)
+             ) @ #vk.18 )
+        case I_SendA_PQCv1_case_1
+        solve( !KU( h(<'macI', h(<'root1', ~ss, ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.6 )
+          case I_RecvB_PQCv1
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.9 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.37 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.38 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.8 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.28 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( !KU( h(<'macI', h(<'root1', ~ss, ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.6 )
+          case I_RecvB_PQCv1
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.9 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.37 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.38 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        next
+          case c_h
+          solve( !KU( h(<'root1', ~ss, ~na, ~nb>) ) @ #vk.8 )
+            case c_h
+            solve( !KU( ~ss ) @ #vk.28 )
+              case I_SendA_PQCv1
+              solve( !KU( ~kemsk ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.26 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case split_case_2
+      solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', cA, na, pk(~sk)>, ~sk)
+             ) @ #vk.18 )
+        case I_SendA_PQCv1_case_1
+        solve( !KU( h(<'macI', 
+                       h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.6 )
+          case c_h
+          solve( !KU( h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         ~na, ~nb>)
+                 ) @ #vk.8 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.28 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case I_SendA_PQCv1_case_2
+        solve( !KU( h(<'macI', 
+                       h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), ~na, ~nb>), 
+                       h(<~sid, $A, 'PQCv1', kemenc(~ss, kempk(~kemsk)), ~na, pk(~sk)>)>)
+               ) @ #vk.6 )
+          case c_h
+          solve( !KU( h(<'root1', kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1), 
+                         ~na, ~nb>)
+                 ) @ #vk.8 )
+            case c_h
+            solve( !KU( kemdec(kemenc(~ss, kempk(~kemsk)), ~kemsk.1) ) @ #vk.28 )
+              case c_kemdec
+              solve( !KU( ~kemsk.1 ) @ #vk.30 )
+                case Reveal_KEM
+                by contradiction /* from formulas */
+              qed
+            qed
+          qed
+        qed
+      next
+        case c_sign
+        solve( !KU( ~sk ) @ #vk.26 )
+          case Reveal_Ltk
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma V1_LacksForwardSecrecy_Witness:
+  exists-trace
+  "∃ sid A B root #i #r #k.
+    ((((SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i) ∧
+       (SecretRoot( sid, root ) @ #i)) ∧
+      (KemReveal( B ) @ #r)) ∧
+     (K( root ) @ #k)) ∧
+    (¬(∃ x #e. EphReveal( x ) @ #e))"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ sid A B root #i #r #k.
+  (SessionEstablishedFull( sid, A, B, 'PQCv1' ) @ #i) ∧
+  (SecretRoot( sid, root ) @ #i) ∧
+  (KemReveal( B ) @ #r) ∧
+  (K( root ) @ #k)
+ ∧
+  ∀ x #e. (EphReveal( x ) @ #e) ⇒ ⊥"
+*/
+simplify
+solve( St_R_WaitFin( sid, A, $A.1, 'PQCv1', root, thA ) ▶₀ #i )
+  case R_RecvA_SendB_PQCv1
+  solve( !KemLtk( $A.1, kemsk ) ▶₀ #r )
+    case Register_KEMKey
+    solve( SecretRoot( sid, root ) @ #i )
+      case R_RecvFin_Establish
+      solve( splitEqs(2) )
+        case split_case_1
+        solve( !KU( sign(<'DomA', sid, $A, 'PQCv1', cA, na, pk(~sk)>, ~sk)
+               ) @ #vk.18 )
+          case c_sign
+          solve( !KU( ~sk ) @ #vk.26 )
+            case Reveal_Ltk
+            solve( !KU( h(<'macI', h(<'root1', kemdec(cA, ~kemsk), na, ~nb>), 
+                           h(<sid, $A, 'PQCv1', cA, na, pk(~sk)>)>)
+                   ) @ #vk.10 )
+              case c_h
+              solve( !KU( h(<'root1', kemdec(cA, ~kemsk), na, ~nb>) ) @ #vk.12 )
+                case c_h
+                solve( !KU( kemdec(cA, ~kemsk) ) @ #vk.36 )
+                  case c_kemdec
+                  solve( !KU( h(<sid, $A, 'PQCv1', cA, na, pk(~sk)>) ) @ #vk.34 )
+                    case c_h
+                    solve( !KU( ~nb ) @ #vk.37 )
+                      case R_RecvA_SendB_PQCv1
+                      solve( !KU( ~kemsk ) @ #vk.38 )
+                        case Reveal_KEM
+                        solve( !KU( pk(~sk) ) @ #vk.35 )
+                          case I_SendA_Classic
+                          SOLVED // trace found
+                        qed
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma ForwardSecrecy_v2:
+  all-traces
+  "∀ sid A B root thA #i #j.
+    ((((((RootI( sid, root ) @ #i) ∧
+         (Commit_I( sid, A, B, 'PQCv2', thA ) @ #i)) ∧
+        (Running_R( sid, A, B, 'PQCv2', thA ) @ #j)) ∧
+       (¬(∃ x #r. EphReveal( x ) @ #r))) ∧
+      (¬(∃ #r. (LtkReveal( A ) @ #r) ∧ (#r < #i)))) ∧
+     (¬(∃ #r. (LtkReveal( B ) @ #r) ∧ (#r < #i)))) ⇒
+    (¬(∃ #k. K( root ) @ #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B root thA #i #j.
+  (RootI( sid, root ) @ #i) ∧
+  (Commit_I( sid, A, B, 'PQCv2', thA ) @ #i) ∧
+  (Running_R( sid, A, B, 'PQCv2', thA ) @ #j)
+ ∧
+  (∀ x #r. (EphReveal( x ) @ #r) ⇒ ⊥) ∧
+  (∀ #r. (LtkReveal( A ) @ #r) ⇒ ¬(#r < #i)) ∧
+  (∀ #r. (LtkReveal( B ) @ #r) ⇒ ¬(#r < #i)) ∧
+  (∃ #k. (K( root ) @ #k))"
+*/
+simplify
+solve( RootI( sid, root ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
+    by solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+  next
+    case I_SendA_ClassicOnly
+    by solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+  qed
+next
+  case I_RecvB_PQCv1
+  solve( St_I_WaitB( sid, A, B, pol, 'PQCv1', pk(x), kpkB, na, ss, thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv1_case_1
+    by solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+  next
+    case I_SendA_PQCv1_case_2
+    by solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+  qed
+next
+  case I_RecvB_PQCv2
+  solve( St_I_WaitB_v2( sid, A, B, pol, 'PQCv2', pk(x), kpkB, na, ss, xa,
+                        thA
+         ) ▶₀ #i )
+    case I_SendA_PQCv2_case_1
+    solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+      case I_RecvB_PQCv2
+      solve( Running_R( ~sid, $A, $B, 'PQCv2',
+                        h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                          >)
+             ) @ #j )
+        case R_RecvA_SendB_PQCv2
+        solve( !Ltk( $B, skB ) ▶₁ #j )
+          case Register_Identity
+          solve( !KemLtk( $B, kemsk.1 ) ▶₂ #j )
+            case Register_KEMKey
+            solve( !Pin( $B, pk(~sk), kempk(~kemsk) ) ▶₃ #j )
+              case Pair_OOB
+              solve( !Pin( $A, pk(~sk.1), kpkA ) ▶₄ #j )
+                case Pair_OOB
+                solve( !KU( sign(<'DomB', 
+                                  h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                    >), 
+                                  'PQCv2', gxb, nb, pk(~sk)>,
+                                 ~sk)
+                       ) @ #vk.18 )
+                  case R_RecvA_SendB_PQCv2
+                  solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.1 )
+                    case c_h
+                    solve( !KU( ~ss ) @ #vk.35 )
+                      case I_SendA_PQCv2
+                      solve( !KU( ~kemsk ) @ #vk.38 )
+                        case Reveal_KEM
+                        solve( !KU( 'g'^(~xa*~xb) ) @ #vk.38 )
+                          case I_SendA_PQCv2
+                          solve( !KU( ~xb ) @ #vk.39 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        next
+                          case R_RecvA_SendB_PQCv2
+                          solve( !KU( ~xa ) @ #vk.39 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        next
+                          case c_exp
+                          solve( !KU( ~xa ) @ #vk.41 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        qed
+                      qed
+                    qed
+                  qed
+                next
+                  case c_sign
+                  solve( !KU( ~sk ) @ #vk.35 )
+                    case Reveal_Ltk
+                    by contradiction /* from formulas */
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
+    qed
+  next
+    case I_SendA_PQCv2_case_2
+    solve( Commit_I( ~sid, A.1, B.1, 'PQCv2', thA ) @ #i )
+      case I_RecvB_PQCv2
+      solve( Running_R( ~sid, $A, $B, 'PQCv2',
+                        h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                          >)
+             ) @ #j )
+        case R_RecvA_SendB_PQCv2
+        solve( !Ltk( $B, skB ) ▶₁ #j )
+          case Register_Identity
+          solve( !KemLtk( $B, kemsk.1 ) ▶₂ #j )
+            case Register_KEMKey
+            solve( !Pin( $B, pk(~sk), kempk(~kemsk) ) ▶₃ #j )
+              case Pair_OOB
+              solve( !Pin( $A, pk(~sk.1), kpkA ) ▶₄ #j )
+                case Pair_OOB
+                solve( !KU( sign(<'DomB', 
+                                  h(<~sid, $A, 'PQCv2', kemenc(~ss, kempk(~kemsk)), ~na, 'g'^~xa, pk(~sk.1)
+                                    >), 
+                                  'PQCv2', gxb, nb, pk(~sk)>,
+                                 ~sk)
+                       ) @ #vk.18 )
+                  case R_RecvA_SendB_PQCv2
+                  solve( !KU( h(<'root2', ~ss, 'g'^(~xa*~xb), ~na, ~nb>) ) @ #vk.1 )
+                    case c_h
+                    solve( !KU( ~ss ) @ #vk.35 )
+                      case I_SendA_PQCv2
+                      solve( !KU( ~kemsk ) @ #vk.38 )
+                        case Reveal_KEM
+                        solve( !KU( 'g'^(~xa*~xb) ) @ #vk.38 )
+                          case I_SendA_PQCv2
+                          solve( !KU( ~xb ) @ #vk.39 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        next
+                          case R_RecvA_SendB_PQCv2
+                          solve( !KU( ~xa ) @ #vk.39 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        next
+                          case c_exp
+                          solve( !KU( ~xa ) @ #vk.41 )
+                            case Reveal_Eph
+                            by contradiction /* from formulas */
+                          qed
+                        qed
+                      qed
+                    qed
+                  qed
+                next
+                  case c_sign
+                  solve( !KU( ~sk ) @ #vk.35 )
+                    case Reveal_Ltk
+                    by contradiction /* from formulas */
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      qed
     qed
   qed
 qed
 
 lemma NoClassicUnderStrictPQC:
   all-traces
-  "∀ sid #i.
-    (Policy( sid, 'strictPQC' ) @ #i) ⇒
-    (¬(∃ #j. SessionEstablished( sid, SuiteClassic ) @ #j))"
+  "∀ sid A B thA #i.
+    (Commit_I( sid, A, B, 'Classic', thA ) @ #i) ⇒
+    (¬(∃ #p. Policy( sid, 'strictPQC' ) @ #p))"
 /*
 guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (Policy( sid, 'strictPQC' ) @ #i)
+"∃ sid A B thA #i.
+  (Commit_I( sid, A, B, 'Classic', thA ) @ #i)
  ∧
-  ∃ #j. (SessionEstablished( sid, SuiteClassic ) @ #j)"
+  ∃ #p. (Policy( sid, 'strictPQC' ) @ #p)"
 */
 simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #j )
-  case Finished_Phase
-  by solve( Policy( ~sid, 'strictPQC' ) @ #i )
+solve( Commit_I( sid, A, B, 'Classic', thA ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
+    by solve( Policy( ~sid, 'strictPQC' ) @ #p )
+  next
+    case I_SendA_ClassicOnly
+    by solve( Policy( ~sid, 'strictPQC' ) @ #p )
+  qed
 qed
 
-lemma NegotiationIntegrity_SelectedWasOffered:
+lemma NoSilentClassicFallback_Default:
   all-traces
-  "∀ sid sel #i.
-    (SelectedSuite( sid, sel ) @ #i) ⇒
-    (∃ #j. OfferIncludes( sid, sel ) @ #j)"
+  "∀ sid A B thA #i.
+    ((Commit_I( sid, A, B, 'Classic', thA ) @ #i) ∧
+     (∃ #p. Policy( sid, 'default' ) @ #p)) ⇒
+    (∃ #g.
+      (FallbackGatePassed( sid, 'local_capability_error' ) @ #g) ∧ (#g < #i))"
 /*
 guarded formula characterizing all counter-examples:
-"∃ sid sel #i.
-  (SelectedSuite( sid, sel ) @ #i)
+"∃ sid A B thA #i.
+  (Commit_I( sid, A, B, 'Classic', thA ) @ #i)
  ∧
-  ∀ #j. (OfferIncludes( sid, sel ) @ #j) ⇒ ⊥"
+  (∃ #p. (Policy( sid, 'default' ) @ #p)) ∧
+  (∀ #g.
+    (FallbackGatePassed( sid, 'local_capability_error' ) @ #g) ⇒ ¬(#g < #i))"
 */
 simplify
-solve( SelectedSuite( sid, sel ) @ #i )
-  case Neg_Default_Classic
-  solve( St_Default_FallbackReady( sid ) ▶₀ #i )
-    case Default_Cooldown_Allows
-    by contradiction /* from formulas */
-  qed
-next
-  case Neg_Default_PQCv1
-  solve( St_Default( sid ) ▶₀ #i )
-    case Init_Offer_Default
-    by contradiction /* from formulas */
-  qed
-next
-  case Neg_Default_PQCv1_AfterFallbackBlock
-  solve( St_Default_PQCOnly( sid ) ▶₀ #i )
-    case Default_Cooldown_Denies
+solve( Commit_I( sid, A, B, 'Classic', thA ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
     by contradiction /* from formulas */
   next
-    case Default_Timeout_Denied
-    by contradiction /* from formulas */
+    case I_SendA_ClassicOnly
+    by solve( Policy( ~sid, 'default' ) @ #p )
   qed
-next
-  case Neg_Default_PQCv2
-  solve( St_Default( sid ) ▶₀ #i )
-    case Init_Offer_Default
-    by contradiction /* from formulas */
-  qed
-next
-  case Neg_Default_PQCv2_AfterFallbackBlock
-  solve( St_Default_PQCOnly( sid ) ▶₀ #i )
-    case Default_Cooldown_Denies
+qed
+
+lemma ClassicRequiresDowngradeOrClassicPolicy:
+  all-traces
+  "∀ sid A B thA #i.
+    (Commit_I( sid, A, B, 'Classic', thA ) @ #i) ⇒
+    ((∃ #j. DowngradeEvent( sid ) @ #j) ∨
+     (∃ #p. Policy( sid, 'classicOnly' ) @ #p))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid A B thA #i.
+  (Commit_I( sid, A, B, 'Classic', thA ) @ #i)
+ ∧
+  (∀ #j. (DowngradeEvent( sid ) @ #j) ⇒ ⊥) ∧
+  (∀ #p. (Policy( sid, 'classicOnly' ) @ #p) ⇒ ⊥)"
+*/
+simplify
+solve( Commit_I( sid, A, B, 'Classic', thA ) @ #i )
+  case I_RecvB_Classic
+  solve( St_I_WaitB_C( sid, A, B, pol, 'Classic', pk(x), na, ea, thA
+         ) ▶₀ #i )
+    case I_SendA_Classic
     by contradiction /* from formulas */
   next
-    case Default_Timeout_Denied
+    case I_SendA_ClassicOnly
     by contradiction /* from formulas */
   qed
-next
-  case Neg_Strict_PQCv1
-  solve( St_Strict( sid ) ▶₀ #i )
-    case Init_Offer_Strict
-    by contradiction /* from formulas */
-  qed
-next
-  case Neg_Strict_PQCv2
-  solve( St_Strict( sid ) ▶₀ #i )
-    case Init_Offer_Strict
-    by contradiction /* from formulas */
-  qed
-qed
-
-lemma AuthenticationRequiresVerifiedSigB:
-  all-traces
-  "∀ sid sel #i.
-    (SessionEstablished( sid, sel ) @ #i) ⇒
-    (∃ #j. VerifiedSigB( sid, sel ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid sel #i.
-  (SessionEstablished( sid, sel ) @ #i)
- ∧
-  ∀ #j. (VerifiedSigB( sid, sel ) @ #j) ⇒ ⊥"
-*/
-simplify
-solve( St_Finished( sid, sel ) ▶₀ #i )
-  case Finished_Phase_case_1
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_2
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_3
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_4
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_5
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_6
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_7
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_8
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_9
-  by contradiction /* from formulas */
-qed
-
-lemma ClassicRequiresDowngradeEvent:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
-    (∃ #j. DowngradeEvent( sid ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuiteClassic ) @ #i)
- ∧
-  ∀ #j. (DowngradeEvent( sid ) @ #j) ⇒ ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
-  case Finished_Phase
-  by contradiction /* from formulas */
-qed
-
-lemma ClassicRequiresFallbackGate:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
-    (∃ #j. FallbackGatePassed( sid, 'local_capability_error' ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuiteClassic ) @ #i)
- ∧
-  ∀ #j. (FallbackGatePassed( sid, 'local_capability_error' ) @ #j) ⇒ ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
-  case Finished_Phase
-  by contradiction /* from formulas */
-qed
-
-lemma ClassicOnlyUnderDefaultPolicy:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
-    (∃ #j. Policy( sid, 'default' ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuiteClassic ) @ #i)
- ∧
-  ∀ #j. (Policy( sid, 'default' ) @ #j) ⇒ ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
-  case Finished_Phase
-  by contradiction /* from formulas */
-qed
-
-lemma V2HybridSecretComposition:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuitePQCv2 ) @ #i) ⇒
-    (∃ #j #k.
-      (StaticSecretDerived( sid ) @ #j) ∧
-      (EphemeralSecretDerived( sid ) @ #k))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuitePQCv2 ) @ #i)
- ∧
-  ∀ #j #k.
-   (StaticSecretDerived( sid ) @ #j) ∧ (EphemeralSecretDerived( sid ) @ #k)
-  ⇒
-   ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #i )
-  case Finished_Phase_case_1
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_2
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_3
-  by contradiction /* from formulas */
-next
-  case Finished_Phase_case_4
-  by contradiction /* from formulas */
-qed
-
-lemma TimeoutCannotTriggerClassicFallback:
-  all-traces
-  "∀ sid #i.
-    (TimeoutObserved( sid ) @ #i) ⇒
-    (¬(∃ #j. SessionEstablished( sid, SuiteClassic ) @ #j))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (TimeoutObserved( sid ) @ #i)
- ∧
-  ∃ #j. (SessionEstablished( sid, SuiteClassic ) @ #j)"
-*/
-simplify
-solve( St_Default( sid ) ▶₀ #i )
-  case Init_Offer_Default
-  by solve( St_Finished( ~sid, SuiteClassic ) ▶₀ #j )
-qed
-
-lemma FallbackRateLimitEnforced:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
-    (∃ #j #k.
-      (CooldownChecked( sid, 'inactive' ) @ #j) ∧
-      (CooldownPermit( sid, 'allow' ) @ #k))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuiteClassic ) @ #i)
- ∧
-  ∀ #j #k.
-   (CooldownChecked( sid, 'inactive' ) @ #j) ∧
-   (CooldownPermit( sid, 'allow' ) @ #k)
-  ⇒
-   ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
-  case Finished_Phase
-  by contradiction /* from formulas */
-qed
-
-lemma DowngradeEventRequiredWithContext:
-  all-traces
-  "∀ sid #i.
-    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
-    (∃ #j.
-      DowngradeEventCtx( sid, 'local_capability_error', 'default',
-                         'cooldown_checked'
-      ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (SessionEstablished( sid, SuiteClassic ) @ #i)
- ∧
-  ∀ #j.
-   (DowngradeEventCtx( sid, 'local_capability_error', 'default',
-                       'cooldown_checked'
-    ) @ #j)
-  ⇒
-   ⊥"
-*/
-simplify
-solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
-  case Finished_Phase
-  by contradiction /* from formulas */
-qed
-
-lemma BootstrapControlOnlyUntilPQCRekey:
-  all-traces
-  "∀ sid #i.
-    (BusinessTrafficEnabled( sid ) @ #i) ⇒
-    (∃ #j. (PQCRekeyCompleted( sid ) @ #j) ∧ (#j < #i))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sid #i.
-  (BusinessTrafficEnabled( sid ) @ #i)
- ∧
-  ∀ #j. (PQCRekeyCompleted( sid ) @ #j) ⇒ ¬(#j < #i)"
-*/
-simplify
-solve( St_Strict_Rekeyed( sid ) ▶₀ #i )
-  case Strict_Bootstrap_Rekey
-  by contradiction /* from formulas */
 qed
 
 
@@ -593,21 +5156,20 @@ summary of summaries:
 
 analyzed: skybridge_v2.spthy
 
-  processing time: 0.24s
+  processing time: 49.07s
   
-  Exists_DefaultClassicTrace (exists-trace): verified (5 steps)
-  Exists_StrictPQCv2Trace (exists-trace): verified (4 steps)
-  Exists_StrictBootstrapRecoveryTrace (exists-trace): verified (5 steps)
-  NoClassicUnderStrictPQC (all-traces): verified (3 steps)
-  NegotiationIntegrity_SelectedWasOffered (all-traces): verified (18 steps)
-  AuthenticationRequiresVerifiedSigB (all-traces): verified (11 steps)
-  ClassicRequiresDowngradeEvent (all-traces): verified (3 steps)
-  ClassicRequiresFallbackGate (all-traces): verified (3 steps)
-  ClassicOnlyUnderDefaultPolicy (all-traces): verified (3 steps)
-  V2HybridSecretComposition (all-traces): verified (6 steps)
-  TimeoutCannotTriggerClassicFallback (all-traces): verified (3 steps)
-  FallbackRateLimitEnforced (all-traces): verified (3 steps)
-  DowngradeEventRequiredWithContext (all-traces): verified (3 steps)
-  BootstrapControlOnlyUntilPQCRekey (all-traces): verified (3 steps)
+  Exists_PQCv1_Session (exists-trace): verified (13 steps)
+  Exists_PQCv2_Session (exists-trace): verified (15 steps)
+  Exists_Default_Classic_Downgrade (exists-trace): verified (14 steps)
+  NegotiationIntegrity_AcceptedWasOffered (all-traces): verified (11 steps)
+  SigB_Authentic_or_Compromised (all-traces): verified (29 steps)
+  Injective_Agreement_I_with_R (all-traces): verified (75 steps)
+  Secrecy_SessionKey_HonestCase (all-traces): verified (203 steps)
+  WeakFS_v1 (all-traces): verified (38 steps)
+  V1_LacksForwardSecrecy_Witness (exists-trace): verified (15 steps)
+  ForwardSecrecy_v2 (all-traces): verified (47 steps)
+  NoClassicUnderStrictPQC (all-traces): verified (5 steps)
+  NoSilentClassicFallback_Default (all-traces): verified (5 steps)
+  ClassicRequiresDowngradeOrClassicPolicy (all-traces): verified (5 steps)
 
 ==============================================================================

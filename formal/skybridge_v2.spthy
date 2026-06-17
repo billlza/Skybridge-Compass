@@ -1,287 +1,596 @@
 theory SkyBridge_V2
 begin
 
-/* -----------------------------------------------------------------
-   SkyBridge Compass v2 symbolic model (Tamarin)
+/* =================================================================
+   SkyBridge Compass v2 -- Dolev-Yao symbolic model (Tamarin)
 
-   Reviewer-facing abstraction:
-   - negotiation integrity (selected suite must be offered),
-   - policy-gated classic fallback with explicit timeout deny and cooldown gate,
-   - strict bootstrap control-only recovery until PQC rekey completes,
-   - downgrade events carry minimal replay context,
-   - transcript-authenticated acceptance (modeled by VerifiedSigB),
-   - explicit key-confirmation events,
-   - v2 session establishment requires static + ephemeral contributions.
-   ----------------------------------------------------------------- */
+   This model REPLACES the earlier empty-adversary artifact
+   (preserved as skybridge_v2_empty_adversary.spthy.bak). Every
+   protocol message is sent with Out() and received with In(), so the
+   built-in Dolev-Yao network adversary fully mediates the channel: it
+   can drop, inject, reorder, replay, and synthesise messages from
+   everything it has learned. Authentication, secrecy, agreement,
+   forward secrecy and downgrade resistance are therefore proved
+   against an *active* attacker -- not asserted by an unconditional
+   action label as in the previous version.
 
-builtins: hashing, signing
+   Protocol abstraction is derived from the authoritative sources:
+     - rust/crates/skybridge-core/src/pqc_handshake.rs   (state machine,
+       KEM encapsulate/decapsulate, transcript hashing, key derivation)
+     - rust/crates/skybridge-core/src/classic_handshake.rs (classic path)
+     - Sources/SkyBridgeProtocolCore/P2P/HandshakeMessages.swift
+       (signaturePreimage of MessageA / MessageB; HMAC Finished)
+     - Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift
+       (fallback whitelist/blacklist, 300s/peer cooldown, downgrade gate)
+     - Sources/SkyBridgeProtocolCore/P2P/CryptoSuite.swift
+       (suite wire ids: classic 0x1001, PQCv1 0x0101, PQCv2/FS 0x0102)
+
+   Suites modelled (negotiation state space is tiny and finite):
+     SuiteClassic : X25519+Ed25519   (0x1001) -- classic, no PQC KEM
+     SuitePQCv1   : ML-KEM-768        (0x0101) -- static KEM only
+     SuitePQCv2   : ML-KEM-768-FS     (0x0102) -- static KEM + a fresh
+                                                  ephemeral DH on BOTH
+                                                  sides (FS suite)
+
+   KEM abstraction (standard Tamarin KEM idiom):
+     kempk(sk)         responder's static KEM public key
+     kemenc(ss, pk)    ciphertext encapsulating fresh secret ss to pk
+     kemdec(c, sk)     recovers ss iff c = kemenc(ss, kempk(sk))
+   so KEM-derived secrecy is conditioned on holding the responder's
+   long-term KEM secret -- exactly the v1 trust assumption.
+
+   v2 forward secrecy: the v2 root absorbs an additional ephemeral DH
+   secret 'g^(xa*xb)' that never travels in clear, so the key survives
+   compromise of every long-term key as long as the ephemerals are not
+   revealed.
+   ================================================================= */
+
+builtins: hashing, signing, diffie-hellman
 
 functions:
-  SuiteClassic/0,
-  SuitePQCv1/0,
-  SuitePQCv2/0
+    kempk/1,
+    kemenc/2,
+    kemdec/2
 
-/* -----------------------------
-   Session start / policy choice
-   ----------------------------- */
+equations:
+    kemdec(kemenc(ss, kempk(sk)), sk) = ss
 
-rule Init_Offer_Default:
-  [ Fr(~sid) ]
-  --[ Policy(~sid, 'default'),
-      OfferIncludes(~sid, SuiteClassic),
-      OfferIncludes(~sid, SuitePQCv1),
-      OfferIncludes(~sid, SuitePQCv2),
-      OfferSent(~sid, 'A')
-    ]->
-  [ St_Default(~sid) ]
+/* Public suite tags. We use string constants 'Classic'/'PQCv1'/'PQCv2'
+   directly in the rules, so no function declarations are needed. */
 
-rule Init_Offer_Strict:
-  [ Fr(~sid) ]
+/* =================================================================
+   Long-term identity (ML-DSA-65 signing key) + static KEM key
+   ================================================================= */
+
+/* Each device has exactly ONE long-term ML-DSA identity and ONE static
+   KEM key (enforced by the once-restrictions below). This mirrors the
+   real system where a device is provisioned with a single canonical
+   identity that is what gets pinned -- it removes the spurious
+   multi-identity confusion where an agent name could carry two keys. */
+rule Register_Identity:
+    [ Fr(~sk) ]
+  --[ RegisterIdentity($A, pk(~sk)),
+      OnlyOnceIdentity($A) ]->
+    [ !Ltk($A, ~sk),
+      !Pk($A, pk(~sk)),
+      Out(pk(~sk)) ]
+
+rule Register_KEMKey:
+    [ Fr(~kemsk) ]
+  --[ RegisterKEM($A, kempk(~kemsk)),
+      OnlyOnceKEM($A) ]->
+    [ !KemLtk($A, ~kemsk),
+      !KemPk($A, kempk(~kemsk)),
+      Out(kempk(~kemsk)) ]
+
+restriction identity_once:
+    "All A #i #j. OnlyOnceIdentity(A) @ #i & OnlyOnceIdentity(A) @ #j ==> #i = #j"
+
+restriction kem_once:
+    "All A #i #j. OnlyOnceKEM(A) @ #i & OnlyOnceKEM(A) @ #j ==> #i = #j"
+
+/* =================================================================
+   Out-of-band pairing pin (QR / TOFU pairing).
+   Binds a peer identifier to BOTH the signing public key and the
+   static KEM public key over an authentic OOB channel. The adversary
+   cannot mint a pin; only the genuine published keys can be pinned.
+   This is what makes identity binding / "identityMismatch" provable.
+   ================================================================= */
+rule Pair_OOB:
+    [ !Pk($A, pkA),
+      !KemPk($A, kpkA) ]
+  --[ Pair($A, pkA, kpkA),
+      OnlyOncePair($A) ]->
+    [ !Pin($A, pkA, kpkA) ]
+
+restriction pair_once:
+    "All A #i #j. OnlyOncePair(A) @ #i & OnlyOncePair(A) @ #j ==> #i = #j"
+
+/* =================================================================
+   Key compromise (adversary capabilities)
+   ================================================================= */
+
+rule Reveal_Ltk:
+    [ !Ltk($A, sk) ]
+  --[ LtkReveal($A) ]->
+    [ Out(sk) ]
+
+rule Reveal_KEM:
+    [ !KemLtk($A, kemsk) ]
+  --[ KemReveal($A) ]->
+    [ Out(kemsk) ]
+
+/* Ephemeral reveal: the adversary may also corrupt a fresh ephemeral
+   exponent (e.g. weak RNG / state compromise). Needed to state forward
+   secrecy precisely (FS holds *unless* the ephemerals are revealed).  */
+rule Reveal_Eph:
+    [ !Eph(x) ]
+  --[ EphReveal(x) ]->
+    [ Out(x) ]
+
+/* =================================================================
+   Session-start / policy choice (3 policy modes), mirroring
+   TwoAttemptHandshakeManager:
+     'strictPQC'  : requirePQC, NO classic fallback   -> offers {v1,v2}
+     'default'    : classic fallback allowed via local gate -> offers {v1,v2}
+     'classicOnly': peer known classic-only            -> offers {Classic}
+   Policy + offered set are bound into sigA's transcript.
+   ================================================================= */
+
+rule Init_Session_Strict:
+    [ Fr(~sid), !Pin($B, pkB, kpkB) ]
   --[ Policy(~sid, 'strictPQC'),
-      OfferIncludes(~sid, SuitePQCv1),
-      OfferIncludes(~sid, SuitePQCv2),
-      OfferSent(~sid, 'A')
-    ]->
-  [ St_Strict(~sid) ]
+      Offer(~sid, 'PQCv1'),
+      Offer(~sid, 'PQCv2'),
+      InitFor(~sid, $A, $B) ]->
+    [ St_Init0(~sid, $A, $B, 'strictPQC', pkB, kpkB) ]
 
-/* -------------------------------------
-   Default-policy fallback gating semantics
-   ------------------------------------- */
+rule Init_Session_Default:
+    [ Fr(~sid), !Pin($B, pkB, kpkB) ]
+  --[ Policy(~sid, 'default'),
+      Offer(~sid, 'PQCv1'),
+      Offer(~sid, 'PQCv2'),
+      InitFor(~sid, $A, $B) ]->
+    [ St_Init0(~sid, $A, $B, 'default', pkB, kpkB) ]
 
-rule Default_Timeout_Denied:
-  [ St_Default(sid) ]
-  --[ TimeoutObserved(sid),
-      FallbackDenied(sid, 'timeout')
-    ]->
-  [ St_Default_PQCOnly(sid) ]
+rule Init_Session_ClassicOnly:
+    [ Fr(~sid), !Pin($B, pkB, kpkB) ]
+  --[ Policy(~sid, 'classicOnly'),
+      Offer(~sid, 'Classic'),
+      InitFor(~sid, $A, $B) ]->
+    [ St_InitClassic0(~sid, $A, $B, 'classicOnly', pkB, kpkB) ]
 
-rule Default_LocalFailure_Eligible:
-  [ St_Default(sid) ]
-  --[ LocalFallbackEligible(sid, 'local_capability_error'),
-      FallbackGatePassed(sid, 'local_capability_error')
-    ]->
-  [ St_Default_FallbackCandidate(sid) ]
+/* =================================================================
+   PQC v1 handshake (static KEM only) over the ACTIVE channel
+   ================================================================= */
 
-rule Default_Cooldown_Allows:
-  [ St_Default_FallbackCandidate(sid) ]
-  --[ CooldownChecked(sid, 'inactive'),
-      CooldownPermit(sid, 'allow')
-    ]->
-  [ St_Default_FallbackReady(sid) ]
+/* ---- I -> R : MessageA (PQCv1) ----
+   Fresh KEM secret ~ss encapsulated to B's pinned static KEM key.
+   transcript hash thA binds <sid,A,suite,cA,na,pkA> (the tuple Sha256'd
+   in pqc_handshake.rs). sigA over DomA||thA-tuple with A's long-term key.
+*/
+rule I_SendA_PQCv1:
+    [ St_Init0(sid, A, B, pol, pkB, kpkB),
+      !Ltk(A, skA),
+      Fr(~na),
+      Fr(~ss) ]
+  --[ OfferUsed(sid, 'PQCv1'),
+      SendA(sid, A, B, 'PQCv1') ]->
+    [ Out( <sid, '1', A, 'PQCv1', kemenc(~ss, kpkB), ~na,
+            sign(<'DomA', sid, A, 'PQCv1', kemenc(~ss, kpkB), ~na, pk(skA)>, skA),
+            pk(skA)> ),
+      St_I_WaitB(sid, A, B, pol, 'PQCv1', pkB, kpkB, ~na, ~ss,
+                 h(<sid, A, 'PQCv1', kemenc(~ss, kpkB), ~na, pk(skA)>)) ]
 
-rule Default_Cooldown_Denies:
-  [ St_Default_FallbackCandidate(sid) ]
-  --[ CooldownChecked(sid, 'active'),
-      CooldownDenied(sid, 'active_window')
-    ]->
-  [ St_Default_PQCOnly(sid) ]
+/* ---- R receives MessageA, decapsulates with pinned KEM secret, signs
+   MessageB ----  responderShare empty for v1. sigB over
+   DomB || thA || suite || share || nb || pkB. Session root = h(ss,...). */
+rule R_RecvA_SendB_PQCv1:
+    [ In( <sid, '1', A, 'PQCv1', cA, na, sigA, pkA> ),
+      !Ltk(B, skB),
+      !KemLtk(B, kemsk),
+      !Pin(B, pk(skB), kempk(kemsk)),
+      !Pin(A, pkA, kpkA),
+      Fr(~nb) ]
+  --[ Eq(verify(sigA, <'DomA', sid, A, 'PQCv1', cA, na, pkA>, pkA), true),
+      VerifyA(sid, A, B, 'PQCv1'),
+      RecvA(sid, A, B, 'PQCv1'),
+      SelectedSuite(sid, 'PQCv1'),
+      SigBIssued(sid, B, 'PQCv1'),
+      Running_R(sid, A, B, 'PQCv1', h(<sid, A, 'PQCv1', cA, na, pkA>)),
+      RootR(sid, h(<'root1', kemdec(cA, kemsk), na, ~nb>)) ]->
+    [ Out( <sid, '2', B, 'PQCv1', 'noshare', ~nb,
+            sign(<'DomB', h(<sid, A, 'PQCv1', cA, na, pkA>),
+                  'PQCv1', 'noshare', ~nb, pk(skB)>, skB),
+            pk(skB)> ),
+      St_R_WaitFin(sid, A, B, 'PQCv1',
+                   h(<'root1', kemdec(cA, kemsk), na, ~nb>),
+                   h(<sid, A, 'PQCv1', cA, na, pkA>)) ]
 
-/* -----------------------------------
-   Negotiation / transcript acceptance
-   ----------------------------------- */
+/* ---- I receives MessageB, verifies sigB against pinned pkB, derives
+   the same root, sends I->R Finished MAC. ---- */
+rule I_RecvB_PQCv1:
+    [ St_I_WaitB(sid, A, B, pol, 'PQCv1', pkB, kpkB, na, ss, thA),
+      In( <sid, '2', B, 'PQCv1', 'noshare', nb,
+           sigB, pkB> ) ]
+  --[ VerifyB(sid, A, B, 'PQCv1'),
+      Eq(verify(sigB, <'DomB', thA, 'PQCv1', 'noshare', nb, pkB>, pkB), true),
+      RootI(sid, h(<'root1', ss, na, nb>)),
+      Commit_I(sid, A, B, 'PQCv1', thA),
+      Running_I_Fin(sid, A, B, 'PQCv1', thA) ]->
+    [ Out( <sid, 'finI', h(<'macI', h(<'root1', ss, na, nb>), thA>)> ),
+      St_I_WaitFin(sid, A, B, 'PQCv1', h(<'root1', ss, na, nb>), thA) ]
 
-rule Neg_Default_Classic:
-  [ St_Default_FallbackReady(sid) ]
-  --[ SelectedSuite(sid, SuiteClassic),
-      SigBOverA(sid, SuiteClassic),
-      VerifiedSigB(sid, SuiteClassic),
-      Attempt(sid, SuiteClassic),
+/* =================================================================
+   PQC v2 handshake (static KEM + mandatory ephemerals = FS suite)
+   ================================================================= */
+
+/* ---- I -> R : MessageA (PQCv2) ----
+   In addition to the KEM ciphertext, the initiator publishes a fresh
+   ephemeral DH share 'g^~xa' (the v2 initiatorContribution). */
+rule I_SendA_PQCv2:
+    [ St_Init0(sid, A, B, pol, pkB, kpkB),
+      !Ltk(A, skA),
+      Fr(~na),
+      Fr(~ss),
+      Fr(~xa) ]
+  --[ OfferUsed(sid, 'PQCv2'),
+      SendA(sid, A, B, 'PQCv2'),
+      EphI(sid, ~xa) ]->
+    [ Out( <sid, '1', A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa,
+            sign(<'DomA', sid, A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa, pk(skA)>, skA),
+            pk(skA)> ),
+      !Eph(~xa),
+      St_I_WaitB_v2(sid, A, B, pol, 'PQCv2', pkB, kpkB, ~na, ~ss, ~xa,
+                    h(<sid, A, 'PQCv2', kemenc(~ss, kpkB), ~na, 'g'^~xa, pk(skA)>)) ]
+
+/* ---- R receives v2 MessageA, decapsulates, contributes its own fresh
+   ephemeral 'g'^~xb (the mandatory v2 responderShare). The v2 root
+   absorbs BOTH the KEM secret and the ephemeral DH secret g^(xa*xb). */
+rule R_RecvA_SendB_PQCv2:
+    [ In( <sid, '1', A, 'PQCv2', cA, na, gxa, sigA, pkA> ),
+      !Ltk(B, skB),
+      !KemLtk(B, kemsk),
+      !Pin(B, pk(skB), kempk(kemsk)),
+      !Pin(A, pkA, kpkA),
+      Fr(~nb),
+      Fr(~xb) ]
+  --[ Eq(verify(sigA, <'DomA', sid, A, 'PQCv2', cA, na, gxa, pkA>, pkA), true),
+      VerifyA(sid, A, B, 'PQCv2'),
+      RecvA(sid, A, B, 'PQCv2'),
+      SelectedSuite(sid, 'PQCv2'),
+      SigBIssued(sid, B, 'PQCv2'),
+      EphR(sid, ~xb),
+      Running_R(sid, A, B, 'PQCv2', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>)),
+      RootR(sid, h(<'root2', kemdec(cA, kemsk), gxa^~xb, na, ~nb>)) ]->
+    [ Out( <sid, '2', B, 'PQCv2', 'g'^~xb, ~nb,
+            sign(<'DomB', h(<sid, A, 'PQCv2', cA, na, gxa, pkA>),
+                  'PQCv2', 'g'^~xb, ~nb, pk(skB)>, skB),
+            pk(skB)> ),
+      !Eph(~xb),
+      St_R_WaitFin(sid, A, B, 'PQCv2',
+                   h(<'root2', kemdec(cA, kemsk), gxa^~xb, na, ~nb>),
+                   h(<sid, A, 'PQCv2', cA, na, gxa, pkA>)) ]
+
+/* ---- I receives v2 MessageB, verifies sigB, recomputes the hybrid
+   root with the responder's ephemeral share. ---- */
+rule I_RecvB_PQCv2:
+    [ St_I_WaitB_v2(sid, A, B, pol, 'PQCv2', pkB, kpkB, na, ss, xa, thA),
+      In( <sid, '2', B, 'PQCv2', gxb, nb, sigB, pkB> ) ]
+  --[ VerifyB(sid, A, B, 'PQCv2'),
+      Eq(verify(sigB, <'DomB', thA, 'PQCv2', gxb, nb, pkB>, pkB), true),
+      RootI(sid, h(<'root2', ss, gxb^xa, na, nb>)),
+      Commit_I(sid, A, B, 'PQCv2', thA),
+      Running_I_Fin(sid, A, B, 'PQCv2', thA) ]->
+    [ Out( <sid, 'finI', h(<'macI', h(<'root2', ss, gxb^xa, na, nb>), thA>)> ),
+      St_I_WaitFin(sid, A, B, 'PQCv2', h(<'root2', ss, gxb^xa, na, nb>), thA) ]
+
+/* =================================================================
+   Classic handshake (X25519+Ed25519) -- only reachable via
+   classicOnly policy or an explicitly-gated default fallback.
+   Modelled with classic DH (no KEM). ===============================*/
+
+/* default-policy local fallback gate: only a LOCAL capability error
+   (pqcProviderUnavailable / suiteNegotiationFailed) plus a cooldown
+   permit may move a default session into a classic attempt. Timeout /
+   signature / replay / key-confirmation failures are NOT gateable. */
+rule Default_LocalFallback_Gate:
+    [ St_Init0(sid, A, B, 'default', pkB, kpkB) ]
+  --[ FallbackGatePassed(sid, 'local_capability_error'),
+      LocalFallbackEligible(sid),
+      CooldownPermit(sid, 'allow'),
+      Offer(sid, 'Classic'),
       DowngradeEvent(sid),
-      DowngradeEventCtx(sid, 'local_capability_error', 'default', 'cooldown_checked'),
-      ClassicFallbackAccepted(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuiteClassic) ]
+      DowngradeCtx(sid, 'local_capability_error', 'default') ]->
+    [ St_Init_ClassicFallback(sid, A, B, 'default', pkB, kpkB) ]
 
-rule Neg_Default_PQCv1:
-  [ St_Default(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv1),
-      SigBOverA(sid, SuitePQCv1),
-      VerifiedSigB(sid, SuitePQCv1),
-      Attempt(sid, SuitePQCv1),
-      StaticSecretDerived(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv1) ]
+/* I -> R MessageA classic (fresh DH share g^~ea). */
+rule I_SendA_Classic:
+    [ St_Init_ClassicFallback(sid, A, B, pol, pkB, kpkB),
+      !Ltk(A, skA),
+      Fr(~na),
+      Fr(~ea) ]
+  --[ OfferUsed(sid, 'Classic'),
+      SendA(sid, A, B, 'Classic'),
+      ClassicAttempt(sid),
+      EphI(sid, ~ea) ]->
+    [ Out( <sid, '1', A, 'Classic', 'g'^~ea, ~na,
+            sign(<'DomA', sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>, skA),
+            pk(skA)> ),
+      !Eph(~ea),
+      St_I_WaitB_C(sid, A, B, pol, 'Classic', pkB, ~na, ~ea,
+                   h(<sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>)) ]
 
-rule Neg_Default_PQCv2:
-  [ St_Default(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv2),
-      SigBOverA(sid, SuitePQCv2),
-      VerifiedSigB(sid, SuitePQCv2),
-      Attempt(sid, SuitePQCv2),
-      StaticSecretDerived(sid),
-      EphemeralSecretDerived(sid),
-      HybridSecretComposed(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv2) ]
+/* classicOnly policy emits MessageA classic directly. */
+rule I_SendA_ClassicOnly:
+    [ St_InitClassic0(sid, A, B, 'classicOnly', pkB, kpkB),
+      !Ltk(A, skA),
+      Fr(~na),
+      Fr(~ea) ]
+  --[ OfferUsed(sid, 'Classic'),
+      SendA(sid, A, B, 'Classic'),
+      ClassicAttempt(sid),
+      EphI(sid, ~ea) ]->
+    [ Out( <sid, '1', A, 'Classic', 'g'^~ea, ~na,
+            sign(<'DomA', sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>, skA),
+            pk(skA)> ),
+      !Eph(~ea),
+      St_I_WaitB_C(sid, A, B, 'classicOnly', 'Classic', pkB, ~na, ~ea,
+                   h(<sid, A, 'Classic', 'g'^~ea, ~na, pk(skA)>)) ]
 
-rule Neg_Default_PQCv1_AfterFallbackBlock:
-  [ St_Default_PQCOnly(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv1),
-      SigBOverA(sid, SuitePQCv1),
-      VerifiedSigB(sid, SuitePQCv1),
-      Attempt(sid, SuitePQCv1),
-      StaticSecretDerived(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv1) ]
+rule R_RecvA_SendB_Classic:
+    [ In( <sid, '1', A, 'Classic', gea, na, sigA, pkA> ),
+      !Ltk(B, skB),
+      !KemLtk(B, kemsk),
+      !Pin(B, pk(skB), kempk(kemsk)),
+      !Pin(A, pkA, kpkA),
+      Fr(~nb),
+      Fr(~eb) ]
+  --[ Eq(verify(sigA, <'DomA', sid, A, 'Classic', gea, na, pkA>, pkA), true),
+      VerifyA(sid, A, B, 'Classic'),
+      RecvA(sid, A, B, 'Classic'),
+      SelectedSuite(sid, 'Classic'),
+      SigBIssued(sid, B, 'Classic'),
+      EphR(sid, ~eb),
+      Running_R(sid, A, B, 'Classic', h(<sid, A, 'Classic', gea, na, pkA>)),
+      RootR(sid, h(<'rootC', gea^~eb, na, ~nb>)) ]->
+    [ Out( <sid, '2', B, 'Classic', 'g'^~eb, ~nb,
+            sign(<'DomB', h(<sid, A, 'Classic', gea, na, pkA>),
+                  'Classic', 'g'^~eb, ~nb, pk(skB)>, skB),
+            pk(skB)> ),
+      !Eph(~eb),
+      St_R_WaitFin(sid, A, B, 'Classic',
+                   h(<'rootC', gea^~eb, na, ~nb>),
+                   h(<sid, A, 'Classic', gea, na, pkA>)) ]
 
-rule Neg_Default_PQCv2_AfterFallbackBlock:
-  [ St_Default_PQCOnly(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv2),
-      SigBOverA(sid, SuitePQCv2),
-      VerifiedSigB(sid, SuitePQCv2),
-      Attempt(sid, SuitePQCv2),
-      StaticSecretDerived(sid),
-      EphemeralSecretDerived(sid),
-      HybridSecretComposed(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv2) ]
+rule I_RecvB_Classic:
+    [ St_I_WaitB_C(sid, A, B, pol, 'Classic', pkB, na, ea, thA),
+      In( <sid, '2', B, 'Classic', geb, nb, sigB, pkB> ) ]
+  --[ VerifyB(sid, A, B, 'Classic'),
+      Eq(verify(sigB, <'DomB', thA, 'Classic', geb, nb, pkB>, pkB), true),
+      RootI(sid, h(<'rootC', geb^ea, na, nb>)),
+      Commit_I(sid, A, B, 'Classic', thA),
+      Running_I_Fin(sid, A, B, 'Classic', thA) ]->
+    [ Out( <sid, 'finI', h(<'macI', h(<'rootC', geb^ea, na, nb>), thA>)> ),
+      St_I_WaitFin(sid, A, B, 'Classic', h(<'rootC', geb^ea, na, nb>), thA) ]
 
-rule Neg_Strict_PQCv1:
-  [ St_Strict(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv1),
-      SigBOverA(sid, SuitePQCv1),
-      VerifiedSigB(sid, SuitePQCv1),
-      Attempt(sid, SuitePQCv1),
-      StaticSecretDerived(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv1) ]
+/* =================================================================
+   Finished / key confirmation (HMAC over transcript), both directions.
+   Responder accepts only on a matching I->R Finished MAC; this is the
+   point at which a session is considered Established for B. The
+   initiator side establishes on a matching R->I Finished MAC.
+   ================================================================= */
 
-rule Neg_Strict_PQCv2:
-  [ St_Strict(sid) ]
-  --[ SelectedSuite(sid, SuitePQCv2),
-      SigBOverA(sid, SuitePQCv2),
-      VerifiedSigB(sid, SuitePQCv2),
-      Attempt(sid, SuitePQCv2),
-      StaticSecretDerived(sid),
-      EphemeralSecretDerived(sid),
-      HybridSecretComposed(sid)
-    ]->
-  [ St_HandshakeDone(sid, SuitePQCv2) ]
+/* R sends its R->I Finished after MessageB; carried as a separate frame.
+   (Modelled lazily: R emits it when it receives the initiator Finished,
+   keeping the trace minimal but still requiring MAC agreement.) */
+rule R_RecvFin_Establish:
+    [ St_R_WaitFin(sid, A, B, suite, root, thA),
+      In( <sid, 'finI', macI> ) ]
+  --[ Eq(macI, h(<'macI', root, thA>)),
+      KeyConfR(sid, A, B, suite),
+      Commit_R(sid, A, B, suite, thA),
+      SessionEstablished(sid, suite),
+      SessionEstablishedFull(sid, A, B, suite),
+      SecretRoot(sid, root) ]->
+    [ Out( <sid, 'finR', h(<'macR', root, thA>)> ),
+      St_R_Done(sid, A, B, suite, root) ]
 
-/* -----------------------------------
-   Strict bootstrap-assisted recovery
-   ----------------------------------- */
+rule I_RecvFin_Establish:
+    [ St_I_WaitFin(sid, A, B, suite, root, thA),
+      In( <sid, 'finR', macR> ) ]
+  --[ Eq(macR, h(<'macR', root, thA>)),
+      KeyConfI(sid, A, B, suite),
+      Commit_I_Final(sid, A, B, suite, thA),
+      SecretRoot(sid, root) ]->
+    [ St_I_Done(sid, A, B, suite, root) ]
 
-rule Strict_Bootstrap_ControlOnly:
-  [ St_Strict(sid) ]
-  --[ BootstrapTrigger(sid, 'missingKEM'),
-      BootstrapControlChannel(sid),
-      BusinessTrafficBlocked(sid)
-    ]->
-  [ St_Strict_Bootstrap(sid) ]
+/* =================================================================
+   Restriction: equality action label means literal equality.
+   ================================================================= */
+restriction Equality:
+    "All x y #i. Eq(x, y) @ #i ==> x = y"
 
-rule Strict_Bootstrap_Rekey:
-  [ St_Strict_Bootstrap(sid) ]
-  --[ PQCRekeyCompleted(sid) ]->
-  [ St_Strict_Rekeyed(sid) ]
+/* =================================================================
+   ====================  LEMMAS  ===================================
+   ================================================================= */
 
-rule Strict_Bootstrap_EnableBusiness:
-  [ St_Strict_Rekeyed(sid) ]
-  --[ BusinessTrafficEnabled(sid) ]->
-  [ ]
+/* ---- Sanity / existence (anti-vacuity) ---- */
 
-/* ------------------------------
-   Explicit key confirmation path
-   ------------------------------ */
+lemma Exists_PQCv1_Session:
+    exists-trace
+    "Ex sid A B #i.
+        SessionEstablishedFull(sid, A, B, 'PQCv1') @ #i"
 
-rule Finished_Phase:
-  [ St_HandshakeDone(sid, sel) ]
-  --[ FinishedSent(sid, 'B'),
-      FinishedVerified(sid, 'A')
-    ]->
-  [ St_Finished(sid, sel) ]
+lemma Exists_PQCv2_Session:
+    exists-trace
+    "Ex sid A B #i.
+        SessionEstablishedFull(sid, A, B, 'PQCv2') @ #i"
 
-rule Session_Established:
-  [ St_Finished(sid, sel) ]
-  --[ SessionEstablished(sid, sel) ]->
-  [ ]
+lemma Exists_Default_Classic_Downgrade:
+    exists-trace
+    "Ex sid A B #i #j.
+        DowngradeEvent(sid) @ #i
+      & SessionEstablishedFull(sid, A, B, 'Classic') @ #j"
 
-/* ------------------------------
-   Exist-trace lemmas (anti-vacuity)
-   ------------------------------ */
+/* ---- (5d-i) Negotiation integrity: the suite an initiator ACCEPTS
+   (its sigB-verified Commit) must have been one it offered in that very
+   session. This is exactly where the Rust initiator enforces
+   offered_suites.contains(selected). (The responder's SelectedSuite over
+   an attacker-forged MessageA is out of scope: with a compromised
+   initiator key the attacker can mint any MessageA -- captured by the
+   LtkReveal(A) escape on the agreement lemma below.) */
+lemma NegotiationIntegrity_AcceptedWasOffered:
+    all-traces
+    "All sid A B sel thA #i.
+        Commit_I(sid, A, B, sel, thA) @ #i
+        ==> (Ex #j. Offer(sid, sel) @ #j)"
 
-lemma Exists_DefaultClassicTrace:
-  exists-trace
-  "Ex sid #i #j #k.
-     Policy(sid, 'default') @ #i
-   & DowngradeEvent(sid) @ #j
-   & SessionEstablished(sid, SuiteClassic) @ #k"
+/* ---- Authentication core: a responder MessageB signature on a given
+   transcript/suite can only exist if the pinned responder actually
+   issued it (i.e. sigB is unforgeable under the pinned key), unless
+   that responder's long-term signing key was revealed. This is the
+   non-trivial replacement for the old unconditional VerifiedSigB. */
+lemma SigB_Authentic_or_Compromised:
+    all-traces
+    "All sid A B suite thA #i.
+        Commit_I(sid, A, B, suite, thA) @ #i
+        ==> ( (Ex #j. SigBIssued(sid, B, suite) @ #j)
+            | (Ex #r. LtkReveal(B) @ #r) )"
 
-lemma Exists_StrictPQCv2Trace:
-  exists-trace
-  "Ex sid #i #j.
-     Policy(sid, 'strictPQC') @ #i
-   & SessionEstablished(sid, SuitePQCv2) @ #j"
+/* ---- (5b) Injective agreement initiator<->responder on
+   <peerId, selectedSuite, transcript>. This is the security-critical
+   direction: when the initiator A commits to a session with the pinned
+   responder B on <A,B,suite,thA> (after verifying sigB), then B
+   genuinely ran a responder session with matching data, AND the
+   correspondence is injective -- no two distinct initiator commits map
+   to the same responder run (replay/duplication of MessageB cannot make
+   the initiator accept twice for one responder session). The agreement
+   holds unless the responder's long-term signing key was revealed, in
+   which case responder impersonation is unavoidable (expected escape). */
+lemma Injective_Agreement_I_with_R:
+    all-traces
+    "All sid A B suite thA #i.
+        Commit_I(sid, A, B, suite, thA) @ #i
+        ==> ( ( (Ex #j. Running_R(sid, A, B, suite, thA) @ #j & #j < #i)
+                & not (Ex sid2 #i2.
+                         Commit_I(sid2, A, B, suite, thA) @ #i2
+                       & not (#i2 = #i)) )
+            | (Ex #r. LtkReveal(B) @ #r) )"
 
-lemma Exists_StrictBootstrapRecoveryTrace:
-  exists-trace
-  "Ex sid #i #j #k.
-     Policy(sid, 'strictPQC') @ #i
-   & BootstrapControlChannel(sid) @ #j
-   & PQCRekeyCompleted(sid) @ #k"
+/* ---- (5a) Session-key secrecy: the established root secret of an
+   honest session stays secret from the Dolev-Yao adversary, unless a
+   relevant secret was revealed (see the precise per-suite FS lemmas
+   below for which secret matters for which suite). Here we state the
+   clean honest-case secrecy: with NO compromise of any long-term or
+   ephemeral secret, the root is never known to the adversary. */
+lemma Secrecy_SessionKey_HonestCase:
+    all-traces
+    "All sid root #i.
+        SecretRoot(sid, root) @ #i
+      & not (Ex A #r. LtkReveal(A) @ #r)
+      & not (Ex A #r. KemReveal(A) @ #r)
+      & not (Ex x #r. EphReveal(x) @ #r)
+        ==> not (Ex #k. K(root) @ #k)"
 
-/* ------------------------------
-   Security lemmas
-   ------------------------------ */
+/* ---- (5c-v1) Weak forward secrecy for v1: a v1 session root is
+   secret as long as the responder's static KEM secret is not revealed
+   (v1 has no ephemeral, so KEM-key compromise breaks it -- weak FS). */
+lemma WeakFS_v1:
+    all-traces
+    "All sid A B root #i.
+        SessionEstablishedFull(sid, A, B, 'PQCv1') @ #i
+      & SecretRoot(sid, root) @ #i
+      & not (Ex #r. KemReveal(B) @ #r)
+      & not (Ex #r. LtkReveal(A) @ #r)
+        ==> not (Ex #k. K(root) @ #k)"
 
+/* ---- (5c-v1') The v1/v2 separation is REAL, not an artifact: there
+   EXISTS a trace where a v1 session root is recovered by the adversary
+   after the static KEM secret is revealed *later* (post-session) -- the
+   exact post-compromise scenario v2 survives. This positive existence
+   proof witnesses that v1 lacks forward secrecy, so WeakFS_v1's
+   KEM-honest premise is load-bearing (not vacuous) and ForwardSecrecy_v2
+   is a strictly stronger guarantee. */
+lemma V1_LacksForwardSecrecy_Witness:
+    exists-trace
+    "Ex sid A B root #i #r #k.
+        SessionEstablishedFull(sid, A, B, 'PQCv1') @ #i
+      & SecretRoot(sid, root) @ #i
+      & KemReveal(B) @ #r
+      & K(root) @ #k
+      & not (Ex x #e. EphReveal(x) @ #e)"
+
+/* ---- (5c-v2) Genuine (perfect) forward secrecy for v2.
+
+   This is the property v1 CANNOT achieve and the reason the FS suite
+   (0x0102) exists. For a v2 session between an honest initiator and a
+   matching honest responder run, the established root stays secret EVEN
+   IF every long-term key -- the ML-DSA signing keys AND the static KEM
+   key -- is subsequently revealed, provided the per-session ephemerals
+   are not revealed.
+
+   The standard PFS scoping applies: the long-term keys must be honest
+   *at session time* (no LtkReveal of A or B strictly BEFORE the
+   initiator commits at #i); reveals that happen LATER are exactly what
+   forward secrecy must tolerate, and are allowed. (If B's signing key
+   were already compromised before the session, the adversary is a live
+   MITM on that very session -- a degenerate non-FS scenario that no
+   key-agreement scheme can defend, witnessed in the earlier iteration
+   by a forged MessageB carrying a degenerate ephemeral share.)
+
+   Compare with WeakFS_v1 above: v1 needs the KEM key honest; v2 does
+   not -- the ephemeral DH carries secrecy past full long-term
+   compromise. */
+lemma ForwardSecrecy_v2:
+    all-traces
+    "All sid A B root thA #i #j.
+        RootI(sid, root) @ #i
+      & Commit_I(sid, A, B, 'PQCv2', thA) @ #i
+      & Running_R(sid, A, B, 'PQCv2', thA) @ #j
+      & not (Ex x #r. EphReveal(x) @ #r)
+      & not (Ex #r. LtkReveal(A) @ #r & #r < #i)
+      & not (Ex #r. LtkReveal(B) @ #r & #r < #i)
+        ==> not (Ex #k. K(root) @ #k)"
+
+/* ---- (5e-i) Downgrade resistance under STRICT policy: an initiator
+   running under strictPQC NEVER accepts a classic session. Because the
+   only way to reach a classic initiator state is the default-policy
+   fallback gate or the classicOnly policy, a strict session has no
+   classic transition at all -- so neither a network/timeout effect nor
+   an active attacker can drive the strict initiator to classic. Anchored
+   on the initiator's sigB-verified Commit (policy is the initiator's). */
 lemma NoClassicUnderStrictPQC:
-  "All sid #i.
-     Policy(sid, 'strictPQC') @ #i
-     ==> not (Ex #j. SessionEstablished(sid, SuiteClassic) @ #j)"
+    all-traces
+    "All sid A B thA #i.
+        Commit_I(sid, A, B, 'Classic', thA) @ #i
+        ==> not (Ex #p. Policy(sid, 'strictPQC') @ #p)"
 
-lemma NegotiationIntegrity_SelectedWasOffered:
-  "All sid sel #i.
-     SelectedSuite(sid, sel) @ #i
-     ==> (Ex #j. OfferIncludes(sid, sel) @ #j)"
+/* ---- (5e-ii) No silent classic fallback under default policy: whenever
+   an initiator under default policy accepts a classic session, that
+   acceptance is preceded by the explicit LOCAL fallback gate event
+   (FallbackGatePassed with 'local_capability_error'). The adversary
+   cannot manufacture this gate over the network; only the local
+   capability path emits it. Hence timeout / dropped-PQC packets (which
+   never emit the gate) cannot silently produce a classic session. */
+lemma NoSilentClassicFallback_Default:
+    all-traces
+    "All sid A B thA #i.
+        Commit_I(sid, A, B, 'Classic', thA) @ #i
+      & (Ex #p. Policy(sid, 'default') @ #p)
+        ==> (Ex #g. FallbackGatePassed(sid, 'local_capability_error') @ #g
+                  & #g < #i)"
 
-lemma AuthenticationRequiresVerifiedSigB:
-  "All sid sel #i.
-     SessionEstablished(sid, sel) @ #i
-     ==> (Ex #j. VerifiedSigB(sid, sel) @ #j)"
-
-lemma ClassicRequiresDowngradeEvent:
-  "All sid #i.
-     SessionEstablished(sid, SuiteClassic) @ #i
-     ==> (Ex #j. DowngradeEvent(sid) @ #j)"
-
-lemma ClassicRequiresFallbackGate:
-  "All sid #i.
-     SessionEstablished(sid, SuiteClassic) @ #i
-     ==> (Ex #j. FallbackGatePassed(sid, 'local_capability_error') @ #j)"
-
-lemma ClassicOnlyUnderDefaultPolicy:
-  "All sid #i.
-     SessionEstablished(sid, SuiteClassic) @ #i
-     ==> (Ex #j. Policy(sid, 'default') @ #j)"
-
-lemma V2HybridSecretComposition:
-  "All sid #i.
-     SessionEstablished(sid, SuitePQCv2) @ #i
-     ==> (Ex #j #k.
-            StaticSecretDerived(sid) @ #j
-          & EphemeralSecretDerived(sid) @ #k)"
-
-lemma TimeoutCannotTriggerClassicFallback:
-  "All sid #i.
-     TimeoutObserved(sid) @ #i
-     ==> not (Ex #j. SessionEstablished(sid, SuiteClassic) @ #j)"
-
-lemma FallbackRateLimitEnforced:
-  "All sid #i.
-     SessionEstablished(sid, SuiteClassic) @ #i
-     ==> (Ex #j #k.
-            CooldownChecked(sid, 'inactive') @ #j
-          & CooldownPermit(sid, 'allow') @ #k)"
-
-lemma DowngradeEventRequiredWithContext:
-  "All sid #i.
-     SessionEstablished(sid, SuiteClassic) @ #i
-     ==> (Ex #j.
-            DowngradeEventCtx(sid, 'local_capability_error', 'default', 'cooldown_checked') @ #j)"
-
-lemma BootstrapControlOnlyUntilPQCRekey:
-  "All sid #i.
-     BusinessTrafficEnabled(sid) @ #i
-     ==> (Ex #j. PQCRekeyCompleted(sid) @ #j & #j < #i)"
+/* ---- Downgrade evidence: any classic session accepted by an initiator
+   carries a context-bearing downgrade event (audit trail) OR was a
+   classicOnly-policy session to begin with. There is no third way to a
+   classic acceptance, so a classic session is always explained by
+   recorded downgrade evidence or an explicit classic-only policy. */
+lemma ClassicRequiresDowngradeOrClassicPolicy:
+    all-traces
+    "All sid A B thA #i.
+        Commit_I(sid, A, B, 'Classic', thA) @ #i
+        ==> ( (Ex #j. DowngradeEvent(sid) @ #j)
+            | (Ex #p. Policy(sid, 'classicOnly') @ #p) )"
 
 end
