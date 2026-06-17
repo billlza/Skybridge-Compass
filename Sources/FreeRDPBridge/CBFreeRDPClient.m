@@ -161,6 +161,8 @@ static BOOL CBFreeRDPVersionMeetsMinimum(NSString *versionString) {
     cb_check_event_handles_fn _checkEventHandles;
     pEndPaint _originalEndPaint;   // GDI 原始 EndPaint（链接调用，保留失效区域维护）
     BOOL _pumpActive;
+    uint64_t _emittedFrameCount;   // 已上抛帧数（诊断：区分「连上无帧」与「帧已流动」）
+    BOOL _loggedEmptyEndPaint;     // 「EndPaint 触发但帧缓冲不可用」只记录一次，避免刷屏
 
  // Apple Silicon 硬件解码器
     AppleSiliconDecoder _decoder;
@@ -717,10 +719,27 @@ static void videoToolboxDecompressionCallback(
         ok = ok && _settingsSetString(settings, FreeRDP_Domain, self.domain.UTF8String);
     }
 
-    // 选用软件 GDI：gdi_init 会把更新管线（位图/SurfaceBits/GFX）绘制进 primary_buffer，
-    // 我们再从 EndPaint 读出该帧缓冲。无该 API 时退化为「仅连接、无画面」，不影响连接本身。
+    // 选用软件 GDI + 仅协商「无需 ffmpeg 即可解码」的编解码路径。
+    // 关键：本应用内置的 FreeRDP 以 WITH_FFMPEG=OFF 构建，没有 H.264 解码器；而现代 Windows 默认
+    // 用 RDPGFX 的 H.264/AVC444 推流，会导致整屏无法解码（黑屏）。因此关闭 RDPGFX 管线与 H.264/AVC，
+    // 改为启用内置纯软件解码的 RemoteFX / NSCodec，让服务端回退到软件 GDI 能解码的 RemoteFX/位图表面
+    // 更新。这是当前不带 ffmpeg 的构建能真正出图的关键。设置 API 缺失时退化为「仅连接、无画面」。
     if (_settingsSetBool) {
         _settingsSetBool(settings, FreeRDP_SoftwareGdi, TRUE);
+        // 关闭需要 ffmpeg 的 GFX / H.264 路径
+        _settingsSetBool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
+        _settingsSetBool(settings, FreeRDP_GfxH264, FALSE);
+        _settingsSetBool(settings, FreeRDP_GfxAVC444, FALSE);
+        _settingsSetBool(settings, FreeRDP_GfxAVC444v2, FALSE);
+        // 启用内置(无 ffmpeg 依赖)的软件可解码编解码
+        _settingsSetBool(settings, FreeRDP_RemoteFxCodec, TRUE);
+        _settingsSetBool(settings, FreeRDP_NSCodec, TRUE);
+
+        // 接受服务端证书。Windows 主机普遍使用自签名 RDP 证书，FreeRDP 默认会因无法验证而直接拒绝连接，
+        // 而本桥接没有交互式「是否信任此证书」的 UI，否则将永远连不上。
+        // ⚠️ 安全说明：这放弃了对服务端证书的校验（存在中间人风险）。这是为打通连接的测试构建取舍，
+        //    生产前应改为 TOFU 指纹固定（安装 pVerifyCertificateEx 回调：首次记录指纹、变更即告警）。
+        _settingsSetBool(settings, FreeRDP_IgnoreCertificate, TRUE);
     }
 
     if (!ok) {
@@ -975,6 +994,24 @@ static void videoToolboxDecompressionCallback(
                  (uint32_t)gdi->height,
                  (uint32_t)gdi->stride,
                  CBFreeRDPFrameTypeBGRA);
+        _emittedFrameCount += 1;
+        if (_emittedFrameCount == 1) {
+            os_log_info(CBFreeRDPLogger,
+                        "🖼️ RDP 首帧已渲染并上抛: %dx%d stride=%d (软件GDI/RemoteFX 路径)",
+                        gdi->width, gdi->height, (int)gdi->stride);
+            [self notifyState:[NSString stringWithFormat:@"🖼️ 已收到远程画面首帧 %dx%d", gdi->width, gdi->height]];
+        } else if ((_emittedFrameCount % 120) == 0) {
+            os_log_debug(CBFreeRDPLogger, "🖼️ RDP 已渲染 %llu 帧", _emittedFrameCount);
+        }
+    } else if (!_loggedEmptyEndPaint && _emittedFrameCount == 0) {
+        // EndPaint 触发但帧缓冲不可用：记录一次，便于诊断「连上但黑屏」(例如服务端仍用了无法解码的编解码)。
+        _loggedEmptyEndPaint = YES;
+        os_log_error(CBFreeRDPLogger,
+                     "⚠️ EndPaint 触发但首帧缓冲不可用: callback=%d gdi=%p buffer=%p %dx%d stride=%d",
+                     callback != nil, (void *)gdi,
+                     gdi ? (void *)gdi->primary_buffer : NULL,
+                     gdi ? gdi->width : -1, gdi ? gdi->height : -1,
+                     gdi ? (int)gdi->stride : -1);
     }
     return TRUE;
 }
@@ -1012,14 +1049,10 @@ static void videoToolboxDecompressionCallback(
         os_log_info(CBFreeRDPLogger, "✅ 颜色深度: %@位", colorDepth);
     }
     
- // Apple Silicon 硬件加速优化
-    if (_isAppleSilicon && _settingsSetUint32) {
- // 启用 H.264 硬件加速
-        _settingsSetUint32(settings, FreeRDP_GfxH264, TRUE);
- // 启用 AVC444 (高质量 H.264)
-        _settingsSetUint32(settings, FreeRDP_GfxAVC444, TRUE);
-        os_log_info(CBFreeRDPLogger, "🚀 已启用 Apple Silicon 硬件加速编解码");
-    }
+ // 注意：不在此启用 GFX H.264/AVC444。内置 FreeRDP 以 WITH_FFMPEG=OFF 构建，没有 H.264 解码器，
+ // 启用后整屏会无法解码（黑屏）。编解码路径已在 applyConnectionIdentitySettings 统一锁定为
+ // 软件 GDI + RemoteFX/NSCodec（无 ffmpeg 依赖）。若将来打包带 ffmpeg/HW 解码的 FreeRDP 或接入
+ // VideoToolbox H.264，再在此按能力启用 GFX。
 }
 
 /// 配置交互设置
