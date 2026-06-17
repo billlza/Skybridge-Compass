@@ -1,7 +1,21 @@
 #import "CBFreeRDPClient.h"
-#import "CBFreeRDPConstants.h"  // 新增常量定义
+#import "CBFreeRDPConstants.h"
 #import <dlfcn.h>
 #import <os/log.h>
+
+// 真实 FreeRDP/WinPR 3.26.0 头（与 Sources/Vendor/FreeRDPDylibs 的 dylib 同版本）。
+// 结构体布局、设置枚举值、像素格式、输入标志均由编译器解析，取代旧的占位 opaque 类型 +
+// 硬编码指针 slot + 伪造设置常量（曾把 DesktopWidth/Port/Username/Password 写入错误槽位）。
+// dylib 仍按需 dlopen；这些头只提供类型与函数签名，不引入链接期硬依赖。
+// 关键：必须在 Apple 媒体框架之前包含 —— winpr 的 IID/REFIID typedef 与 CoreFoundation
+// 的 CFPlugInCOM 同名冲突，先定义者胜（winpr 无重定义守卫，CoreFoundation 有）。
+#include <freerdp/freerdp.h>
+#include <freerdp/settings.h>
+#include <freerdp/gdi/gdi.h>
+#include <freerdp/input.h>
+#include <freerdp/update.h>
+#include <freerdp/codec/color.h>
+
 #import <CoreGraphics/CoreGraphics.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <CoreMedia/CoreMedia.h>
@@ -9,14 +23,7 @@
 #import <sys/utsname.h>
 #import <string.h>
 
-// FreeRDP 核心结构体和函数指针定义
-typedef struct _freerdp freerdp;
-typedef struct _rdpContext rdpContext;
-typedef struct _rdpSettings rdpSettings;
-typedef struct _rdpGdi rdpGdi;
-typedef struct _rdpInput rdpInput;
-
-// FreeRDP 函数指针类型定义 (基于 FreeRDP 3.x API)
+// FreeRDP 函数指针类型定义（签名匹配真实 3.x 导出符号；类型来自上面的真实头）
 typedef const char *(*freerdp_version_string_fn)(void);
 typedef freerdp *(*freerdp_new_fn)(void);
 typedef void (*freerdp_free_fn)(freerdp *instance);
@@ -27,42 +34,53 @@ typedef BOOL (*freerdp_set_connection_type_fn)(rdpSettings *settings, uint32_t t
 typedef BOOL (*freerdp_input_send_mouse_event_fn)(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y);
 typedef BOOL (*freerdp_input_send_keyboard_event_fn)(rdpInput *input, uint16_t flags, uint8_t code);
 
-// FreeRDP 3.x 新增设置 API
+// FreeRDP 3.x 设置 API
 typedef BOOL (*freerdp_settings_set_uint32_fn)(rdpSettings *settings, size_t id, uint32_t value);
 typedef BOOL (*freerdp_settings_set_string_fn)(rdpSettings *settings, size_t id, const char *value);
 typedef BOOL (*freerdp_settings_get_uint32_fn)(rdpSettings *settings, size_t id, uint32_t *value);
 typedef const char *(*freerdp_settings_get_string_fn)(rdpSettings *settings, size_t id);
+typedef BOOL (*freerdp_settings_set_bool_fn)(rdpSettings *settings, size_t id, BOOL value);
 
-_Static_assert(sizeof(void *) == 8, "CBFreeRDPClient requires 64-bit pointer layout");
+// 渲染 / 事件泵导出符号
+typedef BOOL (*cb_gdi_init_fn)(freerdp *instance, UINT32 format);
+typedef void (*cb_gdi_free_fn)(freerdp *instance);
+typedef BOOL (*cb_check_event_handles_fn)(rdpContext *context);
 
-enum {
-    CBRDPInstanceSlotContext = 0,
-    CBRDPContextSlotInput = 38,
-    CBRDPContextSlotSettings = 40
-};
-
-static void *CBReadPointerSlot(const void *base, size_t slot) {
-    if (!base) {
-        return NULL;
-    }
-    void *value = NULL;
-    memcpy(&value, ((const uint8_t *)base) + (slot * sizeof(void *)), sizeof(void *));
-    return value;
+// 实例 → 上下文/输入/设置：真实字段访问，偏移由编译器计算（不再读硬编码 slot）。
+static inline rdpContext *CBGetContextFromInstance(freerdp *instance) {
+    return instance ? instance->context : NULL;
 }
 
-static rdpContext *CBGetContextFromInstance(freerdp *instance) {
-    return (rdpContext *)CBReadPointerSlot(instance, CBRDPInstanceSlotContext);
-}
-
-static rdpInput *CBGetInputFromInstance(freerdp *instance) {
+static inline rdpInput *CBGetInputFromInstance(freerdp *instance) {
     rdpContext *context = CBGetContextFromInstance(instance);
-    return (rdpInput *)CBReadPointerSlot(context, CBRDPContextSlotInput);
+    return context ? context->input : NULL;
 }
 
-static rdpSettings *CBGetSettingsFromInstance(freerdp *instance) {
+static inline rdpSettings *CBGetSettingsFromInstance(freerdp *instance) {
     rdpContext *context = CBGetContextFromInstance(instance);
-    return (rdpSettings *)CBReadPointerSlot(context, CBRDPContextSlotSettings);
+    return context ? context->settings : NULL;
 }
+
+// rdpContext → CBFreeRDPClient 注册表：GDI 的 EndPaint C 回调据此找回对应客户端实例。
+// 值用 nonretainedObject（客户端在断开前主动移除，生命周期长于注册项），用锁保护以支持并发会话。
+@class CBFreeRDPClient;
+
+static NSMutableDictionary<NSNumber *, NSValue *> *CBClientRegistry(void) {
+    static NSMutableDictionary *registry;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ registry = [NSMutableDictionary dictionary]; });
+    return registry;
+}
+
+static NSLock *CBClientRegistryLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSLock alloc] init]; });
+    return lock;
+}
+
+// 前向声明：GDI 绘制完成回调（在文件尾部定义，转发到客户端的 handleEndPaint:）。
+static BOOL CBEndPaintCallback(rdpContext *context);
 
 // Apple Silicon 优化的硬件编解码器支持 (macOS 13+ with VideoToolbox)
 typedef struct {
@@ -135,7 +153,15 @@ static BOOL CBFreeRDPVersionMeetsMinimum(NSString *versionString) {
     freerdp_settings_set_string_fn _settingsSetString;
     freerdp_settings_get_uint32_fn _settingsGetUint32;
     freerdp_settings_get_string_fn _settingsGetString;
-    
+    freerdp_settings_set_bool_fn _settingsSetBool;
+
+ // 渲染 / 事件泵
+    cb_gdi_init_fn _gdiInit;
+    cb_gdi_free_fn _gdiFree;
+    cb_check_event_handles_fn _checkEventHandles;
+    pEndPaint _originalEndPaint;   // GDI 原始 EndPaint（链接调用，保留失效区域维护）
+    BOOL _pumpActive;
+
  // Apple Silicon 硬件解码器
     AppleSiliconDecoder _decoder;
 }
@@ -154,6 +180,11 @@ static BOOL CBFreeRDPVersionMeetsMinimum(NSString *versionString) {
 @property (nonatomic) freerdp *connectionRef;
 @property (nonatomic, strong) NSTimer * _Nullable keepAliveTimer;
 @property (nonatomic, assign) BOOL isAppleSilicon;
+
+// 渲染 / 事件泵（均在 workerQueue 上串行执行，避免与输入发送争用单线程 FreeRDP 上下文）
+- (void)startGraphicsAndPump;
+- (void)pumpEventsOnce;
+- (BOOL)handleEndPaint:(rdpContext *)context;
 
 @end
 
@@ -540,7 +571,7 @@ static void videoToolboxDecompressionCallback(
 
         strongSelf.state = CBFreeRDPClientStateConnected;
         [strongSelf notifyState:@"✅ FreeRDP 会话已连接"];
-        [strongSelf startKeepAlive];
+        [strongSelf startGraphicsAndPump];
     });
 
     return YES;
@@ -549,11 +580,22 @@ static void videoToolboxDecompressionCallback(
 - (void)disconnect
 {
     dispatch_async(self.workerQueue, ^{
-        if (self.connectionRef && self->_clientDisconnect) {
-            self->_clientDisconnect(self.connectionRef);
-        }
-        if (self.connectionRef && self->_clientFree) {
-            self->_clientFree(self.connectionRef);
+        self->_pumpActive = NO;
+        if (self.connectionRef) {
+            // 先从注册表移除（断开 EndPaint 回调对本实例的查找），再释放 GDI 与连接。
+            [CBClientRegistryLock() lock];
+            [CBClientRegistry() removeObjectForKey:@((uintptr_t)self.connectionRef)];
+            [CBClientRegistryLock() unlock];
+            self->_originalEndPaint = NULL;
+            if (self->_gdiFree) {
+                self->_gdiFree(self.connectionRef);
+            }
+            if (self->_clientDisconnect) {
+                self->_clientDisconnect(self.connectionRef);
+            }
+            if (self->_clientFree) {
+                self->_clientFree(self.connectionRef);
+            }
         }
         self.connectionRef = NULL;
         [self.keepAliveTimer invalidate];
@@ -569,17 +611,24 @@ static void videoToolboxDecompressionCallback(
 {
     os_log_debug(CBFreeRDPLogger, "Pointer event (%u, %u) mask %u", x, y, mask);
 
-    if (_sendMouseEvent && self.connectionRef) {
-        rdpInput *input = CBGetInputFromInstance(self.connectionRef);
-        if (!input) {
-            os_log_error(CBFreeRDPLogger, "❌ Pointer event dropped: rdpInput unavailable");
+    if (!_sendMouseEvent) {
+        return;
+    }
+    // 串行化到 workerQueue：FreeRDP 上下文单线程，输入发送必须与连接/事件泵同队列，避免数据竞争。
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(self.workerQueue, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.connectionRef) {
             return;
         }
-        const BOOL ok = _sendMouseEvent(input, mask, x, y);
-        if (!ok) {
+        rdpInput *input = CBGetInputFromInstance(strongSelf.connectionRef);
+        if (!input) {
+            return;
+        }
+        if (!strongSelf->_sendMouseEvent(input, mask, x, y)) {
             os_log_error(CBFreeRDPLogger, "❌ Pointer event send failed");
         }
-    }
+    });
 }
 
 - (void)submitKeyboardEventWithCode:(uint16_t)code
@@ -587,18 +636,24 @@ static void videoToolboxDecompressionCallback(
 {
     os_log_debug(CBFreeRDPLogger, "Keyboard event code %u down %d", code, down);
 
-    if (_sendKeyboardEvent && self.connectionRef) {
-        rdpInput *input = CBGetInputFromInstance(self.connectionRef);
+    if (!_sendKeyboardEvent) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(self.workerQueue, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.connectionRef) {
+            return;
+        }
+        rdpInput *input = CBGetInputFromInstance(strongSelf.connectionRef);
         if (!input) {
-            os_log_error(CBFreeRDPLogger, "❌ Keyboard event dropped: rdpInput unavailable");
             return;
         }
         const uint16_t flags = down ? KBD_FLAGS_DOWN : KBD_FLAGS_RELEASE;
-        const BOOL ok = _sendKeyboardEvent(input, flags, (uint8_t)(code & 0xFF));
-        if (!ok) {
+        if (!strongSelf->_sendKeyboardEvent(input, flags, (uint8_t)(code & 0xFF))) {
             os_log_error(CBFreeRDPLogger, "❌ Keyboard event send failed");
         }
-    }
+    });
 }
 
 #pragma mark - Helpers
@@ -660,6 +715,12 @@ static void videoToolboxDecompressionCallback(
 
     if (self.domain.length > 0) {
         ok = ok && _settingsSetString(settings, FreeRDP_Domain, self.domain.UTF8String);
+    }
+
+    // 选用软件 GDI：gdi_init 会把更新管线（位图/SurfaceBits/GFX）绘制进 primary_buffer，
+    // 我们再从 EndPaint 读出该帧缓冲。无该 API 时退化为「仅连接、无画面」，不影响连接本身。
+    if (_settingsSetBool) {
+        _settingsSetBool(settings, FreeRDP_SoftwareGdi, TRUE);
     }
 
     if (!ok) {
@@ -750,6 +811,12 @@ static void videoToolboxDecompressionCallback(
     _sendMouseEvent = (freerdp_input_send_mouse_event_fn)dlsym(_libraryHandle, "freerdp_input_send_mouse_event");
     _sendKeyboardEvent = (freerdp_input_send_keyboard_event_fn)dlsym(_libraryHandle, "freerdp_input_send_keyboard_event");
 
+ // 设置布尔 / 软件 GDI 渲染 / 事件泵（可选；缺失则降级为「仅连接、无画面」）
+    _settingsSetBool = (freerdp_settings_set_bool_fn)dlsym(_libraryHandle, "freerdp_settings_set_bool");
+    _gdiInit = (cb_gdi_init_fn)dlsym(_libraryHandle, "gdi_init");
+    _gdiFree = (cb_gdi_free_fn)dlsym(_libraryHandle, "gdi_free");
+    _checkEventHandles = (cb_check_event_handles_fn)dlsym(_libraryHandle, "freerdp_check_event_handles");
+
  // 检查必要的基础函数
     NSMutableArray<NSString *> *missingSymbols = [NSMutableArray array];
     if (!_versionString) [missingSymbols addObject:@"freerdp_get_version_string"];
@@ -831,15 +898,85 @@ static void videoToolboxDecompressionCallback(
     return YES;
 }
 
-- (void)startKeepAlive
+- (void)startGraphicsAndPump
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
-                                                                repeats:YES
-                                                                  block:^(__unused NSTimer * _Nonnull timer) {
-            os_log_debug(CBFreeRDPLogger, "Issuing FreeRDP keep-alive ping");
-        }];
+    // 运行在 workerQueue（由 connect 的 worker 块调用）。
+    if (!self.connectionRef) {
+        return;
+    }
+    rdpContext *context = CBGetContextFromInstance(self.connectionRef);
+    if (!context) {
+        [self notifyState:@"⚠️ 无法获取 FreeRDP 上下文，无法渲染"];
+        return;
+    }
+
+    // 注册 实例→本客户端，供 GDI 的 EndPaint C 回调找回本实例。
+    [CBClientRegistryLock() lock];
+    CBClientRegistry()[@((uintptr_t)self.connectionRef)] = [NSValue valueWithNonretainedObject:self];
+    [CBClientRegistryLock() unlock];
+
+    // 初始化软件 GDI：分配 BGRA32 帧缓冲，更新管线（位图/SurfaceBits/GFX）会绘制进 primary_buffer。
+    BOOL gdiReady = NO;
+    if (_gdiInit) {
+        gdiReady = _gdiInit(self.connectionRef, PIXEL_FORMAT_BGRA32);
+    }
+    if (gdiReady && context->update) {
+        // 链接 GDI 原 EndPaint（保留失效区域维护），叠加本客户端的整帧发射。
+        _originalEndPaint = context->update->EndPaint;
+        context->update->EndPaint = CBEndPaintCallback;
+        [self notifyState:@"🖼️ 远程画面渲染已启用"];
+    } else {
+        [self notifyState:@"⚠️ 软件 GDI 不可用：已连接但无画面"];
+    }
+
+    // 启动事件泵：周期性处理事件句柄 → 驱动更新管线 → 触发 EndPaint → 发射帧。
+    _pumpActive = YES;
+    [self pumpEventsOnce];
+}
+
+- (void)pumpEventsOnce
+{
+    if (!_pumpActive || !self.connectionRef || !_checkEventHandles) {
+        return;
+    }
+    rdpContext *context = CBGetContextFromInstance(self.connectionRef);
+    if (!context) {
+        return;
+    }
+    if (!_checkEventHandles(context)) {
+        // 连接关闭或出错：停止泵并上报。
+        _pumpActive = NO;
+        self.state = CBFreeRDPClientStateDisconnected;
+        [self notifyState:@"FreeRDP 会话已结束"];
+        return;
+    }
+    // 自重排：~15ms 一轮，在 workerQueue 上与输入发送串行交替（单线程上下文安全）。
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_MSEC)),
+                   self.workerQueue, ^{
+        [weakSelf pumpEventsOnce];
     });
+}
+
+- (BOOL)handleEndPaint:(rdpContext *)context
+{
+    // 先调用 GDI 原 EndPaint（失效区域维护），再发射整帧缓冲给上层。
+    if (_originalEndPaint) {
+        _originalEndPaint(context);
+    }
+    rdpGdi *gdi = context ? context->gdi : NULL;
+    CBFreeRDPFrameCallback callback = self.frameCallback;
+    if (callback && gdi && gdi->primary_buffer &&
+        gdi->width > 0 && gdi->height > 0 && gdi->stride > 0) {
+        NSData *frame = [NSData dataWithBytes:gdi->primary_buffer
+                                       length:(NSUInteger)gdi->stride * (NSUInteger)gdi->height];
+        callback(frame,
+                 (uint32_t)gdi->width,
+                 (uint32_t)gdi->height,
+                 (uint32_t)gdi->stride,
+                 CBFreeRDPFrameTypeBGRA);
+    }
+    return TRUE;
 }
 
 #pragma mark - 设置配置方法
@@ -983,12 +1120,12 @@ static void videoToolboxDecompressionCallback(
         }
     }
     
- // 缓存优化 (Apple Silicon 特定)
-    if (_settingsSetUint32) {
-        _settingsSetUint32(settings, FreeRDP_BitmapCacheEnabled, TRUE);
-        _settingsSetUint32(settings, FreeRDP_OffscreenCacheEnabled, TRUE);
-        _settingsSetUint32(settings, FreeRDP_GlyphCacheEnabled, TRUE);
-        os_log_info(CBFreeRDPLogger, "✅ 缓存优化已启用");
+ // 缓存优化：位图缓存是 BOOL 类型（用 set_bool）。Offscreen/Glyph 在真实 3.26 中是
+ // SupportLevel（UINT32）而非简单开关，半配置的字形缓存可能导致连接异常，故交由 FreeRDP
+ // 协商默认值，仅显式启用位图缓存。
+    if (_settingsSetBool) {
+        _settingsSetBool(settings, FreeRDP_BitmapCacheEnabled, TRUE);
+        os_log_info(CBFreeRDPLogger, "✅ 位图缓存已启用");
     }
     
  // Apple Silicon 网络优化
@@ -1035,3 +1172,21 @@ static void videoToolboxDecompressionCallback(
 }
 
 @end
+
+// GDI 绘制完成回调（C 函数指针，安装到 context->update->EndPaint）。
+// 通过注册表用 context->instance 找回对应的 CBFreeRDPClient，转发到其 handleEndPaint:。
+// 运行在 workerQueue（freerdp_check_event_handles 内部调用）—— 与输入发送同队列，串行安全。
+static BOOL CBEndPaintCallback(rdpContext *context)
+{
+    if (!context || !context->instance) {
+        return TRUE;
+    }
+    [CBClientRegistryLock() lock];
+    NSValue *entry = CBClientRegistry()[@((uintptr_t)context->instance)];
+    [CBClientRegistryLock() unlock];
+    CBFreeRDPClient *client = entry ? entry.nonretainedObjectValue : nil;
+    if (client) {
+        return [client handleEndPaint:context];
+    }
+    return TRUE;
+}

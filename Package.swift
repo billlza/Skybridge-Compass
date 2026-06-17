@@ -131,7 +131,14 @@ let package = Package(
             cSettings: [
                 .unsafeFlags(latestCStandardFlags),
                 // Apple Silicon 优化编译选项（不要手动定义 TARGET_CPU_*，由 SDK/编译器根据架构提供）
-                .define("APPLE_SILICON_OPTIMIZED", to: "1")
+                .define("APPLE_SILICON_OPTIMIZED", to: "1"),
+                // 真实 FreeRDP/WinPR 3.26.0 头（与 Sources/Vendor/FreeRDPDylibs 的 dylib 版本一一对应）。
+                // 让结构体偏移与设置枚举值由编译器解析，取代此前的占位 opaque 类型 + 硬编码 slot/伪造常量。
+                .headerSearchPath("../Vendor/FreeRDPHeaders/include"),
+                // FreeRDP/WinPR 头自带若干 deprecated 标注（如 pVerifyCertificate）以及与
+                // CoreFoundation 同值不同写法的 HRESULT 宏（S_OK/E_FAIL 等）重定义。均为第三方头、
+                // 不可改，仅对本桥接目标抑制这两类告警以满足「零告警」要求；不影响我方代码的告警检查。
+                .unsafeFlags(["-Wno-deprecated-declarations", "-Wno-macro-redefined"])
             ],
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),
