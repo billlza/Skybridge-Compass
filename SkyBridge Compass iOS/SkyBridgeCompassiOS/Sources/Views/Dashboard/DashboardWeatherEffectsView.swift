@@ -327,10 +327,23 @@ private enum WeatherParticleRenderer {
         size: CGSize
     ) {
         let center = CGPoint(x: size.width * 0.18, y: size.height * 0.16)
+        // 柔和的太阳辉光：几层同心圆由内亮到外淡，模拟阳光晕染（仅 5 个 fill，开销极低），缓慢脉动。
+        let glowPulse = 0.82 + 0.18 * sin(time * 0.22)
+        let baseGlow = min(size.width, size.height) * 0.42
+        let glowLayers = 5
+        for layer in 0..<glowLayers {
+            let t = Double(layer) / Double(glowLayers - 1)   // 0(内)→1(外)
+            let r = baseGlow * CGFloat(0.28 + t * 0.95) * CGFloat(glowPulse)
+            let alpha = (0.11 * (1.0 - t) + 0.012) * snapshot.intensity
+            context.fill(
+                Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                with: .color(Color.yellow.opacity(alpha))
+            )
+        }
         let rayCount = 18
         for index in 0..<rayCount {
             let angle = Double(index) / Double(rayCount) * Double.pi * 2 + time * 0.025
-            let length = min(size.width, size.height) * CGFloat(0.18 + 0.05 * sin(time * 0.18 + Double(index)))
+            let length = min(size.width, size.height) * CGFloat(0.20 + 0.06 * sin(time * 0.18 + Double(index)))
             let start = CGPoint(
                 x: center.x + CGFloat(cos(angle)) * length * 0.25,
                 y: center.y + CGFloat(sin(angle)) * length * 0.25
@@ -342,7 +355,8 @@ private enum WeatherParticleRenderer {
             var path = Path()
             path.move(to: start)
             path.addLine(to: end)
-            context.stroke(path, with: .color(Color.yellow.opacity(0.018)), lineWidth: 10)
+            // 原 0.018 几乎不可见；提高到可感知但仍克制的水平。
+            context.stroke(path, with: .color(Color.yellow.opacity(0.05)), lineWidth: 9)
         }
 
         for particle in particles {
@@ -358,7 +372,7 @@ private enum WeatherParticleRenderer {
                     width: CGFloat(radius * 2),
                     height: CGFloat(radius * 2)
                 )),
-                with: .color(Color.white.opacity((0.06 + 0.16 * twinkle) * snapshot.intensity * particle.alpha))
+                with: .color(Color.white.opacity((0.10 + 0.22 * twinkle) * snapshot.intensity * particle.alpha))
             )
         }
     }
@@ -384,9 +398,11 @@ private enum WeatherParticleRenderer {
                     width: CGFloat(width),
                     height: CGFloat(height)
                 )
+                // 深度着色 + 提高不透明度：近处云团更厚实、远处更轻薄，云层更立体而非平淡一片。
+                let depthShade = 0.6 + 0.7 * cloud.depth
                 layer.fill(
                     Path(ellipseIn: rect),
-                    with: .color(Color.white.opacity((0.055 + cloud.alpha * 0.11) * snapshot.intensity))
+                    with: .color(Color.white.opacity((0.09 + cloud.alpha * 0.16) * snapshot.intensity * depthShade))
                 )
             }
         }
@@ -399,9 +415,14 @@ private enum WeatherParticleRenderer {
         in context: inout GraphicsContext,
         size: CGSize
     ) {
-        let wind = (snapshot.wind - 0.35) * (snapshot.isStorm ? 0.72 : 0.42) + sin(time * 0.14) * 0.12
+        // 阵风：基础风 + 慢速摆动 + 偶发强阵风，让整片雨丝有节奏地倾斜（纯数学，零额外绘制开销）。
+        let gust = sin(time * 0.14) * 0.12
+            + sin(time * 0.37 + 1.3) * 0.07
+            + max(0, sin(time * 0.085) - 0.45) * 0.55
+        let wind = (snapshot.wind - 0.35) * (snapshot.isStorm ? 0.78 : 0.46) + gust
         let activeCount = snapshot.isStorm ? drops.count : min(390, drops.count)
-        let baseOpacity = snapshot.isStorm ? 0.30 : 0.23
+        // 提高基础不透明度：原值过低（0.23）在明亮背景上几乎看不见，显得简陋。
+        let baseOpacity = snapshot.isStorm ? 0.50 : 0.38
 
         for drop in drops.prefix(activeCount) {
             let fall = (drop.y + time * drop.speed * (snapshot.isStorm ? 0.18 : 0.13)).wrapped01()
@@ -409,15 +430,30 @@ private enum WeatherParticleRenderer {
             let y = fall * Double(size.height)
             let length = drop.length * (0.72 + drop.depth * 0.50) * (snapshot.isStorm ? 1.18 : 1.0)
             let dx = wind * length * 0.34
+            // 深度着色：近处雨丝更亮更粗、远处更淡更细 → 形成景深层次，而非平铺噪点。
+            let depthShade = 0.45 + 0.75 * drop.depth
+            let head = CGPoint(x: CGFloat(x), y: CGFloat(y))
+            let tail = CGPoint(x: CGFloat(x + dx), y: CGFloat(y + length))
 
             var path = Path()
-            path.move(to: CGPoint(x: CGFloat(x), y: CGFloat(y)))
-            path.addLine(to: CGPoint(x: CGFloat(x + dx), y: CGFloat(y + length)))
+            path.move(to: head)
+            path.addLine(to: tail)
             context.stroke(
                 path,
-                with: .color(Color.white.opacity(baseOpacity * snapshot.intensity * drop.alpha)),
-                lineWidth: CGFloat(drop.size)
+                with: .color(Color.white.opacity(baseOpacity * snapshot.intensity * drop.alpha * depthShade)),
+                lineWidth: CGFloat(drop.size * (0.8 + drop.depth * 0.6))
             )
+            // 近处雨丝叠一段更亮的“头部”高光，呈现明显的流线/速度感（仅最近 ~40% 雨丝，限制开销）。
+            if drop.depth > 0.62 {
+                var headPath = Path()
+                headPath.move(to: head)
+                headPath.addLine(to: CGPoint(x: CGFloat(x + dx * 0.32), y: CGFloat(y + length * 0.32)))
+                context.stroke(
+                    headPath,
+                    with: .color(Color.white.opacity(min(0.85, baseOpacity * 1.5) * snapshot.intensity * drop.alpha)),
+                    lineWidth: CGFloat(drop.size * (1.1 + drop.depth * 0.6))
+                )
+            }
         }
 
         let splashCount = snapshot.isStorm ? 48 : 30
@@ -426,7 +462,8 @@ private enum WeatherParticleRenderer {
             guard phase > 0.62 else { continue }
             let x = drop.x * Double(size.width)
             let y = Double(size.height) * (0.78 + drop.y * 0.18)
-            let radius = (phase - 0.62) * 8.0 * snapshot.intensity
+            let radius = (phase - 0.62) * 10.0 * snapshot.intensity
+            // 双环水花：外环淡、内核亮，落地处更有“溅起”的实感。
             context.stroke(
                 Path(ellipseIn: CGRect(
                     x: CGFloat(x - radius),
@@ -434,8 +471,17 @@ private enum WeatherParticleRenderer {
                     width: CGFloat(radius * 2),
                     height: CGFloat(radius * 0.55)
                 )),
-                with: .color(Color.cyan.opacity(0.055 * snapshot.intensity)),
-                lineWidth: 0.8
+                with: .color(Color.cyan.opacity(0.12 * snapshot.intensity)),
+                lineWidth: 1.0
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: CGFloat(x - radius * 0.28),
+                    y: CGFloat(y - radius * 0.10),
+                    width: CGFloat(radius * 0.56),
+                    height: CGFloat(radius * 0.22)
+                )),
+                with: .color(Color.white.opacity(0.10 * snapshot.intensity))
             )
         }
     }
@@ -447,12 +493,27 @@ private enum WeatherParticleRenderer {
         in context: inout GraphicsContext,
         size: CGSize
     ) {
-        let wind = (snapshot.wind - 0.25) * 0.18 + sin(time * 0.10) * 0.055
+        // 阵风 + 慢速摆动，让雪花成片飘移而非垂直下落（纯数学）。
+        let wind = (snapshot.wind - 0.25) * 0.22 + sin(time * 0.10) * 0.055 + sin(time * 0.043 + 0.7) * 0.06
         for flake in flakes {
-            let x = (flake.x + sin(time * flake.twinkle + flake.phase) * 0.032 + wind * flake.depth).wrapped01()
-                * Double(size.width)
+            let sway = sin(time * flake.twinkle + flake.phase) * 0.034
+            let x = (flake.x + sway + wind * flake.depth).wrapped01() * Double(size.width)
             let y = (flake.y + time * flake.speed * 0.060).wrapped01() * Double(size.height)
-            let radius = flake.size * (0.75 + flake.depth * 0.45)
+            let radius = flake.size * (0.75 + flake.depth * 0.55)
+            // 提高不透明度 + 深度着色，让雪有层次而不再是淡噪点。
+            let core = (0.16 + 0.30 * flake.depth) * snapshot.intensity * flake.alpha
+            // 近处雪花加一圈更大更淡的光晕，营造体积与发光感（仅最近雪花，限制开销）。
+            if flake.depth > 0.55 {
+                context.fill(
+                    Path(ellipseIn: CGRect(
+                        x: CGFloat(x - radius * 1.9),
+                        y: CGFloat(y - radius * 1.9),
+                        width: CGFloat(radius * 3.8),
+                        height: CGFloat(radius * 3.8)
+                    )),
+                    with: .color(Color.white.opacity(core * 0.28))
+                )
+            }
             context.fill(
                 Path(ellipseIn: CGRect(
                     x: CGFloat(x - radius),
@@ -460,7 +521,7 @@ private enum WeatherParticleRenderer {
                     width: CGFloat(radius * 2),
                     height: CGFloat(radius * 2)
                 )),
-                with: .color(Color.white.opacity((0.09 + 0.15 * flake.depth) * snapshot.intensity * flake.alpha))
+                with: .color(Color.white.opacity(core))
             )
         }
     }
@@ -475,7 +536,7 @@ private enum WeatherParticleRenderer {
         let tint: Color = snapshot.condition == .haze
             ? Color(red: 0.96, green: 0.78, blue: 0.46)
             : .white
-        let opacity = snapshot.condition == .haze ? 0.060 : 0.070
+        let opacity = snapshot.condition == .haze ? 0.085 : 0.10
 
         context.drawLayer { layer in
             layer.addFilter(.blur(radius: 24))
