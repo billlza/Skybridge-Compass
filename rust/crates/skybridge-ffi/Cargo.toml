@@ -1,0 +1,46 @@
+[package]
+name = "skybridge-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Outward FFI surface (C ABI + UniFFI) that lets non-Rust clients drive the portable SkyBridge secure-transport core."
+
+# Outward FFI: a C-ABI shared/static library for C/C++/C#-P-Invoke consumers and
+# an `rlib` so the in-tree `uniffi-bindgen` binary and tests can link the crate.
+[lib]
+name = "skybridge_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# UniFFI scaffolding (Kotlin/Swift bindings) is ON by default so that
+# `cargo build --workspace` compiles and exercises it. Disable it with
+# `--no-default-features` for a pure C-ABI build (no `uniffi` dependency).
+default = ["uniffi-scaffolding"]
+uniffi-scaffolding = ["dep:uniffi"]
+# Pulls in UniFFI's bindgen CLI (clap/camino/full bindgen) for the in-tree
+# `uniffi-bindgen` binary. Kept off the default build so the lean library /
+# C-ABI build does not drag in the binding-generator toolchain.
+uniffi-cli = ["uniffi-scaffolding", "uniffi?/cli"]
+
+[dependencies]
+skybridge-core = { path = "../skybridge-core" }
+skybridge-agent = { path = "../skybridge-agent" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uniffi = { version = "0.31.1", optional = true, features = ["tokio"] }
+
+[build-dependencies]
+cbindgen = "0.29"
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# In-tree binding generator: `cargo run -p skybridge-ffi --features uniffi-cli --bin uniffi-bindgen -- ...`
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["uniffi-cli"]

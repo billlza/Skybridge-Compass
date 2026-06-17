@@ -4,6 +4,7 @@ members = [
     "crates/skybridge-agent",
     "crates/skybridge-cli",
     "crates/skybridge-auth-mail",
+    "crates/skybridge-ffi",
 ]
 resolver = "2"
 
