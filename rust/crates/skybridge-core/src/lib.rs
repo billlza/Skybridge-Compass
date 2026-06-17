@@ -9,6 +9,7 @@ pub mod file_transfer_frame;
 pub mod identity;
 pub mod native_webrtc;
 pub mod platform;
+pub mod policy;
 pub mod pqc;
 pub mod pqc_handshake;
 pub mod presentation;
@@ -25,6 +26,10 @@ pub use event::*;
 pub use file_transfer_frame::*;
 pub use identity::*;
 pub use native_webrtc::*;
+pub use policy::{
+    DowngradeDecision, DowngradeEvent, DowngradePolicy, FALLBACK_COOLDOWN, FallbackRateLimiter,
+    FallbackReason, PolicyGate,
+};
 pub use pqc::*;
 pub use pqc_handshake::{
     PqcInitiatorConfig, PqcInitiatorHandshake, PqcResponderConfig, PqcResponderHandshake,

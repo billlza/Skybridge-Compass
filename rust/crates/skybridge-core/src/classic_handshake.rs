@@ -16,6 +16,7 @@ use crate::handshake_wire::{
     append_u16_le, encode_string, encode_string_array, read_exact, read_u16_le,
     unwrap_handshake_padding,
 };
+use crate::policy::{DowngradePolicy, encode_policy_wire_byte};
 use crate::{ProtocolIdentityBinding, ProtocolSigningAlgorithm, handshake_app_frame};
 
 const HANDSHAKE_VERSION: u8 = 1;
@@ -42,6 +43,11 @@ pub struct ClassicInitiatorConfig {
     pub local_binding: ProtocolIdentityBinding,
     pub signing_secret_key: Vec<u8>,
     pub local_device_name: Option<String>,
+    /// Downgrade posture advertised on the wire. The classic path is the
+    /// post-downgrade attempt, so this defaults to [`DowngradePolicy::Default`]
+    /// (no PQC mandate), which encodes the same `0x00` policy byte the legacy
+    /// `classic_policy_bytes()` emitted.
+    pub policy: DowngradePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +163,7 @@ impl ClassicInitiatorHandshake {
 
         let supported_suites = [CLASSIC_SUITE_WIRE_ID];
         let capabilities = classic_capabilities_bytes();
-        let policy = classic_policy_bytes();
+        let policy = classic_policy_bytes(self.config.policy);
         let identity_public_key = encode_identity_public_key(
             self.config.local_binding.protocol_signing_algorithm,
             &self.config.local_binding.protocol_public_key_bytes,
@@ -645,9 +651,15 @@ fn classic_capabilities_bytes() -> Vec<u8> {
     encoded
 }
 
-fn classic_policy_bytes() -> Vec<u8> {
+/// Encode the classic MessageA policy block.
+///
+/// Wire format is unchanged: `[requirePQC: u8][reserved: u8][provider-token:
+/// len-prefixed str][trailing: u8]`. The first byte is now derived from the active
+/// [`DowngradePolicy`] (for the default `DowngradePolicy::Default` it emits `0x00`,
+/// byte-identical to the previous static output).
+fn classic_policy_bytes(policy: DowngradePolicy) -> Vec<u8> {
     let mut encoded = Vec::new();
-    encoded.push(0x00);
+    encoded.push(encode_policy_wire_byte(policy));
     encoded.push(0x00);
     encode_string(&mut encoded, "classic");
     encoded.push(0x00);
@@ -789,6 +801,7 @@ mod tests {
             )?,
             signing_secret_key: vec![9; 32],
             local_device_name: Some("Rust Agent".to_owned()),
+            policy: DowngradePolicy::Default,
         };
         let handshake = ClassicInitiatorHandshake::new(config)?;
         let timestamp = handshake_app_frame::apple_reference_seconds_now();

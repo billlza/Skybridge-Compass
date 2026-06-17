@@ -44,6 +44,10 @@ pub(super) struct DecodedMessageA {
     pub(super) key_shares: BTreeMap<CryptoSuite, Vec<u8>>,
     pub(super) client_nonce: [u8; 32],
     pub(super) transcript_hash_a: [u8; 32],
+    /// The initiator's advertised `requirePQC` flag, decoded from the MessageA
+    /// policy block (previously discarded). `true` => the initiator claims a
+    /// PQC-mandatory posture on the wire.
+    pub(super) initiator_requires_pqc: bool,
 }
 
 pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
@@ -76,7 +80,11 @@ pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
     let capabilities_len = read_u16_le(frame, &mut offset)? as usize;
     let _capabilities = read_exact(frame, &mut offset, capabilities_len)?;
     let policy_len = read_u16_le(frame, &mut offset)? as usize;
-    let _policy = read_exact(frame, &mut offset, policy_len)?;
+    let policy = read_exact(frame, &mut offset, policy_len)?;
+    // The policy block was previously discarded. Decode its first byte
+    // (`requirePQC`) so the responder can observe the initiator's advertised
+    // downgrade posture. Wire format: see `pqc_policy_bytes()`.
+    let initiator_requires_pqc = policy.first().is_some_and(|&flag| flag != 0x00);
     let identity_public_key_len = read_u16_le(frame, &mut offset)? as usize;
     let identity_public_key = read_exact(frame, &mut offset, identity_public_key_len)?.to_vec();
     let unsigned_end = offset;
@@ -109,6 +117,7 @@ pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
         key_shares,
         client_nonce,
         transcript_hash_a: transcript_hash_a_bytes,
+        initiator_requires_pqc,
     })
 }
 

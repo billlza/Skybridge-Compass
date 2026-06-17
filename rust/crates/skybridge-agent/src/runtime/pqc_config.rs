@@ -130,6 +130,8 @@ pub(super) async fn build_pqc_initiator_config_from_env(
         local_device_name: Some(identity.state.device.device_name.clone()),
         preferred_suites,
         peer_kem_public_keys,
+        // Prefer PQC, allow a gated/rate-limited local classic fallback.
+        policy: skybridge_core::DowngradePolicy::PreferPqc,
     }))
 }
 
@@ -175,5 +177,6 @@ pub(super) async fn build_pqc_responder_config(
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
         supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+        policy: skybridge_core::DowngradePolicy::PreferPqc,
     }))
 }

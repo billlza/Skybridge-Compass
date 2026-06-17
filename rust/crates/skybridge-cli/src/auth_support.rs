@@ -48,6 +48,7 @@ pub(crate) async fn maybe_inline_pqc_responder_config(
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
         supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+        policy: skybridge_core::DowngradePolicy::PreferPqc,
     }))
 }
 

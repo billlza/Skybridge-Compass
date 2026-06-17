@@ -474,6 +474,8 @@ async fn run_managed_session(
                 local_binding: local_binding.clone(),
                 signing_secret_key,
                 local_device_name: Some(identity.state.device.device_name.clone()),
+                // Classic path is the post-downgrade attempt: no PQC mandate.
+                policy: skybridge_core::DowngradePolicy::Default,
             })
         })
         .transpose()?,

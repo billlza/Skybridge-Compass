@@ -8,6 +8,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::policy::{DowngradePolicy, encode_policy_wire_byte};
 use crate::{
     ClassicHandleResult, ClassicSessionKeys, CryptoSuite, ProtocolIdentityBinding,
     ProtocolSigningAlgorithm, RustPqcIdentityMaterial, mldsa65_sign_detached,
@@ -44,6 +45,10 @@ pub struct PqcInitiatorConfig {
     pub local_device_name: Option<String>,
     pub preferred_suites: Vec<CryptoSuite>,
     pub peer_kem_public_keys: BTreeMap<CryptoSuite, Vec<u8>>,
+    /// Downgrade posture advertised on the wire (governs the policy byte) and
+    /// consulted locally before any PQC -> Classic fallback. Defaults to
+    /// [`DowngradePolicy::PreferPqc`].
+    pub policy: DowngradePolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +57,9 @@ pub struct PqcResponderConfig {
     pub local_device_name: Option<String>,
     pub identity: RustPqcIdentityMaterial,
     pub supported_suites: Vec<CryptoSuite>,
+    /// Downgrade posture this responder enforces. Defaults to
+    /// [`DowngradePolicy::PreferPqc`].
+    pub policy: DowngradePolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +170,7 @@ impl PqcInitiatorHandshake {
         fill_random(&mut client_nonce)?;
 
         let capabilities = pqc_capabilities_bytes(&offered_suites);
-        let policy = pqc_policy_bytes();
+        let policy = pqc_policy_bytes(self.config.policy);
         let identity_public_key = encode_identity_public_key(
             self.config.local_binding.protocol_signing_algorithm,
             &self.config.local_binding.protocol_public_key_bytes,
@@ -315,6 +323,59 @@ impl PqcInitiatorHandshake {
             PqcInitiatorState::Established(_) => Ok(ClassicHandleResult::default()),
             PqcInitiatorState::Idle => bail!("received Finished before PQC handshake started"),
         }
+    }
+
+    /// The active downgrade posture for this initiator.
+    pub fn policy(&self) -> DowngradePolicy {
+        self.config.policy
+    }
+
+    /// Decide — *locally, before sending any Classic MessageA* — whether this
+    /// failed PQC attempt may downgrade to a Classic handshake with `peer`.
+    ///
+    /// This is the portable realization of the Swift `attemptFallback` gate
+    /// (`TwoAttemptHandshakeManager`). It is the single authority a caller (agent /
+    /// CLI orchestrator) must consult before constructing a
+    /// [`crate::classic_handshake::ClassicInitiatorHandshake`] in response to a PQC
+    /// failure. Because the decision is taken here, on the initiator, off the wire,
+    /// a remote attacker cannot induce the downgrade.
+    ///
+    /// On authorization the returned [`crate::policy::DowngradeDecision::Allowed`]
+    /// carries a structured, serde-serializable [`crate::policy::DowngradeEvent`]
+    /// anchored to this handshake's MessageA transcript — the replayable audit
+    /// record. Denials (BLOCKED reason / strict policy / rate limit) are typed and
+    /// carry no event.
+    ///
+    /// `to_suite` is the Classic suite the caller would downgrade to (typically
+    /// [`CryptoSuite::X25519_ED25519`]).
+    pub fn authorize_classic_fallback(
+        &self,
+        gate: &mut crate::policy::PolicyGate,
+        peer: &str,
+        reason: crate::policy::FallbackReason,
+        to_suite: CryptoSuite,
+    ) -> crate::policy::DowngradeDecision {
+        // `from_suite`: the PQC suite we attempted (the first/preferred offered
+        // suite this initiator was configured with).
+        let from_suite = self
+            .config
+            .preferred_suites
+            .iter()
+            .copied()
+            .find(|suite| suite.is_pqc())
+            .unwrap_or(CryptoSuite::MLKEM768_MLDSA65);
+        // Bind the audit record to this handshake's MessageA transcript when known.
+        let transcript_anchor = match &self.state {
+            PqcInitiatorState::WaitingForMessageB(waiting) => Some(waiting.transcript_hash_a),
+            _ => None,
+        };
+        gate.authorize_downgrade(
+            peer,
+            from_suite,
+            to_suite,
+            reason,
+            transcript_anchor.as_ref().map(|hash| hash.as_slice()),
+        )
     }
 }
 
@@ -515,6 +576,25 @@ fn build_responder_message_b_and_keys(
     config: &PqcResponderConfig,
     message_a: &DecodedMessageA,
 ) -> Result<(Vec<u8>, ClassicSessionKeys)> {
+    // Policy gate (responder side): a strict-PQC responder MUST NOT continue if the
+    // initiator advertises a non-PQC-mandatory posture on the wire while we require
+    // PQC. This is the responder's structural refusal of an induced downgrade; it
+    // is intentionally NOT a fallback (PQC has no classic path on this wire), so it
+    // emits a typed failure rather than a DowngradeEvent.
+    if config.policy.requires_pqc() && !message_a.initiator_requires_pqc {
+        // Surfaced honestly: the responder enforces PQC; it does not silently
+        // downgrade. (PreferPqc tolerates this for interop; only the strict modes
+        // hard-refuse.)
+        if !config.policy.allows_classic_business_fallback()
+            && !config.policy.allows_bootstrap_control_channel()
+        {
+            bail!(
+                "strict-PQC responder policy refuses peer advertising a non-PQC posture \
+                 (no classic fallback path)"
+            );
+        }
+    }
+
     let selected_suite = config
         .supported_suites
         .iter()
@@ -620,15 +700,39 @@ fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
     encode_string_array(&mut encoded, &["AES-256-GCM", "ChaCha20-Poly1305"]);
     encoded.push(0x01);
     encode_string(&mut encoded, handshake_app_frame::HEARTBEAT_PLATFORM);
-    encode_string(&mut encoded, "liboqs");
+    // Cross-platform provider-token: kept as the fixed wire string "liboqs" for
+    // interop with existing Swift/Apple peers that match on this token. The actual
+    // Rust PQC backend is pqcrypto/PQClean (see PQC_PROVIDER_BACKEND below), NOT
+    // liboqs; the on-wire token is a compatibility tag, not a truthful claim about
+    // this implementation.
+    encode_string(&mut encoded, PQC_PROVIDER_WIRE_TOKEN);
     encoded
 }
 
-fn pqc_policy_bytes() -> Vec<u8> {
+/// On-wire provider compatibility token. Existing peers match on the literal
+/// string "liboqs"/"liboqsPQC"; this implementation's true backend is
+/// [`PQC_PROVIDER_BACKEND`].
+const PQC_PROVIDER_WIRE_TOKEN: &str = "liboqs";
+/// On-wire policy provider compatibility token (see [`PQC_PROVIDER_WIRE_TOKEN`]).
+const PQC_POLICY_PROVIDER_WIRE_TOKEN: &str = "liboqsPQC";
+/// The accurate, honest name of the Rust PQC backend (pqcrypto crates wrapping
+/// PQClean). Surfaced for diagnostics; not sent on the wire to preserve interop.
+pub const PQC_PROVIDER_BACKEND: &str = "pqcrypto/PQClean";
+
+/// Encode the MessageA policy block.
+///
+/// Wire format is unchanged from the legacy `pqc_policy_bytes()`:
+/// `[requirePQC: u8][reserved: u8][provider-token: len-prefixed str][trailing: u8]`.
+/// The first byte (`requirePQC`) is now *derived from the active
+/// [`DowngradePolicy`]* via [`encode_policy_wire_byte`] instead of being a hardcoded
+/// literal, so the policy layer actually governs what goes on the wire. For
+/// `DowngradePolicy::PreferPqc` (the default) it emits `0x01`, byte-identical to
+/// the previous static output, preserving compatibility with existing peers.
+fn pqc_policy_bytes(policy: DowngradePolicy) -> Vec<u8> {
     let mut encoded = Vec::new();
-    encoded.push(0x01);
+    encoded.push(encode_policy_wire_byte(policy));
     encoded.push(0x00);
-    encode_string(&mut encoded, "liboqsPQC");
+    encode_string(&mut encoded, PQC_POLICY_PROVIDER_WIRE_TOKEN);
     encoded.push(0x00);
     encoded
 }
@@ -864,6 +968,7 @@ mod tests {
                 CryptoSuite::MLKEM768_MLDSA65,
                 responder_identity.mlkem768_public_key.clone(),
             )]),
+            policy: DowngradePolicy::PreferPqc,
         })?;
 
         let message_a = handshake.start()?;
@@ -880,6 +985,7 @@ mod tests {
                 local_device_name: Some("Rust PQC Responder".to_owned()),
                 identity: responder_identity,
                 supported_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+                policy: DowngradePolicy::PreferPqc,
             },
             &responder_message_a,
         )?;
@@ -917,6 +1023,7 @@ mod tests {
                 CryptoSuite::XWING_MLDSA,
                 responder_identity.xwing_public_key.clone(),
             )]),
+            policy: DowngradePolicy::PreferPqc,
         })?;
 
         let message_a = handshake.start()?;
@@ -933,6 +1040,7 @@ mod tests {
                 local_device_name: Some("Rust Hybrid Responder".to_owned()),
                 identity: responder_identity,
                 supported_suites: vec![CryptoSuite::XWING_MLDSA],
+                policy: DowngradePolicy::PreferPqc,
             },
             &responder_message_a,
         )?;
@@ -968,6 +1076,7 @@ mod tests {
                 CryptoSuite::MLKEM768_MLDSA65,
                 responder_identity.mlkem768_public_key.clone(),
             )]),
+            policy: DowngradePolicy::PreferPqc,
         })?;
         let mut responder = PqcResponderHandshake::new(PqcResponderConfig {
             local_binding: ProtocolIdentityBinding::new(
@@ -979,6 +1088,7 @@ mod tests {
             local_device_name: Some("Rust PQC Responder".to_owned()),
             identity: responder_identity,
             supported_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            policy: DowngradePolicy::PreferPqc,
         })?;
 
         let message_a = initiator.start()?;
@@ -1002,6 +1112,180 @@ mod tests {
         assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
         assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
         assert_eq!(responder_keys.negotiated_suite, "ML-KEM-768");
+        Ok(())
+    }
+
+    /// The policy byte is now derived from the active policy, but the default
+    /// `PreferPqc` posture must produce the exact legacy wire bytes so existing
+    /// peers keep parsing it.
+    #[test]
+    fn pqc_policy_bytes_preserve_legacy_wire_format() {
+        // Legacy literal: [0x01, 0x00, <u32 LE len=9>"liboqsPQC", 0x00].
+        let mut expected = Vec::new();
+        expected.push(0x01);
+        expected.push(0x00);
+        crate::handshake_wire::encode_string(&mut expected, "liboqsPQC");
+        expected.push(0x00);
+        assert_eq!(pqc_policy_bytes(DowngradePolicy::PreferPqc), expected);
+        // Strict realizations also advertise requirePQC=1.
+        assert_eq!(
+            pqc_policy_bytes(DowngradePolicy::StrictPqcCompliance)[0],
+            0x01
+        );
+        // A non-PQC posture flips the first byte to 0x00.
+        assert_eq!(pqc_policy_bytes(DowngradePolicy::Default)[0], 0x00);
+    }
+
+    /// The responder now decodes (rather than discards) the initiator's advertised
+    /// `requirePQC` posture from MessageA.
+    #[test]
+    fn responder_decodes_initiator_policy_posture() -> Result<()> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+        let mut handshake = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-1234567890abcd",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: None,
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        let message_a = handshake.start()?;
+        let decoded = decode_message_a(&message_a)?;
+        assert!(
+            decoded.initiator_requires_pqc,
+            "PreferPqc must advertise requirePQC=1 and be observed by the responder"
+        );
+        Ok(())
+    }
+
+    /// End-to-end initiator-side fallback gate: BLOCKED reasons denied, ALLOWED
+    /// reason authorized with a transcript-anchored DowngradeEvent, and the per-peer
+    /// 300 s cooldown then denies an immediate second fallback.
+    #[test]
+    fn initiator_fallback_gate_enforces_taxonomy_and_cooldown() -> Result<()> {
+        use crate::policy::{DowngradeDecision, FallbackReason, PolicyGate};
+
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+        let mut handshake = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-1234567890abcd",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: None,
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        // Drive into WaitingForMessageB so a transcript anchor is available.
+        let _message_a = handshake.start()?;
+
+        let mut gate = PolicyGate::new(handshake.policy());
+        let peer = "device-fedcba0987654321";
+
+        // BLOCKED: a timeout must never authorize a fallback.
+        let blocked = handshake.authorize_classic_fallback(
+            &mut gate,
+            peer,
+            FallbackReason::Timeout,
+            CryptoSuite::X25519_ED25519,
+        );
+        assert_eq!(
+            blocked,
+            DowngradeDecision::DeniedReasonIneligible(FallbackReason::Timeout)
+        );
+
+        // ALLOWED: pqcProviderUnavailable authorizes a transcript-anchored event.
+        let allowed = handshake.authorize_classic_fallback(
+            &mut gate,
+            peer,
+            FallbackReason::PqcProviderUnavailable,
+            CryptoSuite::X25519_ED25519,
+        );
+        let event = allowed.event().expect("eligible reason => authorized");
+        assert_eq!(event.from_suite, CryptoSuite::MLKEM768_MLDSA65.wire_id);
+        assert_eq!(event.to_suite, CryptoSuite::X25519_ED25519.wire_id);
+        assert!(
+            event.transcript_anchor.is_some(),
+            "fallback authorized in-handshake must anchor to the MessageA transcript"
+        );
+
+        // COOLDOWN: a second eligible fallback to the same peer is rate-limited.
+        let second = handshake.authorize_classic_fallback(
+            &mut gate,
+            peer,
+            FallbackReason::PqcProviderUnavailable,
+            CryptoSuite::X25519_ED25519,
+        );
+        assert!(matches!(
+            second,
+            DowngradeDecision::DeniedRateLimited { .. }
+        ));
+        Ok(())
+    }
+
+    /// A strict-PQC responder refuses an initiator that advertises a non-PQC
+    /// (downgrade-friendly) posture, rather than silently proceeding.
+    #[test]
+    fn strict_responder_refuses_non_pqc_initiator_posture() -> Result<()> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+        // Initiator advertises Default posture (requirePQC=0) on the wire.
+        let mut handshake = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-1234567890abcd",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: None,
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::Default,
+        })?;
+        let message_a = handshake.start()?;
+        let decoded = decode_message_a(&message_a)?;
+        assert!(!decoded.initiator_requires_pqc);
+
+        let responder_binding = ProtocolIdentityBinding::new(
+            "device-fedcba0987654321",
+            responder_identity.signing_algorithm,
+            responder_identity.signing_public_key.clone(),
+            None,
+        )?;
+        let result = build_responder_message_b_and_keys(
+            &PqcResponderConfig {
+                local_binding: responder_binding,
+                local_device_name: None,
+                identity: responder_identity,
+                supported_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+                policy: DowngradePolicy::StrictPqcCompliance,
+            },
+            &decoded,
+        );
+        assert!(
+            result.is_err(),
+            "strict-PQC responder must refuse a non-PQC-posture initiator"
+        );
         Ok(())
     }
 }

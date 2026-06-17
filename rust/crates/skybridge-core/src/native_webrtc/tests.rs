@@ -156,6 +156,7 @@ async fn native_webrtc_completes_rust_to_rust_pqc_handshake() -> Result<()> {
                     responder_identity.mlkem768_public_key.clone(),
                 ),
             ]),
+            policy: crate::DowngradePolicy::PreferPqc,
         }),
         pqc_responder: None,
     })
@@ -177,6 +178,7 @@ async fn native_webrtc_completes_rust_to_rust_pqc_handshake() -> Result<()> {
             local_device_name: Some("Rust PQC Responder".to_owned()),
             identity: responder_identity,
             supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+            policy: crate::DowngradePolicy::PreferPqc,
         }),
     })
     .await?;
