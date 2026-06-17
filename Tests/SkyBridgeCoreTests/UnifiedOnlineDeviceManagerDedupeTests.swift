@@ -122,6 +122,79 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testPersistenceKeepsNamedConnectedAndDropsUnknownOrNeverConnected() throws {
+        UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        let manager = UnifiedOnlineDeviceManager.shared
+        let namedConnected = makeDevice(
+            name: "Ziang的Mac",
+            uniqueIdentifier: "id:aaaaaaaa-0000-4000-8000-000000000001",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        // 无名「未知」设备（即便有连接时间）不应被记住——这是历史堆积的离线幽灵。
+        let unknownConnected = makeDevice(
+            name: "Unknown Device",
+            uniqueIdentifier: "id:bbbbbbbb-0000-4000-8000-000000000002",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        // 从未连接的被动发现不应被记住。
+        let neverConnected = makeDevice(
+            name: "Passing iPhone",
+            uniqueIdentifier: "id:cccccccc-0000-4000-8000-000000000003",
+            status: .offline,
+            lastConnectedAt: nil
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        try writePersistedDevicesForTesting(
+            [namedConnected, unknownConnected, neverConnected],
+            schemaVersion: 2
+        )
+        manager.reloadPersistedDevicesForTesting()
+
+        XCTAssertEqual(
+            manager.onlineDevices.map(\.uniqueIdentifier),
+            [namedConnected.uniqueIdentifier]
+        )
+        let persisted = try persistedDevicesForTesting()
+        XCTAssertEqual(persisted.map(\.uniqueIdentifier), [namedConnected.uniqueIdentifier])
+    }
+
+    @MainActor
+    func testClearOfflineDevicesRemovesUnauthorizedOfflineAndKeepsOnline() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let offlineNamed = makeDevice(
+            name: "Old Offline Mac",
+            uniqueIdentifier: "id:dddddddd-0000-4000-8000-000000000004",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        let onlineDevice = makeDevice(
+            name: "Live iPad",
+            uniqueIdentifier: "id:eeeeeeee-0000-4000-8000-000000000005",
+            status: .online,
+            lastConnectedAt: nil
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        manager.replaceDevicesForTesting([offlineNamed, onlineDevice])
+        let removed = manager.clearOfflineDevices()
+
+        XCTAssertEqual(removed, 1)
+        XCTAssertEqual(
+            manager.onlineDevices.map(\.uniqueIdentifier),
+            [onlineDevice.uniqueIdentifier]
+        )
+    }
+
+    @MainActor
     func testLegacyPersistedDeviceScrubMigratesToV2WithoutCrossNetworkRows() throws {
         UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
         let manager = UnifiedOnlineDeviceManager.shared

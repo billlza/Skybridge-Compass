@@ -4024,20 +4024,43 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let now = Date()
         let timeout: TimeInterval = 300 // 5分钟
 
- // 移除超时且没有连接历史的设备
+ // 移除「非本机、未授权、且已离线超时」的发现设备。
+ // 关键修复：不再因「曾经连接过(lastConnectedAt != nil)」而永久保留——一次性连接不应让一台
+ // 已离线且未授权的设备永远留在列表里，那正是历史「未知」设备堆积、且无法清理的根因。
+ // 已授权(受信/云端)设备始终保留以便重连；当前仍可发现(最近 timeout 内被看到)的设备也保留。
         deviceMap = deviceMap.filter { _, device in
             if device.isLocalDevice {
                 return true // 保留本机
             }
-
-            if device.lastConnectedAt != nil || device.isAuthorized {
-                return true // 保留有历史的设备
+            if device.isAuthorized {
+                return true // 保留已授权(受信/云端)设备
             }
-
-            return now.timeIntervalSince(device.lastSeen) < timeout
+            if now.timeIntervalSince(device.lastSeen) < timeout {
+                return true // 最近仍可发现，保留
+            }
+            // 离线超时：仅保留「值得记住」的具名重连目标；无名「未知」/从未连接的幽灵在此清理。
+            return skybridgeDeviceIsRememberable(device)
         }
 
         updateDevicesList()
+    }
+
+ /// 用户触发的即时清理：移除所有「非本机、未授权、当前离线」的发现设备，并同步清除持久化缓存。
+ /// 已授权(受信/云端)设备与当前在线设备保留。返回移除的数量。
+    @discardableResult
+    public func clearOfflineDevices() -> Int {
+        let before = deviceMap.count
+        deviceMap = deviceMap.filter { _, device in
+            if device.isLocalDevice { return true }
+            if device.isAuthorized { return true }
+            return device.connectionStatus != .offline
+        }
+        let removed = before - deviceMap.count
+ // 重写持久化缓存：scrub 只保留可持久化的已授权设备，离线幽灵不会再次回灌。
+        storage.rewrite(Array(deviceMap.values))
+        updateDevicesList()
+        logger.info("🧹 用户清理离线/未知设备: 移除 \(removed) 台")
+        return removed
     }
 
  /// 映射USB设备类型
@@ -4163,6 +4186,29 @@ public struct DeviceStats: Sendable {
     }
 }
 
+// MARK: - 设备记忆策略（持久化 / 清理共用）
+
+/// 名称是否「真实」：排除空名与各种「未知」占位名（这些正是历史堆积的离线幽灵）。
+fileprivate func skybridgeDeviceNameIsRememberable(_ rawName: String) -> Bool {
+    let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !name.isEmpty else { return false }
+    switch name {
+    case "unknown", "unknown device", "unknowndevice",
+         "未知", "未知设备", "p2ppeer", "p2p peer":
+        return false
+    default:
+        return true
+    }
+}
+
+/// 设备是否值得「记住」（持久化并在离线时保留为重连目标）：
+/// 必须有真实名称，且确有关系——已授权(受信/云端) 或 曾真正连接过。
+/// 从未连接的被动发现、以及无名的「未知」设备都不记住，避免「以前发现的设备全算进去」。
+fileprivate func skybridgeDeviceIsRememberable(_ device: OnlineDevice) -> Bool {
+    skybridgeDeviceNameIsRememberable(device.name)
+        && (device.isAuthorized || device.lastConnectedAt != nil)
+}
+
 // MARK: - 设备存储
 
 /// 设备持久化存储
@@ -4268,8 +4314,20 @@ private class DeviceStorage {
         }
     }
 
+    /// 用当前内存中的设备整体重写持久化缓存（scrub 只保留可持久化的已授权设备）。
+    func rewrite(_ devices: [OnlineDevice]) {
+        replaceDevices(Self.scrubPersistedDevices(devices))
+    }
+
     private static func scrubPersistedDevice(_ device: OnlineDevice) -> OnlineDevice? {
         guard !isEphemeralConnectionIdentifier(device.uniqueIdentifier) else {
+            return nil
+        }
+        // 仅持久化「值得记住」的设备（真实名称 + 已授权或曾连接）。无名的「未知」设备、以及从未连接的
+        // 被动发现不写入缓存，避免它们在下次启动时作为离线幽灵重新加载、让历史发现的设备「全算进去」。
+        // 本守卫同时会在加载旧缓存时一次性清洗掉历史遗留的此类设备（loadDevices 检测到 scrub 后数量
+        // 变化即重写缓存）。受信/云端/曾连接的具名设备仍会保留，便于重连。
+        guard skybridgeDeviceIsRememberable(device) else {
             return nil
         }
         var scrubbedDevice = device

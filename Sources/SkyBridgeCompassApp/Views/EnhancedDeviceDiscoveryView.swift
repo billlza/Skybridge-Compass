@@ -564,6 +564,17 @@ public struct EnhancedDeviceDiscoveryView: View {
                     Text(String(format: LocalizationManager.shared.localizedString("discovery.onlineDevices"), activeOnlineDevicesNonLocal.count))
                         .font(.headline)
 
+                    if clearableOfflineDeviceCount > 0 {
+                        Button {
+                            unifiedDeviceManager.clearOfflineDevices()
+                        } label: {
+                            Label("清理离线 (\(clearableOfflineDeviceCount))", systemImage: "trash")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("移除所有已离线、未授权的发现设备（受信/在线设备保留）")
+                    }
+
                     Spacer()
 
  // 搜索框
@@ -1186,6 +1197,13 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     private var onlineNonLocalDevices: [OnlineDevice] {
         unifiedDeviceManager.onlineDevices.filter { !$0.isLocalDevice }
+    }
+
+    /// 可被「清理离线」一键移除的设备数：非本机、未授权、当前离线（即历史堆积的「未知」离线幽灵）。
+    private var clearableOfflineDeviceCount: Int {
+        unifiedDeviceManager.onlineDevices.filter {
+            !$0.isLocalDevice && !$0.isAuthorized && $0.connectionStatus == .offline
+        }.count
     }
 
     private var connectedOnlineDevicesNonLocal: [OnlineDevice] {
