@@ -10,7 +10,8 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         lowLatency: Bool = false,
         hardware: Bool = true,
         appleSiliconOptimization: Bool = true,
-        preserveExactVisibleSize: Bool = false
+        preserveExactVisibleSize: Bool = false,
+        displayID: CGDirectDisplayID? = nil
     ) -> RemoteControlStreamRequest {
         RemoteControlStreamRequest(
             preferredSize: size,
@@ -20,7 +21,8 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
             lowLatencyMode: lowLatency,
             enableHardwareAcceleration: hardware,
             enableAppleSiliconOptimization: appleSiliconOptimization,
-            preserveExactVisibleSize: preserveExactVisibleSize
+            preserveExactVisibleSize: preserveExactVisibleSize,
+            preferredDisplayID: displayID
         )
     }
 
