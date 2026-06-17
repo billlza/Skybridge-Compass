@@ -18,6 +18,7 @@ pub mod route;
 pub mod session;
 pub mod signaling;
 pub mod signaling_client;
+pub mod two_attempt;
 
 pub use auth::*;
 pub use classic_handshake::*;
@@ -27,8 +28,8 @@ pub use file_transfer_frame::*;
 pub use identity::*;
 pub use native_webrtc::*;
 pub use policy::{
-    DowngradeDecision, DowngradeEvent, DowngradePolicy, FALLBACK_COOLDOWN, FallbackRateLimiter,
-    FallbackReason, PolicyGate,
+    DowngradeDecision, DowngradeEvent, DowngradePolicy, DowngradeSignatureError, FALLBACK_COOLDOWN,
+    FallbackRateLimiter, FallbackReason, PolicyGate, SignedDowngradeEvent,
 };
 pub use pqc::*;
 pub use pqc_handshake::{
@@ -40,3 +41,7 @@ pub use route::*;
 pub use session::*;
 pub use signaling::*;
 pub use signaling_client::*;
+pub use two_attempt::{
+    DowngradeEventSink, DowngradeSigningIdentity, HandshakeOutcome, TwoAttemptError,
+    TwoAttemptHandshakeDriver,
+};

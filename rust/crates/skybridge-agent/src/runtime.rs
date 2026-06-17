@@ -35,6 +35,7 @@ mod pqc_config;
 #[cfg(test)]
 mod tests;
 mod tracing_setup;
+mod two_attempt_connect;
 
 pub use options::AgentRuntimeOptions;
 pub use paths::{AgentPaths, resolve_paths};
@@ -429,6 +430,94 @@ where
     Ok(())
 }
 
+/// Resolve the PQC initiator config, routing a *PQC-provider-unavailable* failure
+/// through the live two-attempt downgrade driver.
+///
+/// This is the runtime call site that finally exercises the policy gate on a real
+/// PQC failure (the gap this work closes): for an ML-DSA-65 *initiator*, building
+/// the PQC initiator config can fail because no peer PQC KEM public keys are
+/// configured — the canonical `PqcProviderUnavailable` condition. Rather than
+/// blindly `?`-propagating, we drive it through
+/// [`two_attempt_connect::drive_two_attempt_handshake`], which classifies the
+/// failure, consults the [`PolicyGate`] (posture + per-peer cooldown), and — only
+/// on an authorized downgrade — emits a signed [`skybridge_core::DowngradeEvent`]
+/// to the audit sink. The classic *attempt* closure honestly reports that the
+/// agent has no Ed25519 classic identity to actually fall back to when running an
+/// ML-DSA-65 identity, so a permitted downgrade is recorded but the typed
+/// classic-unavailable error is surfaced rather than silently proceeding.
+///
+/// For every non-initiator role, a non-ML-DSA identity, or a PQC config that builds
+/// cleanly, this is a thin pass-through with no behavioral change.
+async fn resolve_pqc_initiator_with_two_attempt_fallback(
+    paths: &AgentPaths,
+    identity: &crate::state::DeviceIdentityMaterial,
+    local_binding: &skybridge_core::ProtocolIdentityBinding,
+    control: &ManagedSessionControl,
+) -> Result<Option<skybridge_core::PqcInitiatorConfig>> {
+    use skybridge_core::PolicyGate;
+
+    match build_pqc_initiator_config_from_env(paths, identity, local_binding, control.role).await {
+        Ok(config) => Ok(config),
+        Err(pqc_error) => {
+            // Only an ML-DSA-65 initiator can produce an auditable, signable
+            // downgrade decision; anything else just propagates the original error.
+            let signing_identity = match two_attempt_connect::signing_identity_from_device(identity)
+            {
+                Ok(signing_identity)
+                    if control.role == RuntimeSessionRole::Initiator =>
+                {
+                    signing_identity
+                }
+                _ => return Err(pqc_error),
+            };
+
+            let mut gate = PolicyGate::new(two_attempt_connect::AGENT_DEFAULT_DOWNGRADE_POLICY);
+            // `ManagedSessionControl` does not carry a resolved remote device id, so
+            // the per-peer cooldown is keyed on the stable session id (one fallback
+            // decision per session attempt).
+            let peer = control.session_id.clone();
+
+            // Live two-attempt drive: attempt 1 is the PQC config build that just
+            // failed; attempt 2 (classic) is gated behind policy authorization.
+            let outcome = two_attempt_connect::drive_two_attempt_handshake::<(), _, _>(
+                &mut gate,
+                &signing_identity,
+                &peer,
+                &control.session_id,
+                skybridge_core::CryptoSuite::MLKEM768_MLDSA65,
+                two_attempt_connect::AGENT_CLASSIC_FALLBACK_SUITE,
+                None,
+                || Err(anyhow!("{pqc_error}")),
+                || {
+                    // The agent's ML-DSA-65 identity carries no Ed25519 classic key,
+                    // so there is no classic identity to actually downgrade to here.
+                    // The downgrade was authorized + audited above; surface the
+                    // honest typed error instead of silently establishing nothing.
+                    Err(anyhow!(
+                        "classic fallback authorized but the ML-DSA-65 agent identity has no Ed25519 classic key"
+                    ))
+                },
+            );
+
+            match outcome {
+                // Unreachable here (PQC build already failed), but handle for totality.
+                Ok(_) => Ok(None),
+                Err(error) => {
+                    warn!(
+                        kind = "agent.session.two_attempt_fallback_outcome",
+                        session_id = %control.session_id,
+                        outcome = %error,
+                        "PQC initiator unavailable; two-attempt downgrade driver evaluated the failure"
+                    );
+                    // Preserve fail-closed behavior: propagate the original PQC error
+                    // so the session does not silently start with no handshake.
+                    Err(pqc_error)
+                }
+            }
+        }
+    }
+}
+
 async fn run_managed_session(
     paths: AgentPaths,
     control: ManagedSessionControl,
@@ -449,9 +538,13 @@ async fn run_managed_session(
     )?;
     let identity = ensure_device_identity(&paths).await?;
     let local_binding = signing_binding(&identity)?;
-    let pqc_initiator =
-        build_pqc_initiator_config_from_env(&paths, &identity, &local_binding, control.role)
-            .await?;
+    let pqc_initiator = resolve_pqc_initiator_with_two_attempt_fallback(
+        &paths,
+        &identity,
+        &local_binding,
+        &control,
+    )
+    .await?;
     let pqc_responder =
         build_pqc_responder_config(&paths, &identity, &local_binding, control.role).await?;
     let mut connection = SignalingConnection::connect(ws_url, &control.session_id).await?;

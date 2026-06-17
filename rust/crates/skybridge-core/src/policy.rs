@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::CryptoSuite;
+use crate::{CryptoSuite, ProtocolSigningAlgorithm, mldsa65_sign_detached, mldsa65_verify_detached};
 
 /// Per-peer cooldown enforced between two authorized Classic fallbacks.
 ///
@@ -291,6 +291,11 @@ impl DowngradeEvent {
     pub const DOWNGRADE_RESISTANCE: &'static str =
         "policy_gate+no_timeout_fallback+rate_limited";
 
+    /// Domain-separation tag prepended to every canonical signing pre-image so a
+    /// `DowngradeEvent` signature can never be confused with any other ML-DSA-65
+    /// signature this identity produces (handshake MessageA/MessageB, etc.).
+    pub const SIGNING_DOMAIN: &'static [u8] = b"SkyBridge-DowngradeEvent-v1";
+
     fn new(
         peer: &str,
         from_suite: CryptoSuite,
@@ -312,6 +317,148 @@ impl DowngradeEvent {
             transcript_anchor: transcript_anchor.map(hex_encode),
             downgrade_resistance: Self::DOWNGRADE_RESISTANCE.to_owned(),
         }
+    }
+
+    /// Deterministic, version-stable byte serialization of this event used as the
+    /// ML-DSA-65 signing pre-image.
+    ///
+    /// This is intentionally *not* `serde_json` — JSON map/whitespace ordering is
+    /// not a stable signing input across crate/serde versions. Instead every field
+    /// is length-prefixed and emitted in a fixed order behind a domain tag, so the
+    /// exact same bytes are reproduced by [`SignedDowngradeEvent::verify`] when a
+    /// persisted/replayed event is checked. The unsigned serde encoding of
+    /// [`DowngradeEvent`] is left untouched (it is FFI-consumed) — the signature is
+    /// computed over *this* canonical form and carried alongside in
+    /// [`SignedDowngradeEvent`].
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(Self::SIGNING_DOMAIN);
+        out.extend_from_slice(&self.schema_version.to_le_bytes());
+        push_len_prefixed(&mut out, self.peer.as_bytes());
+        out.extend_from_slice(&self.from_suite.to_le_bytes());
+        out.extend_from_slice(&self.to_suite.to_le_bytes());
+        push_len_prefixed(&mut out, self.reason.diagnostic_code().as_bytes());
+        // Policy posture: a single stable discriminant byte (independent of the
+        // legacy `requirePQC` wire byte, which collapses distinct postures).
+        out.push(match self.policy {
+            DowngradePolicy::StrictPqcCompliance => 0x00,
+            DowngradePolicy::StrictPqcBootstrapAssisted => 0x01,
+            DowngradePolicy::PreferPqc => 0x02,
+            DowngradePolicy::Default => 0x03,
+        });
+        out.extend_from_slice(&self.cooldown_seconds.to_le_bytes());
+        // Timestamp as Unix-nanoseconds (i128) — order-stable and resolution-stable.
+        out.extend_from_slice(&self.timestamp_window.unix_timestamp_nanos().to_le_bytes());
+        match &self.transcript_anchor {
+            Some(anchor) => {
+                out.push(0x01);
+                push_len_prefixed(&mut out, anchor.as_bytes());
+            }
+            None => out.push(0x00),
+        }
+        push_len_prefixed(&mut out, self.downgrade_resistance.as_bytes());
+        out
+    }
+}
+
+/// A [`DowngradeEvent`] with a detached ML-DSA-65 signature over its canonical
+/// serialization, plus the signer's identity so a verifier can re-check it.
+///
+/// This is the cryptographically tamper-evident realization of the auditable
+/// downgrade record: the structured [`DowngradeEvent`] is unchanged (and still
+/// serde-/FFI-stable), and the signature is computed over
+/// [`DowngradeEvent::canonical_bytes`] — so a persisted or replayed event whose
+/// fields were altered will fail [`Self::verify`]. The signer's public key is
+/// carried for convenience, but a relying party MUST verify against an
+/// *independently trusted* key (e.g. the peer's pinned identity), not blindly
+/// against `signer_public_key` — see [`Self::verify_with`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedDowngradeEvent {
+    /// The structured downgrade record (its own serde encoding is unchanged).
+    pub event: DowngradeEvent,
+    /// Signing algorithm — always [`ProtocolSigningAlgorithm::MlDsa65`] today.
+    pub signer_algorithm: ProtocolSigningAlgorithm,
+    /// The signer's ML-DSA-65 public key (base64 in the serde encoding).
+    #[serde(with = "base64_standard")]
+    pub signer_public_key: Vec<u8>,
+    /// Detached ML-DSA-65 signature over [`DowngradeEvent::canonical_bytes`]
+    /// (base64 in the serde encoding).
+    #[serde(with = "base64_standard")]
+    pub signature: Vec<u8>,
+}
+
+/// Errors from signing or verifying a [`SignedDowngradeEvent`].
+#[derive(Debug, thiserror::Error)]
+pub enum DowngradeSignatureError {
+    /// The local identity did not use ML-DSA-65 (the only supported signer).
+    #[error("downgrade-event signing requires an ML-DSA-65 identity, got {0}")]
+    UnsupportedSignerAlgorithm(ProtocolSigningAlgorithm),
+    /// The detached ML-DSA-65 signature failed to verify against the public key.
+    #[error("downgrade-event signature verification failed: {0}")]
+    InvalidSignature(String),
+    /// The underlying ML-DSA-65 sign/verify primitive errored (e.g. malformed key).
+    #[error("downgrade-event crypto error: {0}")]
+    Crypto(String),
+}
+
+impl SignedDowngradeEvent {
+    /// Sign `event` with the local ML-DSA-65 identity, producing a detached
+    /// signature over [`DowngradeEvent::canonical_bytes`].
+    ///
+    /// `public_key`/`secret_key` are the local identity's ML-DSA-65 key pair (the
+    /// same material the PQC handshake signs MessageA with — see
+    /// `RustPqcIdentityMaterial` / the agent's `ProtocolSigningKeyMaterial`).
+    pub fn sign(
+        event: DowngradeEvent,
+        signer_algorithm: ProtocolSigningAlgorithm,
+        public_key: &[u8],
+        secret_key: &[u8],
+    ) -> Result<Self, DowngradeSignatureError> {
+        if signer_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
+            return Err(DowngradeSignatureError::UnsupportedSignerAlgorithm(
+                signer_algorithm,
+            ));
+        }
+        let canonical = event.canonical_bytes();
+        let signature = mldsa65_sign_detached(&canonical, secret_key)
+            .map_err(|error| DowngradeSignatureError::Crypto(error.to_string()))?;
+        Ok(Self {
+            event,
+            signer_algorithm,
+            signer_public_key: public_key.to_vec(),
+            signature,
+        })
+    }
+
+    /// Recompute the canonical bytes and verify the detached signature against the
+    /// *embedded* `signer_public_key`.
+    ///
+    /// This proves the event has not been tampered with since it was signed by the
+    /// holder of `signer_public_key`. It does NOT by itself prove *who* signed it —
+    /// to bind the record to a known peer, verify against an externally trusted key
+    /// with [`Self::verify_with`].
+    pub fn verify(&self) -> Result<(), DowngradeSignatureError> {
+        let key = self.signer_public_key.clone();
+        self.verify_with(&key)
+    }
+
+    /// Recompute the canonical bytes and verify the detached signature against an
+    /// externally supplied, trusted public key (e.g. the peer's pinned ML-DSA-65
+    /// identity). A key that differs from the true signer fails verification.
+    pub fn verify_with(&self, public_key: &[u8]) -> Result<(), DowngradeSignatureError> {
+        if self.signer_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
+            return Err(DowngradeSignatureError::UnsupportedSignerAlgorithm(
+                self.signer_algorithm,
+            ));
+        }
+        let canonical = self.event.canonical_bytes();
+        mldsa65_verify_detached(&canonical, &self.signature, public_key)
+            .map_err(|error| DowngradeSignatureError::InvalidSignature(error.to_string()))
     }
 }
 
@@ -403,6 +550,32 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// Base64 (standard) serde codec for the `Vec<u8>` fields of
+/// [`SignedDowngradeEvent`] (public key + signature), keeping the wrapper's JSON
+/// human-readable and consistent with `ProtocolIdentityBinding`.
+mod base64_standard {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(value))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(value.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +794,130 @@ mod tests {
         assert_eq!(
             decoded.downgrade_resistance,
             DowngradeEvent::DOWNGRADE_RESISTANCE
+        );
+    }
+
+    // ---- Signing: sign -> verify round-trips, tamper/wrong-key fail ----
+
+    fn sample_event() -> DowngradeEvent {
+        let mut gate = PolicyGate::new(DowngradePolicy::PreferPqc);
+        gate.authorize_downgrade(
+            "device-fedcba0987654321",
+            PQC_SUITE,
+            CLASSIC_SUITE,
+            FallbackReason::PqcProviderUnavailable,
+            Some(&[0x01, 0x02, 0x03, 0x04]),
+        )
+        .event()
+        .cloned()
+        .expect("authorized => event")
+    }
+
+    #[test]
+    fn signed_event_round_trips_sign_then_verify() {
+        let (public_key, secret_key) = crate::mldsa65_generate_keypair();
+        let signed = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::MlDsa65,
+            &public_key,
+            &secret_key,
+        )
+        .expect("sign");
+        // Verifies against the embedded key and against the same key supplied out-of-band.
+        signed.verify().expect("self-verify");
+        signed.verify_with(&public_key).expect("trusted-key verify");
+    }
+
+    #[test]
+    fn signed_event_survives_serde_round_trip() {
+        let (public_key, secret_key) = crate::mldsa65_generate_keypair();
+        let signed = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::MlDsa65,
+            &public_key,
+            &secret_key,
+        )
+        .expect("sign");
+        let json = serde_json::to_string(&signed).expect("serialize");
+        let decoded: SignedDowngradeEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, signed);
+        // The inner event's own serde encoding is unchanged / still present.
+        assert_eq!(decoded.event, signed.event);
+        decoded.verify().expect("verify after serde round-trip");
+    }
+
+    #[test]
+    fn tampered_event_fails_verification() {
+        let (public_key, secret_key) = crate::mldsa65_generate_keypair();
+        let signed = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::MlDsa65,
+            &public_key,
+            &secret_key,
+        )
+        .expect("sign");
+
+        // Mutate a field after signing: the recomputed canonical bytes no longer match.
+        let mut tampered = signed.clone();
+        tampered.event.peer = "device-attacker0000000".to_owned();
+        assert!(
+            matches!(
+                tampered.verify(),
+                Err(DowngradeSignatureError::InvalidSignature(_))
+            ),
+            "a tampered event must fail signature verification"
+        );
+
+        // Flipping the recorded suite is also caught.
+        let mut tampered_suite = signed.clone();
+        tampered_suite.event.to_suite = PQC_SUITE.wire_id;
+        assert!(tampered_suite.verify().is_err());
+    }
+
+    #[test]
+    fn wrong_key_fails_verification() {
+        let (public_key, secret_key) = crate::mldsa65_generate_keypair();
+        let (other_public_key, _other_secret_key) = crate::mldsa65_generate_keypair();
+        let signed = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::MlDsa65,
+            &public_key,
+            &secret_key,
+        )
+        .expect("sign");
+        // A different (attacker / unrelated) public key must not verify the signature.
+        assert!(
+            signed.verify_with(&other_public_key).is_err(),
+            "verifying against the wrong key must fail"
+        );
+    }
+
+    #[test]
+    fn signing_rejects_non_mldsa_identity() {
+        let (public_key, secret_key) = crate::mldsa65_generate_keypair();
+        let result = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::Ed25519,
+            &public_key,
+            &secret_key,
+        );
+        assert!(matches!(
+            result,
+            Err(DowngradeSignatureError::UnsupportedSignerAlgorithm(
+                ProtocolSigningAlgorithm::Ed25519
+            ))
+        ));
+    }
+
+    #[test]
+    fn canonical_bytes_are_deterministic_and_domain_separated() {
+        let event = sample_event();
+        assert_eq!(event.canonical_bytes(), event.canonical_bytes());
+        assert!(
+            event
+                .canonical_bytes()
+                .starts_with(DowngradeEvent::SIGNING_DOMAIN),
+            "canonical pre-image must be domain-separated"
         );
     }
 
