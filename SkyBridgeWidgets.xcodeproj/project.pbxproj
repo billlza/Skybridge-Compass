@@ -101,6 +101,7 @@
 		C00EEDBECAC4FEC52B10FA31 /* SkyBridgeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 962ACD1027DC997E30E6FD7B /* SkyBridgeUI */; };
 		C4F836ECF847653206BAA2C7 /* NSTextFieldRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */; };
 		C91899FAFC645E27B5CFCEC5 /* TrustedDeviceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */; };
+		D31CE3551A6E4B0C8F0D0002 /* DeviceMessagingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D31CE3551A6E4B0C8F0D0001 /* DeviceMessagingView.swift */; };
 		D150ECFD3F644A3C36BC983F /* DeepSpaceBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */; };
 		D18FEAF482D5F10FC9FF76D1 /* SkyBridgeWidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */; };
 		D1AA0048AE2EFE6CAA48604F /* WeatherDashboardCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */; };
@@ -175,6 +176,7 @@
 		453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardBackgroundView.swift; sourceTree = "<group>"; };
 		4AA118FAF4446AA7A926A272 /* PerformanceMetricRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMetricRow.swift; sourceTree = "<group>"; };
 		4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceDetailView.swift; sourceTree = "<group>"; };
+		D31CE3551A6E4B0C8F0D0001 /* DeviceMessagingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingView.swift; sourceTree = "<group>"; };
 		4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardViewModel.swift; sourceTree = "<group>"; };
 		4F654D338CC30B122FE4B133 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WebKit.framework; sourceTree = "<group>"; };
 		5181227F31B316BCC735B8FA /* GlassSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSidebar.swift; sourceTree = "<group>"; };
@@ -386,6 +388,7 @@
 				72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */,
 				904A7A42479065B9367A8E4D /* SSHTerminalView.swift */,
 				4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */,
+				D31CE3551A6E4B0C8F0D0001 /* DeviceMessagingView.swift */,
 				3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */,
 				72CCFF8EFF1A7A7B473878F4 /* USBDeviceManagementView.swift */,
 				DD91A8E4CBF6638B206BB830 /* VNCViewerView.swift */,
@@ -786,6 +789,7 @@
 				37D0AB8ABBF69CB961977B17 /* ThemeConfiguration.swift in Sources */,
 				2CA33118A7F89D5B3CBDEFBD /* TopNavigationBarView.swift in Sources */,
 				C91899FAFC645E27B5CFCEC5 /* TrustedDeviceDetailView.swift in Sources */,
+				D31CE3551A6E4B0C8F0D0002 /* DeviceMessagingView.swift in Sources */,
 				3718C6A09071B63D5A584DC2 /* USBDeviceManagementView.swift in Sources */,
 				A754A5A5420B98FC76F858A0 /* UnifiedDeviceDiscoveryIntegrationView.swift in Sources */,
 				7A82E21B4233C8E31F7F217F /* UserProfileOverlay.swift in Sources */,
