@@ -100,6 +100,8 @@ public final class TopBarNetworkStatusService: ObservableObject {
     private var initialSpeedSampleTask: Task<Void, Never>?
     private var locationTask: Task<Void, Never>?
     private var latencyTask: Task<Void, Never>?
+    /// 周期性刷新任务：带宽/延迟/位置在首采后会自动陈旧，需要定时重采，否则顶栏指标会「卡住不再刷新」。
+    private var periodicRefreshTask: Task<Void, Never>?
     private var lastLocationRefresh: Date?
     private var lastLatencyRefresh: Date?
 
@@ -179,6 +181,7 @@ public final class TopBarNetworkStatusService: ObservableObject {
         refreshLocationIfNeeded(force: true)
         refreshLatencyIfNeeded(force: true)
         startNetworkPathMonitoring()
+        startPeriodicRefresh(generation: probeGeneration)
     }
 
     private func stopMonitoring() {
@@ -194,6 +197,8 @@ public final class TopBarNetworkStatusService: ObservableObject {
         locationTask = nil
         latencyTask?.cancel()
         latencyTask = nil
+        periodicRefreshTask?.cancel()
+        periodicRefreshTask = nil
         previousCounters = nil
         previousCounterDate = nil
     }
@@ -230,6 +235,31 @@ public final class TopBarNetworkStatusService: ObservableObject {
                 }
                 self.initialSpeedSampleTask = nil
                 self.sampleSpeed()
+            }
+        }
+    }
+
+    /// 周期性重采：每 2s 触发一次。带宽每次都重算（sampleSpeed 自带重入保护）；延迟/位置走 IfNeeded
+    /// 的内部节流（分别为 15s / 300s），因此用 force:false 即可自适应频率，不会过度探测。
+    private func startPeriodicRefresh(generation: UInt64) {
+        periodicRefreshTask?.cancel()
+        periodicRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+                await MainActor.run { [weak self] in
+                    guard let self,
+                          self.isCurrentProbeGeneration(generation),
+                          !Task.isCancelled else {
+                        return
+                    }
+                    self.sampleSpeed()
+                    self.refreshLatencyIfNeeded(force: false)
+                    self.refreshLocationIfNeeded(force: false)
+                }
             }
         }
     }

@@ -178,7 +178,13 @@ public struct EnhancedDeviceDiscoveryView: View {
             cachedTrustedRecordGroups = groups
             refreshPresentationState(trustedGroups: groups)
         }
-        .onReceive(unifiedDeviceManager.$onlineDevices) { devices in
+        // 节流：发现扫描时 onlineDevices 会高频突发更新，而 buildPresentationSnapshot 是主线程上的
+        // O(n²) 去重/分组。不节流会让每次突发都触发一次重算 → 主线程过载 → 沙滩球。合并为最多每 300ms
+        // 一次重算（latest: true 保证最终状态仍会渲染）。
+        .onReceive(
+            unifiedDeviceManager.$onlineDevices
+                .throttle(for: .milliseconds(300), scheduler: DispatchQueue.main, latest: true)
+        ) { devices in
             refreshPresentationState(onlineDevices: devices)
         }
         .onReceive(unifiedDeviceManager.$localDevice) { _ in
