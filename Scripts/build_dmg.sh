@@ -699,20 +699,61 @@ extract_source_helper_version() {
 }
 
 select_identity() {
-    local dev_id
-    local apple_dev
-    local identities
+    # 修复：keychain 中可能同时存在多个 "Developer ID Application" 证书（例如开发者同时是
+    # 个人 "Ziang Li" 团队和某组织/企业团队的成员）。旧逻辑用 `awk ... exit` 盲取第一个，
+    # 可能签上错误团队的证书，导致 Gatekeeper 打开 DMG 时显示错误的发布者（如 "WeChat"）。
+    # 现在：
+    #   1) 若设置了 SKYBRIDGE_PREFERRED_SIGNING_IDENTITY（子串，如 "Ziang Li" 或完整团队 ID），
+    #      在候选中做子串匹配；匹配唯一则用之，匹配为空/多义则报错列出候选。
+    #   2) 未设偏好且只有一个 Developer ID Application → 直接使用。
+    #   3) 未设偏好且存在多个 → 拒绝盲选，列出全部并失败（fail-loud）。
+    #   4) 没有 Developer ID Application → 回退 Apple Development（保持旧行为）。
+    local identities preferred apple_dev id line
+    preferred="${SKYBRIDGE_PREFERRED_SIGNING_IDENTITY:-}"
     identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-    dev_id="$(printf '%s\n' "$identities" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
-    apple_dev="$(printf '%s\n' "$identities" | awk -F '"' '/Apple Development/ {print $2; exit}')"
 
-    if [[ -n "$dev_id" ]]; then
-        echo "$dev_id"
-    elif [[ -n "$apple_dev" ]]; then
-        echo "$apple_dev"
-    else
-        echo ""
+    local -a dev_ids=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && dev_ids+=("$line")
+    done < <(printf '%s\n' "$identities" | awk -F '"' '/Developer ID Application/ {print $2}')
+
+    if [[ -n "$preferred" && ${#dev_ids[@]} -gt 0 ]]; then
+        local -a matched=()
+        for id in "${dev_ids[@]}"; do
+            [[ "$id" == *"$preferred"* ]] && matched+=("$id")
+        done
+        if [[ ${#matched[@]} -eq 1 ]]; then
+            echo "${matched[0]}"
+            return 0
+        elif [[ ${#matched[@]} -eq 0 ]]; then
+            log_error "未找到匹配 SKYBRIDGE_PREFERRED_SIGNING_IDENTITY='${preferred}' 的 Developer ID Application 证书。可用候选：" >&2
+            printf '   - %s\n' "${dev_ids[@]}" >&2
+            return 1
+        else
+            log_error "SKYBRIDGE_PREFERRED_SIGNING_IDENTITY='${preferred}' 匹配到多个 Developer ID Application 证书，请写得更精确（可用完整团队 ID）：" >&2
+            printf '   - %s\n' "${matched[@]}" >&2
+            return 1
+        fi
     fi
+
+    if [[ ${#dev_ids[@]} -gt 1 ]]; then
+        log_error "检测到多个 Developer ID Application 证书，拒绝盲选（避免签到错误团队，导致 Gatekeeper 显示错误发布者）。" >&2
+        log_error "请用 --identity \"<完整身份>\" 或设置 SKYBRIDGE_PREFERRED_SIGNING_IDENTITY=\"<子串，如 Ziang Li>\" 指定。候选：" >&2
+        printf '   - %s\n' "${dev_ids[@]}" >&2
+        return 1
+    fi
+    if [[ ${#dev_ids[@]} -eq 1 ]]; then
+        echo "${dev_ids[0]}"
+        return 0
+    fi
+
+    apple_dev="$(printf '%s\n' "$identities" | awk -F '"' '/Apple Development/ {print $2; exit}')"
+    if [[ -n "$apple_dev" ]]; then
+        echo "$apple_dev"
+        return 0
+    fi
+    echo ""
+    return 0
 }
 
 sign_dmg_artifact() {
@@ -914,7 +955,10 @@ verify_app_release_features "$APP_BUNDLE"
 
 if [[ "$SKIP_SIGN" == false ]]; then
     if [[ -z "$SIGNING_IDENTITY" ]]; then
-        SIGNING_IDENTITY="$(select_identity)"
+        if ! SIGNING_IDENTITY="$(select_identity)"; then
+            log_error "无法确定唯一的签名身份，已停止发布（见上方候选列表）。"
+            exit 1
+        fi
     fi
 
     if [[ -n "$SIGNING_IDENTITY" ]]; then
@@ -1066,7 +1110,10 @@ rm -f "$TEMP_DMG"
 log_success "DMG 创建完成: $DMG_PATH"
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
-    SIGNING_IDENTITY="$(select_identity)"
+    if ! SIGNING_IDENTITY="$(select_identity)"; then
+        log_error "无法确定唯一的 DMG 签名身份，已停止发布（见上方候选列表）。"
+        exit 1
+    fi
 fi
 sign_dmg_artifact "$DMG_PATH" "$SIGNING_IDENTITY"
 
