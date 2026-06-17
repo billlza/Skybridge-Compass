@@ -35,6 +35,7 @@ pub(crate) enum Commands {
     Code(CodeCommand),
     Connect(ConnectCommand),
     Session(SessionCommand),
+    Settings(SettingsCommand),
     Disconnect(DisconnectCommand),
     File(FileCommand),
     Check(CheckCommand),

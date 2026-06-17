@@ -163,6 +163,33 @@ pub(crate) struct SessionCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SettingsCommand {
+    #[command(subcommand)]
+    pub(crate) command: SettingsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SettingsSubcommand {
+    /// List the controllable setting keys.
+    List(OutputOptions),
+    /// Print the full request contract for every controllable setting.
+    Contract(OutputOptions),
+    /// Validate a requested value against the contract and emit a request descriptor
+    /// (contract-only; the app/agent applies it, the CLI never mutates a live session).
+    Set(SettingsSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SettingsSetArgs {
+    /// Setting key (see `skybridge settings list`).
+    pub(crate) key: String,
+    /// Requested value (validated against the contract; toggles accept on/off/true/false).
+    pub(crate) value: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct RemoteDesktopCommand {
     #[command(subcommand)]
     pub(crate) command: RemoteDesktopSubcommand,

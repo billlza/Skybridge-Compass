@@ -17,7 +17,7 @@ use crate::session_commands::{disconnect, prove_remote_desktop, session_inspect,
 use crate::{
     AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
     DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
-    RemoteDesktopSubcommand, SessionSubcommand,
+    RemoteDesktopSubcommand, SessionSubcommand, SettingsSubcommand,
 };
 
 pub(super) async fn dispatch(cli: Cli) -> Result<()> {
@@ -54,6 +54,13 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             SessionSubcommand::RemoteDesktop(command) => match command.command {
                 RemoteDesktopSubcommand::Prove(args) => prove_remote_desktop(args).await,
             },
+        },
+        Commands::Settings(settings) => match settings.command {
+            SettingsSubcommand::List(output) => crate::settings_commands::list(output.json),
+            SettingsSubcommand::Contract(output) => crate::settings_commands::contract(output.json),
+            SettingsSubcommand::Set(args) => {
+                crate::settings_commands::set(&args.key, &args.value, args.output.json)
+            }
         },
         Commands::Disconnect(args) => disconnect(cli.state_dir, &args.session_id).await,
         Commands::File(file) => match file.command {

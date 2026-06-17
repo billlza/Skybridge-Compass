@@ -38,6 +38,7 @@ mod performance_tests;
 mod remote_control_notice_check;
 mod repo_paths;
 mod session_commands;
+mod settings_commands;
 mod smoke_suite;
 mod test_commands;
 mod webrtc_media_artifacts;

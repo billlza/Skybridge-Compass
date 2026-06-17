@@ -242,5 +242,9 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "session_commands/tests.rs",
         include_str!("../../session_commands/tests.rs"),
     ),
+    (
+        "settings_commands.rs",
+        include_str!("../../settings_commands.rs"),
+    ),
     ("test_commands.rs", include_str!("../../test_commands.rs")),
 ];

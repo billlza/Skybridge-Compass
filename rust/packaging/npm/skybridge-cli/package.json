@@ -1,6 +1,6 @@
 {
   "name": "skybridge-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SkyBridge CLI npm wrapper for signed Rust release binaries",
   "license": "MIT",
   "homepage": "https://github.com/billlza/Skybridge-Compass",
