@@ -32,18 +32,11 @@ public final class LogStore: ObservableObject, @unchecked Sendable {
     private let lock = NSLock()
     private var buffer: [LogEntry] = []
     private var dirty = false
-    private var flushTimer: DispatchSourceTimer?
+    /// 是否已安排一次合并刷新。取代此前的 5Hz 常驻定时器：空闲时零唤醒，仅在有新日志时安排一次刷新（省电）。
+    private var flushScheduled = false
+    private let flushInterval: TimeInterval = 0.25
 
-    private init() {
-        // Throttle UI updates to avoid List diff/render storms
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 0.2, repeating: 0.2)
-        timer.setEventHandler { [weak self] in
-            self?.flushIfNeeded()
-        }
-        timer.resume()
-        self.flushTimer = timer
-    }
+    private init() {}
 
     /// Thread-safe append; does not touch `@Published` directly (flushed periodically on main).
     public func append(level: LogLevel, category: String, message: String) {
@@ -53,7 +46,18 @@ public final class LogStore: ObservableObject, @unchecked Sendable {
             buffer.removeFirst(buffer.count - capacity)
         }
         dirty = true
+        // 仅在尚未安排刷新时安排一次（合并突发日志为一次 UI 刷新）；空闲时不产生任何主线程唤醒。
+        let needsSchedule = !flushScheduled
+        if needsSchedule {
+            flushScheduled = true
+        }
         lock.unlock()
+
+        if needsSchedule {
+            DispatchQueue.main.asyncAfter(deadline: .now() + flushInterval) { [weak self] in
+                self?.flushIfNeeded()
+            }
+        }
     }
 
     public func clear() {
@@ -98,6 +102,7 @@ public final class LogStore: ObservableObject, @unchecked Sendable {
     private func flushIfNeeded() {
         let snapshot: [LogEntry]?
         lock.lock()
+        flushScheduled = false
         if dirty {
             dirty = false
             snapshot = buffer

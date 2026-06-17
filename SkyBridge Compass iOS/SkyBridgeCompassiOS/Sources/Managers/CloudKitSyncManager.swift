@@ -235,11 +235,14 @@ public final class ICloudDevicePresenceService: ObservableObject {
         }
 
         refreshNow()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshNow()
             }
         }
+        // 允许系统合并唤醒（省电）：心跳无需精确到秒，给 ~30% 容差让 iOS 对齐其它定时器。
+        timer.tolerance = refreshInterval * 0.3
+        heartbeatTimer = timer
         SkyBridgeLogger.shared.info("💓 iCloud KVS 在线心跳已启动")
     }
 

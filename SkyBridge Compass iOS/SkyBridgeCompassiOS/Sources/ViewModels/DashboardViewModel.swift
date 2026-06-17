@@ -123,7 +123,8 @@ public class DashboardViewModel: ObservableObject {
         // 刷新设备发现
         let discoveryManager = DeviceDiscoveryManager.instance
         let startedNow = !discoveryManager.isDiscovering
-        if startedNow {
+        // 后台不重启发现：否则 30s 自动刷新会抵消 scenePhase 的省电拆除，让 Bonjour/NWBrowser 在后台持续运行耗电。
+        if startedNow && UIApplication.shared.applicationState == .active {
             try? await discoveryManager.startDiscovery()
             // 仅在“本次确实启动了发现”时做一次短等待，避免空列表闪烁。
             try? await Task.sleep(for: .milliseconds(600))
@@ -159,9 +160,10 @@ public class DashboardViewModel: ObservableObject {
     }
 
     private func setupBindings() {
-        // 监听设备发现变化
+        // 监听设备发现变化。节流到最多每 300ms 一次：发现扫描时该 publisher 会高频突发，
+        // 每次都重算指标/呈现是主线程负担（与 mac 端节流修复同理）。latest:true 保证最终状态仍渲染。
         DeviceDiscoveryManager.instance.$discoveredDevices
-            .receive(on: DispatchQueue.main)
+            .throttle(for: .milliseconds(300), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] devices in
                 self?.discoveredDevices = devices
                 self?.updateMetrics()
@@ -283,6 +285,7 @@ public class DashboardViewModel: ObservableObject {
                 await self?.refresh()
             }
         }
+        refreshTimer?.tolerance = 6 // 允许系统合并唤醒（省电）
     }
     
     private func stopAutoRefresh() {

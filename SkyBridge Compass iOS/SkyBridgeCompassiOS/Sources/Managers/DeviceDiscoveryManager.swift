@@ -438,6 +438,10 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 设备清理定时器
     private var cleanupTimer: Timer?
 
+    /// 合并高频 Bonjour 浏览事件的去抖任务：避免每个 add/change/remove 都同步触发 O(n²) 去重+重建
+    /// （主线程负担、扫描时耗电/卡顿）。在最后一个事件后 ~250ms 统一重算一次。
+    private var pendingDiscoveredDevicesUpdateTask: Task<Void, Never>?
+
     /// 周期性刷新定时器（省电策略：周期 refresh，而不是一直保持浏览器常驻）
     private var periodicRefreshTimer: Timer?
     private var periodicRefreshIntervalSeconds: TimeInterval = 0
@@ -967,8 +971,8 @@ public class DeviceDiscoveryManager: ObservableObject {
         discoveryIdentityAliasesByDeviceId[device.id, default: []]
             .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
         deviceLastActivity[device.id] = Date()
-        updateDiscoveredDevices()
-        
+        scheduleDiscoveredDevicesUpdate()
+
         SkyBridgeLogger.shared.info("➕ 发现设备: \(device.name) [\(device.platform.rawValue)] via \(serviceType.displayName)")
     }
     
@@ -985,7 +989,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             deviceCache.removeValue(forKey: deviceId)
             deviceLastActivity.removeValue(forKey: deviceId)
             endpointToDeviceId.removeValue(forKey: endpointKey)
-            updateDiscoveredDevices()
+            scheduleDiscoveredDevicesUpdate()
             return
         }
 
@@ -995,7 +999,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             deviceCache[deviceId] = existing
             deviceLastActivity[deviceId] = Date()
             endpointToDeviceId.removeValue(forKey: endpointKey)
-            updateDiscoveredDevices()
+            scheduleDiscoveredDevicesUpdate()
             SkyBridgeLogger.shared.debug("ℹ️ 活跃对等端仍受保护，保留服务元数据: \(existing.name) via \(serviceType.displayName)")
             return
         }
@@ -1017,7 +1021,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         if deviceCache[deviceId] == nil {
             discoveryIdentityAliasesByDeviceId.removeValue(forKey: deviceId)
         }
-        updateDiscoveredDevices()
+        scheduleDiscoveredDevicesUpdate()
     }
     
     private func handleDeviceChanged(_ result: NWBrowser.Result, serviceType: DiscoveryServiceType) async {
@@ -1033,9 +1037,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         discoveryIdentityAliasesByDeviceId[device.id, default: []]
             .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
         deviceLastActivity[device.id] = Date()
-        updateDiscoveredDevices()
+        scheduleDiscoveredDevicesUpdate()
     }
-    
+
     /// 从 NWBrowser.Result 创建设备对象
     private func createDevice(from result: NWBrowser.Result, serviceType: DiscoveryServiceType) async -> DiscoveredDevice {
         let endpoint = result.endpoint
@@ -2133,6 +2137,7 @@ public class DeviceDiscoveryManager: ObservableObject {
                 self?.cleanupStaleDevices()
             }
         }
+        cleanupTimer?.tolerance = 6 // 允许系统合并唤醒（省电）
     }
 
     private func startPeriodicRefreshTimer() {
@@ -2215,6 +2220,18 @@ public class DeviceDiscoveryManager: ObservableObject {
             grouped[device.platform, default: []].append(device)
         }
         devicesByPlatform = grouped
+    }
+
+    /// 去抖触发 updateDiscoveredDevices()：合并高频浏览事件突发，避免每个事件都同步跑 O(n²) 去重。
+    /// 缓存的增删改是廉价同步操作（已在调用处完成）；昂贵的合并/重建/发布推迟到突发结束后一次完成。
+    private func scheduleDiscoveredDevicesUpdate() {
+        pendingDiscoveredDevicesUpdateTask?.cancel()
+        pendingDiscoveredDevicesUpdateTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.pendingDiscoveredDevicesUpdateTask = nil
+            self?.updateDiscoveredDevices()
+        }
     }
 
     private func coalesceEquivalentCachedDevices() {

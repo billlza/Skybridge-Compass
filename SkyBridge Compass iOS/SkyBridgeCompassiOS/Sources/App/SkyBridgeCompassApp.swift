@@ -440,7 +440,8 @@ struct SkyBridgeCompassApp: App {
             if !connectionManager.isListening {
                 try? await connectionManager.startListening()
             }
-            ICloudDevicePresenceService.shared.refreshNow()
+            // 回到前台：重启在线心跳定时器（后台空闲时会被停掉以省电）。start() 幂等。
+            ICloudDevicePresenceService.shared.start()
             applyClipboardSettings()
 
         case .background:
@@ -464,7 +465,10 @@ struct SkyBridgeCompassApp: App {
                 if !hasActiveP2P && !isTransferring && !hasCrossNetwork {
                     discoveryManager.stopDiscovery()
                     connectionManager.stopListening()
-                    SkyBridgeLogger.shared.info("⏹️ 后台空闲超过 30s，已停止 discovery/listener")
+                    // 同时停止 iCloud 在线心跳定时器（30s/次 + iCloud KVS 同步），后台空闲时持续运行会显著耗电。
+                    // 回到前台时由 .active 分支的 start() 重新拉起。
+                    ICloudDevicePresenceService.shared.stop()
+                    SkyBridgeLogger.shared.info("⏹️ 后台空闲超过 30s，已停止 discovery/listener/在线心跳")
                 } else {
                     SkyBridgeLogger.shared.info("ℹ️ 后台仍有活动连接/传输，保持 discovery/listener")
                 }
