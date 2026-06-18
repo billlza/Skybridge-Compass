@@ -1,4 +1,5 @@
 use crate::error::CoreError;
+use crate::suite::CryptoSuite;
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
 use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
@@ -8,26 +9,41 @@ use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Encapsulates symmetric material derived during a session handshake.
-#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+///
+/// `Debug` is hand-written to redact: the struct holds raw key material, so the
+/// derived formatter would leak the shared secret and AEAD key into any log.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SessionSecrets {
-    pub shared_secret: Vec<u8>,
+    shared_secret: Vec<u8>,
     aead_key: [u8; 32],
+}
+
+impl std::fmt::Debug for SessionSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionSecrets").finish_non_exhaustive()
+    }
 }
 
 #[allow(deprecated)]
 type AeadNonce = aes_gcm::aead::generic_array::GenericArray<u8, aes_gcm::aead::consts::U12>;
 
 impl SessionSecrets {
-    /// Derives AES-256-GCM material from a raw shared secret via HKDF-SHA256.
+    /// Derives AES-256-GCM material from a raw shared secret via HKDF-SHA256,
+    /// domain-separated by the negotiated [`CryptoSuite`] so the SAME 32-byte
+    /// secret can never derive the SAME AEAD key under two different suites
+    /// (a cross-suite key-collision the previous fixed-info derivation allowed).
     /// `pub(crate)` so the PQC KEM path (`crate::pqc`) can build identical session
-    /// secrets from a KEM shared secret — the AEAD layer is suite-agnostic.
-    pub(crate) fn new(shared_secret: Vec<u8>) -> Result<Self, CoreError> {
-        let hk = Hkdf::<Sha256>::new(None, &shared_secret);
+    /// secrets from a KEM shared secret — the AEAD layer is suite-agnostic but the
+    /// derivation is suite-bound. (Full handshake-transcript binding lands in T4b.)
+    pub(crate) fn new(shared_secret: &[u8], suite: CryptoSuite) -> Result<Self, CoreError> {
+        let hk = Hkdf::<Sha256>::new(None, shared_secret);
+        let mut info = b"skybridge-session-aead/v1/suite=".to_vec();
+        info.extend_from_slice(&suite.wire_id().to_be_bytes());
         let mut okm = [0u8; 32];
-        hk.expand(b"skybridge-session-aead", &mut okm)
+        hk.expand(&info, &mut okm)
             .map_err(|e| CoreError::CryptoHandshake(format!("hkdf expand failed: {e}")))?;
         Ok(Self {
-            shared_secret,
+            shared_secret: shared_secret.to_vec(),
             aead_key: okm,
         })
     }
@@ -188,7 +204,9 @@ where
         };
         let shared = self.exchange.derive_shared(&local, peer_public_key).await?;
         *self.local_key.lock().unwrap() = Some(local);
-        SessionSecrets::new(shared)
+        // The only `KeyExchangeProvider` today is P-256 ECDH; bind the derivation
+        // to that suite. A future X25519 provider passes `X25519Ed25519` here.
+        SessionSecrets::new(&shared, CryptoSuite::P256Ecdsa)
     }
 
     fn local_public_key(&self) -> Option<Vec<u8>> {
@@ -290,7 +308,8 @@ mod tests {
 
     #[tokio::test]
     async fn secrets_zeroize_wipes_material() {
-        let mut secrets = SessionSecrets::new(vec![1u8; 32]).expect("construct secrets");
+        let mut secrets =
+            SessionSecrets::new(&[1u8; 32], CryptoSuite::P256Ecdsa).expect("construct secrets");
         // Call zeroize directly to validate the derive impl clears buffers.
         secrets.zeroize();
 
@@ -318,5 +337,21 @@ mod tests {
             .decrypt(&secret2, &tampered)
             .expect_err("tampered data should fail");
         assert!(matches!(err, CoreError::Decrypt(_)));
+    }
+
+    #[test]
+    fn session_secrets_are_domain_separated_by_suite() {
+        // The SAME raw shared secret must derive DIFFERENT AEAD keys under
+        // different negotiated suites, so a secret can never be cross-applied.
+        let shared = [7u8; 32];
+        let xwing = SessionSecrets::new(&shared, CryptoSuite::XWingHybrid).unwrap();
+        let mlkem = SessionSecrets::new(&shared, CryptoSuite::MlKem768MlDsa65).unwrap();
+        assert_ne!(xwing.aead_key, mlkem.aead_key);
+
+        let sealed = xwing.seal(b"cross-suite").unwrap();
+        assert!(
+            mlkem.open(&sealed).is_err(),
+            "same raw secret under different suites must not interoperate"
+        );
     }
 }
