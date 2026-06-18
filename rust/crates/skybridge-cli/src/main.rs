@@ -13,6 +13,8 @@ mod cli_text;
 mod connection_code;
 mod connection_code_snapshot;
 mod connectivity_check;
+#[cfg(unix)]
+mod crossnet_commands;
 mod control_plane_doctor;
 mod device_commands;
 mod doctor_commands;

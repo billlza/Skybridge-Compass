@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 
 mod check;
 mod common;
+#[cfg(unix)]
+mod crossnet;
 mod doctor;
 mod operator;
 mod smoke;
@@ -11,6 +13,8 @@ mod test;
 
 pub(crate) use check::*;
 pub(crate) use common::*;
+#[cfg(unix)]
+pub(crate) use crossnet::*;
 pub(crate) use doctor::*;
 pub(crate) use operator::*;
 pub(crate) use smoke::*;
@@ -34,6 +38,8 @@ pub(crate) enum Commands {
     Device(DeviceCommand),
     Code(CodeCommand),
     Connect(ConnectCommand),
+    #[cfg(unix)]
+    Crossnet(CrossnetCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     RemoteDesktop(RemoteDesktopCommand),

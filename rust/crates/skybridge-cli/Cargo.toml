@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 skybridge-agent = { path = "../skybridge-agent" }
 skybridge-core = { path = "../skybridge-core" }
+skybridge-crossnet-client = { path = "../skybridge-crossnet-client" }
 time.workspace = true
 tokio.workspace = true
 url.workspace = true

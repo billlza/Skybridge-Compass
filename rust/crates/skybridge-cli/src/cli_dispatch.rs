@@ -14,6 +14,8 @@ use crate::doctor_commands::{
 use crate::operator_status::{doctor, metrics, tail_logs};
 use crate::performance_commands::check_performance;
 use crate::session_commands::{disconnect, session_inspect, session_ls};
+#[cfg(unix)]
+use crate::CrossnetSubcommand;
 use crate::{
     AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
     DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
@@ -51,6 +53,15 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             }
         },
         Commands::Connect(args) => crate::connection_code::connect_code(cli.state_dir, args).await,
+        #[cfg(unix)]
+        Commands::Crossnet(crossnet) => match crossnet.command {
+            CrossnetSubcommand::Host(args) => crate::crossnet_commands::host(args).await,
+            CrossnetSubcommand::Connect(args) => crate::crossnet_commands::connect(args).await,
+            CrossnetSubcommand::Disconnect(output) => {
+                crate::crossnet_commands::disconnect(output.json).await
+            }
+            CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
+        },
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,

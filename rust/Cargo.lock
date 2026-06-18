@@ -3043,7 +3043,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skybridge"
-version = "1.0.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3052,6 +3052,7 @@ dependencies = [
  "serde_json",
  "skybridge-agent",
  "skybridge-core",
+ "skybridge-crossnet-client",
  "time",
  "tokio",
  "url",
@@ -3059,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-agent"
-version = "1.0.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3083,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-auth-mail"
-version = "1.0.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3098,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-core"
-version = "1.0.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3133,8 +3134,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "skybridge-crossnet-client"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "skybridge-ffi"
-version = "1.0.0"
+version = "0.2.1"
 dependencies = [
  "cbindgen",
  "serde",
