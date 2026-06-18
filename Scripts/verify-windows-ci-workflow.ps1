@@ -50,7 +50,7 @@ foreach ($signal in @(
     "dotnet-version: '10.0.x'",
     "Fetch mac UI parity baseline",
     "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c",
-    "git fetch --no-tags origin +refs/heads/tdsc-2026-01-0318-ios-sim-fix:refs/remotes/origin/tdsc-2026-01-0318-ios-sim-fix",
+    'git fetch --no-tags --depth=1 origin $baselineCommit',
     "Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
