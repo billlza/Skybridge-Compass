@@ -23,3 +23,9 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# Post-quantum cryptography (pure Rust, no C/liboqs — keeps the CI hermetic/offline).
+# ML-KEM-768 (FIPS 203) for the pure-PQC suite, X-Wing (X25519+ML-KEM-768 IETF hybrid)
+# for the preferred hybrid suite, ML-DSA-65 (FIPS 204) for PQC handshake signatures.
+ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
+ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+x-wing = { version = "0.1.0-rc.0", features = ["getrandom", "zeroize"] }

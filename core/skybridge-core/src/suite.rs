@@ -86,6 +86,19 @@ impl CryptoProviderCapabilities {
         }
     }
 
+    /// Capabilities actually backed by compiled-in providers: real X-Wing and
+    /// ML-KEM-768/ML-DSA-65 post-quantum KEMs (see [`crate::pqc`]) plus the
+    /// classic P-256 ECDH path (see [`crate::crypto`]). The `X25519Ed25519`
+    /// suite is intentionally false until that classic provider is wired.
+    pub const fn with_native_pqc() -> Self {
+        Self {
+            supports_xwing_hybrid: true,
+            supports_mlkem_768_mldsa_65: true,
+            supports_x25519_ed25519: false,
+            supports_p256_ecdsa: true,
+        }
+    }
+
     pub fn supports(self, suite: CryptoSuite) -> bool {
         match suite {
             CryptoSuite::XWingHybrid => self.supports_xwing_hybrid,

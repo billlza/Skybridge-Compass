@@ -18,7 +18,10 @@ pub struct SessionSecrets {
 type AeadNonce = aes_gcm::aead::generic_array::GenericArray<u8, aes_gcm::aead::consts::U12>;
 
 impl SessionSecrets {
-    fn new(shared_secret: Vec<u8>) -> Result<Self, CoreError> {
+    /// Derives AES-256-GCM material from a raw shared secret via HKDF-SHA256.
+    /// `pub(crate)` so the PQC KEM path (`crate::pqc`) can build identical session
+    /// secrets from a KEM shared secret — the AEAD layer is suite-agnostic.
+    pub(crate) fn new(shared_secret: Vec<u8>) -> Result<Self, CoreError> {
         let hk = Hkdf::<Sha256>::new(None, &shared_secret);
         let mut okm = [0u8; 32];
         hk.expand(b"skybridge-session-aead", &mut okm)
@@ -32,6 +35,37 @@ impl SessionSecrets {
     fn cipher(&self) -> Result<Aes256Gcm, CoreError> {
         Aes256Gcm::new_from_slice(&self.aead_key)
             .map_err(|e| CoreError::Crypto(format!("aead key init failed: {e}")))
+    }
+
+    /// AES-256-GCM seal with a fresh random 12-byte nonce, framed as `nonce || ciphertext`.
+    /// Single AEAD implementation shared by every negotiated suite (classic + PQC).
+    pub(crate) fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        let cipher = self.cipher()?;
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce: AeadNonce = nonce_bytes.into();
+        let mut ciphertext = cipher
+            .encrypt(&nonce, plaintext)
+            .map_err(|e| CoreError::Encrypt(format!("aead encrypt failed: {e}")))?;
+        let mut framed = nonce.to_vec();
+        framed.append(&mut ciphertext);
+        Ok(framed)
+    }
+
+    /// AES-256-GCM open of a `nonce || ciphertext` frame produced by [`Self::seal`].
+    pub(crate) fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        if ciphertext.len() < 12 {
+            return Err(CoreError::Decrypt("ciphertext too short".into()));
+        }
+        let (nonce_bytes, body) = ciphertext.split_at(12);
+        let cipher = self.cipher()?;
+        let nonce_array: [u8; 12] = nonce_bytes
+            .try_into()
+            .map_err(|_| CoreError::Crypto("nonce length mismatch".into()))?;
+        let nonce: AeadNonce = nonce_array.into();
+        cipher
+            .decrypt(&nonce, body)
+            .map_err(|e| CoreError::Decrypt(format!("aead decrypt failed: {e}")))
     }
 }
 
@@ -170,31 +204,11 @@ where
     }
 
     fn encrypt(&self, secrets: &SessionSecrets, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
-        let cipher = secrets.cipher()?;
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce: AeadNonce = nonce_bytes.into();
-        let mut ciphertext = cipher
-            .encrypt(&nonce, plaintext)
-            .map_err(|e| CoreError::Encrypt(format!("aead encrypt failed: {e}")))?;
-        let mut framed = nonce.to_vec();
-        framed.append(&mut ciphertext);
-        Ok(framed)
+        secrets.seal(plaintext)
     }
 
     fn decrypt(&self, secrets: &SessionSecrets, ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {
-        if ciphertext.len() < 12 {
-            return Err(CoreError::Decrypt("ciphertext too short".into()));
-        }
-        let (nonce_bytes, body) = ciphertext.split_at(12);
-        let cipher = secrets.cipher()?;
-        let nonce_array: [u8; 12] = nonce_bytes
-            .try_into()
-            .map_err(|_| CoreError::Crypto("nonce length mismatch".into()))?;
-        let nonce: AeadNonce = nonce_array.into();
-        cipher
-            .decrypt(&nonce, body)
-            .map_err(|e| CoreError::Decrypt(format!("aead decrypt failed: {e}")))
+        secrets.open(ciphertext)
     }
 }
 
