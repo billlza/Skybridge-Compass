@@ -32,7 +32,11 @@ DerivedData/
 .swiftpm_module_cache/
 .swiftpm-cache/
 .swiftpm-module-cache/
-Package.resolved
+# Package.resolved is COMMITTED on purpose: the macos-release-readiness CI's
+# os27 source-contracts lane runs `swift build --disable-automatic-resolution`,
+# which requires a checked-in Package.resolved (otherwise SwiftPM reports
+# "a resolved file is required ... dependencies were added: swift-asn1").
+!Package.resolved
 Packages/
 Package.pins
 .swift_test_output.txt
