@@ -27,5 +27,5 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # ML-KEM-768 (FIPS 203) for the pure-PQC suite, X-Wing (X25519+ML-KEM-768 IETF hybrid)
 # for the preferred hybrid suite, ML-DSA-65 (FIPS 204) for PQC handshake signatures.
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
-ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+ml-dsa = { version = "0.1.1", features = ["getrandom", "zeroize"] }
 x-wing = { version = "0.1.0-rc.0", features = ["getrandom", "zeroize"] }

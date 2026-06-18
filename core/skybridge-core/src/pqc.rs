@@ -40,7 +40,7 @@ use ml_kem::{
     Kem as _, Key as MlKemKey, KeyExport, MlKem768,
 };
 use std::sync::Mutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Size in bytes of a serialized ML-KEM-768 encapsulation key.
 pub const ML_KEM_768_ENCAPSULATION_KEY_LEN: usize = 1184;
@@ -75,11 +75,15 @@ enum KemPrivateKey {
 }
 
 /// Output of responder-side encapsulation: the ciphertext to return to the
-/// initiator plus the locally-derived shared secret (zeroized on drop).
+/// initiator plus the locally-derived shared secret. The secret is held in a
+/// `Zeroizing` buffer wiped on drop; the crate-returned KEM secret is also
+/// explicitly zeroized at the source after being copied here (the `ml-kem` /
+/// `x-wing` `SharedKey = Array<u8, U32>` is NOT zeroized on drop, since `u8`
+/// has no `ZeroizeOnDrop`).
 pub struct KemEncapsulation {
     /// Serialized ciphertext to send back to the initiator.
     pub ciphertext: Vec<u8>,
-    /// Shared secret derived by the responder.
+    /// Shared secret derived by the responder (wiped on drop).
     pub shared_secret: Zeroizing<Vec<u8>>,
 }
 
@@ -128,10 +132,12 @@ impl KemProvider for MlKem768Kem {
         let key = MlKemKey::<MlKemEncapKey<MlKem768>>::try_from(peer_encapsulation_key)
             .map_err(|_| CoreError::InvalidCryptoKey)?;
         let ek = MlKemEncapKey::<MlKem768>::new(&key).map_err(|_| CoreError::InvalidCryptoKey)?;
-        let (ct, ss) = ek.encapsulate();
+        let (ct, mut ss) = ek.encapsulate();
+        let shared_secret = Zeroizing::new(ss.to_vec());
+        ss.zeroize(); // wipe the crate-returned Array (not ZeroizeOnDrop for u8)
         Ok(KemEncapsulation {
             ciphertext: ct.to_vec(),
-            shared_secret: Zeroizing::new(ss.to_vec()),
+            shared_secret,
         })
     }
 
@@ -147,8 +153,10 @@ impl KemProvider for MlKem768Kem {
         };
         let ct = MlKemCiphertext::<MlKem768>::try_from(ciphertext)
             .map_err(|_| CoreError::Decrypt("ML-KEM-768 ciphertext length mismatch".into()))?;
-        let ss = dk.decapsulate(&ct);
-        Ok(Zeroizing::new(ss.to_vec()))
+        let mut ss = dk.decapsulate(&ct);
+        let shared = Zeroizing::new(ss.to_vec());
+        ss.zeroize();
+        Ok(shared)
     }
 }
 
@@ -175,10 +183,12 @@ impl KemProvider for XWingHybridKem {
     fn encapsulate(&self, peer_encapsulation_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         let pk = x_wing::EncapsulationKey::try_from(peer_encapsulation_key)
             .map_err(|_| CoreError::InvalidCryptoKey)?;
-        let (ct, ss) = pk.encapsulate();
+        let (ct, mut ss) = pk.encapsulate();
+        let shared_secret = Zeroizing::new(ss.to_vec());
+        ss.zeroize(); // wipe the crate-returned Array (not ZeroizeOnDrop for u8)
         Ok(KemEncapsulation {
             ciphertext: ct.to_vec(),
-            shared_secret: Zeroizing::new(ss.to_vec()),
+            shared_secret,
         })
     }
 
@@ -194,8 +204,10 @@ impl KemProvider for XWingHybridKem {
         };
         let ct = x_wing::Ciphertext::try_from(ciphertext)
             .map_err(|_| CoreError::Decrypt("X-Wing ciphertext length mismatch".into()))?;
-        let ss = sk.decapsulate(&ct);
-        Ok(Zeroizing::new(ss.to_vec()))
+        let mut ss = sk.decapsulate(&ct);
+        let shared = Zeroizing::new(ss.to_vec());
+        ss.zeroize();
+        Ok(shared)
     }
 }
 
@@ -255,7 +267,7 @@ impl KemSession {
         peer_encapsulation_key: &[u8],
     ) -> Result<(Vec<u8>, SessionSecrets), CoreError> {
         let encapsulation = self.provider.encapsulate(peer_encapsulation_key)?;
-        let secrets = SessionSecrets::new(encapsulation.shared_secret.to_vec())?;
+        let secrets = SessionSecrets::new(&encapsulation.shared_secret, self.provider.suite())?;
         Ok((encapsulation.ciphertext, secrets))
     }
 
@@ -269,7 +281,7 @@ impl KemSession {
             .take()
             .ok_or(CoreError::MissingCryptoMaterial)?;
         let shared = self.provider.decapsulate(&key_pair, ciphertext)?;
-        SessionSecrets::new(shared.to_vec())
+        SessionSecrets::new(&shared, self.provider.suite())
     }
 }
 
@@ -454,6 +466,28 @@ mod tests {
             initiator_secrets.open(&sealed).is_err(),
             "divergent secret must fail AEAD authentication"
         );
+    }
+
+    #[test]
+    fn x_wing_corrupt_ciphertext_yields_divergent_secret() {
+        // X-Wing is the PREFERRED suite; its decapsulate combines ML-KEM implicit
+        // rejection (ct_m, bytes 0..1088) with X25519 (ct_x, bytes 1088..1120) via
+        // a SHA3-256 combiner. Corrupting EITHER half must yield a divergent secret
+        // so the AEAD open fails (no error, no silent acceptance).
+        for flip_at in [0usize, X_WING_CIPHERTEXT_LEN - 1] {
+            let initiator = KemSession::new(Box::new(XWingHybridKem));
+            let responder = KemSession::new(Box::new(XWingHybridKem));
+            let ek = initiator.begin().unwrap();
+            let (mut ciphertext, responder_secrets) = responder.respond(&ek).unwrap();
+            ciphertext[flip_at] ^= 0xFF;
+            let initiator_secrets = initiator.complete_initiator(&ciphertext).unwrap();
+
+            let sealed = responder_secrets.seal(b"secret").unwrap();
+            assert!(
+                initiator_secrets.open(&sealed).is_err(),
+                "divergent secret (flip at {flip_at}) must fail AEAD authentication"
+            );
+        }
     }
 
     #[test]
