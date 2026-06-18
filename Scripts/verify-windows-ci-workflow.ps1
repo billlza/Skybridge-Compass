@@ -45,9 +45,16 @@ $gitSshRemote = Get-Content -Raw -LiteralPath $gitSshRemotePath
 foreach ($signal in @(
     "name: Windows Portability",
     "windows-latest",
-    "actions/checkout@v4",
-    "actions/setup-dotnet@v4",
+    "actions/checkout@v7.0.0",
+    "actions/setup-dotnet@v5.3.0",
     "dotnet-version: '10.0.x'",
+    "Fetch mac UI parity baseline",
+    "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c",
+    "git fetch --no-tags origin +refs/heads/tdsc-2026-01-0318-ios-sim-fix:refs/remotes/origin/tdsc-2026-01-0318-ios-sim-fix",
+    "Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
     "rustup toolchain install stable --profile minimal",
     "rustup component add clippy",
     "rustup component add llvm-tools-preview",
@@ -68,6 +75,12 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $workflow -Needle $signal -Message "Windows CI workflow missing signal: $signal"
 }
+
+$baselineFetchStepIndex = $workflow.IndexOf("Fetch mac UI parity baseline", [StringComparison]::Ordinal)
+$pinSshRemoteStepIndex = $workflow.IndexOf("Pin GitHub remote to SSH", [StringComparison]::Ordinal)
+Assert-True -Condition ($baselineFetchStepIndex -ge 0) -Message "Windows CI workflow missing mac UI parity baseline fetch step."
+Assert-True -Condition ($pinSshRemoteStepIndex -ge 0) -Message "Windows CI workflow missing SSH remote pin step."
+Assert-True -Condition ($baselineFetchStepIndex -lt $pinSshRemoteStepIndex) -Message "Windows CI workflow must fetch the mac UI parity baseline before pinning origin to SSH."
 
 foreach ($forbidden in @(
     "-RequireGitRemoteAccess",
