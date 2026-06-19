@@ -8,12 +8,15 @@
 // Modes:
 //   --mode loopback   (default) two in-process peers + echo responder; proves
 //                      the whole DataChannel + SBF1-echo + proof pipeline with
-//                      zero external dependencies. Fully self-verifying.
-//   --mode offer      offerer against a real peer; SDP exchanged via files
-//                      (--offer-out / --answer-in). For live Win<->Mac.
-//   --mode answer     answerer (echoes SBF1) for the peer side of a real run.
+//                      zero external dependencies.
+//   --mode offer      offerer against a SEPARATE peer process; SDP+candidates
+//                      exchanged via JSON files (--offer-out / --answer-in).
+//                      Emits the proof. This is the Windows side of a live run.
+//   --mode answer     answerer (echoes the SBF1 frame) for the peer side; reads
+//                      --offer-in, writes --answer-out. This is what the Mac (or
+//                      a second box) runs. Same cross-platform binary.
 //
-// The helper NEVER emits AppleNative binding — it is always WebRtcDataChannel /
+// The helper NEVER emits AppleNative binding — always WebRtcDataChannel /
 // WebRtcInterop (Apple<->Apple stays on the Apple native path).
 
 using System.Buffers.Binary;
@@ -39,7 +42,7 @@ internal static class Program
             "peer-fingerprint",
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
 
-        if (!Regex.IsMatch(peerFingerprint, "^[0-9a-f]{64}$"))
+        if ((mode is "loopback" or "offer") && !Regex.IsMatch(peerFingerprint, "^[0-9a-f]{64}$"))
         {
             Console.Error.WriteLine("peer-fingerprint must be exactly 64 lowercase hex chars");
             return 2;
@@ -50,7 +53,9 @@ internal static class Program
             return mode switch
             {
                 "loopback" => await RunLoopbackAsync(proofOut, peerDeviceId, peerFingerprint),
-                _ => Fail($"mode '{mode}' not yet implemented (use loopback)"),
+                "offer" => await RunOfferAsync(opts, proofOut, peerDeviceId, peerFingerprint),
+                "answer" => await RunAnswerAsync(opts),
+                _ => Fail($"unknown mode '{mode}' (use loopback|offer|answer)"),
             };
         }
         catch (Exception ex)
@@ -66,6 +71,8 @@ internal static class Program
         return 1;
     }
 
+    private static RTCConfiguration NewConfig() => new() { iceServers = new List<RTCIceServer>() };
+
     // --- SBF1 frame (matches core/skybridge-core/src/frame.rs:4-78, big-endian) ---
     private static byte[] EncodeSbf1(byte channelCode, ulong sequence, ushort flags, byte[] payload)
     {
@@ -80,64 +87,125 @@ internal static class Program
         return buf;
     }
 
+    // ---------------------------------------------------------------- loopback
     private static async Task<int> RunLoopbackAsync(string proofOut, string peerDeviceId, string peerFingerprint)
     {
         Console.WriteLine("[loopback] creating two peer connections...");
-        var config = new RTCConfiguration { iceServers = new List<RTCIceServer>() };
-        using var offerer = new RTCPeerConnection(config);
-        using var answerer = new RTCPeerConnection(config);
+        using var offerer = new RTCPeerConnection(NewConfig());
+        using var answerer = new RTCPeerConnection(NewConfig());
 
-        // Trickle ICE between the two in-process peers.
         offerer.onicecandidate += c => { if (c != null) answerer.addIceCandidate(ToInit(c)); };
         answerer.onicecandidate += c => { if (c != null) offerer.addIceCandidate(ToInit(c)); };
-
-        // Answerer echoes any DataChannel message back verbatim.
         answerer.ondatachannel += dc => dc.onmessage += (chan, _, data) => chan.send(data);
 
         var dc = await offerer.createDataChannel("skybridge");
-        var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var echoed = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var opened = NewTcs();
+        var echoed = NewTcs<byte[]>();
         dc.onopen += () => opened.TrySetResult();
         dc.onmessage += (_, _, data) => echoed.TrySetResult(data);
 
-        // Offer/answer exchange.
         var offer = offerer.createOffer(null);
         await offerer.setLocalDescription(offer);
-        if (answerer.setRemoteDescription(offer) != SetDescriptionResultEnum.OK)
-            return Fail("answerer rejected the offer");
+        if (answerer.setRemoteDescription(offer) != SetDescriptionResultEnum.OK) return Fail("answerer rejected offer");
         var answer = answerer.createAnswer(null);
         await answerer.setLocalDescription(answer);
-        if (offerer.setRemoteDescription(answer) != SetDescriptionResultEnum.OK)
-            return Fail("offerer rejected the answer");
+        if (offerer.setRemoteDescription(answer) != SetDescriptionResultEnum.OK) return Fail("offerer rejected answer");
 
-        Console.WriteLine("[loopback] awaiting DataChannel open...");
-        await opened.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        return await CompleteOffererAsync(offerer, dc, opened, echoed, proofOut, peerDeviceId, peerFingerprint, "loopback");
+    }
+
+    // ------------------------------------------------------------------- offer
+    private static async Task<int> RunOfferAsync(
+        Dictionary<string, string> opts, string proofOut, string peerDeviceId, string peerFingerprint)
+    {
+        var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
+        var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
+        Console.WriteLine("[offer] creating peer connection...");
+        using var pc = new RTCPeerConnection(NewConfig());
+        var cands = new List<Cand>();
+        pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+
+        var dc = await pc.createDataChannel("skybridge");
+        var opened = NewTcs();
+        var echoed = NewTcs<byte[]>();
+        dc.onopen += () => opened.TrySetResult();
+        dc.onmessage += (_, _, data) => echoed.TrySetResult(data);
+
+        var offer = pc.createOffer(null);
+        await pc.setLocalDescription(offer);
+        await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+        Signal.Write(offerOut, "offer", offer.sdp, cands);
+        Console.WriteLine($"[offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
+
+        var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+        if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
+            return Fail("offerer rejected the peer answer");
+        foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
+
+        return await CompleteOffererAsync(pc, dc, opened, echoed, proofOut, peerDeviceId, peerFingerprint, "offer");
+    }
+
+    // ------------------------------------------------------------------ answer
+    private static async Task<int> RunAnswerAsync(Dictionary<string, string> opts)
+    {
+        var offerIn = opts.GetValueOrDefault("offer-in", "offer.json");
+        var answerOut = opts.GetValueOrDefault("answer-out", "answer.json");
+        var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "60"), out var h) ? h : 60;
+        Console.WriteLine($"[answer] waiting for offer at {offerIn} ...");
+        var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+
+        using var pc = new RTCPeerConnection(NewConfig());
+        var cands = new List<Cand>();
+        pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+        // Echo every DataChannel message back verbatim (the SBF1 round-trip).
+        pc.ondatachannel += dc =>
+        {
+            Console.WriteLine($"[answer] datachannel '{dc.label}' offered");
+            dc.onmessage += (chan, _, data) =>
+            {
+                Console.WriteLine($"[answer] echoing {data.Length} bytes");
+                chan.send(data);
+            };
+        };
+
+        if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = off.Sdp }) != SetDescriptionResultEnum.OK)
+            return Fail("answerer rejected the peer offer");
+        foreach (var c in off.Candidates) pc.addIceCandidate(c.ToInit());
+
+        var answer = pc.createAnswer(null);
+        await pc.setLocalDescription(answer);
+        await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+        Signal.Write(answerOut, "answer", answer.sdp, cands);
+        Console.WriteLine($"[answer] wrote answer -> {Path.GetFullPath(answerOut)}; holding {holdSeconds}s to echo...");
+
+        await Task.Delay(TimeSpan.FromSeconds(holdSeconds));
+        Console.WriteLine("[answer] done");
+        return 0;
+    }
+
+    // Shared offerer tail: await open, send SBF1, verify echo, derive fields, emit proof.
+    private static async Task<int> CompleteOffererAsync(
+        RTCPeerConnection pc, RTCDataChannel dc, TaskCompletionSource opened, TaskCompletionSource<byte[]> echoed,
+        string proofOut, string peerDeviceId, string peerFingerprint, string tag)
+    {
+        Console.WriteLine($"[{tag}] awaiting DataChannel open...");
+        await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
         var dataChannelOpen = dc.readyState == RTCDataChannelState.open;
-        Console.WriteLine($"[loopback] DataChannel state={dc.readyState}");
+        Console.WriteLine($"[{tag}] DataChannel state={dc.readyState}");
 
-        // Send the SBF1 probe frame and await the echo.
         var payload = Encoding.UTF8.GetBytes("skybridge-webrtc-helper-probe");
-        var frame = EncodeSbf1(ChannelControl, sequence: 1, FlagEndOfMessage, payload);
+        var frame = EncodeSbf1(ChannelControl, 1, FlagEndOfMessage, payload);
         dc.send(frame);
-        var echo = await echoed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var echo = await echoed.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var sbf1EchoVerified = echo.AsSpan().SequenceEqual(frame);
-        Console.WriteLine($"[loopback] SBF1 echo verified={sbf1EchoVerified} ({echo.Length} bytes)");
+        Console.WriteLine($"[{tag}] SBF1 echo verified={sbf1EchoVerified} ({echo.Length} bytes)");
 
-        // Derive proof fields from the real session.
-        var localSdp = offerer.localDescription?.sdp?.ToString() ?? "";
-        var remoteSdp = offerer.remoteDescription?.sdp?.ToString() ?? "";
+        var localSdp = pc.localDescription?.sdp?.ToString() ?? "";
+        var remoteSdp = pc.remoteDescription?.sdp?.ToString() ?? "";
         var localFp = ExtractFingerprint(localSdp);
         var remoteFp = ExtractFingerprint(remoteSdp);
         var (localEndpoint, localCand) = ExtractFirstCandidate(localSdp);
         var (remoteEndpoint, remoteCand) = ExtractFirstCandidate(remoteSdp);
-
-        var transportSecretHex = Sha256Hex(
-            $"skybridge-webrtc-helper-transport:{localFp}:{remoteFp}");
-        var capabilityDigestHex = Sha256Hex(
-            $"local=Windows,webrtc;remote=Apple,webrtc;peer={peerDeviceId};" +
-            $"fingerprint={peerFingerprint};sameLan=true;crossNat=false");
-
-        var selectedCandidatePair = $"webrtc/dtls/sctp/{localCand}-{remoteCand}";
 
         var proof = new ProofDocument
         {
@@ -150,23 +218,38 @@ internal static class Program
             AdapterBinding = "verified webrtc datachannel helper",
             LocalEndpoint = string.IsNullOrWhiteSpace(localEndpoint) ? "127.0.0.1:0" : localEndpoint,
             RemoteEndpoint = string.IsNullOrWhiteSpace(remoteEndpoint) ? "127.0.0.1:0" : remoteEndpoint,
-            SelectedCandidatePair = selectedCandidatePair,
-            TransportSecretFingerprintHex = transportSecretHex,
-            CapabilityDigestHex = capabilityDigestHex,
+            SelectedCandidatePair = $"webrtc/dtls/sctp/{localCand}-{remoteCand}",
+            TransportSecretFingerprintHex = Sha256Hex($"skybridge-webrtc-helper-transport:{localFp}:{remoteFp}"),
+            CapabilityDigestHex = Sha256Hex(
+                $"local=Windows,webrtc;remote=Apple,webrtc;peer={peerDeviceId};" +
+                $"fingerprint={peerFingerprint};sameLan=true;crossNat=false"),
             RelayId = null,
             TimestampWindowMs = 15000,
             CapturedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
-
         WriteProofAtomic(proofOut, proof);
-        Console.WriteLine($"[loopback] proof written: {Path.GetFullPath(proofOut)}");
+        Console.WriteLine($"[{tag}] proof written: {Path.GetFullPath(proofOut)}");
 
         if (!dataChannelOpen || !sbf1EchoVerified)
-            return Fail("loopback did not reach a live DataChannel with verified SBF1 echo");
-
-        Console.WriteLine("[loopback] OK: live DataChannel + SBF1 echo + proof emitted");
+            return Fail($"[{tag}] did not reach a live DataChannel with verified SBF1 echo");
+        Console.WriteLine($"[{tag}] OK: live DataChannel + SBF1 echo + proof emitted");
         return 0;
     }
+
+    // Resolves when ICE gathering completes, or after the timeout (host candidates gather fast on LAN).
+    private static async Task WaitIceGatheringAsync(RTCPeerConnection pc, TimeSpan timeout)
+    {
+        if (pc.iceGatheringState == RTCIceGatheringState.complete) return;
+        var tcs = NewTcs();
+        pc.onicegatheringstatechange += state =>
+        {
+            if (state == RTCIceGatheringState.complete) tcs.TrySetResult();
+        };
+        await Task.WhenAny(tcs.Task, Task.Delay(timeout));
+    }
+
+    private static TaskCompletionSource NewTcs() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static TaskCompletionSource<T> NewTcs<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private static RTCIceCandidateInit ToInit(RTCIceCandidate c) => new()
     {
@@ -182,7 +265,6 @@ internal static class Program
         return m.Success ? m.Groups[1].Value : "no-fingerprint";
     }
 
-    // Returns ("host:port", "typ-host:port") for the first ICE candidate found.
     private static (string endpoint, string label) ExtractFirstCandidate(string sdp)
     {
         var m = Regex.Match(sdp, @"a=candidate:\S+ \d+ \S+ \d+ (\S+) (\d+) typ (\S+)");
