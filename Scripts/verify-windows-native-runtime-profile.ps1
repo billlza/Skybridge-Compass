@@ -82,6 +82,10 @@ var runtimeVariables = new[]
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
     "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH",
     "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS",
+    "SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_MSQUIC_ROLE",
+    "SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_MSQUIC_ACCEPT_TIMEOUT_MS",
     "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES"
 };
 
@@ -341,6 +345,70 @@ try
     await ExpectThrowsAsync<InvalidOperationException>(
         () => msquicAdapter.PrepareAsync(BuildMsQuicAdapterRequestWithoutRemoteMsQuic()),
         "Windows native MsQuic adapter requires the remote peer to advertise SupportsMsQuic");
+
+    // Explicit dial role must resolve to the same dialer adapter as the default (unset) role.
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ROLE", "dial");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT", "192.168.0.42:5443");
+    var msquicDialRoleDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    var msquicDialRoleAdapter = GetNested<IWindowsTransportAdapterClient>(msquicDialRoleDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<WindowsNativeMsQuicTransportAdapterClient>(msquicDialRoleAdapter, "msquic explicit dial-role transport adapter");
+
+    // Listen role resolves to the inbound listener adapter and shares the same contract gates as the dialer.
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ROLE", "listen");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT", "0.0.0.0:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS", "12000");
+    var msquicListenDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<FfiEngineClient>(msquicListenDependencies.EngineClient, "msquic listen engine");
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(msquicListenDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "msquic listen DNS-SD provider");
+    var msquicListenAdapter = GetNested<IWindowsTransportAdapterClient>(msquicListenDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<WindowsNativeMsQuicListenerTransportAdapterClient>(msquicListenAdapter, "msquic listen transport adapter");
+    // These gates fire BEFORE any UDP bind/accept, so they are safe to drive in a headless smoke (no port is opened).
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicListenAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.AppleNative, CoreTransportAuditCode.AppleNativeDefault)),
+        "Windows native MsQuic listener must not select AppleNative");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicListenAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "Windows native MsQuic listener requires the Core-selected transport to be WindowsNativeMsQuic.");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicListenAdapter.PrepareAsync(BuildMsQuicAdapterRequestWithoutRemoteMsQuic()),
+        "Windows native MsQuic listener requires the remote peer to advertise SupportsMsQuic");
+
+    // Listen role without a listen endpoint must fail closed at construction.
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ROLE", "listen");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=msquic.");
+
+    // Listen role with a bad accept timeout must fail closed.
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ROLE", "listen");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT", "0.0.0.0:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ACCEPT_TIMEOUT_MS", "0");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_MSQUIC_ACCEPT_TIMEOUT_MS must be a positive unsigned integer.");
+
+    // An unknown msquic role must fail closed.
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_ROLE", "relay");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT", "192.168.0.42:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT", "0.0.0.0:5443");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_MSQUIC_ROLE must be dial or listen when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=msquic.");
 
     ConfigureExternalEnvironment();
     var externalDependencies = SessionViewModelDependencyFactory.CreateConfigured();

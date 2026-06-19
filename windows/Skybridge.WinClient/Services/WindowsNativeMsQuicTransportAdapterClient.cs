@@ -134,6 +134,12 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
         var (host, port) = ParseEndpoint(_options.PeerEndpoint);
         var remote = await ResolveRemoteAsync(host, port).ConfigureAwait(false);
 
+        // The dialer presents its OWN ephemeral leaf cert so the listener can read it via
+        // connection.RemoteCertificate. That is what lets BOTH sides derive the SAME transport secret from
+        // the SORTED pair {dialerLeafFp, listenerLeafFp} (see WindowsNativeMsQuicTransportSecret). Without a
+        // client cert the listener would only ever see one cert and the leaf-cert set would diverge.
+        using var clientCertificate = WindowsNativeMsQuicEphemeralCertificate.Create("skybridge-msquic-dial");
+
         var clientOptions = new QuicClientConnectionOptions
         {
             RemoteEndPoint = remote,
@@ -143,9 +149,10 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
             {
                 ApplicationProtocols = new List<SslApplicationProtocol> { new(SkyBridgeAlpn) },
                 TargetHost = host,
+                ClientCertificates = new X509CertificateCollection { clientCertificate },
                 // QUIC mandates TLS 1.3. The SkyBridge PQC handshake rides OVER QUIC (inside the
                 // skybridge.control stream as SBF1/SBP2 frames), so QUIC's TLS is the transport tunnel,
-                // not the SkyBridge identity. We therefore pin the peer's leaf-cert fingerprint into the
+                // not the SkyBridge identity. We therefore pin BOTH leaf-cert fingerprints into the
                 // transport secret (so a swapped cert changes the Core transcript digest) but do not
                 // require a public CA chain on the LAN. The SkyBridge PQC handshake + pairing material is
                 // the real peer authentication and runs above this tunnel.
@@ -169,12 +176,16 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
             var remoteEndpoint = FormatEndpoint(connection.RemoteEndPoint);
             var negotiatedAlpn = connection.NegotiatedApplicationProtocol.ToString();
 
-            var transportSecret = DeriveTransportSecret(
+            // Two-sided secret agreement: "own" = the dialer's presented client cert, "peer" = the
+            // listener's server cert. The listener mirrors this with own=server, peer=dialer-client, and
+            // WindowsNativeMsQuicTransportSecret sorts the pair so both reach the same bytes.
+            var transportSecret = WindowsNativeMsQuicTransportSecret.Derive(
                 localEndpoint,
                 remoteEndpoint,
                 negotiatedAlpn,
                 request.PairingMaterial.PublicKeyFingerprint,
-                connection.RemoteCertificate as X509Certificate2);
+                WindowsNativeMsQuicTransportSecret.LeafFingerprint(clientCertificate),
+                WindowsNativeMsQuicTransportSecret.LeafFingerprint(connection.RemoteCertificate as X509Certificate2));
 
             // "Selected candidate pair" for QUIC is the negotiated UDP 5-tuple plus ALPN; this is the
             // MsQuic analogue of an ICE candidate pair and is bound into the Core transcript digest.
@@ -194,49 +205,6 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
         {
             await connection.DisposeAsync().ConfigureAwait(false);
         }
-    }
-
-    /// <summary>
-    /// Derives a stable 32-byte transport secret from the negotiated QUIC/TLS session.
-    ///
-    /// System.Net.Quic does NOT currently expose the RFC 5705 TLS exporter (no
-    /// <c>QuicConnection.ExportKeyingMaterial</c>), so per the task's fallback instruction we derive a
-    /// stable secret from the negotiated TLS connection (endpoints + ALPN) bound to the peer leaf-cert
-    /// fingerprint and the pairing public-key fingerprint. This binds the Core transcript digest to the
-    /// concrete QUIC session: a different peer cert, a different UDP 5-tuple, or a different ALPN yields a
-    /// different secret and therefore a different transcript digest. This is the documented open risk: it
-    /// is a session-binding fingerprint, not the actual QUIC keying material.
-    /// </summary>
-    private static byte[] DeriveTransportSecret(
-        string localEndpoint,
-        string remoteEndpoint,
-        string negotiatedAlpn,
-        string pairingPublicKeyFingerprint,
-        X509Certificate2? serverCertificate)
-    {
-        var certFingerprint = serverCertificate is null
-            ? "no-peer-cert"
-            : Convert.ToHexString(SHA256.HashData(serverCertificate.RawData)).ToLowerInvariant();
-
-        // Canonicalize the endpoint pair (order-independent) so BOTH peers derive the
-        // SAME secret: peer A's local == peer B's remote and vice versa, so a fixed
-        // local|remote ordering would diverge between the two ends and the Core
-        // transcript digests would not match. Sorting the pair makes the endpoint
-        // contribution symmetric. (Remaining two-sided gap, pending the QUIC listener
-        // half: the leaf-cert binding is still asymmetric — the dialer sees the
-        // listener's server cert; full mutual-cert agreement lands with the inbound
-        // adapter + the real RFC 5705 exporter once System.Net.Quic exposes it.)
-        var endpointPair = new[] { localEndpoint, remoteEndpoint };
-        Array.Sort(endpointPair, StringComparer.Ordinal);
-
-        var material =
-            $"skybridge-msquic-transport-secret/v1"
-            + $"|alpn={negotiatedAlpn}"
-            + $"|endpoints={endpointPair[0]}|{endpointPair[1]}"
-            + $"|peerCert={certFingerprint}"
-            + $"|pairingFp={pairingPublicKeyFingerprint}";
-
-        return SHA256.HashData(Encoding.UTF8.GetBytes(material));
     }
 
     /// <summary>
