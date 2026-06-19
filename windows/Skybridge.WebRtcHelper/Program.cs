@@ -73,6 +73,22 @@ internal static class Program
 
     private static RTCConfiguration NewConfig() => new() { iceServers = new List<RTCIceServer>() };
 
+    // Builds a config with STUN/TURN servers from a comma-separated --ice-servers arg
+    // (e.g. "stun:stun.l.google.com:19302,turn:host:3478|user|pass"). Needed for the
+    // cross-subnet Win<->Mac hop where host candidates alone won't route.
+    private static RTCConfiguration ConfigWithIce(string csv)
+    {
+        var servers = new List<RTCIceServer>();
+        foreach (var raw in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = raw.Split('|');
+            var s = new RTCIceServer { urls = parts[0] };
+            if (parts.Length >= 3) { s.username = parts[1]; s.credential = parts[2]; }
+            servers.Add(s);
+        }
+        return new RTCConfiguration { iceServers = servers };
+    }
+
     // --- SBF1 frame (matches core/skybridge-core/src/frame.rs:4-78, big-endian) ---
     private static byte[] EncodeSbf1(byte channelCode, ulong sequence, ushort flags, byte[] payload)
     {
@@ -121,7 +137,7 @@ internal static class Program
         var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
         var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
         Console.WriteLine("[offer] creating peer connection...");
-        using var pc = new RTCPeerConnection(NewConfig());
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
 
@@ -154,7 +170,7 @@ internal static class Program
         Console.WriteLine($"[answer] waiting for offer at {offerIn} ...");
         var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
 
-        using var pc = new RTCPeerConnection(NewConfig());
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
         // Echo every DataChannel message back verbatim (the SBF1 round-trip).
