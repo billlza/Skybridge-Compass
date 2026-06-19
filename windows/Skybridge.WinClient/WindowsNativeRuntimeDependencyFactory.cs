@@ -11,6 +11,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private const string TransportAdapterVariable = "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER";
     private const string ExternalTransportAdapterMode = "external";
     private const string VerifiedWebRtcTransportAdapterMode = "webrtc-verified";
+    private const string MsQuicTransportAdapterMode = "msquic";
     private const string SettingsSystemPreferencesVariable = "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES";
     private const string EnabledMode = "enabled";
 
@@ -89,7 +90,15 @@ internal static class WindowsNativeRuntimeDependencyFactory
                     ReadWebRtcProofMaxAgeMs()));
         }
 
-        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external or webrtc-verified when set.");
+        if (string.Equals(mode, MsQuicTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new WindowsNativeMsQuicTransportAdapterClient(
+                new WindowsNativeMsQuicTransportAdapterOptions(
+                    Required("SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT", MsQuicTransportAdapterMode),
+                    ReadTimestampWindowMs()));
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external, webrtc-verified, or msquic when set.");
     }
 
     private static bool IsEnabled(string variable) =>

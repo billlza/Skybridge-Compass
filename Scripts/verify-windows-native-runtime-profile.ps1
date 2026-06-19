@@ -313,7 +313,34 @@ try
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "carrier");
     ExpectThrows<InvalidOperationException>(
         () => SessionViewModelDependencyFactory.CreateConfigured(),
-        "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external or webrtc-verified when set.");
+        "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external, webrtc-verified, or msquic when set.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=msquic.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT", "192.168.0.42:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS", "12000");
+    var msquicDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<FfiEngineClient>(msquicDependencies.EngineClient, "msquic engine");
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(msquicDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "msquic DNS-SD provider");
+    var msquicAdapter = GetNested<IWindowsTransportAdapterClient>(msquicDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<WindowsNativeMsQuicTransportAdapterClient>(msquicAdapter, "msquic transport adapter");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.AppleNative, CoreTransportAuditCode.AppleNativeDefault)),
+        "Windows native MsQuic adapter must not select AppleNative");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "Windows native MsQuic adapter requires the Core-selected transport to be WindowsNativeMsQuic.");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => msquicAdapter.PrepareAsync(BuildMsQuicAdapterRequestWithoutRemoteMsQuic()),
+        "Windows native MsQuic adapter requires the remote peer to advertise SupportsMsQuic");
 
     ConfigureExternalEnvironment();
     var externalDependencies = SessionViewModelDependencyFactory.CreateConfigured();
@@ -490,6 +517,42 @@ static WindowsTransportAdapterRequest BuildAdapterRequest(CoreTransportKind tran
         PeerCapabilities.Windows(),
         peer.Capabilities,
         NetworkPath.CrossNatPath());
+}
+
+static WindowsTransportAdapterRequest BuildMsQuicAdapterRequestWithoutRemoteMsQuic()
+{
+    // Windows-to-Windows MsQuic transport kind/audit, but the remote peer does NOT advertise SupportsMsQuic,
+    // so the adapter's capability-negotiation gate must reject the request before any QUIC dial.
+    var remoteWithoutMsQuic = PeerCapabilities.Windows() with { SupportsMsQuic = false };
+    var peer = new DiscoveredPeer(
+        CoreDiscoveryServiceKind.QuicPrimary,
+        "win-2",
+        "Desk Windows",
+        CorePeerPlatform.Windows,
+        "Windows",
+        new string('0', 64),
+        "msquic,webrtc,tcp,relay",
+        "1",
+        remoteWithoutMsQuic);
+    var pairingMaterial = new PairingMaterial(
+        "win-2",
+        "Desk Windows",
+        "Windows",
+        new string('0', 64),
+        new byte[] { 1, 2, 3, 4 },
+        VerifiedAgainstDiscoveryFingerprint: true,
+        "profile smoke");
+
+    return new WindowsTransportAdapterRequest(
+        peer,
+        pairingMaterial,
+        CoreTransportKind.WindowsNativeMsQuic,
+        CoreTransportAuditCode.WindowsNativeMsQuicSameLan,
+        RelayRequired: false,
+        RelayAllowed: false,
+        PeerCapabilities.Windows(),
+        remoteWithoutMsQuic,
+        NetworkPath.SameLanPath());
 }
 
 static T GetNested<T>(object source, string fieldName)
