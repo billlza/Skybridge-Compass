@@ -822,11 +822,13 @@ foreach ($stackFreshnessSignal in @(
     "edition = `"2021`"",
     "crate-type = [`"rlib`", `"cdylib`"]",
     "10.0.9",
+    "10.0.10",
     "2028-11-14",
     "v2.5.8",
     "v0.24.4",
     "CheckOnline",
     "api.nuget.org",
+    "api.nuget.org/v3-flatcontainer/sipsorcery/index.json",
     "api.github.com/repos/microsoft/msquic/releases/latest",
     "api.github.com/repos/paullouisageneau/libdatachannel/releases/latest"
 )) {

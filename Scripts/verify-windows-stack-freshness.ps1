@@ -104,13 +104,13 @@ foreach ($architectureSignal in @(
     'MsQuic v2.5.8',
     'libdatachannel',
     'v0.24.4',
-    'SIPSorcery `10.0.9`',
+    'SIPSorcery `10.0.10`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
     '-EvidencePath <json>',
     'source URIs',
     'online latest-version results',
-    'Stack sources refreshed on 2026-06-12'
+    'Stack sources refreshed on 2026-06-18'
 )) {
     Assert-Contains -Text $architecture -Needle $architectureSignal -Message "Architecture stack freshness doc missing signal: $architectureSignal"
 }
@@ -145,7 +145,7 @@ if ($CheckOnline) {
     Assert-True -Condition ($latestQrCoder -eq $qrCoderVersion) -Message "QRCoder package is not current stable: project=$qrCoderVersion latest=$latestQrCoder"
 
     $latestSipsorcery = Get-LatestStableNuGetVersion -PackageId "SIPSorcery"
-    Assert-True -Condition ($latestSipsorcery -eq "10.0.9") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
+    Assert-True -Condition ($latestSipsorcery -eq "10.0.10") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
 
     $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease
     Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
@@ -208,7 +208,7 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
         approvedVersions = [ordered]@{
             dotnetLatestRuntime = "10.0.9"
             dotnetEolDate = "2028-11-14"
-            sipsorcery = "10.0.9"
+            sipsorcery = "10.0.10"
             msquic = "v2.5.8"
             libdatachannel = "v0.24.4"
         }
