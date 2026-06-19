@@ -1,0 +1,77 @@
+<!--
+  SkyBridgeTheme.xaml — Windows visual identity matched to the macOS app.
+
+  Tokens are derived from the REAL Mac app, not the (drifted) capture-fixture
+  spec: the deep-space navy window gradient comes from
+  ThemeConfiguration.swift backgroundGradient (~#0A0E22 -> #03040F, dark
+  throughout); the cyan "QuantumGlass" accent (#00D9FF) is the Mac brand accent;
+  glass card fills/strokes and corner radii (shell 30 / sidebar 24 / panel 22 /
+  card 18 / button 12) come from SkyBridgeVisualParity layout tokens.
+
+  This dictionary is ADDITIVE: it is merged after XamlControlsResources and
+  redefines accent ThemeResources + adds named SkyBridge* brushes. It does NOT
+  change control structure, order, or automation ids, so the structural parity
+  gates stay green. The app is dark-locked (App RequestedTheme="Dark") so the
+  built-in Fluent surfaces render as dark glass over the navy gradient.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ===== Brand colors ===== -->
+    <Color x:Key="SkyBridgeAccentColor">#FF00D9FF</Color>
+    <Color x:Key="SkyBridgeAccentPressedColor">#FF12B8E6</Color>
+    <Color x:Key="SkyBridgeAccentHoverColor">#FF4DE6FF</Color>
+
+    <!-- ===== Deep-space navy window gradient (dark top-to-bottom) ===== -->
+    <LinearGradientBrush x:Key="SkyBridgeWindowGradientBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FF0A0E22" Offset="0.0" />
+        <GradientStop Color="#FF070A18" Offset="0.55" />
+        <GradientStop Color="#FF03040F" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <!-- ===== Accent brushes ===== -->
+    <SolidColorBrush x:Key="SkyBridgeAccentBrush" Color="{StaticResource SkyBridgeAccentColor}" />
+    <SolidColorBrush x:Key="SkyBridgeAccentPressedBrush" Color="{StaticResource SkyBridgeAccentPressedColor}" />
+    <SolidColorBrush x:Key="SkyBridgeAccentHoverBrush" Color="{StaticResource SkyBridgeAccentHoverColor}" />
+
+    <!-- ===== Glass / surface brushes (white over the dark gradient) ===== -->
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#29FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#29FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#332E3857" />
+    <SolidColorBrush x:Key="SkyBridgePanelFillBrush" Color="#21FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#1AFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeCardFillBrush" Color="#24FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#1AFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="#8C2E3857" />
+
+    <!-- ===== Text brushes ===== -->
+    <SolidColorBrush x:Key="SkyBridgeTextPrimaryBrush" Color="#FFF7FAFF" />
+    <SolidColorBrush x:Key="SkyBridgeTextSecondaryBrush" Color="#B8FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeTextMutedBrush" Color="#75FFFFFF" />
+
+    <!-- ===== Status brushes ===== -->
+    <SolidColorBrush x:Key="SkyBridgeSuccessBrush" Color="#FF4DC770" />
+    <SolidColorBrush x:Key="SkyBridgeWarningBrush" Color="#FFFF9A4D" />
+    <SolidColorBrush x:Key="SkyBridgeDangerBrush" Color="#FFFF5C5C" />
+
+    <!-- ===== Corner radii (match Mac layout tokens) ===== -->
+    <CornerRadius x:Key="SkyBridgeShellCornerRadius">30</CornerRadius>
+    <CornerRadius x:Key="SkyBridgeSidebarCornerRadius">24</CornerRadius>
+    <CornerRadius x:Key="SkyBridgePanelCornerRadius">22</CornerRadius>
+    <CornerRadius x:Key="SkyBridgeCardCornerRadius">18</CornerRadius>
+    <CornerRadius x:Key="SkyBridgeButtonCornerRadius">12</CornerRadius>
+
+    <!-- ===== Override stock Fluent accent so built-in controls adopt cyan ===== -->
+    <Color x:Key="SystemAccentColor">#FF00D9FF</Color>
+    <Color x:Key="SystemAccentColorLight1">#FF4DE6FF</Color>
+    <Color x:Key="SystemAccentColorLight2">#FF7DEEFF</Color>
+    <Color x:Key="SystemAccentColorLight3">#FFADF4FF</Color>
+    <Color x:Key="SystemAccentColorDark1">#FF12B8E6</Color>
+    <Color x:Key="SystemAccentColorDark2">#FF0E97BE</Color>
+    <Color x:Key="SystemAccentColorDark3">#FF0A7596</Color>
+    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#FF00D9FF" />
+    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#E600D9FF" />
+    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#CC00D9FF" />
+
+</ResourceDictionary>

@@ -8,7 +8,7 @@
     mc:Ignorable="d">
     <Grid
         x:Name="RootShell"
-        Background="{ThemeResource SolidBackgroundFillColorBase}"
+        Background="{StaticResource SkyBridgeWindowGradientBrush}"
         d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
         <Grid.Resources>
         <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
