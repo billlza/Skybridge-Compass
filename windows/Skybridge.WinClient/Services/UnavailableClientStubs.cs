@@ -119,6 +119,22 @@ internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
     }
 }
 
+internal sealed class UnavailableWeatherClient : IWeatherClient
+{
+    public string BuildInitialStatus() => WeatherClient.DefaultInitialStatus;
+
+    public string BuildPendingStatus() => WeatherClient.DefaultPendingStatus;
+
+    public string BuildCompletedStatus(WeatherSnapshot snapshot) =>
+        WeatherClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        WeatherClient.DefaultCompletedStatusMessage;
+
+    public Task<WeatherSnapshot> BuildReadOnlySnapshotAsync() =>
+        throw new WeatherUnavailableException("Weather client is not configured.");
+}
+
 internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
     public string BuildInitialStatus() => FileTransferWorkspaceClient.DefaultInitialStatus;

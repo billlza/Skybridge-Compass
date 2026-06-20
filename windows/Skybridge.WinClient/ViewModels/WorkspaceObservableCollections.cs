@@ -12,6 +12,7 @@ internal sealed class WorkspaceObservableCollections
     {
         NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries);
         DashboardMetrics = new ObservableCollection<DashboardMetricView>();
+        WeatherMetrics = new ObservableCollection<WeatherMetricView>();
         DashboardQuickActions = new ObservableCollection<WorkspaceActionItemView>();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -60,6 +61,8 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<FeatureEntry> NavigationItems { get; }
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
+
+    public ObservableCollection<WeatherMetricView> WeatherMetrics { get; }
 
     public ObservableCollection<WorkspaceActionItemView> DashboardQuickActions { get; }
 

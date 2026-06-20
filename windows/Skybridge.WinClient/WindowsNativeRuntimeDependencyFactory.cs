@@ -48,6 +48,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new UsbManagementWorkspaceClient(),
             CreateSettingsWorkspaceClientFromEnvironment(),
             new DashboardMetricsClient(),
+            new WeatherClient(),
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
             new WorkspaceActionCatalogClient(),

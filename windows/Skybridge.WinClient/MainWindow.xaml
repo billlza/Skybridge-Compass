@@ -16,6 +16,11 @@
         <vm:MetricKeyToGlyphConverter x:Key="MetricGlyphConverter" />
         <vm:MetricKeyToBrushConverter x:Key="MetricAccentBrushConverter" />
         <vm:QuickActionKeyToBrushConverter x:Key="QuickActionAccentBrushConverter" />
+        <vm:WeatherConditionToGlyphConverter x:Key="WeatherConditionGlyphConverter" />
+        <vm:WeatherConditionToBrushConverter x:Key="WeatherConditionBrushConverter" />
+        <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
+        <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
+        <vm:WeatherPhaseToVisibilityConverter x:Key="WeatherPhaseVisibilityConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -172,6 +177,38 @@
                 </Grid>
             </Border>
         </DataTemplate>
+        <!-- Weather metric grid cell: color-emoji icon (fixed 16-wide) + a label-over-value
+             VStack, element-matching the Mac WeatherMetric (HStack: icon, then
+             [label .caption2 muted; value .caption.bold]). The icon is a COLOR EMOJI via
+             Segoe UI Emoji (Segoe Fluent Icons has no weather/humidity/AQI glyphs), so it is
+             pre-colored and carries no Foreground tint. The per-metric tint (humidity=cyan,
+             wind=mint, visibility=blue, and the AQI bucket color green/yellow/orange/red/
+             purple/brown) now lives on the VALUE text, preserving the air-quality signal. -->
+        <DataTemplate x:Key="WeatherMetricItemTemplate">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock
+                    Text="{Binding Key, Converter={StaticResource WeatherMetricGlyphConverter}}"
+                    FontFamily="Segoe UI Emoji"
+                    FontSize="14"
+                    Width="16"
+                    VerticalAlignment="Top" />
+                <StackPanel Spacing="2">
+                    <TextBlock
+                        Text="{Binding Label}"
+                        FontSize="11"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                    <TextBlock
+                        Text="{Binding Value}"
+                        FontSize="13"
+                        FontWeight="Bold"
+                        Foreground="{Binding TintKey, Converter={StaticResource WeatherMetricTintBrushConverter}}" />
+                </StackPanel>
+            </StackPanel>
+        </DataTemplate>
+        <ItemsPanelTemplate x:Key="WeatherMetricItemsPanel">
+            <!-- 2 columns, matching the Mac LazyVGrid(2 flexible cols, spacing 10). -->
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="2" ItemWidth="150" />
+        </ItemsPanelTemplate>
         <DataTemplate x:Key="DashboardQuickActionTemplate">
             <!-- Element-matches the Mac QuickActionButton.swift: a centered colored
                  icon over a centered title, NO subtitle/description (Mac shows none).
@@ -533,6 +570,175 @@
                             ItemsSource="{Binding DashboardMetrics}"
                             ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
                             ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
+
+                        <!-- ===================================================================
+                             Weather hero card — full-width, element-matches the Mac
+                             WeatherDashboardCard. GlassPanel chrome (full-width like the
+                             Quick Actions panel below) with the corner radius pinned to 20
+                             to match the Mac r20 hero. Three mutually-exclusive state layers
+                             (Loading / Loaded / Error) keyed off WeatherPhase via the
+                             WeatherPhaseVisibilityConverter, mirroring the Mac body state
+                             machine. Min height 168 keeps the two-column loaded layout from
+                             clipping; the loading/error layers center inside the same chrome.
+                             =================================================================== -->
+                        <Border Style="{StaticResource GlassPanel}" CornerRadius="20" MinHeight="168">
+                            <Grid>
+                                <!-- Loaded state: header + big glyph/temp + condition + metric grid + footer -->
+                                <Grid Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loaded}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+
+                                    <!-- Header row: location glyph + name (left), refresh button (right).
+                                         No nav-arrow exists on the Mac card, so none is added here. -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <!-- E81D = Location (a map pin) ~ SF "location.fill", cyan -->
+                                            <FontIcon Glyph="&#xE81D;" FontSize="15" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                            <TextBlock
+                                                Text="{Binding WeatherLocation}"
+                                                FontSize="18"
+                                                FontWeight="Bold"
+                                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <!-- Refresh button: 32x32 glass circle + E72C (Refresh, a circular
+                                             arrow) ~ SF "arrow.clockwise". The only nav control on the card. -->
+                                        <Button
+                                            Grid.Column="1"
+                                            AutomationProperties.AutomationId="Skybridge.Weather.Refresh"
+                                            AutomationProperties.Name="Refresh weather"
+                                            ToolTipService.ToolTip="Refresh weather"
+                                            Command="{Binding RefreshWeatherCommand}"
+                                            Width="32"
+                                            Height="32"
+                                            Padding="0"
+                                            CornerRadius="16"
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1">
+                                            <FontIcon Glyph="&#xE72C;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        </Button>
+                                    </Grid>
+
+                                    <!-- Body: left = big glyph + temperature (fixed 120 wide);
+                                         right = condition text + metric grid + footer. -->
+                                    <Grid Grid.Row="1" Margin="0,14,0,0" ColumnSpacing="20">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Left column: condition emoji over big temperature.
+                                             Color EMOJI via Segoe UI Emoji (Segoe Fluent Icons has no
+                                             weather glyphs); emoji are pre-colored so no Foreground. -->
+                                        <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock
+                                                Text="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionGlyphConverter}}"
+                                                FontFamily="Segoe UI Emoji"
+                                                FontSize="40"
+                                                HorizontalAlignment="Center" />
+                                            <!-- Big temperature: integer + degree sign, thin/rounded feel via light weight -->
+                                            <TextBlock
+                                                Text="{Binding WeatherTemperature}"
+                                                FontSize="44"
+                                                FontWeight="Thin"
+                                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                HorizontalAlignment="Center" />
+                                        </StackPanel>
+
+                                        <!-- Right column -->
+                                        <StackPanel Grid.Column="1" Spacing="12">
+                                            <!-- Condition text (Clear/Cloudy/Rain/...) -->
+                                            <TextBlock
+                                                Text="{Binding WeatherCondition}"
+                                                FontSize="15"
+                                                FontWeight="Medium"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            <!-- Hairline divider, white@0.1 like the Mac overlay -->
+                                            <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                                            <!-- Metric grid: humidity / wind / visibility / AQI (2 cols).
+                                                 Visibility + AQI cells are emitted only when present, so the
+                                                 grid shows 2/3/4 cells exactly like the Mac. -->
+                                            <ItemsControl
+                                                AutomationProperties.AutomationId="Skybridge.Weather.Metrics"
+                                                ItemsSource="{Binding WeatherMetrics}"
+                                                ItemsPanel="{StaticResource WeatherMetricItemsPanel}"
+                                                ItemTemplate="{StaticResource WeatherMetricItemTemplate}" />
+                                            <!-- Footer: source label ("wttr.in" / "wttr.in + AQI") + relative time -->
+                                            <Grid Margin="0,2,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <!-- E704 = Streaming/antenna waves ~ SF "antenna.radiowaves.left.and.right" -->
+                                                    <FontIcon Glyph="&#xE704;" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="{Binding WeatherSource}"
+                                                        FontSize="11"
+                                                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                        VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Text="{Binding WeatherUpdatedRelative}"
+                                                    FontSize="11"
+                                                    Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                    VerticalAlignment="Center" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Grid>
+                                </Grid>
+
+                                <!-- Loading state: spinner + title + hint, centered in the same chrome -->
+                                <StackPanel
+                                    Spacing="10"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loading}">
+                                    <ProgressRing IsActive="{Binding IsWeatherLoading}" Width="32" Height="32" HorizontalAlignment="Center" />
+                                    <TextBlock Text="Loading weather..." FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="First load can take a few seconds" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                </StackPanel>
+
+                                <!-- Error state: warning glyph + title + message + Retry, centered -->
+                                <StackPanel
+                                    Spacing="10"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Error}">
+                                    <!-- E7BA = Warning (triangle with !) ~ SF "exclamationmark.triangle.fill", orange -->
+                                    <FontIcon Glyph="&#xE7BA;" FontSize="36" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="Weather unavailable" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock
+                                        Text="{Binding WeatherErrorMessage}"
+                                        FontSize="12"
+                                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                        TextWrapping="Wrap"
+                                        TextAlignment="Center"
+                                        MaxWidth="360"
+                                        HorizontalAlignment="Center" />
+                                    <Button
+                                        AutomationProperties.AutomationId="Skybridge.Weather.Retry"
+                                        AutomationProperties.Name="Retry"
+                                        Style="{StaticResource PrimaryButton}"
+                                        Command="{Binding RefreshWeatherCommand}"
+                                        HorizontalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <!-- E72C = Refresh ~ SF "arrow.clockwise" -->
+                                            <FontIcon Glyph="&#xE72C;" FontSize="13" />
+                                            <TextBlock Text="Retry" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
 
                         <!-- Quick Actions panel (matches Mac 2x2 QuickActionsPanelView) -->
                         <Border Style="{StaticResource GlassPanel}">

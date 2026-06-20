@@ -20,6 +20,19 @@ public sealed record DashboardMetricView(
         new(metric.Label, metric.Value, metric.Detail);
 }
 
+// Weather metric grid cell (Humidity / Wind speed / Visibility / AQI). Key drives the
+// per-cell glyph + tint converters; Label/Value carry the localized label and the
+// pre-formatted value (with Mac units). Mirrors DashboardMetricView's FromMetric idiom.
+public sealed record WeatherMetricView(
+    string Key,
+    string Label,
+    string Value,
+    string TintKey)
+{
+    public static WeatherMetricView FromMetric(WeatherMetricSnapshot metric) =>
+        new(metric.Key, metric.Label, metric.Value, metric.TintKey);
+}
+
 public sealed record SettingsActionItemView(
     string Key,
     string Title,

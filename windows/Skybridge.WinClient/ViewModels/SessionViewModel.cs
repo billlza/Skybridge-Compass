@@ -29,6 +29,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
     private readonly IDashboardMetricsClient _dashboardMetricsClient;
+    private readonly IWeatherClient _weatherClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private readonly ISessionStatusClient _sessionStatusClient;
@@ -55,6 +56,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
+    private readonly WeatherStateCoordinator _weatherStateCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
@@ -92,6 +94,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _systemMonitorStatus = "";
     private string _usbManagementStatus = "";
     private string _settingsStatus = "";
+    private string _weatherPhase = WeatherStateCoordinator.PhaseLoading;
+    private string _weatherLocation = "";
+    private string _weatherTemperature = "";
+    private string _weatherCondition = "";
+    private string _weatherConditionKey = "";
+    private string _weatherSource = "";
+    private string _weatherUpdatedRelative = "";
+    private string _weatherErrorMessage = "";
     private int _onlineDeviceCount;
     private int _activeSessionCount;
     private int _transferTaskCount;
@@ -126,6 +136,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
         IDashboardMetricsClient? dashboardMetricsClient = null,
+        IWeatherClient? weatherClient = null,
         ITopBarStatusClient? topBarStatusClient = null,
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
@@ -151,6 +162,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             usbManagementClient,
             settingsClient,
             dashboardMetricsClient,
+            weatherClient,
             topBarStatusClient,
             connectionWorkspaceStateClient,
             workspaceActionCatalogClient,
@@ -182,6 +194,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _usbManagementClient = dependencies.UsbManagementClient;
         _settingsClient = dependencies.SettingsClient;
         _dashboardMetricsClient = dependencies.DashboardMetricsClient;
+        _weatherClient = dependencies.WeatherClient;
         _connectionWorkspaceStateClient = dependencies.ConnectionWorkspaceStateClient;
         _workspaceActionCatalogClient = dependencies.WorkspaceActionCatalogClient;
         _sessionStatusClient = dependencies.SessionStatusClient;
@@ -287,6 +300,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         NavigationItems = collections.NavigationItems;
         _selectedFeature = startupState.SelectedFeature;
         DashboardMetrics = collections.DashboardMetrics;
+        WeatherMetrics = collections.WeatherMetrics;
         DashboardQuickActions = collections.DashboardQuickActions;
         BitrateProfiles = collections.BitrateProfiles;
         FramerateProfiles = collections.FramerateProfiles;
@@ -343,6 +357,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => ActiveSessionCount = value,
             value => TransferTaskCount = value,
             value => PerformanceStatus = value);
+        _weatherStateCoordinator = new WeatherStateCoordinator(
+            _weatherClient,
+            WeatherMetrics,
+            value => WeatherPhase = value,
+            value => WeatherLocation = value,
+            value => WeatherTemperature = value,
+            value => WeatherCondition = value,
+            value => WeatherConditionKey = value,
+            value => WeatherSource = value,
+            value => WeatherUpdatedRelative = value,
+            value => WeatherErrorMessage = value,
+            value => StatusMessage = value);
+        RefreshWeatherCommand = _weatherStateCoordinator.RefreshCommand;
         SidebarSessionActions = collections.SidebarSessionActions;
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
@@ -566,6 +593,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceShellRefreshCoordinator.LoadWorkspaceActions();
         _workspaceShellRefreshCoordinator.RefreshDashboardMetrics();
         _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
+        // Kick the first weather fetch on startup (the dashboard is the default feature),
+        // mirroring the Mac auto-load on dashboard show. Fire-and-forget via the command's
+        // async-void Execute is consistent with the house style; the card shows the
+        // Loading state until the real snapshot lands (never fake numbers).
+        RefreshWeatherCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -573,6 +605,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<FeatureEntry> NavigationItems { get; }
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
+
+    public ObservableCollection<WeatherMetricView> WeatherMetrics { get; }
 
     public ObservableCollection<WorkspaceActionItemView> DashboardQuickActions { get; }
 
@@ -659,6 +693,69 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<SettingsActionItemView> SettingsActions { get; }
 
     public ObservableCollection<SettingsDetailItemView> SettingsDetails { get; }
+
+    // ---- Weather hero card surface (element-matches the Mac WeatherDashboardCard) ----
+    // Phase drives the three state layers via WeatherPhaseToVisibilityConverter; the
+    // scalar strings/collection are mutated by WeatherStateCoordinator on the UI context.
+
+    public string WeatherPhase
+    {
+        get => _weatherPhase;
+        private set
+        {
+            if (SetField(ref _weatherPhase, value))
+            {
+                OnPropertyChanged(nameof(IsWeatherLoading));
+            }
+        }
+    }
+
+    // Convenience flag for the loading spinner's IsActive (avoids a converter on a bool).
+    public bool IsWeatherLoading =>
+        string.Equals(WeatherPhase, WeatherStateCoordinator.PhaseLoading, StringComparison.Ordinal);
+
+    public string WeatherLocation
+    {
+        get => _weatherLocation;
+        private set => SetField(ref _weatherLocation, value);
+    }
+
+    public string WeatherTemperature
+    {
+        get => _weatherTemperature;
+        private set => SetField(ref _weatherTemperature, value);
+    }
+
+    public string WeatherCondition
+    {
+        get => _weatherCondition;
+        private set => SetField(ref _weatherCondition, value);
+    }
+
+    // The enum name (Clear/Cloudy/...) the glyph + accent converters key off.
+    public string WeatherConditionKey
+    {
+        get => _weatherConditionKey;
+        private set => SetField(ref _weatherConditionKey, value);
+    }
+
+    public string WeatherSource
+    {
+        get => _weatherSource;
+        private set => SetField(ref _weatherSource, value);
+    }
+
+    public string WeatherUpdatedRelative
+    {
+        get => _weatherUpdatedRelative;
+        private set => SetField(ref _weatherUpdatedRelative, value);
+    }
+
+    public string WeatherErrorMessage
+    {
+        get => _weatherErrorMessage;
+        private set => SetField(ref _weatherErrorMessage, value);
+    }
 
     public int OnlineDeviceCount
     {
@@ -1108,6 +1205,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand PrepareConnectionCommand { get; }
 
     public ICommand RunCoreDiagnosticsCommand { get; }
+
+    // Refresh button on the weather hero card (the only nav control on the Mac card).
+    public ICommand RefreshWeatherCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
 

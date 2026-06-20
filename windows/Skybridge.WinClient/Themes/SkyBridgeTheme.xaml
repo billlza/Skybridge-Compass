@@ -82,6 +82,31 @@
     <SolidColorBrush x:Key="SkyBridgeNavMonitorBrush" Color="#FFFF9A4D" />
     <SolidColorBrush x:Key="SkyBridgeNavSettingsBrush" Color="#FF9AA7BF" />
 
+    <!-- ===== Weather hero card brushes (element-match WeatherDashboardCard) =====
+         Condition accents mirror the Mac iconColor:
+           clear=yellow  cloudy=gray  rainy=blue  snowy=cyan  stormy=violet
+         Metric tints mirror the Mac per-metric colors:
+           humidity=cyan  wind=mint  visibility=blue
+         AQI bucket colors mirror aqiColor():
+           0-49 green | 50-99 yellow | 100-149 orange | 150-199 red |
+           200-299 purple | >=300 brown -->
+    <SolidColorBrush x:Key="SkyBridgeWeatherClearBrush" Color="#FFFFCF4D" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherCloudyBrush" Color="#FFAEB6C7" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherRainyBrush" Color="#FF4FA3FF" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherSnowyBrush" Color="#FF00D9FF" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherStormyBrush" Color="#FFB07CF5" />
+
+    <SolidColorBrush x:Key="SkyBridgeWeatherHumidityBrush" Color="#FF00D9FF" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherWindBrush" Color="#FF4FE0A8" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherVisibilityBrush" Color="#FF4FA3FF" />
+
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiGreenBrush" Color="#FF4DC770" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiYellowBrush" Color="#FFFFD24D" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiOrangeBrush" Color="#FFFF9A4D" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiRedBrush" Color="#FFFF5C5C" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiPurpleBrush" Color="#FFB07CF5" />
+    <SolidColorBrush x:Key="SkyBridgeWeatherAqiBrownBrush" Color="#FFB07A57" />
+
     <!-- ===== Corner radii (match Mac layout tokens) ===== -->
     <CornerRadius x:Key="SkyBridgeShellCornerRadius">30</CornerRadius>
     <CornerRadius x:Key="SkyBridgeSidebarCornerRadius">24</CornerRadius>

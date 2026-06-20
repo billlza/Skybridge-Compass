@@ -503,7 +503,12 @@ foreach ($templateSignal in @(
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
 
-Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 5 -Message "MainWindow must render action buttons only through the five shared action templates."
+# 5 workspace-action buttons live inside the shared action templates (sidebar / topbar /
+# quick-action / detail / status). The weather hero card adds 2 card-local controls that are
+# NOT workspace actions and have no place in those templates: the header Refresh button and
+# the error-state Retry button. Those 2 are accounted for here (5 + 2 = 7); the shared-template
+# usage itself is still enforced by the Assert-Ordered checks below.
+Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 7 -Message "MainWindow must render workspace-action buttons through the five shared action templates (plus the weather card's Refresh + Retry card-local buttons)."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
     'ItemsSource="{Binding SidebarSessionActions}"',
