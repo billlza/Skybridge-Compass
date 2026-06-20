@@ -451,7 +451,7 @@
                             ItemTemplate="{StaticResource DashboardQuickActionTemplate}" />
                     </StackPanel>
 
-                    <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -665,7 +665,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -697,7 +697,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -769,7 +769,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -815,7 +815,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -838,7 +838,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -886,7 +886,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -944,7 +944,7 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <Border Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                             <StackPanel Spacing="14">
                                 <TextBlock
                                     AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
@@ -960,7 +960,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Grid.Column="1" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <Border Grid.Column="1" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
                             <StackPanel Spacing="14">
                                 <TextBlock Text="Session Controls" FontSize="18" FontWeight="SemiBold" />
                                 <StackPanel Spacing="6">
