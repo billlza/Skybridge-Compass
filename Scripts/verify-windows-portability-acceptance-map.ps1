@@ -145,7 +145,7 @@ foreach ($signal in @(
     "QRCoder",
     "1.8.0",
     "MsQuic v2.5.8",
-    "libdatachannel v0.24.4",
+    "libdatachannel v0.24.5",
     "verify-windows-stack-freshness.ps1"
 )) {
     Assert-Contains -Text $architecture -Needle $signal -Message "Stack evidence missing architecture signal: $signal"

@@ -103,7 +103,7 @@ foreach ($architectureSignal in @(
     'November 14, 2028',
     'MsQuic v2.5.8',
     'libdatachannel',
-    'v0.24.4',
+    'v0.24.5',
     'SIPSorcery `10.0.10`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
@@ -152,7 +152,7 @@ if ($CheckOnline) {
     Assert-True -Condition (-not [bool]$msquicLatest.prerelease) -Message "MsQuic latest release must not be a prerelease."
 
     $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease
-    Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.4") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
+    Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.5") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
     Assert-True -Condition (-not [bool]$libdatachannelLatest.prerelease) -Message "libdatachannel latest release must not be a prerelease."
 
     $onlineEvidence = [ordered]@{
@@ -210,7 +210,7 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
             dotnetEolDate = "2028-11-14"
             sipsorcery = "10.0.10"
             msquic = "v2.5.8"
-            libdatachannel = "v0.24.4"
+            libdatachannel = "v0.24.5"
         }
         sourceUris = $sourceUris
         online = $onlineEvidenceValue
