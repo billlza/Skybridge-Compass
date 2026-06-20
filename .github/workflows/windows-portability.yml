@@ -60,6 +60,8 @@ jobs:
 
       - name: Run Windows portability gate
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           .\Scripts\verify-windows-portability-smoke.ps1 -CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage -StackFreshnessEvidencePath artifacts\windows-stack-freshness.json -RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json

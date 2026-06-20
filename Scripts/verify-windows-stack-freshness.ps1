@@ -64,6 +64,15 @@ $sourceUris = [ordered]@{
 }
 $onlineEvidence = [ordered]@{}
 
+# Authenticate GitHub REST calls when a token is available (CI passes GITHUB_TOKEN).
+# Unauthenticated api.github.com is limited to 60 req/hr per IP, which the shared CI
+# runner IP exhausts -> the freshness gate intermittently fails with HTTP 403
+# "API rate limit exceeded". A token raises the limit to 5000/hr. Falls back to
+# unauthenticated (local dev) when no token is present.
+$githubHeaders = @{ "User-Agent" = "skybridge-stack-freshness" }
+$githubToken = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) { $env:GITHUB_TOKEN } else { $env:GH_TOKEN }
+if (-not [string]::IsNullOrWhiteSpace($githubToken)) { $githubHeaders["Authorization"] = "Bearer $githubToken" }
+
 $winClientProjectPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 $cargoManifestPath = Join-Path $RepoRoot "core/skybridge-core/Cargo.toml"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
@@ -147,11 +156,11 @@ if ($CheckOnline) {
     $latestSipsorcery = Get-LatestStableNuGetVersion -PackageId "SIPSorcery"
     Assert-True -Condition ($latestSipsorcery -eq "10.0.10") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
 
-    $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease
+    $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease -Headers $githubHeaders
     Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
     Assert-True -Condition (-not [bool]$msquicLatest.prerelease) -Message "MsQuic latest release must not be a prerelease."
 
-    $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease
+    $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease -Headers $githubHeaders
     Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.5") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
     Assert-True -Condition (-not [bool]$libdatachannelLatest.prerelease) -Message "libdatachannel latest release must not be a prerelease."
 
