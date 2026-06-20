@@ -37,14 +37,25 @@ internal static class Program
         var opts = ParseArgs(args);
         var mode = opts.GetValueOrDefault("mode", "loopback");
         var proofOut = opts.GetValueOrDefault("proof-out", "skybridge-webrtc-proof.json");
-        var peerDeviceId = opts.GetValueOrDefault("peer-device-id", "loopback-peer");
+        // Placeholder identity is ONLY for the loopback self-test. For a real peer
+        // (offer mode) the caller MUST supply the real paired identity, or we fail
+        // closed — never silently emit a proof bound to the well-known fake peer.
+        var peerDeviceId = opts.GetValueOrDefault("peer-device-id", mode == "loopback" ? "loopback-peer" : "");
         var peerFingerprint = opts.GetValueOrDefault(
             "peer-fingerprint",
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+            mode == "loopback"
+                ? "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                : "");
+
+        if (mode == "offer" && string.IsNullOrWhiteSpace(peerDeviceId))
+        {
+            Console.Error.WriteLine("offer mode requires --peer-device-id <real paired device id>; refusing to emit a placeholder-bound proof");
+            return 2;
+        }
 
         if ((mode is "loopback" or "offer") && !Regex.IsMatch(peerFingerprint, "^[0-9a-f]{64}$"))
         {
-            Console.Error.WriteLine("peer-fingerprint must be exactly 64 lowercase hex chars");
+            Console.Error.WriteLine("peer-fingerprint must be exactly 64 lowercase hex chars (offer mode: pass the real paired fingerprint, not a placeholder)");
             return 2;
         }
 
