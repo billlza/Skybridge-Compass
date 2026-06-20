@@ -11,6 +11,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private const string TransportAdapterVariable = "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER";
     private const string ExternalTransportAdapterMode = "external";
     private const string VerifiedWebRtcTransportAdapterMode = "webrtc-verified";
+    private const string VerifiedWebRtcLaunchTransportAdapterMode = "webrtc-verified-launch";
     private const string MsQuicTransportAdapterMode = "msquic";
     private const string MsQuicRoleVariable = "SKYBRIDGE_WINDOWS_MSQUIC_ROLE";
     private const string MsQuicDialRole = "dial";
@@ -28,7 +29,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
     {
         var coreBridge = new CoreBridge();
         var discoveryClient = new CoreDiscoveryClient(coreBridge);
-        var transportAdapterClient = CreateTransportAdapterFromEnvironment();
+        var connectionPreflightClient = CreateConnectionPreflightClientFromEnvironment(coreBridge);
 
         return new SessionViewModelDependencies(
             new FfiEngineClient(),
@@ -38,7 +39,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new ManualConnectionClient(),
             new CrossNetworkConnectionClient(),
             new PairingMaterialClient(),
-            new ConnectionPreflightClient(coreBridge, transportAdapterClient),
+            connectionPreflightClient,
             new CoreDiagnosticsClient(coreBridge),
             new FileTransferWorkspaceClient(coreBridge),
             new RemoteDesktopWorkspaceClient(coreBridge),
@@ -61,6 +62,79 @@ internal static class WindowsNativeRuntimeDependencyFactory
         IsEnabled(SettingsSystemPreferencesVariable)
             ? new SettingsWorkspaceClient(new WindowsSystemPreferencesLauncher())
             : new SettingsWorkspaceClient();
+
+    // Picks the connection-preflight client from the transport-adapter env mode.
+    //
+    //  - webrtc-verified-launch  -> the in-session launcher path: each connect first launches the
+    //                               WebRtcHelper offerer to produce a FRESH proof bound to the real
+    //                               paired identity, then runs the standard preflight against a
+    //                               runtime verified adapter over that fresh proof. This closes the
+    //                               env-at-startup vs. 60s freshness-window gap.
+    //  - everything else         -> the back-compat env path: the adapter (incl. webrtc-verified
+    //                               reading a pre-existing proof file at SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH)
+    //                               is resolved once at startup, exactly as before.
+    private static IConnectionPreflightClient CreateConnectionPreflightClientFromEnvironment(CoreBridge coreBridge)
+    {
+        var mode = Environment.GetEnvironmentVariable(TransportAdapterVariable);
+        if (string.Equals(mode, VerifiedWebRtcLaunchTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new LaunchingWebRtcVerifiedPreflightClient(
+                coreBridge,
+                new WebRtcHelperLaunchClient(CreateWebRtcHelperLaunchOptionsFromEnvironment()),
+                ReadWebRtcProofMaxAgeMs());
+        }
+
+        return new ConnectionPreflightClient(coreBridge, CreateTransportAdapterFromEnvironment());
+    }
+
+    private static WebRtcHelperLaunchOptions CreateWebRtcHelperLaunchOptionsFromEnvironment() =>
+        new(
+            ResolveWebRtcHelperExecutablePath(),
+            ResolveWebRtcSignalingDirectory(),
+            Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_FILE_NAME"),
+            Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_OFFER_FILE_NAME"),
+            Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_ANSWER_FILE_NAME"),
+            Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_ICE_SERVERS"),
+            ReadWebRtcHelperLaunchTimeout());
+
+    private static string ResolveWebRtcHelperExecutablePath()
+    {
+        var configured = Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_HELPER_PATH");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured.Trim();
+        }
+
+        // Default: the helper exe sitting next to the app.
+        return System.IO.Path.Combine(AppContext.BaseDirectory, "Skybridge.WebRtcHelper.exe");
+    }
+
+    private static string ResolveWebRtcSignalingDirectory()
+    {
+        var configured = Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SIGNALING_DIR");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured.Trim();
+        }
+
+        return System.IO.Path.Combine(AppContext.BaseDirectory, "webrtc-signaling");
+    }
+
+    private static TimeSpan? ReadWebRtcHelperLaunchTimeout()
+    {
+        var raw = Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_LAUNCH_TIMEOUT_MS");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (ulong.TryParse(raw, out var value) && value > 0)
+        {
+            return TimeSpan.FromMilliseconds(value);
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_WEBRTC_LAUNCH_TIMEOUT_MS must be a positive unsigned integer.");
+    }
 
     private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment()
     {
