@@ -47,22 +47,31 @@
                 AutomationProperties.AutomationId="{Binding Id}"
                 AutomationProperties.Name="{Binding Title}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="28" />
+                    <ColumnDefinition Width="32" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <FontIcon
+                <Border
                     Grid.Column="0"
-                    Glyph="{Binding Glyph}"
-                    FontSize="16"
-                    VerticalAlignment="Center" />
+                    Width="32"
+                    Height="32"
+                    CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding Glyph}"
+                        FontSize="16"
+                        Foreground="{StaticResource SkyBridgeAccentBrush}"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center" />
+                </Border>
                 <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
+                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBlock
                         Text="{Binding Status}"
                         TextWrapping="Wrap"
                         MaxLines="2"
                         FontSize="12"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -111,27 +120,33 @@
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceMetricCardTemplate">
-            <Border
-                Width="220"
-                Height="116"
-                Margin="0,0,12,12"
-                Padding="16"
-                CornerRadius="{StaticResource SkyBridgeCardCornerRadius}"
-                Background="{StaticResource SkyBridgeCardFillBrush}"
-                BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
-                BorderThickness="1">
+            <Border Style="{StaticResource MetricCard}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
+                    <!-- Accent icon chip (top-left), matching the Mac StatCard glyph badge -->
+                    <Border
+                        Style="{StaticResource AccentIconChip}"
+                        HorizontalAlignment="Left">
+                        <FontIcon
+                            Glyph="&#xE9D2;"
+                            FontSize="16"
+                            Foreground="{StaticResource SkyBridgeAccentBrush}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
                     <TextBlock
+                        Grid.Row="1"
+                        Margin="0,10,0,0"
                         Text="{Binding Title}"
                         FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
                         TextWrapping="Wrap"
                         MaxLines="1" />
-                    <StackPanel Grid.Row="1" VerticalAlignment="Bottom" Spacing="2">
+                    <StackPanel Grid.Row="2" VerticalAlignment="Bottom" Spacing="2">
                         <TextBlock
                             Text="{Binding Value}"
                             FontSize="30"
@@ -149,26 +164,25 @@
         </DataTemplate>
         <DataTemplate x:Key="DashboardQuickActionTemplate">
             <Button
+                Style="{StaticResource QuickActionTile}"
                 AutomationProperties.AutomationId="{Binding AutomationId}"
                 AutomationProperties.Name="{Binding Title}"
                 Command="{Binding Command}"
                 IsEnabled="{Binding IsEnabled}"
                 Width="306"
-                MinHeight="64"
-                Margin="0,0,12,12"
-                Padding="14"
-                HorizontalContentAlignment="Stretch"
-                VerticalContentAlignment="Center">
+                Margin="0,0,12,12">
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="40" />
+                        <ColumnDefinition Width="44" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <Border
-                        Width="40"
-                        Height="40"
+                        Width="44"
+                        Height="44"
                         CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
                         VerticalAlignment="Center">
                         <FontIcon
                             Glyph="{Binding Glyph}"
@@ -178,7 +192,7 @@
                             HorizontalAlignment="Center" />
                     </Border>
                     <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             Text="{Binding Detail}"
                             TextWrapping="Wrap"
@@ -407,6 +421,7 @@
                     Margin="0,16,0,16"
                     ItemsSource="{Binding NavigationItems}"
                     ItemTemplate="{StaticResource NavigationItemTemplate}"
+                    ItemContainerStyle="{StaticResource NavItemContainer}"
                     SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
                     SelectionMode="Single" />
 
@@ -421,13 +436,13 @@
 
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
-                <RowDefinition Height="72" />
+                <RowDefinition Height="56" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
             <Border
                 Grid.Row="0"
-                Padding="24,14"
+                Padding="24,8"
                 Background="{StaticResource SkyBridgeTopBarFillBrush}"
                 BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
                 BorderThickness="0,0,0,1">
@@ -452,26 +467,20 @@
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <Border
-                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"
-                            Padding="12,7"
-                            CornerRadius="16"
-                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
-                            BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
-                            BorderThickness="1">
+                            Style="{StaticResource StatusPill}"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus">
                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" />
                                 <FontIcon Glyph="&#xE9F5;" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
                                 <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <Border
+                            Style="{StaticResource StatusPill}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
-                            Padding="12,7"
-                            CornerRadius="16"
-                            ToolTipService.ToolTip="FPS / Diagnostics"
-                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
-                            BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
-                            BorderThickness="1">
+                            ToolTipService.ToolTip="FPS / Diagnostics">
                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeWarningBrush}" />
                                 <FontIcon Glyph="&#xE9D9;" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" />
                                 <TextBlock Text="FPS" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                 <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
@@ -498,12 +507,7 @@
                             ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
 
                         <!-- Quick Actions panel (matches Mac 2x2 QuickActionsPanelView) -->
-                        <Border
-                            Padding="18"
-                            CornerRadius="{StaticResource SkyBridgePanelCornerRadius}"
-                            Background="{StaticResource SkyBridgePanelFillBrush}"
-                            BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
-                            BorderThickness="1">
+                        <Border Style="{StaticResource GlassPanel}">
                             <StackPanel Spacing="14">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <FontIcon Glyph="&#xE80A;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
@@ -518,7 +522,7 @@
                         </Border>
                     </StackPanel>
 
-                    <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -732,7 +736,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -764,7 +768,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -836,7 +840,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -882,7 +886,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -905,7 +909,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -953,7 +957,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -1011,7 +1015,7 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <Border Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                        <Border Style="{StaticResource GlassPanel}">
                             <StackPanel Spacing="14">
                                 <TextBlock
                                     AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
@@ -1027,7 +1031,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Grid.Column="1" Padding="18" CornerRadius="{StaticResource SkyBridgePanelCornerRadius}" Background="{StaticResource SkyBridgePanelFillBrush}" BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}" BorderThickness="1">
+                        <Border Style="{StaticResource GlassPanel}" Grid.Column="1">
                             <StackPanel Spacing="14">
                                 <TextBlock Text="Session Controls" FontSize="18" FontWeight="SemiBold" />
                                 <StackPanel Spacing="6">

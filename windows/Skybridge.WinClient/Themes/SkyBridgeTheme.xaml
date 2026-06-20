@@ -67,6 +67,21 @@
     <SolidColorBrush x:Key="SkyBridgeWarningBrush" Color="#FFFF9A4D" />
     <SolidColorBrush x:Key="SkyBridgeDangerBrush" Color="#FFFF5C5C" />
 
+    <!-- ===== Per-feature nav accent brushes (distinct on-brand hues) =====
+         One hue per sidebar feature so each section reads as its own
+         destination while staying inside the .starryNight palette:
+           dashboard = accent blue   devices = cyan      usb = teal
+           file = green              remote  = indigo    quantum = violet
+           monitor = orange          settings = slate -->
+    <SolidColorBrush x:Key="SkyBridgeNavDashboardBrush" Color="#FF3072EF" />
+    <SolidColorBrush x:Key="SkyBridgeNavDevicesBrush" Color="#FF00D9FF" />
+    <SolidColorBrush x:Key="SkyBridgeNavUsbBrush" Color="#FF1FC9B0" />
+    <SolidColorBrush x:Key="SkyBridgeNavFileTransferBrush" Color="#FF4DC770" />
+    <SolidColorBrush x:Key="SkyBridgeNavRemoteDesktopBrush" Color="#FF6E7BF2" />
+    <SolidColorBrush x:Key="SkyBridgeNavQuantumBrush" Color="#FFB07CF5" />
+    <SolidColorBrush x:Key="SkyBridgeNavMonitorBrush" Color="#FFFF9A4D" />
+    <SolidColorBrush x:Key="SkyBridgeNavSettingsBrush" Color="#FF9AA7BF" />
+
     <!-- ===== Corner radii (match Mac layout tokens) ===== -->
     <CornerRadius x:Key="SkyBridgeShellCornerRadius">30</CornerRadius>
     <CornerRadius x:Key="SkyBridgeSidebarCornerRadius">24</CornerRadius>
