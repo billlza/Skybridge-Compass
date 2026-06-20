@@ -277,9 +277,11 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Device Discovery",
                 CommandId: WorkspaceActionCommandId.OpenDeviceDiscovery),
             new(
+                // Folder glyph (E8B7) to element-match the Mac QuickActionsPanelView
+                // "File Transfer" action, which uses SF "folder".
                 "FileTransfer",
                 "File Transfer",
-                "\uE8E5",
+                "\uE8B7",
                 true,
                 "Queue and history",
                 CommandId: WorkspaceActionCommandId.OpenFileTransfer),

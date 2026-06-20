@@ -1274,7 +1274,7 @@ Assert-Ordered -Text $dashboardMetrics -Context "Dashboard metrics service order
     '"Online Devices"',
     '"Active Sessions"',
     '"Transfer Tasks"',
-    '"Performance"'
+    '"System Status"'
 )
 
 foreach ($dashboardSignal in @(
@@ -1306,11 +1306,28 @@ foreach ($dashboardSignal in @(
     "TransferTaskCount",
     "PerformanceStatus",
     "new DashboardMetricsClient()",
-    "Core engine connected peer count placeholder",
-    "renderer and ETW telemetry providers"
+    # Mac-parity StatCard: the 4th card is "System Status" with value "Excellent"
+    # (系统状态 / 极佳), mapping the busy/nominal scalar to a human health label.
+    '"System Status"',
+    '"Excellent"'
 )) {
     Assert-Contains -Text ($dashboardMetrics + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $dashboardSignal -Message "Dashboard metrics parity signal missing: $dashboardSignal"
 }
+
+# Mac StatCard.swift has NO caption/description under the value (icon → label →
+# big value). The Windows WorkspaceMetricCardTemplate must therefore NOT bind a
+# Detail caption inside the metric card, and the dashboard metric service must
+# not ship the old placeholder/"pending" captions that made the card read like a
+# knock-off. These assertions keep the caption-free, honest structure locked in.
+Assert-True -Condition (-not $dashboardMetrics.Contains("Core engine connected peer count placeholder")) -Message "Dashboard metric cards must not ship the old placeholder caption; Mac StatCard has no caption under the value."
+Assert-True -Condition (-not $dashboardMetrics.Contains("renderer and ETW telemetry providers")) -Message "Dashboard metric cards must not ship the old 'pending telemetry' caption; Mac StatCard has no caption under the value."
+Assert-True -Condition (-not $dashboardMetrics.Contains('"Performance"')) -Message "Dashboard 4th metric must be 'System Status' (Mac parity), not 'Performance'."
+$metricCardTemplate = [regex]::Match($mainWindow, '<DataTemplate x:Key="WorkspaceMetricCardTemplate">[\s\S]*?</DataTemplate>').Value
+Assert-True -Condition ($metricCardTemplate.Length -gt 0) -Message "MainWindow.xaml must define WorkspaceMetricCardTemplate."
+Assert-Contains -Text $metricCardTemplate -Needle 'Glyph="{Binding Title, Converter={StaticResource MetricGlyphConverter}}"' -Message "Metric card must key its colored glyph off the metric Title (Mac StatCard icon)."
+Assert-Contains -Text $metricCardTemplate -Needle 'Foreground="{Binding Title, Converter={StaticResource MetricAccentBrushConverter}}"' -Message "Metric card must key its accent hue off the metric Title (Mac StatCard color)."
+Assert-Contains -Text $metricCardTemplate -Needle 'Text="{Binding Value}"' -Message "Metric card must render the big bold Value (Mac StatCard value)."
+Assert-True -Condition (-not $metricCardTemplate.Contains('Text="{Binding Detail}"')) -Message "Metric card must NOT render a Detail caption; Mac StatCard has no caption under the value."
 
 Assert-Ordered -Text $topBarStatus -Context "Top bar service parity order" -Needles @(
     '"Connection"',

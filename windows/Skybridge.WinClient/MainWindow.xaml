@@ -129,16 +129,19 @@
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceMetricCardTemplate">
+            <!-- Element-matches the Mac StatCard.swift: colored icon top-left,
+                 then a small secondary label, then a big bold value. There is NO
+                 caption/description under the value on the Mac, so the Detail
+                 TextBlock is intentionally absent here. -->
             <Border Style="{StaticResource MetricCard}">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <!-- Accent icon chip (top-left), matching the Mac StatCard glyph badge.
                          Glyph + accent hue are keyed per-metric off the stable Title
-                         (Online Devices / Active Sessions / Transfer Tasks / Performance)
+                         (Online Devices / Active Sessions / Transfer Tasks / System Status)
                          so each card reads distinctly like the Mac StatCard. -->
                     <Border
                         Style="{StaticResource AccentIconChip}"
@@ -150,33 +153,29 @@
                             HorizontalAlignment="Center"
                             VerticalAlignment="Center" />
                     </Border>
-                    <TextBlock
-                        Grid.Row="1"
-                        Margin="0,12,0,0"
-                        Text="{Binding Title}"
-                        FontSize="12"
-                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
-                        TextWrapping="Wrap"
-                        MaxLines="1" />
-                    <StackPanel Grid.Row="2" VerticalAlignment="Bottom" Spacing="3">
+                    <!-- Bottom group: small secondary label + big bold value
+                         (Mac VStack rhythm: label .caption .secondary, value .title.bold). -->
+                    <StackPanel Grid.Row="1" VerticalAlignment="Bottom" Spacing="4">
+                        <TextBlock
+                            Text="{Binding Title}"
+                            FontSize="12"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            TextWrapping="Wrap"
+                            MaxLines="1" />
                         <TextBlock
                             Text="{Binding Value}"
                             FontSize="30"
                             FontWeight="Bold"
                             LineHeight="34"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                        <TextBlock
-                            Text="{Binding Detail}"
-                            TextWrapping="Wrap"
-                            FontSize="12"
-                            MaxLines="2"
-                            TextTrimming="CharacterEllipsis"
-                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </StackPanel>
                 </Grid>
             </Border>
         </DataTemplate>
         <DataTemplate x:Key="DashboardQuickActionTemplate">
+            <!-- Element-matches the Mac QuickActionButton.swift: a centered colored
+                 icon over a centered title, NO subtitle/description (Mac shows none).
+                 The colored glyph hue is keyed per-action off the stable Key. -->
             <Button
                 Style="{StaticResource QuickActionTile}"
                 AutomationProperties.AutomationId="{Binding AutomationId}"
@@ -185,11 +184,7 @@
                 IsEnabled="{Binding IsEnabled}"
                 Width="306"
                 Margin="0,0,12,12">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
+                <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Border
                         Width="44"
                         Height="44"
@@ -197,7 +192,7 @@
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                         BorderThickness="1"
-                        VerticalAlignment="Center">
+                        HorizontalAlignment="Center">
                         <FontIcon
                             Glyph="{Binding Glyph}"
                             FontSize="18"
@@ -205,15 +200,14 @@
                             VerticalAlignment="Center"
                             HorizontalAlignment="Center" />
                     </Border>
-                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                        <TextBlock
-                            Text="{Binding Detail}"
-                            TextWrapping="Wrap"
-                            FontSize="12"
-                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    </StackPanel>
-                </Grid>
+                    <TextBlock
+                        Text="{Binding Title}"
+                        FontWeight="SemiBold"
+                        TextWrapping="Wrap"
+                        TextAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                </StackPanel>
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceFactRowTemplate">
