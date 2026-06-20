@@ -66,6 +66,7 @@ let package = Package(
         .executable(name: "LocalLanInteropHost", targets: ["LocalLanInteropHost"]),
         .executable(name: "LocalLanSmokeSourceHost", targets: ["LocalLanSmokeSourceHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
+        .executable(name: "SBF1AnswerHost", targets: ["SBF1AnswerHost"]),
         .executable(name: "CurrentPathProbe", targets: ["CurrentPathProbe"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
@@ -498,6 +499,19 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AppKit")
+            ]
+        ),
+        .executableTarget(
+            name: "SBF1AnswerHost",
+            dependencies: [
+                "SkyBridgeCore",
+                "SkyBridgeProtocolCore"
+            ],
+            path: "Sources/SBF1AnswerHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency"),
+                .define("APPLE_SILICON_OPTIMIZED"),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ]
         ),
         .executableTarget(
