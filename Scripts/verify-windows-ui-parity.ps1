@@ -1159,8 +1159,8 @@ Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsDetails" -ItemTe
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsActions" -ItemTemplate "SettingsActionRowTemplate"
 
 foreach ($layoutSignal in @(
-    "<ColumnDefinition Width=`"300`" />",
-    "<RowDefinition Height=`"72`" />",
+    "<ColumnDefinition Width=`"280`" />",
+    "<RowDefinition Height=`"56`" />",
     "Text=`"Skybridge Compass`" TextWrapping=`"Wrap`"",
     "Text=`"{Binding Title}`" FontWeight=`"SemiBold`" TextWrapping=`"Wrap`" MaxLines=`"2`"",
     "ItemsSource=`"{Binding NavigationItems}`"",
