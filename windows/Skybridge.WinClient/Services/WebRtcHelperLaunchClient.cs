@@ -41,6 +41,20 @@ public interface IWebRtcHelperLaunchClient
     Task<WebRtcHelperLaunchResult> LaunchOffererAsync(
         WebRtcHelperLaunchRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Launches the helper in DATA-PLANE session mode (<c>--mode session-offer</c> or
+    /// <c>--mode session-answer</c>). Unlike the one-shot offerer, this process does NOT exit on
+    /// success: it opens the loopback SBF1 IPC and runs the persistent bidirectional pump. This
+    /// method starts the process, waits for the helper to print its bound IPC port
+    /// (<c>SKYBRIDGE_DATAPLANE_PORT=&lt;n&gt;</c>) once the DataChannel is open, and returns a live
+    /// <see cref="WebRtcHelperSession"/> that owns the process and exposes the port to connect
+    /// <see cref="SkyBridgeDataPlaneClient"/> to. Disposing the session stops the helper.
+    /// Fail-closed: if the helper exits or never reports a port within the timeout, throws.
+    /// </summary>
+    Task<WebRtcHelperSession> LaunchSessionAsync(
+        WebRtcHelperSessionRequest request,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
@@ -188,6 +202,148 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
         return new WebRtcHelperLaunchResult(proofPath, offerPath, answerPath);
     }
 
+    public async Task<WebRtcHelperSession> LaunchSessionAsync(
+        WebRtcHelperSessionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var mode = request.AsAnswerer ? "session-answer" : "session-offer";
+
+        var helperPath = _options.HelperExecutablePath;
+        if (!File.Exists(helperPath))
+        {
+            throw new InvalidOperationException(
+                $"WebRTC helper executable was not found at '{helperPath}'. " +
+                "Set SKYBRIDGE_WINDOWS_WEBRTC_HELPER_PATH to the built Skybridge.WebRtcHelper.exe, " +
+                "or place it next to the app.");
+        }
+
+        var offerPath = _options.ResolveOfferPath();
+        var answerPath = _options.ResolveAnswerPath();
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = helperPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = _options.WorkingDirectory,
+        };
+        startInfo.ArgumentList.Add("--mode");
+        startInfo.ArgumentList.Add(mode);
+        // Offerer writes offer.json / reads answer.json; answerer is the mirror.
+        startInfo.ArgumentList.Add("--offer-out");
+        startInfo.ArgumentList.Add(offerPath);
+        startInfo.ArgumentList.Add("--answer-in");
+        startInfo.ArgumentList.Add(answerPath);
+        startInfo.ArgumentList.Add("--offer-in");
+        startInfo.ArgumentList.Add(offerPath);
+        startInfo.ArgumentList.Add("--answer-out");
+        startInfo.ArgumentList.Add(answerPath);
+        // 0 => OS-chosen free loopback port; the helper prints the actual port.
+        startInfo.ArgumentList.Add("--ipc-port");
+        startInfo.ArgumentList.Add(request.PreferredIpcPort.ToString());
+        if (!string.IsNullOrWhiteSpace(_options.IceServersCsv))
+        {
+            startInfo.ArgumentList.Add("--ice-servers");
+            startInfo.ArgumentList.Add(_options.IceServersCsv!.Trim());
+        }
+
+        var process = new Process { StartInfo = startInfo };
+        var portTcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stderr = new StringBuilder();
+
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is null)
+            {
+                return;
+            }
+
+            // The helper prints "SKYBRIDGE_DATAPLANE_PORT=<n>" once the DataChannel
+            // is open and the loopback IPC is bound. That is our "ready" signal.
+            const string marker = "SKYBRIDGE_DATAPLANE_PORT=";
+            var idx = e.Data.IndexOf(marker, StringComparison.Ordinal);
+            if (idx >= 0 && int.TryParse(e.Data.AsSpan(idx + marker.Length).Trim(), out var port))
+            {
+                portTcs.TrySetResult(port);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                stderr.AppendLine(e.Data);
+            }
+        };
+
+        try
+        {
+            if (!process.Start())
+            {
+                process.Dispose();
+                throw new InvalidOperationException(
+                    $"Failed to start the WebRTC helper process at '{helperPath}'.");
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            process.Dispose();
+            throw new InvalidOperationException(
+                $"Failed to launch the WebRTC helper at '{helperPath}': {ex.Message}", ex);
+        }
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        // If the helper exits before reporting a port, fail closed (no peer answer,
+        // signaling never completed, etc.).
+        _ = process.WaitForExitAsync().ContinueWith(
+            _ => portTcs.TrySetException(new InvalidOperationException(
+                $"WebRTC helper exited (code {SafeExitCode(process)}) before the data plane was ready. " +
+                $"A reachable {(request.AsAnswerer ? "offer" : "answer")} peer is required. stderr: {Trim(stderr.ToString())}")),
+            TaskScheduler.Default);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(_options.LaunchTimeout);
+
+        int boundPort;
+        try
+        {
+            boundPort = await portTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            TryKill(process);
+            process.Dispose();
+            throw new InvalidOperationException(
+                $"WebRTC helper did not open the data plane within {_options.LaunchTimeout.TotalSeconds:F0}s " +
+                $"(no SKYBRIDGE_DATAPLANE_PORT). A reachable {(request.AsAnswerer ? "offer" : "answer")} peer is required.");
+        }
+        catch
+        {
+            TryKill(process);
+            process.Dispose();
+            throw;
+        }
+
+        return new WebRtcHelperSession(process, boundPort, offerPath, answerPath);
+    }
+
+    private static int SafeExitCode(Process process)
+    {
+        try
+        {
+            return process.HasExited ? process.ExitCode : -1;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
     private static string Trim(string value)
     {
         var trimmed = value.Trim();
@@ -264,6 +420,79 @@ public sealed record WebRtcHelperLaunchResult(
     string ProofPath,
     string OfferPath,
     string AnswerPath);
+
+/// <summary>
+/// Inputs for launching a DATA-PLANE session helper. <see cref="AsAnswerer"/> selects
+/// <c>session-answer</c> (this box waits for an offer) vs. <c>session-offer</c> (this box drives the
+/// offer). <see cref="PreferredIpcPort"/> is 0 to let the OS pick a free loopback port (recommended);
+/// the helper reports the actual bound port back via stdout.
+/// </summary>
+public sealed record WebRtcHelperSessionRequest(
+    bool AsAnswerer = false,
+    int PreferredIpcPort = 0);
+
+/// <summary>
+/// A live data-plane helper process. Owns the child process and exposes <see cref="IpcPort"/> — the
+/// loopback port a <see cref="SkyBridgeDataPlaneClient"/> connects to. Disposing stops the helper
+/// (which tears the DataChannel + IPC down). This is the session-mode analog of
+/// <see cref="WebRtcHelperLaunchResult"/>; it plugs into the same env-driven
+/// <see cref="WebRtcHelperLaunchOptions"/> the one-shot offerer uses, so the one-shot launch is
+/// untouched.
+/// </summary>
+public sealed class WebRtcHelperSession : IAsyncDisposable
+{
+    private readonly Process _process;
+
+    internal WebRtcHelperSession(Process process, int ipcPort, string offerPath, string answerPath)
+    {
+        _process = process ?? throw new ArgumentNullException(nameof(process));
+        IpcPort = ipcPort;
+        OfferPath = offerPath;
+        AnswerPath = answerPath;
+    }
+
+    /// <summary>The loopback TCP port the helper's SBF1 IPC is listening on (127.0.0.1).</summary>
+    public int IpcPort { get; }
+
+    public string OfferPath { get; }
+
+    public string AnswerPath { get; }
+
+    /// <summary>True while the helper process is still running (data plane live).</summary>
+    public bool IsRunning
+    {
+        get
+        {
+            try
+            {
+                return !_process.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (!_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+                await _process.WaitForExitAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+        }
+        finally
+        {
+            _process.Dispose();
+        }
+    }
+}
 
 /// <summary>
 /// Resolved, validated launch configuration. The helper exe path, signaling file paths, ICE servers,

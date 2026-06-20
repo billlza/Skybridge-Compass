@@ -15,6 +15,17 @@
 //   --mode answer     answerer (echoes the SBF1 frame) for the peer side; reads
 //                      --offer-in, writes --answer-out. This is what the Mac (or
 //                      a second box) runs. Same cross-platform binary.
+//   --mode session-offer / --mode session-answer
+//                      THE DATA PLANE. Same offer/answer signaling as above, but
+//                      after the DataChannel opens the helper does NOT send one
+//                      frame and exit. It opens a loopback TCP IPC (127.0.0.1,
+//                      --ipc-port or OS-chosen) speaking the SAME SBF1 framing and
+//                      runs a continuous bidirectional pump: SBF1 frames from the
+//                      local app are forwarded onto the DataChannel and frames
+//                      from the peer are forwarded back to the app. Multi-channel
+//                      (Control/File/Clipboard/Telemetry/Realtime) by virtue of
+//                      the SBF1 channel byte. This is what clipboard/file/RD build
+//                      on. See SessionTransport.cs for the framing + pump.
 //
 // The helper NEVER emits AppleNative binding — always WebRtcDataChannel /
 // WebRtcInterop (Apple<->Apple stays on the Apple native path).
@@ -66,7 +77,10 @@ internal static class Program
                 "loopback" => await RunLoopbackAsync(proofOut, peerDeviceId, peerFingerprint),
                 "offer" => await RunOfferAsync(opts, proofOut, peerDeviceId, peerFingerprint),
                 "answer" => await RunAnswerAsync(opts),
-                _ => Fail($"unknown mode '{mode}' (use loopback|offer|answer)"),
+                "session-offer" => await RunSessionOfferAsync(opts),
+                "session-answer" => await RunSessionAnswerAsync(opts),
+                "session-driver" => await SessionDriver.RunAsync(opts),
+                _ => Fail($"unknown mode '{mode}' (use loopback|offer|answer|session-offer|session-answer|session-driver)"),
             };
         }
         catch (Exception ex)
@@ -209,6 +223,138 @@ internal static class Program
         Console.WriteLine("[answer] done");
         return 0;
     }
+
+    // ----------------------------------------------------------- session-offer
+    // The DATA PLANE offerer. Identical signaling to RunOfferAsync (offer.json /
+    // answer.json + ICE), but after the DataChannel opens it hands the live
+    // channel to the persistent SBF1 pump instead of sending one frame and
+    // exiting. Runs until the DataChannel or the loopback app closes (or
+    // --hold-seconds, if set, elapses).
+    private static async Task<int> RunSessionOfferAsync(Dictionary<string, string> opts)
+    {
+        var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
+        var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
+        var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
+        var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
+
+        Console.WriteLine("[session-offer] creating peer connection...");
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        var cands = new List<Cand>();
+        pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+
+        var dc = await pc.createDataChannel("skybridge");
+        var opened = NewTcs();
+        dc.onopen += () => opened.TrySetResult();
+
+        var offer = pc.createOffer(null);
+        await pc.setLocalDescription(offer);
+        await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+        Signal.Write(offerOut, "offer", offer.sdp, cands);
+        Console.WriteLine($"[session-offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
+
+        var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+        if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
+            return Fail("session-offer rejected the peer answer");
+        foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
+
+        Console.WriteLine("[session-offer] awaiting DataChannel open...");
+        await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        Console.WriteLine($"[session-offer] DataChannel state={dc.readyState}");
+        if (dc.readyState != RTCDataChannelState.open)
+            return Fail("session-offer: DataChannel did not open");
+
+        return await PumpUntilDoneAsync(dc, ipcPort, portOut, holdSeconds, "session-offer");
+    }
+
+    // ---------------------------------------------------------- session-answer
+    // The DATA PLANE answerer. Identical signaling to RunAnswerAsync, but instead
+    // of echoing one frame it runs the persistent SBF1 pump over the inbound
+    // DataChannel. This is the cross-platform peer side (a second box, or — once
+    // the Apple core speaks the same loopback IPC — the Mac).
+    private static async Task<int> RunSessionAnswerAsync(Dictionary<string, string> opts)
+    {
+        var offerIn = opts.GetValueOrDefault("offer-in", "offer.json");
+        var answerOut = opts.GetValueOrDefault("answer-out", "answer.json");
+        var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
+        var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
+
+        Console.WriteLine($"[session-answer] waiting for offer at {offerIn} ...");
+        var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        var cands = new List<Cand>();
+        pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+
+        var opened = NewTcs<RTCDataChannel>();
+        pc.ondatachannel += dc =>
+        {
+            Console.WriteLine($"[session-answer] datachannel '{dc.label}' offered");
+            dc.onopen += () => opened.TrySetResult(dc);
+            if (dc.readyState == RTCDataChannelState.open) opened.TrySetResult(dc);
+        };
+
+        if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = off.Sdp }) != SetDescriptionResultEnum.OK)
+            return Fail("session-answer rejected the peer offer");
+        foreach (var c in off.Candidates) pc.addIceCandidate(c.ToInit());
+
+        var answer = pc.createAnswer(null);
+        await pc.setLocalDescription(answer);
+        await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+        Signal.Write(answerOut, "answer", answer.sdp, cands);
+        Console.WriteLine($"[session-answer] wrote answer -> {Path.GetFullPath(answerOut)}; awaiting DataChannel open...");
+
+        var channel = await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        Console.WriteLine($"[session-answer] DataChannel state={channel.readyState}");
+        if (channel.readyState != RTCDataChannelState.open)
+            return Fail("session-answer: DataChannel did not open");
+
+        return await PumpUntilDoneAsync(channel, ipcPort, portOut, holdSeconds, "session-answer");
+    }
+
+    // Shared session tail: write the bound IPC port (so the launcher can connect
+    // deterministically), run the bidirectional SBF1 pump, and stop on
+    // DataChannel/app close or after --hold-seconds (if > 0). hold-seconds<=0
+    // means run until the channel/app closes (production behavior).
+    private static async Task<int> PumpUntilDoneAsync(
+        RTCDataChannel dc, int ipcPort, string portOutPath, int holdSeconds, string tag)
+    {
+        using var cts = new CancellationTokenSource();
+        if (holdSeconds > 0) cts.CancelAfter(TimeSpan.FromSeconds(holdSeconds));
+
+        void ReportPort(int port)
+        {
+            if (!string.IsNullOrWhiteSpace(portOutPath))
+            {
+                try
+                {
+                    var tmp = portOutPath + ".tmp";
+                    File.WriteAllText(tmp, port.ToString(), new UTF8Encoding(false));
+                    File.Move(tmp, portOutPath, overwrite: true);
+                }
+                catch (IOException ex)
+                {
+                    Console.Error.WriteLine($"[{tag}] could not write ipc-port-out: {ex.Message}");
+                }
+            }
+        }
+
+        try
+        {
+            await SessionTransport.RunSessionAsync(dc, ipcPort, ReportPort, tag, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[{tag}] hold window elapsed; closing data plane");
+        }
+
+        Console.WriteLine($"[{tag}] data plane ended");
+        return 0;
+    }
+
+    private static int ParsePort(string raw) =>
+        int.TryParse(raw, out var p) && p is >= 0 and <= 65535 ? p : 0;
 
     // Shared offerer tail: await open, send SBF1, verify echo, derive fields, emit proof.
     private static async Task<int> CompleteOffererAsync(
