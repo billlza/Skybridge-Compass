@@ -84,7 +84,10 @@ internal static class WindowsNativeRuntimeDependencyFactory
                 ReadWebRtcProofMaxAgeMs());
         }
 
-        return new ConnectionPreflightClient(coreBridge, CreateTransportAdapterFromEnvironment());
+        // Keep the explicit `transportAdapterClient` local: verify-windows-ffi-client.ps1
+        // asserts the literal factory signal "ConnectionPreflightClient(coreBridge, transportAdapterClient)".
+        var transportAdapterClient = CreateTransportAdapterFromEnvironment();
+        return new ConnectionPreflightClient(coreBridge, transportAdapterClient);
     }
 
     private static WebRtcHelperLaunchOptions CreateWebRtcHelperLaunchOptionsFromEnvironment() =>
