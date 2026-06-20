@@ -27,31 +27,15 @@ internal sealed class SessionEngineActions
     }
 
     public Task ConnectAsync() =>
-        _busyCoordinator.RunAsync(WorkspaceErrorScope.Session, async () =>
-        {
-            _setStatusMessage(_sessionStatusClient.BuildPendingStatus(SessionStatusAction.Connect));
-
-            // Build the launch request ONCE: for the webrtc-verified-launch path the preflight already
-            // ran the helper offerer (live DataChannel + verified SBF1 echo) and the verified adapter
-            // re-validated the fresh proof, so the request only reaches here when IsLiveAdapterReady.
-            var request = _buildConnectionLaunchRequest();
-            await _engineClient.ConnectAsync(request);
-
-            // Honest surface: the FFI Core flips SessionState::Connected on a verified CONTROL plane;
-            // no media / remote-desktop data plane exists on Windows. Say so for the WebRTC path.
-            _setStatusMessage(BuildConnectedStatusMessage(request));
-        });
+        RunAsync(
+            SessionStatusAction.Connect,
+            () => _engineClient.ConnectAsync(_buildConnectionLaunchRequest()));
 
     public Task DisconnectAsync() =>
         RunAsync(SessionStatusAction.Disconnect, _engineClient.DisconnectAsync);
 
     public Task SendHeartbeatAsync() =>
         RunAsync(SessionStatusAction.Heartbeat, _engineClient.SendHeartbeatAsync);
-
-    private static string BuildConnectedStatusMessage(ConnectionLaunchRequest request) =>
-        request.Plan.AdapterKind == ConnectionLaunchAdapterKind.WebRtcDataChannel
-            ? "Connected (control-plane verified)"
-            : SessionStatusClient.BuildDefaultCompletedStatus(SessionStatusAction.Connect);
 
     private async Task RunAsync(
         SessionStatusAction action,
