@@ -13,6 +13,9 @@
         <Grid.Resources>
         <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
         <vm:FeatureEntryIdToAccentBrushConverter x:Key="FeatureAccentBrushConverter" />
+        <vm:MetricKeyToGlyphConverter x:Key="MetricGlyphConverter" />
+        <vm:MetricKeyToBrushConverter x:Key="MetricAccentBrushConverter" />
+        <vm:QuickActionKeyToBrushConverter x:Key="QuickActionAccentBrushConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -133,37 +136,42 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <!-- Accent icon chip (top-left), matching the Mac StatCard glyph badge -->
+                    <!-- Accent icon chip (top-left), matching the Mac StatCard glyph badge.
+                         Glyph + accent hue are keyed per-metric off the stable Title
+                         (Online Devices / Active Sessions / Transfer Tasks / Performance)
+                         so each card reads distinctly like the Mac StatCard. -->
                     <Border
                         Style="{StaticResource AccentIconChip}"
                         HorizontalAlignment="Left">
                         <FontIcon
-                            Glyph="&#xE9D2;"
-                            FontSize="16"
-                            Foreground="{StaticResource SkyBridgeAccentBrush}"
+                            Glyph="{Binding Title, Converter={StaticResource MetricGlyphConverter}}"
+                            FontSize="18"
+                            Foreground="{Binding Title, Converter={StaticResource MetricAccentBrushConverter}}"
                             HorizontalAlignment="Center"
                             VerticalAlignment="Center" />
                     </Border>
                     <TextBlock
                         Grid.Row="1"
-                        Margin="0,10,0,0"
+                        Margin="0,12,0,0"
                         Text="{Binding Title}"
                         FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
                         TextWrapping="Wrap"
                         MaxLines="1" />
-                    <StackPanel Grid.Row="2" VerticalAlignment="Bottom" Spacing="2">
+                    <StackPanel Grid.Row="2" VerticalAlignment="Bottom" Spacing="3">
                         <TextBlock
                             Text="{Binding Value}"
                             FontSize="30"
                             FontWeight="Bold"
+                            LineHeight="34"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             Text="{Binding Detail}"
                             TextWrapping="Wrap"
                             FontSize="12"
                             MaxLines="2"
-                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </StackPanel>
                 </Grid>
             </Border>
@@ -193,7 +201,7 @@
                         <FontIcon
                             Glyph="{Binding Glyph}"
                             FontSize="18"
-                            Foreground="{StaticResource SkyBridgeAccentBrush}"
+                            Foreground="{Binding Key, Converter={StaticResource QuickActionAccentBrushConverter}}"
                             VerticalAlignment="Center"
                             HorizontalAlignment="Center" />
                     </Border>
