@@ -65,7 +65,8 @@ internal sealed class Signal
                     var sig = JsonSerializer.Deserialize<Signal>(File.ReadAllText(path));
                     if (sig is not null && !string.IsNullOrWhiteSpace(sig.Sdp)) return sig;
                 }
-                catch (JsonException) { /* writer mid-flight; retry */ }
+                catch (JsonException) { /* writer mid-flight (partial JSON); retry */ }
+                catch (IOException) { /* file locked by the transfer (scp) mid-write; retry */ }
             }
             await Task.Delay(250);
         }
