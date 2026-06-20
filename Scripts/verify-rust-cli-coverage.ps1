@@ -4,6 +4,16 @@ param(
     [string]$EvidencePath = ""
 )
 
+# Resolve a relative -EvidencePath against the repo root BEFORE the Push-Location
+# (further down) changes the working directory into core/skybridge-core. Otherwise
+# the relative path resolves against the pushed cwd and the evidence lands in
+# core/skybridge-core/artifacts/, while verify-windows-portability-acceptance-evidence.ps1
+# (run from the repo root) reads <repo>/artifacts/ — a path mismatch that fails the
+# acceptance-evidence gate.
+if (-not [string]::IsNullOrWhiteSpace($EvidencePath) -and -not [System.IO.Path]::IsPathRooted($EvidencePath)) {
+    $EvidencePath = Join-Path $RepoRoot $EvidencePath
+}
+
 $ErrorActionPreference = "Stop"
 
 function Assert-True {
