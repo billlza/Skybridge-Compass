@@ -87,6 +87,28 @@ function Assert-ItemsControlTemplate {
     Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml item source must use shared template: $Binding"
 }
 
+function Assert-NavigationViewMenuTemplate {
+    param(
+        [string]$Text,
+        [string]$Binding,
+        [string]$ItemTemplate,
+        [string]$SelectedBinding
+    )
+
+    # The sidebar is a Windows-standard NavigationView (the native control owns
+    # the nav list + single selection + selection indicator + keyboard/a11y),
+    # so navigation binds through MenuItemsSource/MenuItemTemplate rather than
+    # the ItemsControl/ListView ItemsSource/ItemTemplate pair. The NavigationView
+    # opening tag spans multiple lines, so match from "<NavigationView" up to the
+    # closing ">" of the start tag (no intervening "<").
+    $menuSourcePattern = [regex]::Escape("MenuItemsSource=`"{Binding $Binding}`"")
+    $menuTemplatePattern = [regex]::Escape("MenuItemTemplate=`"{StaticResource $ItemTemplate}`"")
+    $selectedPattern = [regex]::Escape("SelectedItem=`"{Binding $SelectedBinding}`"")
+    $pattern = "<NavigationView\b(?=[^<]*$menuSourcePattern)(?=[^<]*$menuTemplatePattern)(?=[^<]*$selectedPattern)[^<]*>"
+
+    Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml sidebar must drive navigation through NavigationView MenuItemsSource/MenuItemTemplate/SelectedItem: $Binding"
+}
+
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs"
 $legacyFeatureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelDependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
@@ -1086,7 +1108,7 @@ Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionAct
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "TopBarStatusActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "DeviceDiscoveryManualConnectFinalActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
-Assert-ItemsControlTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate"
+Assert-NavigationViewMenuTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate" -SelectedBinding "SelectedFeature, Mode=TwoWay"
 Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "DashboardQuickActions" -ItemsPanel "DashboardQuickActionItemsPanel" -ItemTemplate "DashboardQuickActionTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"

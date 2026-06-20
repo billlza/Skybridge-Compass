@@ -12,6 +12,7 @@
         d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
         <Grid.Resources>
         <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <vm:FeatureEntryIdToAccentBrushConverter x:Key="FeatureAccentBrushConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -40,6 +41,11 @@
                 </StackPanel>
             </Button>
         </DataTemplate>
+        <!-- NavigationView MenuItemTemplate: per-item content is a 32x32 accent
+             icon chip (per-feature accent via FeatureAccentBrushConverter) +
+             title (SemiBold) + status subtitle (12px secondary). The native
+             NavigationViewItem owns selection/hover/keyboard/accessibility, so
+             this template carries ONLY the content — no selection visuals. -->
         <DataTemplate x:Key="NavigationItemTemplate">
             <Grid
                 MinHeight="48"
@@ -60,7 +66,7 @@
                     <FontIcon
                         Glyph="{Binding Glyph}"
                         FontSize="16"
-                        Foreground="{StaticResource SkyBridgeAccentBrush}"
+                        Foreground="{Binding Id, Converter={StaticResource FeatureAccentBrushConverter}}"
                         VerticalAlignment="Center"
                         HorizontalAlignment="Center" />
                 </Border>
@@ -381,60 +387,80 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <Border
+        <!-- ===================================================================
+             Sidebar shell — WinUI 3 NavigationView (the Windows-standard nav).
+             The native control owns the nav list, single-selection, the
+             selection indicator/pill, keyboard navigation and accessibility,
+             so exactly one item highlights at a time (replaces the custom
+             ListView + NavItemContainer pill, which painted every item's pill).
+
+               • MenuItemsSource = NavigationItems   (was ItemsSource)
+               • MenuItemTemplate = NavigationItemTemplate  (was ItemTemplate)
+               • SelectedItem    = SelectedFeature (TwoWay)  — unchanged binding
+               • PaneHeader      = 44x44 brand block + name + ConnectionStatus
+               • PaneFooter      = Connect / Disconnect session actions
+               • On-brand selected/hover surfaces come from the documented
+                 NavigationView theme-resource overrides in App.xaml.
+             =================================================================== -->
+        <NavigationView
             Grid.Column="0"
-            Background="{StaticResource SkyBridgeSidebarFillBrush}"
+            Grid.ColumnSpan="2"
+            x:Name="SidebarNavigation"
+            AutomationProperties.AutomationId="Skybridge.Navigation.List"
+            PaneDisplayMode="Left"
+            OpenPaneLength="280"
+            IsSettingsVisible="False"
+            IsBackButtonVisible="Collapsed"
+            IsPaneToggleButtonVisible="False"
+            MenuItemsSource="{Binding NavigationItems}"
+            MenuItemTemplate="{StaticResource NavigationItemTemplate}"
+            SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
             BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
             BorderThickness="0,0,1,0">
-            <Grid Padding="16,20">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
 
-                <StackPanel Spacing="12">
-                    <Grid ColumnSpacing="12">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="44" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <Border
-                            Width="44"
-                            Height="44"
-                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
-                            Background="{StaticResource SkyBridgeAccentBrush}"
-                            VerticalAlignment="Center">
-                            <FontIcon Glyph="&#xE80F;" FontSize="22" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                            <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" MaxLines="1" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                        </StackPanel>
-                    </Grid>
-                    <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
-                </StackPanel>
+            <!-- Brand header block (44x44 accent icon + name + status subtitle) -->
+            <NavigationView.PaneHeader>
+                <Grid Padding="16,20,16,8" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="44" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border
+                        Width="44"
+                        Height="44"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Background="{StaticResource SkyBridgeAccentBrush}"
+                        VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE80F;" FontSize="22" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" MaxLines="1" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </NavigationView.PaneHeader>
 
-                <ListView
-                    Grid.Row="1"
-                    AutomationProperties.AutomationId="Skybridge.Navigation.List"
-                    Margin="0,16,0,16"
-                    ItemsSource="{Binding NavigationItems}"
-                    ItemTemplate="{StaticResource NavigationItemTemplate}"
-                    ItemContainerStyle="{StaticResource NavItemContainer}"
-                    SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
-                    SelectionMode="Single" />
+            <!-- Bottom-pinned session controls (Connect / Disconnect) -->
+            <NavigationView.PaneFooter>
+                <Grid Padding="16,8,16,16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Border Height="1" Margin="0,0,0,12" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                    <ItemsControl
+                        Grid.Row="1"
+                        AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"
+                        ItemsSource="{Binding SidebarSessionActions}"
+                        ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"
+                        ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}" />
+                </Grid>
+            </NavigationView.PaneFooter>
 
-                <ItemsControl
-                    Grid.Row="2"
-                    AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"
-                    ItemsSource="{Binding SidebarSessionActions}"
-                    ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"
-                    ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}" />
-            </Grid>
-        </Border>
-
-        <Grid Grid.Column="1">
+        <!-- NavigationView Content = top bar + the 8 feature workspace panels;
+             they switch via the IsXxxSelected Visibility bindings as the
+             SelectedFeature changes. Content is unchanged from the prior shell. -->
+        <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
                 <RowDefinition Height="*" />
@@ -1056,5 +1082,6 @@
                 </StackPanel>
             </ScrollViewer>
         </Grid>
+        </NavigationView>
     </Grid>
 </Window>
