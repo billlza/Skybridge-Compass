@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod app;
 mod check;
 mod common;
 #[cfg(unix)]
@@ -11,6 +12,7 @@ mod operator;
 mod smoke;
 mod test;
 
+pub(crate) use app::*;
 pub(crate) use check::*;
 pub(crate) use common::*;
 #[cfg(unix)]
@@ -40,6 +42,7 @@ pub(crate) enum Commands {
     Connect(ConnectCommand),
     #[cfg(unix)]
     Crossnet(CrossnetCommand),
+    App(AppCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     RemoteDesktop(RemoteDesktopCommand),

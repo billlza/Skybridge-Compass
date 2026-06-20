@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+mod app_session;
 mod auth_commands;
 mod auth_support;
 mod check_coverage;

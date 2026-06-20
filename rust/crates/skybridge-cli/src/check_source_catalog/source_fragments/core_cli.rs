@@ -1,4 +1,6 @@
 pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
+    ("app_session.rs", include_str!("../../app_session.rs")),
+    ("cli_args/app.rs", include_str!("../../cli_args/app.rs")),
     ("main.rs", include_str!("../../main.rs")),
     ("main_tests.rs", include_str!("../../main_tests.rs")),
     (
