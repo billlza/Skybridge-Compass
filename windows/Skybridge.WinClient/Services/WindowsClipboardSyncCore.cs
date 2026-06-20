@@ -96,11 +96,15 @@ internal readonly struct ClipboardPayload : IEquatable<ClipboardPayload>
 /// <summary>
 /// Provides the AES-256 session key used to seal/open clipboard envelopes.
 ///
-/// KEY-INJECTION POINT: the real P2P session key (the handshake-derived secret,
-/// equivalent to the core's <c>SessionSecrets.seal</c> material) is wired by
-/// constructing <see cref="WindowsClipboardSyncService"/> with a delegate or an
-/// implementation of this interface. For local self-test / bring-up we use
-/// <see cref="DerivedDevelopmentKeyProvider"/> with a clear TODO.
+/// KEY-INJECTION POINT: the production implementation is
+/// <see cref="SessionDerivedClipboardKeyProvider"/>, which derives a distinct
+/// 32-byte key per P2P session from REAL per-session secret material (the WebRTC
+/// session id + the shared pairing/connection secret) via HKDF-SHA256. The
+/// composition root builds it through <see cref="ClipboardKeyProviders"/>.
+///
+/// Fail closed: an implementation MUST throw from <see cref="CurrentKey"/> if no
+/// session key is available, so the service refuses to send rather than emit
+/// cleartext or fall back to a non-secret development key.
 /// </summary>
 internal interface IClipboardSessionKeyProvider
 {
@@ -113,31 +117,140 @@ internal interface IClipboardSessionKeyProvider
 }
 
 /// <summary>
-/// Development-only key provider. Derives a deterministic 32-byte key from a
-/// caller-supplied seed via SHA-256 so the seal/open round-trip and the two-sided
-/// smoke can run before the real session key is wired.
+/// Inputs that bind a clipboard key to ONE specific P2P session. All of these are
+/// observed identically by both endpoints of the verified WebRTC session, so two
+/// peers that feed the SAME inputs into <see cref="ClipboardKeyDerivation"/> derive
+/// the SAME 32-byte key (the cross-platform contract Goal D's live test depends on).
 ///
-/// TODO(session-key): replace with the real handshake-derived session secret from
-/// the SkyBridge Core transport binding (the same secret the data plane uses for
-/// channel framing). Do NOT ship the derived development key in production: until
-/// the real key is injected, treat clipboard sync as bring-up only.
+/// Field roles in the HKDF (see <see cref="ClipboardKeyDerivation"/>):
+///   * <see cref="SharedPairingSecret"/> — the HKDF input keying material (IKM): the
+///     shared pairing/connection secret both peers possess (the connection code, or
+///     a stronger shared secret once one is cross-platform-available).
+///   * <see cref="SessionId"/> — the HKDF salt: a per-session, both-sides-observable
+///     identifier (the WebRTC proof's transportSecretFingerprintHex), so a NEW
+///     session with the SAME pairing secret still derives DISTINCT key material.
 /// </summary>
-internal sealed class DerivedDevelopmentKeyProvider : IClipboardSessionKeyProvider
+internal readonly struct ClipboardSessionBinding
+{
+    public string SharedPairingSecret { get; }
+    public string SessionId { get; }
+
+    public ClipboardSessionBinding(string sharedPairingSecret, string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sharedPairingSecret))
+        {
+            throw new ArgumentException("Clipboard session binding requires a non-empty shared pairing secret.", nameof(sharedPairingSecret));
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("Clipboard session binding requires a non-empty session id.", nameof(sessionId));
+        }
+
+        SharedPairingSecret = sharedPairingSecret;
+        SessionId = sessionId;
+    }
+}
+
+/// <summary>
+/// The exact HKDF-SHA256 derivation of the 32-byte clipboard key. This is the
+/// CONTRACT both platforms must implement identically for live Win↔Mac sync:
+///
+///     IKM  = UTF-8 bytes of the shared pairing/connection secret
+///     salt = UTF-8 bytes of the per-session id (WebRTC transportSecretFingerprintHex)
+///     info = UTF-8 bytes of "skybridge-clipboard-key-v1"  (fixed domain string)
+///     key  = HKDF-SHA256(IKM, salt, info, L = 32)
+///
+/// HKDF (RFC 5869) is HMAC-SHA256 extract-then-expand; .NET's
+/// <c>HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, 32, salt, info)</c>
+/// implements exactly that. The Apple side derives the same key with CryptoKit's
+/// <c>HKDF&lt;SHA256&gt;.deriveKey(inputKeyMaterial:salt:info:outputByteCount:32)</c>
+/// fed the SAME three byte strings.
+/// </summary>
+internal static class ClipboardKeyDerivation
+{
+    /// <summary>The HKDF <c>info</c> domain-separation string. Frozen; bump the suffix to rotate.</summary>
+    public const string Info = "skybridge-clipboard-key-v1";
+
+    public static byte[] DeriveKey(ClipboardSessionBinding binding)
+    {
+        var ikm = System.Text.Encoding.UTF8.GetBytes(binding.SharedPairingSecret);
+        var salt = System.Text.Encoding.UTF8.GetBytes(binding.SessionId);
+        var info = System.Text.Encoding.UTF8.GetBytes(Info);
+        return HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, ClipboardEnvelope.KeySize, salt, info);
+    }
+}
+
+/// <summary>
+/// PRODUCTION key provider. Derives the 32-byte clipboard key from real per-session
+/// secret material via <see cref="ClipboardKeyDerivation"/> (HKDF-SHA256). The key is
+/// computed once at construction (the binding is fixed for the session's lifetime;
+/// a rekey constructs a new provider, mirroring how the monitor is restarted).
+///
+/// Distinct sessions (distinct <see cref="ClipboardSessionBinding.SessionId"/> and/or
+/// shared secret) yield distinct keys, so a captured envelope from one session never
+/// opens under another session's key.
+/// </summary>
+internal sealed class SessionDerivedClipboardKeyProvider : IClipboardSessionKeyProvider
 {
     private readonly byte[] _key;
 
-    public DerivedDevelopmentKeyProvider(string seed = "skybridge.clipboard.dev-key.v1")
+    public SessionDerivedClipboardKeyProvider(ClipboardSessionBinding binding)
+    {
+        _key = ClipboardKeyDerivation.DeriveKey(binding);
+    }
+
+    public byte[] CurrentKey() => _key;
+}
+
+/// <summary>
+/// The only sanctioned way to construct a clipboard key provider for the RUNTIME.
+/// The release path returns ONLY <see cref="SessionDerivedClipboardKeyProvider"/>;
+/// there is no development-key fallback compiled into release. If a caller cannot
+/// supply real session material, it gets no provider and the service fails closed
+/// (it never sends).
+/// </summary>
+internal static class ClipboardKeyProviders
+{
+    /// <summary>
+    /// Build the real session-derived provider for an active P2P session. Throws if
+    /// the session material is missing/blank — callers MUST treat that as "no key"
+    /// and not start clipboard sync (fail closed; never substitute a placeholder).
+    /// </summary>
+    public static IClipboardSessionKeyProvider CreateForSession(string sharedPairingSecret, string sessionId) =>
+        new SessionDerivedClipboardKeyProvider(new ClipboardSessionBinding(sharedPairingSecret, sessionId));
+}
+
+#if DEBUG
+/// <summary>
+/// TEST-ONLY key provider, compiled ONLY under <c>DEBUG</c> (never present in a
+/// Release build). Derives a deterministic 32-byte key from a caller-supplied seed
+/// via SHA-256 so the OS-free smoke / unit tests can exercise the seal/open
+/// round-trip, dedup, and loop-suppression without standing up a real WebRTC
+/// session.
+///
+/// It is NOT reachable from any production code path: the runtime composition root
+/// builds providers exclusively through <see cref="ClipboardKeyProviders"/>, which
+/// returns only <see cref="SessionDerivedClipboardKeyProvider"/>. This type is named
+/// for tests and excluded from Release so it cannot be wired by accident.
+/// </summary>
+internal sealed class TestOnlyDeterministicClipboardKeyProvider : IClipboardSessionKeyProvider
+{
+    private readonly byte[] _key;
+
+    public TestOnlyDeterministicClipboardKeyProvider(string seed = "skybridge.clipboard.test-key.v1")
     {
         _key = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(seed));
     }
 
-    public DerivedDevelopmentKeyProvider(ReadOnlySpan<byte> rawSeed)
+    public TestOnlyDeterministicClipboardKeyProvider(ReadOnlySpan<byte> rawSeed)
     {
         _key = SHA256.HashData(rawSeed);
     }
 
     public byte[] CurrentKey() => _key;
 }
+#endif
 
 /// <summary>
 /// AES-256-GCM envelope, mirroring the macOS ClipboardSyncService /

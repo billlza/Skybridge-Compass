@@ -78,8 +78,11 @@ internal sealed class WindowsClipboardSyncService : IDisposable
 
     /// <param name="dataPlane">The shared data plane; clipboard rides channel Clipboard.</param>
     /// <param name="keyProvider">
-    /// Session-key injection point. Pass the real handshake-derived key provider once
-    /// it is wired; for bring-up pass <see cref="DerivedDevelopmentKeyProvider"/>.
+    /// Session-key injection point. In the runtime this is the real session-derived
+    /// provider (<c>SessionDerivedClipboardKeyProvider</c>) built via
+    /// <c>ClipboardKeyProviders.CreateForSession</c>; there is no development-key
+    /// fallback in release. If no session key is available the caller must not start
+    /// the service (fail closed).
     /// </param>
     /// <param name="syncImages">Whether to read/apply PNG images (default true, matches macOS).</param>
     /// <param name="maxContentBytes">Skip items larger than this (default 10 MiB, matches macOS).</param>

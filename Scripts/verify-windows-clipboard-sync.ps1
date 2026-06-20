@@ -50,6 +50,10 @@ try {
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- The smoke exercises the DEBUG-only TestOnlyDeterministicClipboardKeyProvider
+         for the seal/open round-trip; define DEBUG so it compiles regardless of the
+         host's default build configuration. -->
+    <DefineConstants>`$(DefineConstants);DEBUG</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
@@ -67,7 +71,7 @@ using System.Text;
 using Skybridge.WinClient.Services;
 
 // 1) Envelope seal/open round-trip (AES-256-GCM, nonce||ct||tag).
-var keyProvider = new DerivedDevelopmentKeyProvider("smoke-key");
+var keyProvider = new TestOnlyDeterministicClipboardKeyProvider("smoke-key");
 var key = keyProvider.CurrentKey();
 AssertEqual(32, key.Length, "session key is AES-256 (32 bytes)");
 
@@ -87,7 +91,7 @@ tampered[^1] ^= 0xFF;
 AssertThrows(() => ClipboardEnvelope.Open(tampered, key), "tampered envelope fails to open");
 
 // 1c) Wrong key -> open throws.
-var wrongKey = new DerivedDevelopmentKeyProvider("other-key").CurrentKey();
+var wrongKey = new TestOnlyDeterministicClipboardKeyProvider("other-key").CurrentKey();
 AssertThrows(() => ClipboardEnvelope.Open(envelope, wrongKey), "wrong key fails to open");
 
 // 2) Text/image payload framing round-trip ([kind:1][content:N]).
@@ -120,8 +124,8 @@ AssertEqual(true, changed is not null, "a changed copy is broadcast");
 
 // 4) Loop suppression end-to-end: sender seals -> receiver decodes+applies ->
 //    the receiver's own re-observed local change must NOT be re-broadcast.
-var sender = new ClipboardSyncCodec(new DerivedDevelopmentKeyProvider("shared"));
-var receiver = new ClipboardSyncCodec(new DerivedDevelopmentKeyProvider("shared"));
+var sender = new ClipboardSyncCodec(new TestOnlyDeterministicClipboardKeyProvider("shared"));
+var receiver = new ClipboardSyncCodec(new TestOnlyDeterministicClipboardKeyProvider("shared"));
 
 var outbound = sender.TryBuildOutboundEnvelope(ClipboardPayload.Text("loop-me"));
 AssertEqual(true, outbound is not null, "sender produces envelope");
@@ -139,6 +143,71 @@ AssertEqual(true, echo is null, "receiver does not re-broadcast the applied item
 // 4a) Re-receiving the SAME item is a no-op (dedup on the apply side).
 var again = receiver.TryDecodeInbound(outbound!);
 AssertEqual(true, again is null, "re-received identical item is deduped on apply side");
+
+// ====================================================================
+// Goal C — real session-derived clipboard key (HKDF-SHA256).
+//   IKM  = shared pairing/connection secret
+//   salt = per-session id (WebRTC transportSecretFingerprintHex)
+//   info = "skybridge-clipboard-key-v1"
+// ====================================================================
+
+var pairingSecret = "skybridge-pair:v1;deviceId=mac-abc;pubKeyFP=" + new string('a', 64);
+const string sessionA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; // proof transportSecretFingerprintHex (session A)
+const string sessionB = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"; // a NEW session (B)
+
+// (a) Correct session key round-trips: a key derived from the SAME (secret, sessionId)
+//     on both ends seals/opens the same payload.
+var sessionKeyProviderA1 = ClipboardKeyProviders.CreateForSession(pairingSecret, sessionA);
+var sessionKeyProviderA2 = ClipboardKeyProviders.CreateForSession(pairingSecret, sessionA);
+var sessionKeyA1 = sessionKeyProviderA1.CurrentKey();
+var sessionKeyA2 = sessionKeyProviderA2.CurrentKey();
+AssertEqual(32, sessionKeyA1.Length, "session-derived key is AES-256 (32 bytes)");
+AssertSequenceEqual(sessionKeyA1, sessionKeyA2, "same (secret, sessionId) derives identical key on both ends");
+
+var sessionPlain = Encoding.UTF8.GetBytes("session clipboard payload 会话");
+var sessionEnvelope = ClipboardEnvelope.Seal(sessionPlain, sessionKeyA1);
+var sessionOpened = ClipboardEnvelope.Open(sessionEnvelope, sessionKeyA2);
+AssertSequenceEqual(sessionPlain, sessionOpened, "session key round-trips cleartext (peer A1 -> peer A2)");
+
+// (b) Wrong key is rejected (GCM tag fail): a key from a DIFFERENT shared secret can't open.
+var wrongSecretKey = ClipboardKeyProviders.CreateForSession(pairingSecret + "-tampered", sessionA).CurrentKey();
+AssertThrows(() => ClipboardEnvelope.Open(sessionEnvelope, wrongSecretKey), "wrong shared-secret key is rejected (GCM tag)");
+
+// (d) A NEW session derives DISTINCT key material from a distinct sessionId (salt),
+//     even with the SAME shared pairing secret. So a session-A envelope must NOT open
+//     under the session-B key.
+var sessionKeyB = ClipboardKeyProviders.CreateForSession(pairingSecret, sessionB).CurrentKey();
+AssertEqual(false, AsHex(sessionKeyA1) == AsHex(sessionKeyB), "a new session (distinct salt) derives distinct key material");
+AssertThrows(() => ClipboardEnvelope.Open(sessionEnvelope, sessionKeyB), "session-A envelope does not open under session-B key");
+
+// Distinct shared secret -> distinct key too (same sessionId, different IKM).
+var otherSecretKey = ClipboardKeyProviders.CreateForSession(pairingSecret + "-other", sessionA).CurrentKey();
+AssertEqual(false, AsHex(sessionKeyA1) == AsHex(otherSecretKey), "a distinct shared secret derives distinct key material");
+
+// Blank session material is refused (fail closed — caller must not start sync).
+AssertThrows(() => ClipboardKeyProviders.CreateForSession("", sessionA), "blank shared secret refused");
+AssertThrows(() => ClipboardKeyProviders.CreateForSession(pairingSecret, ""), "blank session id refused");
+
+// (c) Missing key prevents send: a provider that fails closed makes the codec
+//     produce NO envelope (no cleartext fallback) for a fresh local change.
+var failClosedCodec = new ClipboardSyncCodec(new FailClosedKeyProvider());
+AssertThrows(
+    () => failClosedCodec.TryBuildOutboundEnvelope(ClipboardPayload.Text("must-not-send")),
+    "missing session key prevents send (fail closed, no cleartext)");
+
+// (e) The dev/test key is NOT used in the production/release path: the runtime
+//     factory returns ONLY the session-derived provider, never the test-only one.
+var releaseProvider = ClipboardKeyProviders.CreateForSession(pairingSecret, sessionA);
+AssertEqual(
+    true,
+    releaseProvider is SessionDerivedClipboardKeyProvider,
+    "release path uses SessionDerivedClipboardKeyProvider");
+AssertEqual(
+    false,
+    releaseProvider is TestOnlyDeterministicClipboardKeyProvider,
+    "release path is NOT the test-only deterministic provider");
+// The test-only provider is compiled ONLY under DEBUG (this smoke defines DEBUG);
+// in a Release build the type does not exist, so it cannot be wired by accident.
 
 Console.WriteLine("windows-clipboard-sync: ok");
 
@@ -177,6 +246,16 @@ static void AssertEqual<T>(T expected, T actual, string label)
     {
         throw new InvalidOperationException($"{label}: expected {expected}, got {actual}");
     }
+}
+
+// A key provider that has no session key and therefore fails closed: it throws from
+// CurrentKey() rather than returning a usable (let alone cleartext / placeholder) key.
+// This is the contract the production service relies on so a session without key
+// material never sends. Used by Goal C test (c).
+file sealed class FailClosedKeyProvider : IClipboardSessionKeyProvider
+{
+    public byte[] CurrentKey() =>
+        throw new InvalidOperationException("no clipboard session key available (fail closed)");
 }
 '@
 
