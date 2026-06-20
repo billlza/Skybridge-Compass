@@ -14,4 +14,21 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
   </ItemGroup>
+
+  <!--
+    `dotnet publish` of an unpackaged WinUI 3 app (WindowsPackageType=None) does NOT carry the
+    compiled WinUI resource index (<TargetName>.pri) into the publish output, even though
+    `dotnet build` keeps it in bin\. That .pri embeds every compiled XAML (.xbf); without it,
+    ms-appx:///...xaml resolution finds nothing and the app throws XamlParseException at the very
+    first XAML load (MainWindow), crashing on startup. Explicitly publish the .pri so a clean
+    self-contained build is runnable and does not depend on the bin\ build output.
+  -->
+  <Target Name="IncludeProjectPriInPublish" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(OutDir)$(TargetName).pri" Condition="Exists('$(OutDir)$(TargetName).pri')">
+        <RelativePath>$(TargetName).pri</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>
