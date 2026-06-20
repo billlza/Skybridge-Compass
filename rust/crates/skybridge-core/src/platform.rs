@@ -26,9 +26,10 @@ use thiserror::Error;
 // MARK: - Screen capture types
 
 /// Pixel format. Wire-compatible with Swift `PixelFormat` (rawValue strings).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PixelFormat {
     #[serde(rename = "BGRA")]
+    #[default]
     Bgra,
     #[serde(rename = "RGBA")]
     Rgba,
@@ -36,12 +37,6 @@ pub enum PixelFormat {
     Nv12,
     #[serde(rename = "I420")]
     I420,
-}
-
-impl Default for PixelFormat {
-    fn default() -> Self {
-        PixelFormat::Bgra
-    }
 }
 
 /// Screen-capture configuration. Mirrors Swift `ScreenCaptureConfig`.
@@ -257,7 +252,7 @@ pub trait PlatformAdapter: Send + Sync {
 
     // Input injection
     async fn inject_mouse_event(&self, event: RemoteMouseEvent)
-        -> Result<(), PlatformAdapterError>;
+    -> Result<(), PlatformAdapterError>;
     async fn inject_keyboard_event(
         &self,
         event: RemoteKeyboardEvent,
@@ -470,8 +465,14 @@ mod tests {
 
     #[test]
     fn pixel_format_wire_strings_match_swift() {
-        assert_eq!(serde_json::to_string(&PixelFormat::Bgra).unwrap(), "\"BGRA\"");
-        assert_eq!(serde_json::to_string(&PixelFormat::Nv12).unwrap(), "\"NV12\"");
+        assert_eq!(
+            serde_json::to_string(&PixelFormat::Bgra).unwrap(),
+            "\"BGRA\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PixelFormat::Nv12).unwrap(),
+            "\"NV12\""
+        );
     }
 
     #[test]
@@ -510,10 +511,11 @@ mod tests {
     #[tokio::test]
     async fn stub_reports_unsupported() {
         let a = StubPlatformAdapter;
-        assert!(a
-            .start_screen_capture(ScreenCaptureConfig::default())
-            .await
-            .is_err());
+        assert!(
+            a.start_screen_capture(ScreenCaptureConfig::default())
+                .await
+                .is_err()
+        );
         assert!(a.get_screen_frame().await.is_none());
         assert_eq!(
             a.check_permission(PermissionType::Accessibility).await,

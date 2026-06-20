@@ -14,6 +14,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../main_tests/parse/check.rs"),
     ),
     (
+        "main_tests/parse/crossnet.rs",
+        include_str!("../../main_tests/parse/crossnet.rs"),
+    ),
+    (
         "main_tests/parse/device.rs",
         include_str!("../../main_tests/parse/device.rs"),
     ),
@@ -44,6 +48,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "cli_args/common.rs",
         include_str!("../../cli_args/common.rs"),
+    ),
+    (
+        "cli_args/crossnet.rs",
+        include_str!("../../cli_args/crossnet.rs"),
     ),
     (
         "cli_args/doctor.rs",
@@ -117,6 +125,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "control_plane_doctor/signaling.rs",
         include_str!("../../control_plane_doctor/signaling.rs"),
+    ),
+    (
+        "crossnet_commands.rs",
+        include_str!("../../crossnet_commands.rs"),
     ),
     (
         "device_commands.rs",

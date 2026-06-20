@@ -2,7 +2,17 @@
 
 ## Product Definition
 
-SkyBridge CLI is a headless, scriptable, protocol-faithful operator surface for:
+SkyBridge CLI has two explicit operator surfaces:
+
+- **Mac app control surface**: app-bound commands that call the running
+  SkyBridge Compass Pro app through `crossnet-control/1`. These commands may
+  change the GUI/WebRTC runtime only when the Mac app itself has a loaded auth
+  session and tenant binding.
+- **Native/headless surface**: scriptable commands backed by Rust `state_dir`
+  and `skybridge-agent`. These commands are protocol-faithful, but they do not
+  read, copy, or replace the Mac app Keychain/auth session.
+
+The native/headless surface is for:
 
 - device identity and enrollment
 - connection establishment and session visibility
@@ -10,11 +20,15 @@ SkyBridge CLI is a headless, scriptable, protocol-faithful operator surface for:
 - diagnostics and automation
 
 It is not a CLI skin over the GUI, and it is not a general-purpose SSH replacement.
+When an operator action is expected to affect the Mac GUI runtime, the command
+must be app-bound (`skybridge crossnet ...`) or fail closed. Native CLI auth is
+not a fallback for Mac app auth.
 
 ## v1 In Scope
 
 - `skybridge-agent` as the long-running headless peer/runtime
 - `skybridge` as the operator-facing command line
+- `skybridge crossnet ...` as the Mac app-bound cross-network control surface
 - reuse of the formal SkyBridge identity, signaling, current-path, session, and file-transfer contracts
 - stable structured logs and doctor output for automation and regression
 
@@ -54,6 +68,33 @@ The Rust workspace under `rust/` is the new headless surface:
 
 The CLI must not read GUI view models or UI-only state.
 
+## Authority Boundaries
+
+GUI-affecting commands:
+
+- `skybridge crossnet host`
+- `skybridge crossnet connect <code>`
+- `skybridge crossnet disconnect`
+- `skybridge crossnet status`
+
+These are app-bound and use the Mac app's `crossnet-control/1` Unix socket. The
+Mac app remains the source of truth for Keychain auth, tenant state,
+`CrossNetworkConnectionManager`, and WebRTC/signaling lifecycle.
+
+Native/headless commands:
+
+- `skybridge login`
+- `skybridge logout`
+- `skybridge code create`
+- `skybridge connect <code>`
+- `skybridge session ls`
+- `skybridge session inspect <id>`
+- `skybridge disconnect <id>`
+
+These use Rust `state_dir` and `skybridge-agent` runtime state. They are useful
+for standalone/headless operation and tests, but they do not mutate the Mac GUI
+runtime and must not be treated as a substitute GUI interop channel.
+
 ## Source of Truth
 
 - device identity
@@ -78,6 +119,10 @@ The parser is intentionally shaped around the release surface:
 - `skybridge device approve <request-id>`
 - `skybridge code create`
 - `skybridge connect <code>`
+- `skybridge crossnet host`
+- `skybridge crossnet connect <code>`
+- `skybridge crossnet disconnect`
+- `skybridge crossnet status`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
@@ -113,7 +158,7 @@ Still intentionally gated:
 - `skybridge file receive`
 - `skybridge file history`
 
-Current `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` now read that agent/runtime view instead of CLI-local ad hoc records. Full data-plane/file-transfer work remains Phase 6.
+Current native `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` read that native agent/runtime view instead of Mac GUI state. Use `skybridge crossnet ...` for Mac GUI interop. Full data-plane/file-transfer work remains Phase 6.
 
 ## Iteration Template
 

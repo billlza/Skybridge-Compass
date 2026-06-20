@@ -29,7 +29,7 @@ pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> 
         let dirs = ProjectDirs::from("com", "SkyBridge", "skybridge")
             .ok_or_else(|| anyhow!("failed to resolve platform state directory"))?;
         dirs.state_dir()
-            .ok_or_else(|| anyhow!("platform state directory is unavailable"))?
+            .unwrap_or_else(|| dirs.data_local_dir())
             .to_path_buf()
     };
 

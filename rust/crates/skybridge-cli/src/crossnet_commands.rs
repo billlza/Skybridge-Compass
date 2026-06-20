@@ -102,29 +102,39 @@ fn print_disconnect(result: &DisconnectResult, as_json: bool) -> Result<()> {
 }
 
 fn print_status(status: &StatusResult, as_json: bool) -> Result<()> {
+    let session_present = status.session_present || status.session_id.is_some();
     if as_json {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "connection_status": status.connection_status,
                 "readiness": status.readiness,
-                "session_id": status.session_id,
+                "session_present": session_present,
+                "session_ref": status.session_ref,
                 "suite": status.suite,
                 "signaling_health": status.signaling_health,
+                "auth_loaded": status.auth_loaded,
+                "tenant_bound": status.tenant_bound,
             }))?
         );
     } else {
         println!("Connection Status: {}", status.connection_status);
         println!("Readiness: {}", status.readiness);
         println!(
-            "Session ID: {}",
-            status.session_id.as_deref().unwrap_or("none")
+            "Session: {}",
+            if session_present { "present" } else { "none" }
+        );
+        println!(
+            "Session Ref: {}",
+            status.session_ref.as_deref().unwrap_or("none")
         );
         println!("Suite: {}", status.suite.as_deref().unwrap_or("none"));
         println!(
             "Signaling Health: {}",
             status.signaling_health.as_deref().unwrap_or("unknown")
         );
+        println!("Auth Loaded: {}", status.auth_loaded);
+        println!("Tenant Bound: {}", status.tenant_bound);
     }
     Ok(())
 }

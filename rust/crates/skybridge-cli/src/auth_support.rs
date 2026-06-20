@@ -74,7 +74,10 @@ pub(crate) async fn require_auth_session(
     if let Some(session) = refresh_auth_session_if_needed(paths).await? {
         return Ok(session);
     }
-    bail!("No auth session found. Run `skybridge login` first.")
+    bail!(
+        "No native CLI auth session found in {}. Run `skybridge login` for the standalone native CLI path, or use `skybridge crossnet connect <code>` to drive the signed Mac app session through crossnet-control/1.",
+        paths.identity_dir.display()
+    )
 }
 
 pub(crate) fn require_tenant_id(session: &skybridge_core::AuthSession) -> Result<String> {

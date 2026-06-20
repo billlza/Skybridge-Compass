@@ -5,6 +5,8 @@ use skybridge_agent::run_agent;
 
 mod smoke;
 
+#[cfg(unix)]
+use crate::CrossnetSubcommand;
 use crate::auth_commands::{login, logout};
 use crate::connectivity_check::check_connectivity;
 use crate::device_commands::{device_approve, device_enroll, device_status};
@@ -14,8 +16,6 @@ use crate::doctor_commands::{
 use crate::operator_status::{doctor, metrics, tail_logs};
 use crate::performance_commands::check_performance;
 use crate::session_commands::{disconnect, session_inspect, session_ls};
-#[cfg(unix)]
-use crate::CrossnetSubcommand;
 use crate::{
     AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
     DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,

@@ -37,6 +37,38 @@ const OPERATOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 fn operator_capabilities() -> &'static [OperatorCapability] {
     &[
         OperatorCapability {
+            id: "crossnet.host",
+            status: OperatorCapabilityStatus::Available,
+            command: "app-bound: skybridge crossnet host [--lease short|long] [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Mac app operator socket; requires the running signed Mac app to have auth_loaded=true and tenant_bound=true; returns a real app-issued connection code and never falls back to native CLI auth",
+            verification_gate: "skybridge-crossnet-client fake UDS preflight tests + live app socket smoke",
+        },
+        OperatorCapability {
+            id: "crossnet.connect",
+            status: OperatorCapabilityStatus::Available,
+            command: "app-bound: skybridge crossnet connect <code> [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Mac app operator socket; mutates CrossNetworkConnectionManager in the running Mac app only after app auth and tenant preflight pass",
+            verification_gate: "skybridge-crossnet-client fake UDS preflight tests + live app socket smoke",
+        },
+        OperatorCapability {
+            id: "crossnet.disconnect",
+            status: OperatorCapabilityStatus::Available,
+            command: "app-bound: skybridge crossnet disconnect [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Mac app operator socket; requires app auth and tenant binding and reports whether an app session was present before disconnect",
+            verification_gate: "OperatorControlServer disconnect auth gate + crossnet client preflight tests",
+        },
+        OperatorCapability {
+            id: "crossnet.status",
+            status: OperatorCapabilityStatus::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet status [--watch] [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "read-only Mac app operator socket status; reports auth_loaded/tenant_bound plus redacted session presence/ref without exposing raw session ids",
+            verification_gate: "crossnet status redaction tests + live app socket smoke",
+        },
+        OperatorCapability {
             id: "device.status",
             status: OperatorCapabilityStatus::Available,
             command: "skybridge device status [--json]",
@@ -61,11 +93,27 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             verification_gate: "device_discovery_nearby_snapshot_gate + connectivity_matrix_gate",
         },
         OperatorCapability {
+            id: "native.code.create",
+            status: OperatorCapabilityStatus::Available,
+            command: "headless-native: skybridge code create [--json]",
+            owner_module: "connection_code::create + skybridge-agent state",
+            authority_boundary: "standalone native CLI auth/session state under the selected state_dir; does not mutate the Mac GUI runtime and must not be used as a GUI interop substitute",
+            verification_gate: "connection_code::tests",
+        },
+        OperatorCapability {
+            id: "native.connect",
+            status: OperatorCapabilityStatus::Available,
+            command: "headless-native: skybridge connect <code> [--json]",
+            owner_module: "connection_code::connect + skybridge-agent state",
+            authority_boundary: "standalone native signaling/WebRTC runtime backed by Rust state_dir; does not bind or update CrossNetworkConnectionManager in the Mac app",
+            verification_gate: "connection_code::tests",
+        },
+        OperatorCapability {
             id: "session.list",
             status: OperatorCapabilityStatus::Available,
             command: "skybridge session ls [--json]",
             owner_module: "session_commands",
-            authority_boundary: "read-only SessionRegistry projection",
+            authority_boundary: "read-only native/headless SessionRegistry projection; for Mac GUI session state use `skybridge crossnet status`",
             verification_gate: "session_commands::tests",
         },
         OperatorCapability {
@@ -73,7 +121,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             status: OperatorCapabilityStatus::Available,
             command: "skybridge session inspect <id> [--json]",
             owner_module: "session_commands",
-            authority_boundary: "read-only single-session projection",
+            authority_boundary: "read-only native/headless single-session projection; not a Mac GUI runtime projection",
             verification_gate: "session_commands::tests",
         },
         OperatorCapability {
@@ -81,7 +129,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             status: OperatorCapabilityStatus::Available,
             command: "skybridge disconnect <session-id>",
             owner_module: "session_commands",
-            authority_boundary: "updates ManagedSessionControl and RuntimeSessionRecord through skybridge-agent state helpers",
+            authority_boundary: "updates native/headless ManagedSessionControl and RuntimeSessionRecord through skybridge-agent state helpers; for Mac GUI disconnect use `skybridge crossnet disconnect`",
             verification_gate: "dispatch_covers_operator_entry_error_and_wrapper_paths",
         },
         OperatorCapability {
@@ -225,6 +273,7 @@ mod tests {
         assert_eq!(ids.len(), capabilities.len());
 
         for required in [
+            "crossnet.status",
             "device.discovery.nearby",
             "remote_desktop.contract",
             "remote_desktop.status",
@@ -244,6 +293,36 @@ mod tests {
             assert!(
                 !capability.verification_gate.trim().is_empty(),
                 "{required} must declare its verification gate"
+            );
+        }
+
+        for required in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+            let capability = capabilities
+                .iter()
+                .find(|capability| capability.id == required)
+                .expect("app-bound crossnet capability must be declared");
+            assert_eq!(capability.status, OperatorCapabilityStatus::Available);
+            assert!(
+                capability.command.contains("app-bound"),
+                "{required} must advertise the Mac app authority boundary"
+            );
+            assert!(
+                capability
+                    .authority_boundary
+                    .contains("Mac app operator socket"),
+                "{required} must not look like a native state-dir mutation"
+            );
+        }
+
+        for required in ["native.code.create", "native.connect"] {
+            let capability = capabilities
+                .iter()
+                .find(|capability| capability.id == required)
+                .expect("native/headless capability must be declared");
+            assert_eq!(capability.status, OperatorCapabilityStatus::Available);
+            assert!(
+                capability.authority_boundary.contains("does not"),
+                "{required} must not imply GUI mutation"
             );
         }
 

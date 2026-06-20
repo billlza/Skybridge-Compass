@@ -35,7 +35,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::{CryptoSuite, ProtocolSigningAlgorithm, mldsa65_sign_detached, mldsa65_verify_detached};
+use crate::{
+    CryptoSuite, ProtocolSigningAlgorithm, mldsa65_sign_detached, mldsa65_verify_detached,
+};
 
 /// Per-peer cooldown enforced between two authorized Classic fallbacks.
 ///
@@ -58,7 +60,7 @@ pub const FALLBACK_COOLDOWN: Duration = Duration::from_secs(300);
 ///   Classic fallback (the default operational posture).
 /// - [`DowngradePolicy::Default`] — same fallback gating as `PreferPqc` but does
 ///   not *require* an initial PQC attempt; used by peers that have no PQC provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DowngradePolicy {
     /// Strict PQC, compliance realization: classic fallback is *never* allowed.
@@ -67,15 +69,10 @@ pub enum DowngradePolicy {
     /// channel is allowed for paired KEM-key recovery, then mandatory PQC rekey.
     StrictPqcBootstrapAssisted,
     /// Prefer PQC, allow eligible + rate-limited classic business-traffic fallback.
+    #[default]
     PreferPqc,
     /// Default posture: no mandatory initial PQC attempt; same fallback gating.
     Default,
-}
-
-impl Default for DowngradePolicy {
-    fn default() -> Self {
-        Self::PreferPqc
-    }
 }
 
 impl DowngradePolicy {
@@ -235,7 +232,9 @@ impl FallbackRateLimiter {
             None => Duration::ZERO,
             Some(last) => {
                 let elapsed = last.elapsed();
-                self.cooldown().checked_sub(elapsed).unwrap_or(Duration::ZERO)
+                self.cooldown()
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::ZERO)
             }
         }
     }
@@ -288,8 +287,7 @@ impl DowngradeEvent {
     pub const SCHEMA_VERSION: u32 = 1;
 
     /// Canonical descriptor of the enforced downgrade-resistance properties.
-    pub const DOWNGRADE_RESISTANCE: &'static str =
-        "policy_gate+no_timeout_fallback+rate_limited";
+    pub const DOWNGRADE_RESISTANCE: &'static str = "policy_gate+no_timeout_fallback+rate_limited";
 
     /// Domain-separation tag prepended to every canonical signing pre-image so a
     /// `DowngradeEvent` signature can never be confused with any other ML-DSA-65
@@ -503,7 +501,7 @@ impl PolicyGate {
     /// 1. reason eligibility (structural — blocks timeout/auth failures),
     /// 2. policy posture (strict modes deny business fallback),
     /// 3. per-peer rate limit (cooldown),
-    /// and only then is the cooldown clock armed and a [`DowngradeEvent`] minted.
+    /// 4. and only then is the cooldown clock armed and a [`DowngradeEvent`] minted.
     pub fn authorize_downgrade(
         &mut self,
         peer: &str,
@@ -693,10 +691,8 @@ mod tests {
     #[test]
     fn cooldown_denies_second_fallback_within_window() {
         // Use a long custom cooldown so the second call is unambiguously inside it.
-        let mut gate = PolicyGate::with_cooldown(
-            DowngradePolicy::PreferPqc,
-            Duration::from_secs(300),
-        );
+        let mut gate =
+            PolicyGate::with_cooldown(DowngradePolicy::PreferPqc, Duration::from_secs(300));
         let first = gate.authorize_downgrade(
             "peer-a",
             PQC_SUITE,
@@ -740,7 +736,10 @@ mod tests {
             None,
         );
         assert!(a.is_allowed());
-        assert!(b.is_allowed(), "a different peer must not share the cooldown");
+        assert!(
+            b.is_allowed(),
+            "a different peer must not share the cooldown"
+        );
     }
 
     #[test]
@@ -763,7 +762,10 @@ mod tests {
             None,
         );
         assert!(first.is_allowed());
-        assert!(second.is_allowed(), "expired cooldown should re-allow fallback");
+        assert!(
+            second.is_allowed(),
+            "expired cooldown should re-allow fallback"
+        );
     }
 
     // ---- DowngradeEvent round-trips through serde ----
