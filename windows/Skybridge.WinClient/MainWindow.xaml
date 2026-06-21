@@ -32,6 +32,11 @@
         <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
         <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
         <vm:WeatherPhaseToVisibilityConverter x:Key="WeatherPhaseVisibilityConverter" />
+        <vm:FileTransferStateToBrushConverter x:Key="FileTransferStateBrushConverter" />
+        <vm:FileTransferStateToGlyphConverter x:Key="FileTransferStateGlyphConverter" />
+        <vm:FileTransferDirectionToGlyphConverter x:Key="FileTransferDirectionGlyphConverter" />
+        <vm:FileTransferDirectionToBrushConverter x:Key="FileTransferDirectionBrushConverter" />
+        <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -700,35 +705,139 @@
                 </StackPanel>
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             FileTransferQueueItemTemplate — the active/queued transfer ROW for
+             the File Transfer page Transfer Queue list. Element-matches the Mac
+             ModernTransferRowView:
+               [ direction icon (up=outgoing blue / down=incoming green, derived
+                 honestly from State via FileTransferDirectionGlyph/BrushConverter) ]
+               + [ file-type tile holding a status glyph (queued clock / sync /
+                   completed check / error, tinted by State) ]
+               + [ Name (.subheadline medium) over Size (.caption secondary) ]
+               + [ Spacer ]
+               + [ right column: State value (tinted) over Binding (channel kind,
+                   muted caption) ]
+             Bound to the REAL FileTransferQueue collection (FileTransferQueueItemView
+             Name/State/Size/Binding/Detail) projected from the read-only workspace
+             snapshot. There is NO numeric progress field in the Windows snapshot, so
+             the row shows the honest State text (Queued / Intent ready / …) instead
+             of a fabricated progress bar — matching the Mac status semantics without
+             faking a percentage. Detail rides as the row tooltip. No inline Button —
+             the row is display-only; transfer actions live on the shared action surface.
+             =================================================================== -->
         <DataTemplate x:Key="FileTransferQueueItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="12">
+            <Grid Padding="2,8" ColumnSpacing="12" ToolTipService.ToolTip="{Binding Detail}">
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="120" />
-                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel Spacing="2">
-                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding Size}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <!-- Direction icon (Mac arrow.up/down.circle.fill: outgoing blue / incoming green) -->
+                <FontIcon
+                    Grid.Column="0"
+                    Glyph="{Binding State, Converter={StaticResource FileTransferDirectionGlyphConverter}}"
+                    FontSize="18"
+                    Foreground="{Binding State, Converter={StaticResource FileTransferDirectionBrushConverter}}"
+                    VerticalAlignment="Center" />
+                <!-- File-type tile holding the State status glyph (Mac 40x40 icon tile) -->
+                <Border
+                    Grid.Column="1"
+                    Width="36"
+                    Height="36"
+                    CornerRadius="8"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                    BorderThickness="1"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding State, Converter={StaticResource FileTransferStateGlyphConverter}}"
+                        FontSize="16"
+                        Foreground="{Binding State, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <!-- Name + size -->
+                <StackPanel Grid.Column="2" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding Size}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
-                <TextBlock Grid.Column="1" Text="{Binding State}" />
-                <TextBlock Grid.Column="2" Text="{Binding Binding}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <!-- State (tinted) over Binding channel kind (muted) -->
+                <StackPanel Grid.Column="3" Spacing="2" VerticalAlignment="Center" HorizontalAlignment="Right" MinWidth="120">
+                    <TextBlock
+                        Text="{Binding State}"
+                        FontWeight="Medium"
+                        TextAlignment="Right"
+                        Foreground="{Binding State, Converter={StaticResource FileTransferStateBrushConverter}}" />
+                    <TextBlock
+                        Text="{Binding Binding}"
+                        FontSize="11"
+                        TextAlignment="Right"
+                        TextWrapping="Wrap"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                </StackPanel>
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             FileTransferHistoryItemTemplate — the completed-transfer ROW for the
+             File Transfer page Transfer History list. Element-matches the Mac
+             EnhancedHistoryRowView:
+               [ Result status icon (completed check / error, tinted by Result) ]
+               + [ Name (.subheadline medium) over a meta line: Hmac • Signature
+                   (both .caption2 secondary) ]
+               + [ Spacer ]
+               + [ verification shield pill (Mac scan-result capsule): a shield glyph
+                   tinted green when Verified / red when failed + the Result text ]
+             Bound to the REAL FileTransferHistory collection (FileTransferHistoryItemView
+             Name/Result/Hmac/Signature). Carded per-row (GlassCard) to match the Mac
+             EnhancedHistoryRowView's own ultraThinMaterial card. No inline Button.
+             =================================================================== -->
         <DataTemplate x:Key="FileTransferHistoryItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="120" />
-                    <ColumnDefinition Width="160" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                <TextBlock Grid.Column="1" Text="{Binding Result}" />
-                <StackPanel Grid.Column="2" Spacing="2">
-                    <TextBlock Text="{Binding Hmac}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding Signature}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-            </Grid>
+            <Border Style="{StaticResource GlassCard}" Padding="12" Margin="0,0,0,8">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Result status icon (Mac checkmark/xmark.circle.fill) -->
+                    <FontIcon
+                        Grid.Column="0"
+                        Glyph="{Binding Result, Converter={StaticResource FileTransferStateGlyphConverter}}"
+                        FontSize="20"
+                        Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                    <!-- Name + HMAC/Signature meta line -->
+                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}">
+                            <Run Text="{Binding Hmac}" />
+                            <Run Text=" &#x2022; " />
+                            <Run Text="{Binding Signature}" />
+                        </TextBlock>
+                    </StackPanel>
+                    <!-- Verification shield pill (Mac scan-result capsule) -->
+                    <Border
+                        Grid.Column="2"
+                        Style="{StaticResource ConnectionTypeChip}"
+                        BorderBrush="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <FontIcon
+                                Glyph="{Binding Result, Converter={StaticResource FileTransferResultShieldGlyphConverter}}"
+                                FontSize="12"
+                                Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                                VerticalAlignment="Center" />
+                            <TextBlock
+                                Text="{Binding Result}"
+                                FontSize="11"
+                                FontWeight="Medium"
+                                Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                                VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="RemoteDesktopSessionItemTemplate">
             <Grid Padding="0,8" ColumnSpacing="12">
@@ -1661,6 +1770,23 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- ===================================================================
+                         FILE TRANSFER screen — element-matched to the Mac FileTransferView
+                         two-pane layout (Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift):
+                           HEADER (title + status + header actions)
+                           TWO PANES:
+                             LEFT sidebar (fixed 260): Connection Status card +
+                               Quick Actions card (the shared FileTransferActions surface) +
+                               Recent Transfers card (last completed = FileTransferHistory).
+                             RIGHT main: Drop zone card (visual-only, honest "not yet wired")
+                               + QR preview (gated) + Transfer Queue section + Transfer History
+                               section + File Transfer Security facts.
+                         All buttons flow through the shared FileTransferHeaderActions /
+                         FileTransferActions ItemsControls (no inline button elements), so the
+                         gated button count is unchanged. Bound entirely to REAL workspace data:
+                         FileTransferStatus, FileTransferQueue, FileTransferHistory,
+                         FileTransferSecurityFacts, FileTransferShareQrCodeImage.
+                         =================================================================== -->
                     <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
@@ -1680,56 +1806,166 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
-                            <ItemsControl
-                                ItemsSource="{Binding FileTransferActions}"
-                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
-
-                            <Border
-                                AutomationProperties.AutomationId="FileTransferShareQrPreview"
-                                Visibility="{Binding IsFileTransferShareQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                Padding="12"
-                                CornerRadius="8"
-                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1">
-                                <Grid ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <Border Width="132" Height="132" Padding="8" Background="White" CornerRadius="4">
-                                        <Image
-                                            AutomationProperties.AutomationId="FileTransferShareQrImage"
-                                            Source="{Binding FileTransferShareQrCodeImage}"
-                                            Stretch="Uniform" />
-                                    </Border>
-                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock Text="File Transfer QR" FontWeight="SemiBold" />
-                                        <TextBlock Text="{Binding FileTransferStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
+                            <!-- TWO-PANE BODY: fixed sidebar (Mac 240) + main content -->
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="260" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Transfer Queue" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferQueue}" ItemTemplate="{StaticResource FileTransferQueueItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
+                                <!-- LEFT SIDEBAR -->
+                                <StackPanel Grid.Column="0" Spacing="14">
+                                    <!-- Connection Status card (Mac connectionStatusCard) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE701;" FontSize="18" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="Connection Status" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeNavFileTransferBrush}" />
+                                                <TextBlock
+                                                    Text="{Binding FileTransferStatus}"
+                                                    FontSize="13"
+                                                    TextWrapping="Wrap"
+                                                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                    VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Quick Actions card (Mac quickActionsCard) — shared action surface -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="Quick Actions" FontWeight="SemiBold" />
+                                            <ItemsControl
+                                                ItemsSource="{Binding FileTransferActions}"
+                                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                            <TextBlock
+                                                Text="Select files / folder or generate a share QR. Selection prepares an in-memory intent only — no picker is opened and no files are read."
+                                                FontSize="11"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Recent Transfers card (Mac recentTransfersCard — last completed) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="Recent Transfers" FontWeight="SemiBold" />
+                                            <!-- Empty state (Mac fileTransfer.recent.empty) -->
+                                            <StackPanel
+                                                Spacing="6"
+                                                HorizontalAlignment="Center"
+                                                Padding="0,12"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                                <FontIcon Glyph="&#xE81C;" FontSize="22" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock
+                                                    Text="No recent transfers yet"
+                                                    FontSize="12"
+                                                    Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                    HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <!-- Populated: compact recent rows -->
+                                            <ItemsControl
+                                                ItemsSource="{Binding FileTransferHistory}"
+                                                ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Transfer History" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferHistory}" ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
+                                <!-- RIGHT MAIN CONTENT -->
+                                <StackPanel Grid.Column="1" Spacing="14">
+                                    <!-- Drop zone card (Mac modernDropZone) — VISUAL ONLY:
+                                         honest "drag-and-drop not yet wired on Windows" subtitle.
+                                         No .onDrop handler exists on the Windows client yet; use
+                                         the shared Quick Actions buttons to stage a transfer. -->
+                                    <Border Style="{StaticResource GlassCard}" Padding="28" MinHeight="160">
+                                        <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <FontIcon Glyph="&#xE898;" FontSize="48" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Drop files to transfer" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                                            <TextBlock
+                                                Text="Drag-and-drop is not yet wired on the Windows client. Use Select Files / Select Folder above to stage a transfer intent."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                TextAlignment="Center"
+                                                MaxWidth="420"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                HorizontalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- QR preview (gated by IsFileTransferShareQrCodeVisible) -->
+                                    <Border
+                                        AutomationProperties.AutomationId="FileTransferShareQrPreview"
+                                        Style="{StaticResource GlassCard}"
+                                        Visibility="{Binding IsFileTransferShareQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Width="132" Height="132" Padding="8" Background="White" CornerRadius="4">
+                                                <Image
+                                                    AutomationProperties.AutomationId="FileTransferShareQrImage"
+                                                    Source="{Binding FileTransferShareQrCodeImage}"
+                                                    Stretch="Uniform" />
+                                            </Border>
+                                            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                                <TextBlock Text="File Transfer QR" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding FileTransferStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Transfer Queue section (Mac activeTransfersSection) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Transfer Queue" FontWeight="SemiBold" />
+                                            <ListView
+                                                ItemsSource="{Binding FileTransferQueue}"
+                                                ItemTemplate="{StaticResource FileTransferQueueItemTemplate}"
+                                                MinHeight="112"
+                                                SelectionMode="None"
+                                                IsEnabled="{Binding IsFileTransferSelected}" />
+                                            <TextBlock
+                                                Text="Queue is empty. Stage files or a folder from Quick Actions to populate it."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Transfer History section (Mac enhancedTransferHistoryTab) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Transfer History" FontWeight="SemiBold" />
+                                            <ListView
+                                                ItemsSource="{Binding FileTransferHistory}"
+                                                ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}"
+                                                MinHeight="112"
+                                                SelectionMode="None"
+                                                IsEnabled="{Binding IsFileTransferSelected}" />
+                                            <TextBlock
+                                                Text="No completed transfers yet."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- File Transfer Security facts -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="File Transfer Security" FontWeight="SemiBold" />
+                                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Grid>
-
-                            <TextBlock Text="File Transfer Security" FontWeight="SemiBold" />
-                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 

@@ -603,6 +603,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // Network/Health telemetry immediately, instead of empty sections. This is a
         // one-shot sample (no "start monitoring" needed); honest values, never faked.
         RefreshSystemMonitorCommand.Execute(null);
+        // Kick the first File Transfer read-only snapshot on startup so the File Transfer
+        // screen shows the real transport/channel plan, queue, history, and security
+        // facts immediately instead of empty Queue/History/Security sections (the screen
+        // was previously empty until a manual refresh or navigation). Mirrors the Mac
+        // auto-load on file-transfer show; fire-and-forget via the command's async-void
+        // Execute, consistent with the Weather/SystemMonitor kicks above. Read-only
+        // snapshot — no picker is opened and no local files are read.
+        RefreshFileTransferCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
