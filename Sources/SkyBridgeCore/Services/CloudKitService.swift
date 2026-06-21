@@ -107,7 +107,11 @@ public final class CloudKitService: CloudDeviceService {
 
     private init() {
  // 监听 iCloud 账号状态变化
+ // .receive(on: .main)：CloudKit 在自己的后台队列派发 .CKAccountChanged 通知,而本类是 @MainActor、
+ // sink 闭包被编译为 MainActor 隔离。Swift 6 / macOS 27 运行时会在闭包入口断言"当前执行器==MainActor",
+ // 若在后台队列直接调用即 SIGTRAP(dispatch_assert_queue 失败)。先切回主队列再交给 sink,满足隔离。
         NotificationCenter.default.publisher(for: .CKAccountChanged)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { await self?.checkAccountStatus() }
             }
@@ -115,6 +119,7 @@ public final class CloudKitService: CloudDeviceService {
 
  // 监听应用进入前台，触发同步
         NotificationCenter.default.publisher(for: NSApplication.willBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { await self?.refreshDevices() }
             }

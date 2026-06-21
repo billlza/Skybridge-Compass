@@ -36,6 +36,10 @@ public final class FileTransferListenerService: ObservableObject {
     public private(set) var activePort: UInt16?
     private var listenerHealthState: ListenerHealthState = .stopped
     private var bonjourPublished = false
+ /// 上次尝试夺回首选端口的时间；用于限频，避免在首选端口长期被占时反复 churn 监听器。
+    private var lastPreferredPortReclaimAttempt: Date?
+ /// 夺回首选端口的最小重试间隔。
+    private let preferredPortReclaimMinInterval: TimeInterval = 30
     
     public init(manager: FileTransferManager, port: UInt16 = 8080) {
         self.manager = manager
@@ -45,17 +49,8 @@ public final class FileTransferListenerService: ObservableObject {
     public func start() async throws {
         guard listener == nil else { return }
         listenerHealthState = .starting
-        
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        parameters.includePeerToPeer = false
-        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
-            tcp.enableKeepalive = true
-            tcp.keepaliveIdle = 30
-            tcp.keepaliveInterval = 15
-            tcp.keepaliveCount = 4
-        }
 
+        let parameters = makeListenerParameters()
         let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
         listener = boundListener
         activePort = boundPort
@@ -73,13 +68,93 @@ public final class FileTransferListenerService: ObservableObject {
             || registryPort != activePort
             || !bonjourPublished
 
-        guard needsRestart else { return }
+        if needsRestart {
+            log.warning(
+                "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .public) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .public) bonjour=\(self.bonjourPublished, privacy: .public)"
+            )
+            stop()
+            try await start()
+            return
+        }
+
+ // 健康，但被困在动态回退端口上（启动时首选端口被占用）：周期性尝试夺回众所周知的首选端口，
+ // 否则会长期停留在随机端口，与按固定端口预期的对端产生端口错位（pairing/heartbeat 端口与 Bonjour SRV 不一致）。
+        if let activePort, activePort != preferredPort {
+            await reclaimPreferredPortIfPossible(currentPort: activePort)
+        }
+    }
+
+ /// 构建监听器参数（与 `start()` 一致），供 `start()` 与首选端口探测复用。
+    private func makeListenerParameters() -> NWParameters {
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        parameters.includePeerToPeer = false
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 15
+            tcp.keepaliveCount = 4
+        }
+        return parameters
+    }
+
+ /// 当监听器被困在回退端口时，限频尝试迁回首选端口。
+ /// 先用一次性探测监听器确认首选端口确实可绑定（不打扰当前监听器），仅在可用时才 stop()+start() 迁回。
+ /// 已建立的传输连接走各自独立的 NWConnection，不受监听器重启影响；重启窗口仅短暂暂停“接受新连接”。
+    private func reclaimPreferredPortIfPossible(currentPort: UInt16) async {
+        let now = Date()
+        if let last = lastPreferredPortReclaimAttempt,
+           now.timeIntervalSince(last) < preferredPortReclaimMinInterval {
+            return
+        }
+        lastPreferredPortReclaimAttempt = now
+
+        guard await preferredPortIsBindable() else { return }
 
         log.warning(
-            "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .public) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .public) bonjour=\(self.bonjourPublished, privacy: .public)"
+            "♻️ FileTransfer 首选端口 \(self.preferredPort, privacy: .public) 现已可用，从回退端口 \(currentPort, privacy: .public) 迁回"
         )
         stop()
-        try await start()
+        do {
+            try await start()
+        } catch {
+            log.error("❌ FileTransfer 首选端口迁回失败: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+ /// 用一次性探测监听器判断首选端口此刻是否可绑定。绑定成功后立即取消探测器，不影响现有监听器。
+    private func preferredPortIsBindable() async -> Bool {
+        let parameters = makeListenerParameters()
+        guard let probe = try? NWListener(using: parameters, on: NWEndpoint.Port.validated(preferredPort)) else {
+            return false
+        }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let state = StartState()
+            probe.stateUpdateHandler = { update in
+                switch update {
+                case .ready:
+                    guard !state.finished else { return }
+                    state.finished = true
+                    probe.cancel()
+                    continuation.resume(returning: true)
+                case .failed, .cancelled:
+                    guard !state.finished else { return }
+                    state.finished = true
+                    continuation.resume(returning: false)
+                default:
+                    break
+                }
+            }
+            probe.start(queue: queue)
+ // 兜底超时：若探测器卡在 .setup/.waiting 永不就绪，强制以“不可绑定”收尾，避免 continuation 永不 resume。
+ // 与 stateUpdateHandler 同在 `queue` 上串行执行，故对 state.finished 的访问无数据竞争。
+            queue.asyncAfter(deadline: .now() + 2.0) {
+                guard !state.finished else { return }
+                state.finished = true
+                probe.cancel()
+                continuation.resume(returning: false)
+            }
+        }
     }
     
     public func stop() {

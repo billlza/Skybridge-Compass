@@ -281,6 +281,9 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
  /// 设置通知监听
     private func setupNotifications() {
         NotificationCenter.default.publisher(for: .AVCaptureSessionRuntimeError)
+ // AVFoundation 在自己的后台队列派发该通知;本类 @MainActor、sink 闭包按 MainActor 隔离编译,
+ // Swift 6/macOS 27 会在闭包入口断言执行器==MainActor(早于内部 Task),后台直调即崩。先切回主队列。
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 Task { @MainActor in
                     self?.handleSessionError(notification)

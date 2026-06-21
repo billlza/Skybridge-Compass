@@ -172,6 +172,8 @@ public struct DashboardView: View {
             }
         }
         .tint(themeConfiguration.accentColor)
+ // ⌘⇧↑ / ⌘⇧↓：在侧边栏栏目之间上下切换焦点（窗口为 key 时即生效，不依赖鼠标）
+        .background(sidebarNavigationShortcuts)
         .animation(themeConfiguration.springAnimation, value: themeConfiguration.currentTheme)
         .animation(themeConfiguration.easeAnimation, value: themeConfiguration.backgroundIntensity)
         .animation(themeConfiguration.easeAnimation, value: themeConfiguration.glassOpacity)
@@ -209,6 +211,36 @@ public struct DashboardView: View {
         }
         .onReceive(weatherLocationService.$currentLocation.compactMap { $0 }) { location in
             weatherDataService.startWeatherUpdates(for: location)
+        }
+    }
+
+ // MARK: - 侧边栏快捷键切换（⌘⇧↑ 上一个栏目 / ⌘⇧↓ 下一个栏目）
+
+ /// 隐形快捷键宿主：放入视图层级以便注册全窗口快捷键。
+ /// opacity(0) 保留在布局中（`.hidden()` 会移除布局导致快捷键失效）；allowsHitTesting(false) 不拦截鼠标点击。
+    private var sidebarNavigationShortcuts: some View {
+        ZStack {
+            Button("") { moveSidebarSelection(by: -1) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .shift])
+            Button("") { moveSidebarSelection(by: 1) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .shift])
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+ /// 在 `NavigationItem.allCases` 中按 delta 环绕移动当前选中的侧边栏栏目。
+ /// delta = -1 上一个、+1 下一个；到头/到尾环绕，保证按键始终有反馈。
+    private func moveSidebarSelection(by delta: Int) {
+        let all = NavigationItem.allCases
+        guard !all.isEmpty,
+              let idx = all.firstIndex(of: selectedNavigation) else { return }
+        let count = all.count
+        let next = ((idx + delta) % count + count) % count
+        guard all[next] != selectedNavigation else { return }
+        withAnimation(themeConfiguration.springAnimation) {
+            selectedNavigation = all[next]
         }
     }
 
