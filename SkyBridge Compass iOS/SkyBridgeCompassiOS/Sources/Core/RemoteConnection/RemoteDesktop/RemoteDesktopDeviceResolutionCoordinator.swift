@@ -31,8 +31,9 @@ struct RemoteDesktopDeviceResolutionCoordinator {
         let activePeerAddress = peerAddressBackedAddress(for: device)
         let directIP = manager.bestIPAddress(for: device)
         let resolvedIP = await resolveIPAddress(for: device)
+        let remoteControlPort = preferredRemoteControlPort(for: device)
         let plan = RemoteDesktopLANEndpointCandidateFactory.makePlan(
-            remoteControlPort: device.remoteControlPort,
+            remoteControlPort: remoteControlPort,
             directIP: directIP,
             resolvedIP: resolvedIP,
             bonjourService: bonjour,
@@ -41,7 +42,7 @@ struct RemoteDesktopDeviceResolutionCoordinator {
         )
         if let resolvedIP,
            hasReachableLANEndpoint(device),
-           let port = device.remoteControlPort {
+           let port = remoteControlPort {
             SkyBridgeLogger.shared.info(
                 "📡 远控已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
             )
@@ -255,6 +256,46 @@ struct RemoteDesktopDeviceResolutionCoordinator {
             }
         }
         return nil
+    }
+
+    /// Prefer the `remoteControlPort` carried by a candidate that advertises the
+    /// explicit `_skybridge-remote._tcp` Bonjour service (the authoritative remote
+    /// endpoint), mirroring the file-transfer port-provenance fix. A
+    /// session/pairing-derived record can carry a non-advertised port in
+    /// `portMap[remoteControlServiceType]` (and gets the remote service appended to
+    /// its `services` list when merged via `mergePeerServiceMetadata`), so it must
+    /// not win over the real advertised remote-control port.
+    private func preferredRemoteControlPort(for device: DiscoveredDevice) -> UInt16? {
+        let candidates = identityCandidates(for: device)
+
+        for candidate in candidates where advertisesExplicitRemoteControlService(candidate) {
+            if let port = candidate.remoteControlPort, port > 0 {
+                return port
+            }
+        }
+
+        for candidate in candidates {
+            if let port = candidate.remoteControlPort, port > 0 {
+                return port
+            }
+        }
+        return nil
+    }
+
+    /// True when the candidate carries an explicit `_skybridge-remote._tcp`
+    /// advertisement (Bonjour SRV/TXT provenance) rather than a session/pairing
+    /// heartbeat merge. `services` membership alone is not authoritative because
+    /// the pairing merge appends `remoteControlServiceType` to `services`.
+    private func advertisesExplicitRemoteControlService(_ candidate: DiscoveredDevice) -> Bool {
+        if candidate.bonjourServiceType == DiscoveredDevice.remoteControlServiceType {
+            return true
+        }
+        if candidate.id.hasPrefix("bonjour:"),
+           manager.parseBonjourIdentity(from: candidate.id) != nil,
+           candidate.remoteControlPort != nil {
+            return true
+        }
+        return false
     }
 
     private func identityCandidates(for device: DiscoveredDevice) -> [DiscoveredDevice] {

@@ -443,12 +443,49 @@ public class FileTransferManager: ObservableObject {
     }
 
     private func preferredTransferPort(for device: DiscoveredDevice) -> UInt16? {
-        for candidate in transferIdentityCandidates(for: device) {
+        let candidates = transferIdentityCandidates(for: device)
+
+        // Prefer the port carried by a candidate that advertises the explicit
+        // `_skybridge-transfer._tcp` Bonjour service (the authoritative transfer
+        // endpoint). A session/pairing-derived record can carry the live P2P
+        // session port in `portMap[fileTransferServiceType]` (and even gets the
+        // transfer service appended to its `services` list when merged), so it
+        // must NEVER win over the real advertised transfer port.
+        for candidate in candidates where advertisesExplicitTransferService(candidate) {
+            if let port = candidate.fileTransferPort, port > 0 {
+                return port
+            }
+        }
+
+        // No explicit transfer-service advertisement exists: fall back to the
+        // first candidate that carries any transfer port.
+        for candidate in candidates {
             if let port = candidate.fileTransferPort, port > 0 {
                 return port
             }
         }
         return nil
+    }
+
+    /// True when the candidate carries an explicit `_skybridge-transfer._tcp`
+    /// advertisement, i.e. its port provenance is the real transfer-service
+    /// Bonjour record (SRV/TXT) rather than a session/pairing heartbeat merge.
+    ///
+    /// `services` membership alone is NOT authoritative: `mergePeerServiceMetadata`
+    /// appends `fileTransferServiceType` to `services` when it ingests the peer's
+    /// pairing/heartbeat-reported port, so the discriminator is the Bonjour
+    /// service-type itself (set only by transfer-service SRV resolution) or a
+    /// `bonjour:`-prefixed identity tied to the transfer service.
+    private func advertisesExplicitTransferService(_ candidate: DiscoveredDevice) -> Bool {
+        if candidate.bonjourServiceType == DiscoveredDevice.fileTransferServiceType {
+            return true
+        }
+        if candidate.id.hasPrefix("bonjour:"),
+           parseBonjourIdentity(from: candidate.id) != nil,
+           candidate.fileTransferPort != nil {
+            return true
+        }
+        return false
     }
 
     private func activePeerTransferAddress(for device: DiscoveredDevice) -> String? {

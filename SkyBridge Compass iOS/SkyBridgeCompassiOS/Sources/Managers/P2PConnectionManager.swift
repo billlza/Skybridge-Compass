@@ -2735,6 +2735,28 @@ public class P2PConnectionManager: ObservableObject {
             }
         }
 
+        // Symmetry fix (Mac→iOS): if this requester's protocol identity is ALREADY pinned in our
+        // trust stores (i.e. a prior successful iOS→Mac pairing recorded this Mac's authority), it is
+        // a known, previously-approved device — not a cold/stranger peer. Auto-approve WITHOUT raising
+        // the 180s operator-approval prompt, so the operator does not have to be physically at the iPad.
+        //
+        // Security invariant: `requesterFingerprint` here is the signature-VERIFIED protocol identity
+        // fingerprint (the requester's PIB-1 signature over `request.canonicalPreimage` was already
+        // checked in `makeInboundSignedProtocolIdentityBindingPayload`). We only auto-approve when that
+        // verified fingerprint is present in the pinned set for the requester's device-id candidates.
+        // This is the EXACT same revocation-aware pin check the strict-PQC KEM-refresh responder uses
+        // (see `makeInboundSignedKEMRefreshPayload`, "requester protocol identity fingerprint not pinned"):
+        // `trustedProtocolFingerprints(forAny:)` unions only ACTIVE (non-revoked) records from both the
+        // ProtocolIdentityTrustStore and the TrustedDeviceStore current-path authority. Unpinned or
+        // revoked devices fall through to the operator prompt below — never auto-approved.
+        let trustedRequesterPins = await trustedProtocolFingerprints(forAny: requesterIds)
+        if trustedRequesterPins.contains(requesterFingerprint) {
+            let approvedLine = "🔓 PIB-1 requester protocol identity auto-approved via existing pin (no prompt): requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>auto-approved-pinned"
+            SkyBridgeLogger.shared.info(approvedLine)
+            SignedKEMRefreshSmokeStatusWriter.append(approvedLine)
+            return await installInboundRequesterProtocolIdentityBinding(context) ? .alwaysAllow : .reject
+        }
+
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"] == "1" {
             return await installInboundRequesterProtocolIdentityBinding(context) ? .alwaysAllow : .reject
         }
