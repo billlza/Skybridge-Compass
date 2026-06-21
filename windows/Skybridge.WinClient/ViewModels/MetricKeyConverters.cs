@@ -201,6 +201,120 @@ public sealed class SystemMetricKeyToBrushConverter : IValueConverter
 }
 
 /// <summary>
+/// Maps a <c>SystemMonitorIndicatorView.Label</c> (Health / Monitoring / Advanced /
+/// Thermal / Load — the SystemMonitorIndicators rows built by SystemMonitorWorkspaceClient)
+/// to a Segoe Fluent Icons glyph for the System Monitor status-pill strip, mirroring the
+/// Mac PerformanceMonitoringPanelView indicator icons (thermometer / load / health).
+///   "Health"     → EA80  (Health, heart-pulse) ~ SF "heart.fill"/health
+///   "Monitoring"  → E9D9  (Speed gauge)          ~ SF "speedometer"
+///   "Advanced"    → E713  (Settings gear)        ~ SF "gearshape"
+///   "Thermal"     → E9CA  (Diagnostic/temp dial) ~ SF "thermometer"
+///   "Load"        → E9D2  (BarChart)             ~ SF "chart.line.uptrend.xyaxis"
+/// Falls back to a generic gauge glyph (E9D9, Speed) for unknown labels.
+/// NOTE: Segoe Fluent has no dedicated "fan"/"thermometer" — E9CA (Diagnostic) is the
+/// closest dial-style temperature affordance; human-verify the glyph if exact icon matters.
+/// </summary>
+public sealed class SystemIndicatorLabelToGlyphConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var label = value as string ?? string.Empty;
+        return label switch
+        {
+            "Health" => "\uEA80",      // Health (heart-pulse)
+            "Monitoring" => "\uE9D9",  // Speed gauge
+            "Advanced" => "\uE713",    // Settings gear
+            "Thermal" => "\uE9CA",     // Diagnostic dial (closest to thermometer)
+            "Load" => "\uE9D2",        // BarChart (load trend)
+            _ => "\uE9D9"              // Speed gauge
+        };
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
+/// Maps a <c>SystemMonitorIndicatorView.State</c> (the live status string produced by
+/// SystemMonitorWorkspaceClient: "Healthy" / "Caution" / "Network offline" for Health;
+/// "Active" / "Idle" for Monitoring; "Read-only" / "Off" for Advanced; "Unknown" for
+/// Thermal; "Nominal" for Load) to a status brush, so the System Monitor status-pill
+/// strip tints each pill the way the Mac PerformanceMonitoringPanelView does:
+///   good / active / nominal     → SkyBridgeSuccessBrush (green)
+///   caution / read-only         → SkyBridgeWarningBrush (orange)
+///   offline / error             → SkyBridgeDangerBrush  (red)
+///   unknown / idle / off / else → SkyBridgeTextMutedBrush (muted, honest "pending/unknown")
+/// Matching is case-insensitive and substring-based so wording variants still resolve;
+/// nothing is faked-healthy — an unknown/pending state stays muted, never green.
+/// </summary>
+public sealed class SystemIndicatorStateToBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var state = (value as string ?? string.Empty).ToLowerInvariant();
+
+        string brushKey;
+        if (state.Contains("offline") || state.Contains("error") || state.Contains("fail") || state.Contains("critical"))
+        {
+            brushKey = "SkyBridgeDangerBrush";
+        }
+        else if (state.Contains("caution") || state.Contains("warn") || state.Contains("read-only") || state.Contains("readonly"))
+        {
+            brushKey = "SkyBridgeWarningBrush";
+        }
+        else if (state.Contains("healthy") || state.Contains("good") || state.Contains("active") || state.Contains("nominal") || state.Contains("ok"))
+        {
+            brushKey = "SkyBridgeSuccessBrush";
+        }
+        else
+        {
+            // Unknown / Idle / Off / pending — deliberately NOT tinted healthy.
+            brushKey = "SkyBridgeTextMutedBrush";
+        }
+
+        return MetricKeyToBrushConverter.ResolveBrush(brushKey);
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
+/// Maps a <c>SystemMonitorMetricView.Label</c> (CPU / Memory / Disk / Network) to a short
+/// human caption for the colored metric tile's sub-label, mirroring the Mac MetricChartView
+/// row caption. Kept tiny and honest — purely a display string, no fabricated numbers.
+///   "CPU"     → "Processor"
+///   "Memory"  → "Working set"
+///   "Disk"    → "Storage"
+///   "Network" → "Adapters"
+/// Falls back to the raw label for unknown metrics.
+/// </summary>
+public sealed class SystemMetricLabelToCaptionConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var label = value as string ?? string.Empty;
+        return label switch
+        {
+            "CPU" => "Processor",
+            "Memory" => "Working set",
+            "Disk" => "Storage",
+            "Network" => "Adapters",
+            _ => label
+        };
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
 /// Maps a <c>DiscoveredPeerView.Platform</c> (the live DNS-SD peer's platform string,
 /// e.g. "MacOS" / "iOS" / "Windows" / "Android" / "Linux") to a Segoe Fluent Icons
 /// device glyph, so the dashboard Device Discovery summary rows carry a per-device-type

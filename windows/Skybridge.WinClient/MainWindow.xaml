@@ -19,6 +19,9 @@
         <vm:QuickActionKeyToBrushConverter x:Key="QuickActionAccentBrushConverter" />
         <vm:SystemMetricKeyToGlyphConverter x:Key="SystemMetricGlyphConverter" />
         <vm:SystemMetricKeyToBrushConverter x:Key="SystemMetricAccentBrushConverter" />
+        <vm:SystemMetricLabelToCaptionConverter x:Key="SystemMetricCaptionConverter" />
+        <vm:SystemIndicatorLabelToGlyphConverter x:Key="SystemIndicatorGlyphConverter" />
+        <vm:SystemIndicatorStateToBrushConverter x:Key="SystemIndicatorStateBrushConverter" />
         <vm:PlatformToGlyphConverter x:Key="PlatformGlyphConverter" />
         <vm:PeerStatusToBrushConverter x:Key="PeerStatusBrushConverter" />
         <vm:StringPresenceToVisibilityConverter x:Key="StringPresenceVisibilityConverter" />
@@ -46,6 +49,18 @@
                  LazyVGrid). ItemWidth tuned to 158 so two tiles fit inside the
                  half-width Quick Actions cell of the dashboard 2x2 panel grid. -->
             <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="2" ItemWidth="158" />
+        </ItemsPanelTemplate>
+        <!-- System Monitor Overview metric-tile grid: a wrapping row of colored
+             metric tiles (Mac SystemMetricsPanelView). 4 Overview metrics
+             (CPU/Memory/Disk/Network) flow up to 4-across then wrap. ItemWidth tuned
+             to 244 = 232 tile + 12 gutter so tiles sit flush inside the page panel. -->
+        <ItemsPanelTemplate x:Key="SystemMonitorMetricTileItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" ItemWidth="244" />
+        </ItemsPanelTemplate>
+        <!-- System Monitor indicator status-pill strip: horizontally wrapping pills
+             (Mac PerformanceMonitoringPanelView Health/Thermal/Load indicators). -->
+        <ItemsPanelTemplate x:Key="SystemMonitorIndicatorPillItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" />
         </ItemsPanelTemplate>
         <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
             <Button
@@ -425,6 +440,104 @@
                     TextWrapping="Wrap"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             SystemMonitorMetricTileTemplate — the colored metric TILE for the
+             System Monitor page Overview grid. Element-matches the Mac
+             SystemMetricsPanelView / MetricChartView row: a per-metric accent icon
+             chip, the metric Label as a .caption secondary sub-label (with a short
+             human caption beneath via SystemMetricCaptionConverter), and the big
+             tinted Value (Mac .title3.bold in the metric's accent color). The Detail
+             string sits beneath in muted text (e.g. "1.2 GB process working set",
+             "C:\ 240 GB free", or CPU's honest "Usage sampling requires ETW…").
+             Glyph + tint are keyed off Label (SystemMetricGlyphConverter /
+             SystemMetricAccentBrushConverter): CPU orange, Memory blue, Disk violet,
+             Network green — matching the Mac per-channel tinting. Bound to the REAL
+             SystemMonitorOverview sampler (SystemMonitorMetricView Label/Value/Detail):
+             Memory/Disk/Network are live; CPU's Value is the honest logical-core count
+             ("N logical"), not a fabricated %, because CPU% needs ETW wiring. No inline
+             Button — the tile is display-only. Uses the MetricCard glass chrome.
+             =================================================================== -->
+        <DataTemplate x:Key="SystemMonitorMetricTileTemplate">
+            <Border Style="{StaticResource MetricCard}" Width="232" Height="132">
+                <StackPanel Spacing="8">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Border
+                            Width="34"
+                            Height="34"
+                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                            BorderThickness="1"
+                            VerticalAlignment="Center">
+                            <FontIcon
+                                Glyph="{Binding Label, Converter={StaticResource SystemMetricGlyphConverter}}"
+                                FontSize="16"
+                                Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{Binding Label}"
+                                FontSize="12"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock
+                                Text="{Binding Label, Converter={StaticResource SystemMetricCaptionConverter}}"
+                                FontSize="11"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <TextBlock
+                        Text="{Binding Value}"
+                        FontSize="20"
+                        FontWeight="Bold"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}" />
+                    <TextBlock
+                        Text="{Binding Detail}"
+                        FontSize="11"
+                        MaxLines="2"
+                        TextWrapping="Wrap"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <!-- ===================================================================
+             SystemMonitorIndicatorPillTemplate — the tinted status PILL for the
+             System Monitor page indicator strip. Element-matches the Mac
+             PerformanceMonitoringPanelView inline indicator rows (Health / Thermal /
+             Load) rendered as capsule pills: a status dot + indicator glyph + Label +
+             the live State value, all tinted by State via SystemIndicatorStateBrushConverter
+             (green = healthy/active/nominal, orange = caution/read-only, red = offline,
+             muted = unknown/idle/off — pending states stay muted, never faked-healthy).
+             Bound to the REAL SystemMonitorIndicators collection (SystemMonitorIndicatorView
+             Label/State/Detail): Health is derived from live memory/disk/network; Thermal
+             stays honestly "Unknown" (no Windows temperature provider yet). Detail rides
+             as the pill tooltip so the pill stays compact. Uses StatusPill + StatusDot.
+             No inline Button — the pill is display-only.
+             =================================================================== -->
+        <DataTemplate x:Key="SystemMonitorIndicatorPillTemplate">
+            <Border Style="{StaticResource StatusPill}" ToolTipService.ToolTip="{Binding Detail}">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}" />
+                    <FontIcon
+                        Glyph="{Binding Label, Converter={StaticResource SystemIndicatorGlyphConverter}}"
+                        FontSize="14"
+                        Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                    <TextBlock
+                        Text="{Binding Label}"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                        VerticalAlignment="Center" />
+                    <TextBlock
+                        Text="{Binding State}"
+                        Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
         </DataTemplate>
         <!-- ===================================================================
              DiscoveredPeerItemTemplate — the RICH per-peer row for the full
@@ -1713,23 +1826,52 @@
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
-                            <Grid ColumnSpacing="14">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
+                            <!-- Status-pill strip (Mac PerformanceMonitoringPanelView
+                                 Health/Thermal/Load indicators rendered as tinted pills).
+                                 Bound to the live SystemMonitorIndicators collection; each
+                                 pill's dot/icon/value is tinted by State (green healthy,
+                                 orange caution/read-only, red offline, muted unknown/idle/
+                                 off — pending stays muted, never fake-healthy). -->
+                            <ItemsControl
+                                AutomationProperties.AutomationId="Skybridge.SystemMonitor.IndicatorPills"
+                                ItemsSource="{Binding SystemMonitorIndicators}"
+                                ItemsPanel="{StaticResource SystemMonitorIndicatorPillItemsPanel}"
+                                ItemTemplate="{StaticResource SystemMonitorIndicatorPillTemplate}" />
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Overview" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SystemMonitorOverview}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
-                                </StackPanel>
+                            <!-- ============ Card 1 — System Metrics ============
+                                 Mac SystemMetricsPanelView: colored metric tile grid.
+                                 The hero presentation is the tile grid (live Memory/Disk/
+                                 Network + honest CPU logical-core count). The gated
+                                 WorkspaceFactRowTemplate ListView below is the canonical
+                                 data surface the parity gate asserts on; it is collapsed so
+                                 the same rows are not rendered twice (no data is hidden —
+                                 every Overview row appears as a tile). -->
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Overview" FontWeight="SemiBold" />
+                                <ItemsControl
+                                    AutomationProperties.AutomationId="Skybridge.SystemMonitor.MetricTiles"
+                                    ItemsSource="{Binding SystemMonitorOverview}"
+                                    ItemsPanel="{StaticResource SystemMonitorMetricTileItemsPanel}"
+                                    ItemTemplate="{StaticResource SystemMonitorMetricTileTemplate}" />
+                                <ListView Visibility="Collapsed" ItemsSource="{Binding SystemMonitorOverview}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
+                            </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Indicators" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
-                                </StackPanel>
-                            </Grid>
+                            <!-- Indicators heading kept for parity/section order; the live
+                                 indicator data is rendered above as the tinted pill strip.
+                                 The gated WorkspaceStateRowTemplate ListView is collapsed
+                                 (the pills are the visible presentation of the same rows). -->
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Indicators" FontWeight="SemiBold" />
+                                <ListView Visibility="Collapsed" ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
+                            </StackPanel>
 
+                            <!-- ============ Card 2 — Detailed Monitoring ============
+                                 Mac PerformanceMonitoringPanelView insight/detail rows:
+                                 OS / .NET / GC heap / Advanced (live) plus the honest
+                                 pending rows (Thermal "Windows provider pending", GPU
+                                 "provider pending", Helper "not installed"). Bound to the
+                                 live SystemMonitorDetails collection via the gated
+                                 WorkspaceFactRowTemplate (label / value / detail). -->
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Detailed Monitoring" FontWeight="SemiBold" />
                                 <ItemsControl ItemsSource="{Binding SystemMonitorDetails}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />

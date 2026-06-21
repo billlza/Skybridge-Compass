@@ -598,6 +598,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // async-void Execute is consistent with the house style; the card shows the
         // Loading state until the real snapshot lands (never fake numbers).
         RefreshWeatherCommand.Execute(null);
+        // Kick the first System Monitor read-only snapshot on startup so the dashboard
+        // System-Performance panel AND the System Monitor screen show real Memory/Disk/
+        // Network/Health telemetry immediately, instead of empty sections. This is a
+        // one-shot sample (no "start monitoring" needed); honest values, never faked.
+        RefreshSystemMonitorCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
