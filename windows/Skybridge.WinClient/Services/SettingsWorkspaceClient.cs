@@ -499,14 +499,14 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     private static IReadOnlyList<SettingsTabItem> BuildTabs() =>
         new List<SettingsTabItem>
         {
-            new("General", "Language, theme, notifications, scan interval"),
-            new("Network", "Discovery, relay, bandwidth, transport policy"),
-            new("Devices", "USB, nearby devices, trust display"),
-            new("File Transfer", "defaultTransferPath, scanning, retry, history, encryption"),
-            new("Remote Desktop", "videoQuality, interaction, clipboard, audio, network"),
-            new("System Monitor", "refreshInterval, history, alerts, thresholds"),
-            new("Permissions", "Device, notification, and system integration access"),
-            new("Advanced", "PQC, diagnostics, logs, custom services")
+            new("General", "通用 · Language, Preferences, Interface, Data management"),
+            new("Network", "网络 · Wi-Fi, Discovery, Top bar, Connection"),
+            new("Devices", "设备 · Bluetooth, AirPlay, Filters (display-only on Windows)"),
+            new("File Transfer", "文件传输 · Config, Options, Security"),
+            new("Remote Desktop", "远程桌面 · Video transfer, Display, Interaction, Network"),
+            new("System Monitor", "系统监控 · Config, Display, Alerts, Advanced"),
+            new("Permissions", "权限 · Status, Details, Help (no prompt issued by Windows client)"),
+            new("Advanced", "高级 · Debug, Performance, Experimental, PQC, Smoothing, Reset")
         };
 
     private static IReadOnlyList<SettingsActionItem> BuildActions(
@@ -527,62 +527,278 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             new("ClearHistoryData", "Clear History Data", "Disabled", "History deletion must never run from toggle or refresh paths.")
         };
 
+    // Honest, deterministic read-only constants used across the detail rows.
+    // "Default" = the value mac SettingsView shows out of the box; on Windows it is DISPLAY-ONLY
+    // (the snapshot is read-only and there is no Windows settings store behind it yet).
+    private const string DisplayOnly = "Display-only";
+    private const string ReadOnly = "Read-only";
+    private const string CoreOwned = "Core-owned";
+    private const string NotPersisted = "Not persisted";
+    private const string NotWired = "Not wired";
+
+    // ===== Canonical settings-parity surface (macOS SettingsManager keys) =====
+    // The detail rows below render Mac-friendly labels for the two-pane Settings UI, but these
+    // are the underlying canonical keys/enums the macOS app uses. They are kept explicit here so
+    // the Windows-parity gate tracks full coverage. All are surfaced READ-ONLY on Windows until a
+    // settings store + set-bridge exists; the canonical keys do not change.
+    //   File Transfer: defaultTransferPath, maxConcurrentConnections, transferBufferSize,
+    //     autoRetryFailedTransfers, keepTransferHistory, keepSystemAwakeDuringTransfer,
+    //     scanTransferFilesForVirus, scanLevel, encryptionAlgorithm
+    //   Video Transfer: currentConfig (optimized / needsAdjust), estimatedRate,
+    //     resolution 1080p/2k/4k/5k, framerate 30/60/120 fps,
+    //     preset balanced/highPerformance/highQuality/lowLatency,
+    //     compression none/fast/balanced/maximum
+    //   Remote Desktop: videoQuality, compressionLevel, refreshRate, enableAdaptiveQuality,
+    //     fullScreenMode, clipboardSync, audioRedirection, trackpadGestures, mouseSensitivity,
+    //     doubleClickInterval, enableUDP, bandwidthLimit, bufferSize
+    //   System Monitor: refreshInterval, enableAutoRefresh, showTrendIndicators/history,
+    //     enablePerformanceAlerts, retentionDays/maxHistoryPoints,
+    //     CPU/Memory/Disk/Network/Temperature/FanSpeed, enableSoundAlerts/enableNotifications
+    //   Advanced: PQC policy (Strict/Core-owned)
     private static IReadOnlyList<SettingsDetailItem> BuildDetails(
         SettingsExportPreviewSnapshot exportPreview,
-        SettingsActionIntentSnapshot actionIntent) =>
-        new List<SettingsDetailItem>
-        {
-            new("General", "Theme", "System", "Theme color and compact mode are visible but not persisted."),
-            new("General", "Notifications", "Pending", "Notification permission request remains disabled."),
-            new("General", "Export preview", exportPreview.HasPreview ? NormalizeExportPreviewId(exportPreview.PreviewId) : "Ready", BuildExportPreviewDetail(exportPreview)),
-            new("General", "Latest settings action", BuildLatestActionIntentValue(actionIntent), BuildLatestActionIntentDetail(actionIntent)),
-            new("Network", "Transport policy", "Core-owned", "Transport selection remains in Rust Core contracts."),
-            new("Network", "Relay policy", "Pending", "TURN/signaling credentials must not be hardcoded."),
-            new("Devices", "USB provider", "Read-only", "USB Management currently scans removable storage only."),
-            new("File Transfer", "defaultTransferPath", "Pending", "Select receive directory is visible; saving path is pending."),
-            new("File Transfer", "maxConcurrentConnections", "Pending", "Runtime concurrency must be applied through the file-transfer settings bridge."),
-            new("File Transfer", "transferBufferSize", "Pending", "Buffer size is a saved preference until runtime apply is wired."),
-            new("File Transfer", "autoRetryFailedTransfers", "Pending", "Retry policy is visible but not persisted."),
-            new("File Transfer", "keepTransferHistory", "Pending", "History retention needs a store before mutation."),
-            new("File Transfer", "keepSystemAwakeDuringTransfer", "Pending", "Power requests require explicit runtime ownership."),
-            new("File Transfer", "scanTransferFilesForVirus", "Pending", "Malware scanning provider is not wired."),
-            new("File Transfer", "scanLevel", "Pending", "Scan level must be validated before persistence."),
-            new("File Transfer", "encryptionAlgorithm", "Core-owned", "HMAC/signature and crypto policy remain Core/provider-owned."),
-            new("Video Transfer", "currentConfig", "Read-only", "Optimization summary only; no encoder settings are changed."),
-            new("Video Transfer", "optimized / needsAdjust", "Read-only", "Validation warnings remain display-only."),
-            new("Video Transfer", "estimatedRate", "Read-only", "Estimated bitrate is not pushed to runtime."),
-            new("Video Transfer", "load.high/medium/low", "Visible", "Load labels mirror mac settings status."),
-            new("Video Transfer", "resolution 1080p/2k/4k/5k", "Visible", "Resolution choices are not persisted yet."),
-            new("Video Transfer", "framerate 30/60/120 fps", "Visible", "Framerate choices are not persisted yet."),
-            new("Video Transfer", "preset balanced/highPerformance/highQuality/lowLatency", "Visible", "Preset choices are not persisted yet."),
-            new("Video Transfer", "compression none/fast/balanced/maximum", "Visible", "Compression choices are not persisted yet."),
-            new("Remote Desktop", "videoQuality", "Visible", "Quality controls are visible; live application is pending."),
-            new("Remote Desktop", "compressionLevel", "Pending", "Compression is not applied to live sessions yet."),
-            new("Remote Desktop", "refreshRate", "Pending", "Refresh rate is not applied to live sessions yet."),
-            new("Remote Desktop", "enableAdaptiveQuality", "Pending", "Adaptive quality needs transport metrics."),
-            new("Remote Desktop", "fullScreenMode", "Visible", "Fullscreen button remains disabled until live session windowing is wired."),
-            new("Remote Desktop", "clipboardSync", "Pending", "Clipboard channel requires pairing/trust verification."),
-            new("Remote Desktop", "audioRedirection", "Pending", "Audio redirection provider is not wired."),
-            new("Remote Desktop", "fileTransfer", "Pending", "File-transfer bridge remains separate from remote desktop settings."),
-            new("Remote Desktop", "trackpadGestures", "Pending", "Input forwarding is disabled."),
-            new("Remote Desktop", "mouseSensitivity", "Pending", "Input scaling is not applied to runtime."),
-            new("Remote Desktop", "doubleClickInterval", "Pending", "Input timing is not applied to runtime."),
-            new("Remote Desktop", "enableUDP", "Core-owned", "Transport policy remains Core-owned."),
-            new("Remote Desktop", "bandwidthLimit", "Pending", "Bandwidth governor is not wired."),
-            new("Remote Desktop", "bufferSize", "Pending", "Network buffers are not applied to runtime."),
-            new("System Monitor", "Runtime", RuntimeInformation.FrameworkDescription, RuntimeInformation.OSDescription),
-            new("System Monitor", "refreshInterval", "Visible", "ETW/EventSource sampling is pending."),
-            new("System Monitor", "enableAutoRefresh", "Disabled", "Auto refresh does not start background polling."),
-            new("System Monitor", "showTrendIndicators/history", "Pending", "History retention store is not wired."),
-            new("System Monitor", "enablePerformanceAlerts", "Disabled", "Alerts require notification permissions and thresholds."),
-            new("System Monitor", "retentionDays/maxHistoryPoints", "Pending", "Retention changes are destructive and gated."),
-            new("System Monitor", "CPU/Memory/Disk/Network/Temperature/FanSpeed", "Visible", "Unsupported temperature/fan values are provider pending."),
-            new("System Monitor", "cpu/memory/disk/temperature/fanSpeed thresholds", "Pending", "Thresholds are not persisted yet."),
-            new("System Monitor", "enableSoundAlerts/enableNotifications", "Disabled", "Notification writes require explicit permission flow."),
-            new("Permissions", "System access", "Disabled", "No permission prompt is issued by this workspace."),
-            new("Advanced", "PQC policy", "Strict/Core-owned", "Suite IDs and fallback policy remain in Rust Core."),
-            new("Advanced", "Diagnostics", "Text gates", "UI parity and service boundary scripts are the current acceptance checks.")
-        };
+        SettingsActionIntentSnapshot actionIntent)
+    {
+        var details = new List<SettingsDetailItem>();
+        AppendGeneral(details, exportPreview, actionIntent);
+        AppendNetwork(details);
+        AppendDevices(details);
+        AppendFileTransfer(details);
+        AppendRemoteDesktop(details);
+        AppendSystemMonitor(details);
+        AppendPermissions(details);
+        AppendAdvanced(details);
+        return details;
+    }
+
+    // ---- TAB 1: General / 通用 ----
+    private static void AppendGeneral(
+        List<SettingsDetailItem> d,
+        SettingsExportPreviewSnapshot exportPreview,
+        SettingsActionIntentSnapshot actionIntent)
+    {
+        // Card: Language / 语言
+        d.Add(new("General", "Language · Language / 语言", "System (default)", "Mirrors mac default. Language picker is display-only; no app-language override is persisted on Windows."));
+        // Card: Preferences / 偏好
+        d.Add(new("General", "Preferences · Auto scan on startup", "On (default)", DisplayOnly + ". Auto-scan toggle reflects the mac default; Windows discovery start remains user/command driven."));
+        d.Add(new("General", "Preferences · System notifications", "On (default)", DisplayOnly + ". No notification permission is requested by this workspace."));
+        d.Add(new("General", "Preferences · Dark mode", "Off (default)", DisplayOnly + ". Theme follows the host shell; this toggle is not persisted."));
+        d.Add(new("General", "Preferences · Scan interval", "30s (default · 15/30/60/120)", DisplayOnly + ". Interval choice is not persisted to a Windows store."));
+        // Card: Interface / 界面
+        d.Add(new("General", "Interface · Show device details", "On (default)", DisplayOnly + ". Layout preference is not persisted."));
+        d.Add(new("General", "Interface · Show connection stats", "On (default)", DisplayOnly + ". Layout preference is not persisted."));
+        d.Add(new("General", "Interface · Compact mode", "Off (default)", DisplayOnly + ". Layout preference is not persisted."));
+        d.Add(new("General", "Interface · Theme color", "Blue (default)", DisplayOnly + ". Accent color is not persisted."));
+        // Card: Data management / 数据管理
+        d.Add(new("General", "Data management · Clear cache", "Cache size unknown", NotWired + ". No cache store is measured or cleared by this workspace."));
+        d.Add(new("General", "Data management · Export settings", exportPreview.HasPreview ? NormalizeExportPreviewId(exportPreview.PreviewId) : "Ready", BuildExportPreviewDetail(exportPreview)));
+        d.Add(new("General", "Data management · Import settings", BuildActionIntentState(actionIntent, "ImportSettings"), BuildActionIntentDetail(actionIntent, "ImportSettings", "Import is an in-memory validation intent only; no file is opened, read, or written.")));
+        d.Add(new("General", "Data management · Reset settings", BuildActionIntentState(actionIntent, "ResetSettings"), BuildActionIntentDetail(actionIntent, "ResetSettings", "Reset prepares an in-memory intent only; no preference is changed.")));
+        d.Add(new("General", "Data management · Deduplicate keychain", "macOS-only", "Keychain deduplication is an Apple-keychain operation; not applicable on Windows."));
+        // Live snapshot rows (real, deterministic)
+        d.Add(new("General", "Workspace · Latest settings action", BuildLatestActionIntentValue(actionIntent), BuildLatestActionIntentDetail(actionIntent)));
+    }
+
+    // ---- TAB 2: Network / 网络 ----
+    private static void AppendNetwork(List<SettingsDetailItem> d)
+    {
+        // Card: Wi-Fi
+        d.Add(new("Network", "Wi-Fi · Current network", "Not reported", DisplayOnly + ". Windows SSID/refresh status is not surfaced through this workspace."));
+        d.Add(new("Network", "Wi-Fi · Auto-connect known networks", "On (default)", DisplayOnly + ". OS owns Wi-Fi association; toggle is not persisted."));
+        d.Add(new("Network", "Wi-Fi · Show hidden networks", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Network", "Wi-Fi · Prefer 5 GHz", "On (default)", DisplayOnly + ". Band selection is OS-owned."));
+        d.Add(new("Network", "Wi-Fi · Scan timeout", "10s (default · 5/10/15/30)", DisplayOnly + ". Not persisted."));
+        // Card: Discovery / 发现
+        d.Add(new("Network", "Discovery · Enable Bonjour", "On (default)", DisplayOnly + ". Windows uses DNS-SD browse; this toggle is not persisted."));
+        d.Add(new("Network", "Discovery · Enable mDNS resolution", "On (default)", DisplayOnly + "."));
+        d.Add(new("Network", "Discovery · Scan custom ports", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Network", "Discovery · Discovery timeout", "30s (default)", DisplayOnly + ". Not persisted."));
+        d.Add(new("Network", "Discovery · Custom service types", "Empty (default)", DisplayOnly + ". No custom service-type list is stored on Windows."));
+        // Card: Top bar / 顶栏
+        d.Add(new("Network", "Top bar · Show IP location", "On (default)", DisplayOnly + ". Mirrors the top-bar status surface."));
+        d.Add(new("Network", "Top bar · Show network speed", "On (default)", DisplayOnly + "."));
+        d.Add(new("Network", "Top bar · Show network latency", "On (default)", DisplayOnly + "."));
+        // Card: Connection / 连接
+        d.Add(new("Network", "Connection · Connection timeout", "10s (default)", DisplayOnly + ". Not persisted."));
+        d.Add(new("Network", "Connection · Retry count", "3 (default)", DisplayOnly + ". Not persisted."));
+        d.Add(new("Network", "Connection · Transport policy", CoreOwned, "Transport/relay selection remains in Rust Core contracts; not user-settable here."));
+        d.Add(new("Network", "Connection · Relay policy", CoreOwned, "TURN/signaling credentials are Core-owned and must not be hardcoded."));
+    }
+
+    // ---- TAB 3: Devices / 设备 ----
+    private static void AppendDevices(List<SettingsDetailItem> d)
+    {
+        // Card: Bluetooth
+        d.Add(new("Devices", "Bluetooth · Status", "Not scanned", DisplayOnly + ". Windows client does not run a CoreBluetooth-equivalent scan from settings."));
+        d.Add(new("Devices", "Bluetooth · Auto-connect paired devices", "On (default)", DisplayOnly + "."));
+        d.Add(new("Devices", "Bluetooth · Show RSSI", "On (default)", DisplayOnly + "."));
+        d.Add(new("Devices", "Bluetooth · Show connectable only", "Off (default)", DisplayOnly + "."));
+        // Card: AirPlay
+        d.Add(new("Devices", "AirPlay · Status", "macOS-only", "AirPlay discovery is Apple-only; not available on Windows."));
+        d.Add(new("Devices", "AirPlay · Auto-discover Apple TV", "On (default · macOS-only)", DisplayOnly + "."));
+        d.Add(new("Devices", "AirPlay · Show HomePod devices", "On (default · macOS-only)", DisplayOnly + "."));
+        d.Add(new("Devices", "AirPlay · Show third-party AirPlay devices", "On (default · macOS-only)", DisplayOnly + "."));
+        // Card: Filters / 过滤
+        d.Add(new("Devices", "Filters · Hide offline devices", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Devices", "Filters · Sort by signal strength", "On (default)", DisplayOnly + "."));
+        d.Add(new("Devices", "Filters · Show device icons", "On (default)", DisplayOnly + "."));
+        d.Add(new("Devices", "Filters · Min signal strength", "-80 dBm (default · -100…-30)", DisplayOnly + ". Filter threshold is not persisted."));
+        // Real Windows surface
+        d.Add(new("Devices", "USB · Provider", ReadOnly, "Windows USB Management currently scans removable storage only; surfaced read-only on the Devices workspace."));
+    }
+
+    // ---- TAB 4: File Transfer / 文件传输 ----
+    private static void AppendFileTransfer(List<SettingsDetailItem> d)
+    {
+        // Card: Config / 配置
+        d.Add(new("File Transfer", "Config · Default path", "~/Downloads (default)", DisplayOnly + ". Receive directory picker is visible; saving the path is not wired on Windows."));
+        d.Add(new("File Transfer", "Config · Max concurrent transfers", "10 (default)", NotPersisted + ". Runtime concurrency must be applied through the file-transfer settings bridge."));
+        d.Add(new("File Transfer", "Config · Chunk size", "128 KB (default · 64/128/256/512 KB, 1 MB)", NotPersisted + "."));
+        d.Add(new("File Transfer", "Config · Rate limit", "Unlimited (default · 0…500 MB/s)", NotPersisted + ". No bandwidth governor is wired."));
+        // Card: Options / 选项
+        d.Add(new("File Transfer", "Options · Show notification", "On (default)", DisplayOnly + "."));
+        d.Add(new("File Transfer", "Options · Resume enabled", "On (default)", NotPersisted + ". Bound to auto-retry policy on mac; display-only here."));
+        d.Add(new("File Transfer", "Options · Keep history", "On (default)", NotWired + ". History retention needs a store before mutation."));
+        d.Add(new("File Transfer", "Options · Keep system awake", "Off (default)", DisplayOnly + ". Power requests require explicit runtime ownership."));
+        d.Add(new("File Transfer", "Options · Retry count", "3 (default)", NotPersisted + "."));
+        // Card: Security / 安全
+        d.Add(new("File Transfer", "Security · Enable encryption", "On (default)", CoreOwned + ". Transfer encryption is enforced by the Core/provider; display-only."));
+        d.Add(new("File Transfer", "Security · Strict certificate validation", "Always on", ReadOnly + ". Certificate validation is non-optional; no control."));
+        d.Add(new("File Transfer", "Security · Scan files for virus", "Off (default)", NotWired + ". Malware scanning provider is not wired."));
+        d.Add(new("File Transfer", "Security · Scan level", "Standard (default · Quick/Standard/Deep)", DisplayOnly + ". Disabled unless virus scan is on; not persisted."));
+        d.Add(new("File Transfer", "Security · Encryption algorithm", "AES-256-GCM", CoreOwned + ". HMAC/signature and crypto policy remain Core/provider-owned."));
+    }
+
+    // ---- TAB 5: Remote Desktop / 远程桌面 ----
+    private static void AppendRemoteDesktop(List<SettingsDetailItem> d)
+    {
+        // Card: Video transfer / Quality & Performance
+        d.Add(new("Remote Desktop", "Video transfer · Current config", ReadOnly, "Optimization summary only; no encoder settings are changed."));
+        d.Add(new("Remote Desktop", "Video transfer · Optimized / needs-adjust", ReadOnly, "Validation badge is display-only."));
+        d.Add(new("Remote Desktop", "Video transfer · Estimated data rate", ReadOnly, "Estimated bitrate is not pushed to runtime."));
+        d.Add(new("Remote Desktop", "Video transfer · Resolution", "1080P (default · 1080P/2K/4K/5K)", NotPersisted + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Frame rate", "30 fps (default · 30/60/120)", NotPersisted + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Preset", "Balanced (default · balanced/highPerf/highQuality/lowLatency)", NotPersisted + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Hardware acceleration", "On (default)", DisplayOnly + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Apple Silicon optimization", "On (default · macOS-only)", DisplayOnly + ". Apple-Silicon path is not applicable on Windows."));
+        d.Add(new("Remote Desktop", "Video transfer · Adaptive bitrate", "On (default)", DisplayOnly + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Compression quality", "Balanced (default · none/fast/balanced/maximum)", NotPersisted + "."));
+        // Card: Display / 显示
+        d.Add(new("Remote Desktop", "Display · Compression level", "50 (default · 1…100)", NotPersisted + ". Not applied to live sessions yet."));
+        d.Add(new("Remote Desktop", "Display · Full screen mode", "Off (default)", DisplayOnly + ". Disabled until live-session windowing is wired."));
+        // Card: Interaction / 交互
+        d.Add(new("Remote Desktop", "Interaction · Clipboard sync", "On (default)", NotWired + ". Clipboard channel requires pairing/trust verification."));
+        d.Add(new("Remote Desktop", "Interaction · Audio redirection", "Off (default)", NotWired + ". Audio redirection provider is not wired."));
+        d.Add(new("Remote Desktop", "Interaction · File transfer", "On (default)", DisplayOnly + ". File-transfer bridge is a separate subsystem."));
+        d.Add(new("Remote Desktop", "Interaction · Trackpad gestures", "On (default)", NotWired + ". Input forwarding is disabled."));
+        d.Add(new("Remote Desktop", "Interaction · Mouse sensitivity", "1.0 (default · 0.1…3.0)", NotPersisted + ". Input scaling is not applied to runtime."));
+        d.Add(new("Remote Desktop", "Interaction · Double-click interval", "500 ms (default)", NotPersisted + "."));
+        // Card: Network / 网络
+        d.Add(new("Remote Desktop", "Network · Bandwidth adaptive", "On (default)", DisplayOnly + ". Adaptive quality needs transport metrics."));
+        d.Add(new("Remote Desktop", "Network · Enable UDP", "On (default)", CoreOwned + ". Transport policy remains Core-owned."));
+        d.Add(new("Remote Desktop", "Network · Encryption", "Strict-PQC / TLS 1.3", ReadOnly + ". Encryption is non-optional; no control."));
+        d.Add(new("Remote Desktop", "Network · Compression", "6 (default · 0…9)", NotPersisted + "."));
+        d.Add(new("Remote Desktop", "Network · Bandwidth limit", "0 = unlimited (default)", NotWired + "."));
+        d.Add(new("Remote Desktop", "Network · Buffer size", "1 MB (default · 512 KB/1/2/4 MB)", NotPersisted + ". Network buffers are not applied to runtime."));
+    }
+
+    // ---- TAB 6: System Monitor / 系统监控 ----
+    private static void AppendSystemMonitor(List<SettingsDetailItem> d)
+    {
+        // Real, deterministic runtime values (reflect this Windows host).
+        d.Add(new("System Monitor", "Runtime · .NET", RuntimeInformation.FrameworkDescription, $"Process architecture: {RuntimeInformation.ProcessArchitecture}"));
+        d.Add(new("System Monitor", "Runtime · OS", RuntimeInformation.OSDescription, $"OS architecture: {RuntimeInformation.OSArchitecture}"));
+        d.Add(new("System Monitor", "Runtime · Host", Environment.MachineName, $"Logical processors: {Environment.ProcessorCount}"));
+        // Card: Config / 配置
+        d.Add(new("System Monitor", "Config · Refresh interval", "1s (default · 1/5/10/30)", DisplayOnly + ". ETW/EventSource sampling is pending."));
+        d.Add(new("System Monitor", "Config · Enable realtime", "On (default)", NotWired + ". Auto refresh does not start background polling."));
+        d.Add(new("System Monitor", "Config · Enable history", "On (default)", NotWired + ". History retention store is not wired."));
+        d.Add(new("System Monitor", "Config · Performance alerts", "On (default)", NotWired + ". Alerts require notification permissions and thresholds."));
+        d.Add(new("System Monitor", "Config · Retention days", "7 (default)", NotPersisted + ". Retention changes are destructive and gated."));
+        d.Add(new("System Monitor", "Config · Max history points", "300 (default · 50…2000)", NotPersisted + "."));
+        // Card: Display / 显示
+        d.Add(new("System Monitor", "Display · CPU", "On (default)", DisplayOnly + "."));
+        d.Add(new("System Monitor", "Display · Memory", "On (default)", DisplayOnly + "."));
+        d.Add(new("System Monitor", "Display · Disk", "On (default)", DisplayOnly + "."));
+        d.Add(new("System Monitor", "Display · Network", "On (default)", DisplayOnly + "."));
+        d.Add(new("System Monitor", "Display · Temperature", "On (default)", DisplayOnly + ". Temperature sampling provider is pending on Windows."));
+        d.Add(new("System Monitor", "Display · Fan speed", "On (default)", DisplayOnly + ". Fan-speed sampling provider is pending on Windows."));
+        d.Add(new("System Monitor", "Display · Chart type", "Line (default · Line/Bar/Area)", DisplayOnly + "."));
+        // Card: Alerts / 警报
+        d.Add(new("System Monitor", "Alerts · CPU threshold", "80% (default · 50…95)", NotPersisted + "."));
+        d.Add(new("System Monitor", "Alerts · Memory threshold", "80% (default · 50…95)", NotPersisted + "."));
+        d.Add(new("System Monitor", "Alerts · Temperature monitoring", "On (default)", NotWired + "."));
+        d.Add(new("System Monitor", "Alerts · Temperature threshold", "80°C (default · 60…95)", NotPersisted + ". Disabled unless temperature monitoring is on."));
+        d.Add(new("System Monitor", "Alerts · Fan speed monitoring", "On (default)", NotWired + "."));
+        d.Add(new("System Monitor", "Alerts · Fan speed threshold", "4000 RPM (default · 2000…8000)", NotPersisted + ". Disabled unless fan monitoring is on."));
+        d.Add(new("System Monitor", "Alerts · Disk threshold", "90% (default · 70…95)", NotPersisted + "."));
+        d.Add(new("System Monitor", "Alerts · Sound alerts", "Off (default)", NotWired + ". Notification writes require explicit permission flow."));
+        d.Add(new("System Monitor", "Alerts · Notification Center", "On (default)", NotWired + ". No system notification is posted by this workspace."));
+        // Card: Advanced / 高级
+        d.Add(new("System Monitor", "Advanced · Thermal throttling alert", "On (default)", NotWired + "."));
+        d.Add(new("System Monitor", "Advanced · Enable remote monitoring", "Off (default)", DisplayOnly + "."));
+        d.Add(new("System Monitor", "Advanced · Sampling precision", "Normal (default · Low/Normal/High)", DisplayOnly + "."));
+    }
+
+    // ---- TAB 7: Permissions / 权限 ----
+    private static void AppendPermissions(List<SettingsDetailItem> d)
+    {
+        // Card: Status / 状态
+        d.Add(new("Permissions", "Status · Summary", "Not requested", "No permission prompt is issued by this workspace; status is display-only."));
+        // Card: Details / 详情
+        d.Add(new("Permissions", "Details · Wi-Fi access", "OS-managed", "Windows grants network access at the OS level; not prompted here."));
+        d.Add(new("Permissions", "Details · Bluetooth access", "OS-managed", "Windows grants Bluetooth at the OS level; not prompted here."));
+        d.Add(new("Permissions", "Details · Location access", "OS-managed", "Location is governed by Windows privacy settings; not prompted here."));
+        d.Add(new("Permissions", "Details · System configuration access", "OS-managed", "System integration is governed by Windows; not prompted here."));
+        // Card: Help / 帮助
+        d.Add(new("Permissions", "Help · System preferences", CanOpenSystemPreferencesStatic(), "Open Windows Settings (ms-settings:) — disabled unless the explicit launcher is enabled."));
+    }
+
+    // ---- TAB 8: Advanced / 高级 ----
+    private static void AppendAdvanced(List<SettingsDetailItem> d)
+    {
+        // Card: Debug / 调试
+        d.Add(new("Advanced", "Debug · Verbose logging", "Off (default)", DisplayOnly + ". Logging level is not persisted."));
+        d.Add(new("Advanced", "Debug · Show debug info", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Debug · Save network logs", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Debug · Log level", "Info (default · Error/Warning/Info/Debug)", DisplayOnly + "."));
+        // Card: Performance / 性能
+        d.Add(new("Advanced", "Performance · Performance mode", "Balanced (default · extreme/balanced/energySaving/adaptive)", DisplayOnly + ". Render-tier mode is a mac display preference; not persisted on Windows."));
+        d.Add(new("Advanced", "Performance · Real-time weather API", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Performance · Show real-time FPS", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Performance · Hardware acceleration", "On (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Performance · Optimize memory usage", "On (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Performance · Background scanning", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Performance · Metal Performance HUD", "macOS-only", "Metal HUD is an Apple/Metal feature; not applicable on Windows."));
+        d.Add(new("Advanced", "Performance · Max concurrent connections", "10 (default)", NotPersisted + "."));
+        // Card: Experimental / 实验性
+        d.Add(new("Advanced", "Experimental · Enable IPv6", "Off (default)", DisplayOnly + ". Experimental flag is not persisted."));
+        d.Add(new("Advanced", "Experimental · Use new discovery algorithm", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "Experimental · Enable P2P direct connection", "Off (default)", DisplayOnly + "."));
+        // Card: PQC / 后量子加密
+        d.Add(new("Advanced", "PQC · App-layer PQC", "Enabled (policy-forced)", ReadOnly + ". Strict-PQC is enforced by policy; no control."));
+        d.Add(new("Advanced", "PQC · Hybrid TLS", "OS-negotiated", ReadOnly + ". Hybrid TLS is negotiated by the OS transport; no control."));
+        d.Add(new("Advanced", "PQC · Prefer X-Wing hybrid", "Off (default)", DisplayOnly + "."));
+        d.Add(new("Advanced", "PQC · Signature algorithm", "ML-DSA-65 (default · 65/87)", CoreOwned + ". Suite IDs and fallback policy remain in Rust Core."));
+        d.Add(new("Advanced", "PQC · Secure Enclave ML-DSA", "macOS-only", "Secure Enclave is Apple hardware; not applicable on Windows."));
+        d.Add(new("Advanced", "PQC · ML-KEM key agreement", "X-Wing hybrid · ephemeral", ReadOnly + ". Key agreement is Core-owned; no control."));
+        // Card: Smoothing / 平滑
+        d.Add(new("Advanced", "Smoothing · Signal strength alpha", "0.60 (default · 0.10…0.95)", NotPersisted + ". Smoothing factor is display-only."));
+        // Card: Reset / 重置
+        d.Add(new("Advanced", "Reset · Reset all settings", "Gated", "Destructive preference write; prepares an in-memory intent only."));
+        d.Add(new("Advanced", "Reset · Reset network settings", "Gated", "Destructive preference write; prepares an in-memory intent only."));
+        // Diagnostics
+        d.Add(new("Advanced", "Diagnostics · Acceptance gates", "Text gates", "UI parity and service-boundary scripts are the current acceptance checks."));
+    }
+
+    // Honest read-only mirror of the launcher's capability without needing an instance.
+    // The default Windows client uses DisabledSystemPreferencesLauncher, so this reads "Disabled"
+    // unless SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES=enabled gates a real launcher in.
+    private static string CanOpenSystemPreferencesStatic()
+    {
+        var gate = Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES");
+        return string.Equals(gate, "enabled", StringComparison.OrdinalIgnoreCase) ? "Available" : "Disabled";
+    }
 
     private static string BuildExportPreviewDetail(SettingsExportPreviewSnapshot exportPreview)
     {

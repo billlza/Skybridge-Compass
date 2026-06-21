@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
@@ -114,6 +116,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _selectedFramerate = "";
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
+    private SettingsTabItemView? _selectedSettingsTab;
     private bool _isDiscoveryScanning;
     private bool _isDiscoveryCompatibilityModeEnabled;
     private int _extendedSearchCountdown;
@@ -486,6 +489,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsTabs = collections.SettingsTabs;
         SettingsActions = collections.SettingsActions;
         SettingsDetails = collections.SettingsDetails;
+        // Drive the Settings two-pane: when a snapshot replaces the tab/detail collections,
+        // keep a valid left-pane selection and re-derive the right-pane (selected-tab) slice.
+        SettingsTabs.CollectionChanged += OnSettingsTabsChanged;
+        SettingsDetails.CollectionChanged += OnSettingsDetailsChanged;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
         var workspaceShellStateSource = new WorkspaceShellStateSource(this);
@@ -611,6 +618,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // Execute, consistent with the Weather/SystemMonitor kicks above. Read-only
         // snapshot — no picker is opened and no local files are read.
         RefreshFileTransferCommand.Execute(null);
+        // Kick the first Settings read-only snapshot on startup so the Settings two-pane
+        // shows its 8 tabs + grouped section cards immediately instead of an empty screen
+        // (the screen was previously empty until a manual Refresh Status). The
+        // CollectionChanged hooks above auto-select the first tab once the tabs land, so the
+        // right pane is populated without any user interaction. Uses the EXISTING command
+        // (routed through the action catalog / command bindings); read-only snapshot — no
+        // preference, file, permission, or runtime setting is touched.
+        RefreshSettingsCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -706,6 +721,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<SettingsActionItemView> SettingsActions { get; }
 
     public ObservableCollection<SettingsDetailItemView> SettingsDetails { get; }
+
+    // Right-pane rows for the Settings two-pane layout: the subset of SettingsDetails whose
+    // Section matches the currently SelectedSettingsTab. Re-derived whenever the selection
+    // changes OR the backing SettingsDetails / SettingsTabs collections are replaced by a
+    // snapshot refresh.
+    public ObservableCollection<SettingsDetailItemView> SelectedSettingsTabDetails { get; } = new();
+
+    // The same selected-tab rows grouped into section cards (by CardName), in backend order.
+    // This is what the right pane binds to: each group renders a gray card title + a glass
+    // card of control rows, element-matching the Mac SettingsView section cards.
+    public ObservableCollection<SettingsCardGroupView> SelectedSettingsTabCards { get; } = new();
 
     // ---- Weather hero card surface (element-matches the Mac WeatherDashboardCard) ----
     // Phase drives the three state layers via WeatherPhaseToVisibilityConverter; the
@@ -826,6 +852,22 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _selectedFeature, value))
             {
                 _workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();
+            }
+        }
+    }
+
+    // Sub-nav selection for the Settings two-pane layout (left tab list ⇄ right section
+    // cards). TwoWay-bound to the tab ListView's SelectedItem; changing it re-filters the
+    // right pane to that tab's rows. Nullable because the tab list is empty until the first
+    // settings snapshot lands (then the ctor's CollectionChanged hook auto-selects tab 0).
+    public SettingsTabItemView? SelectedSettingsTab
+    {
+        get => _selectedSettingsTab;
+        set
+        {
+            if (SetField(ref _selectedSettingsTab, value))
+            {
+                RefreshSelectedSettingsTabDetails();
             }
         }
     }
@@ -1305,6 +1347,86 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
         _sessionEngineStateProjector.Apply(newState);
+    }
+
+    // Re-derives the right pane for the SelectedSettingsTab: the flat row slice
+    // (SelectedSettingsTabDetails = SettingsDetails where Section == tab Title) and the
+    // grouped-by-card projection (SelectedSettingsTabCards) the pane actually renders.
+    // Both are replaced in place, preserving the backend's row order within each card.
+    private void RefreshSelectedSettingsTabDetails()
+    {
+        SelectedSettingsTabDetails.Clear();
+        SelectedSettingsTabCards.Clear();
+
+        var section = _selectedSettingsTab?.Title;
+        if (string.IsNullOrEmpty(section))
+        {
+            return;
+        }
+
+        var cardOrder = new List<string>();
+        var cardRows = new Dictionary<string, List<SettingsDetailItemView>>(StringComparer.Ordinal);
+
+        foreach (var row in SettingsDetails)
+        {
+            if (!string.Equals(row.Section, section, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            SelectedSettingsTabDetails.Add(row);
+
+            var card = row.CardName;
+            if (!cardRows.TryGetValue(card, out var rows))
+            {
+                rows = new List<SettingsDetailItemView>();
+                cardRows[card] = rows;
+                cardOrder.Add(card);
+            }
+
+            rows.Add(row);
+        }
+
+        foreach (var card in cardOrder)
+        {
+            SelectedSettingsTabCards.Add(new SettingsCardGroupView(card, cardRows[card]));
+        }
+    }
+
+    // When a settings snapshot replaces the tab list, keep a valid selection: if nothing is
+    // selected yet (first load), or the previously-selected tab is gone, select the first
+    // tab. Otherwise preserve the user's current tab (re-resolved to the new instance so the
+    // ListView selection and the right-pane filter both stay correct).
+    private void OnSettingsTabsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (SettingsTabs.Count == 0)
+        {
+            SelectedSettingsTab = null;
+            return;
+        }
+
+        var currentTitle = _selectedSettingsTab?.Title;
+        SettingsTabItemView? resolved = null;
+        if (!string.IsNullOrEmpty(currentTitle))
+        {
+            foreach (var tab in SettingsTabs)
+            {
+                if (string.Equals(tab.Title, currentTitle, StringComparison.Ordinal))
+                {
+                    resolved = tab;
+                    break;
+                }
+            }
+        }
+
+        SelectedSettingsTab = resolved ?? SettingsTabs[0];
+    }
+
+    // When a settings snapshot replaces the detail rows, re-derive the right-pane slice for
+    // the currently selected tab (the row instances changed even if the tab did not).
+    private void OnSettingsDetailsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        RefreshSelectedSettingsTabDetails();
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

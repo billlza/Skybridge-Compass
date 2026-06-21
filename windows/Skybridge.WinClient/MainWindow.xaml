@@ -37,6 +37,8 @@
         <vm:FileTransferDirectionToGlyphConverter x:Key="FileTransferDirectionGlyphConverter" />
         <vm:FileTransferDirectionToBrushConverter x:Key="FileTransferDirectionBrushConverter" />
         <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
+        <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
+        <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -909,14 +911,139 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             SettingsTabItemTemplate — the LEFT sub-nav row for the Settings
+             two-pane layout. Element-matches the Mac SettingsView sidebar row: a
+             per-tab accent icon chip + the tab Title (SemiBold) over the localized
+             EN+ZH section summary (Detail, 12px secondary). Selection (the filled
+             pill) is owned by the native ListView container — exactly one tab
+             highlights at a time — so this template carries content ONLY, no
+             selection visuals and no push-button (keeps the gated button count at 7).
+             Bound to SettingsTabItemView (Title / Detail / Glyph).
+             =================================================================== -->
         <DataTemplate x:Key="SettingsTabItemTemplate">
-            <StackPanel Padding="0,8" Spacing="2">
-                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+            <Grid MinHeight="48" ColumnSpacing="12" Padding="0,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="32" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    Grid.Column="0"
+                    Style="{StaticResource AccentIconChip}"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding Glyph}"
+                        FontSize="16"
+                        Foreground="{StaticResource SkyBridgeNavSettingsBrush}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                    <TextBlock
+                        Text="{Binding Title}"
+                        FontWeight="SemiBold"
+                        TextWrapping="Wrap"
+                        MaxLines="1"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock
+                        Text="{Binding Detail}"
+                        TextWrapping="Wrap"
+                        MaxLines="2"
+                        TextTrimming="CharacterEllipsis"
+                        FontSize="11"
+                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             SettingsControlRowTemplate — one control row inside a section card.
+             Element-matches a Mac SettingsView row: ControlName label on the left,
+             then ONE of three control affordances on the right keyed off the row's
+             honest, backend-derived ControlKind (SettingsControlKindVisibilityConverter):
+               • Toggle   — a ToggleSwitch (IsOn from the On/Off value). ALWAYS
+                            IsEnabled="False": the snapshot is display-only and no
+                            set-command exists, so the switch shows the value but is
+                            non-interactive — honest, never implying Windows toggles it.
+               • Dropdown — a display-only ComboBox populated with the parsed Mac
+                            option set (DropdownOptions), current value selected. Also
+                            IsEnabled="False" (no persistence behind it).
+               • Value    — right-aligned status text, tinted by the value's honesty
+                            vocabulary (SettingsValueStateBrushConverter): cyan for
+                            Core-owned/Read-only, muted for macOS-only/OS-managed,
+                            amber for Gated/Disabled/Not-wired, primary otherwise.
+             The Detail string rides as the row tooltip (the Windows truth: Display-only
+             / Not persisted / Core-owned / macOS-only …). NO inline push-button — none of
+             ToggleSwitch / ComboBox / FontIcon match the gated push-button pattern.
+             Bound to SettingsDetailItemView (ControlName / ControlKind / IsOn /
+             DropdownOptions / DropdownSelection / Value / Detail).
+             =================================================================== -->
+        <DataTemplate x:Key="SettingsControlRowTemplate">
+            <Grid Padding="0,6" ColumnSpacing="12" ToolTipService.ToolTip="{Binding Detail}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <TextBlock
-                    Text="{Binding Detail}"
+                    Grid.Column="0"
+                    Text="{Binding ControlName}"
                     TextWrapping="Wrap"
-                    FontSize="12"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                <!-- Toggle affordance (display-only: OneWay to the get-only IsOn, disabled) -->
+                <ToggleSwitch
+                    Grid.Column="1"
+                    IsOn="{Binding IsOn, Mode=OneWay}"
+                    IsEnabled="{Binding IsSettable}"
+                    MinWidth="0"
+                    OnContent=""
+                    OffContent=""
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Toggle}" />
+                <!-- Dropdown affordance (display-only: OneWay selection, disabled) -->
+                <ComboBox
+                    Grid.Column="1"
+                    ItemsSource="{Binding DropdownOptions}"
+                    SelectedItem="{Binding DropdownSelection, Mode=OneWay}"
+                    IsEnabled="{Binding IsSettable}"
+                    MinWidth="160"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Dropdown}" />
+                <!-- Value affordance (right-aligned status text) -->
+                <TextBlock
+                    Grid.Column="1"
+                    Text="{Binding Value}"
+                    TextWrapping="Wrap"
+                    MaxWidth="240"
+                    TextAlignment="Right"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Right"
+                    Foreground="{Binding Value, Converter={StaticResource SettingsValueStateBrushConverter}}"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Value}" />
+            </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             SettingsCardGroupTemplate — one section CARD in the right pane.
+             Element-matches the Mac SettingsView section: a gray section title
+             (CardName) over a glass card (GlassCard) holding that card's control
+             rows. The rows are an inner ItemsControl over the group's Rows, each
+             rendered by SettingsControlRowTemplate. Bound to SettingsCardGroupView
+             (CardName / Rows). No Button.
+             =================================================================== -->
+        <DataTemplate x:Key="SettingsCardGroupTemplate">
+            <StackPanel Spacing="8" Margin="0,0,0,14">
+                <TextBlock
+                    Text="{Binding CardName}"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                <Border Style="{StaticResource GlassCard}">
+                    <ItemsControl
+                        ItemsSource="{Binding Rows}"
+                        ItemTemplate="{StaticResource SettingsControlRowTemplate}" />
+                </Border>
             </StackPanel>
         </DataTemplate>
         </Grid.Resources>
@@ -2139,22 +2266,69 @@
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
+                            <!-- ===========================================================
+                                 Settings two-pane (element-matches the Mac SettingsView):
+                                   LEFT  (~210px) — the tab sub-nav. A native ListView bound
+                                          to SettingsTabs; the native container owns single
+                                          selection + the filled selection pill (exactly one
+                                          tab highlighted). SelectedItem is TwoWay-bound to
+                                          SelectedSettingsTab, which drives the right pane.
+                                   RIGHT (*)      — the selected tab's grouped section CARDS,
+                                          bound to SelectedSettingsTabCards (re-derived from
+                                          the 142-row SettingsDetails slice for the selected
+                                          tab). Each group = gray section title + glass card
+                                          of control rows (toggle / dropdown / value).
+                                 No push-button anywhere here (gated count stays 7); controls
+                                 are ToggleSwitch / ComboBox / FontIcon / TextBlock only.
+                                 =========================================================== -->
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="240" />
+                                    <ColumnDefinition Width="210" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
+                                <StackPanel Grid.Column="0" Spacing="8">
                                     <TextBlock Text="Settings Tabs" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SettingsTabs}" ItemTemplate="{StaticResource SettingsTabItemTemplate}" MinHeight="220" SelectionMode="None" IsEnabled="{Binding IsSettingsSelected}" />
+                                    <ListView
+                                        AutomationProperties.AutomationId="Skybridge.Settings.TabNav"
+                                        ItemsSource="{Binding SettingsTabs}"
+                                        ItemTemplate="{StaticResource SettingsTabItemTemplate}"
+                                        SelectedItem="{Binding SelectedSettingsTab, Mode=TwoWay}"
+                                        SelectionMode="Single"
+                                        MinHeight="220"
+                                        VerticalAlignment="Top"
+                                        IsEnabled="{Binding IsSettingsSelected}" />
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="12">
+                                <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="Settings Details" FontWeight="SemiBold" />
-                                    <ItemsControl ItemsSource="{Binding SettingsDetails}" ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />
+                                    <ScrollViewer
+                                        VerticalScrollBarVisibility="Auto"
+                                        VerticalScrollMode="Auto"
+                                        MaxHeight="520">
+                                        <ItemsControl
+                                            AutomationProperties.AutomationId="Skybridge.Settings.SectionCards"
+                                            ItemsSource="{Binding SelectedSettingsTabCards}"
+                                            ItemTemplate="{StaticResource SettingsCardGroupTemplate}" />
+                                    </ScrollViewer>
                                 </StackPanel>
                             </Grid>
+
+                            <!-- ===========================================================
+                                 Full read-only mirror of the active settings snapshot. The
+                                 two-pane above is the primary, grouped, control-styled view;
+                                 this collapsed block keeps the flat, contract-shaped
+                                 SettingsDetails (all 142 rows: Section / Label / Value /
+                                 Detail) bound through SettingsDetailRowTemplate so the
+                                 underlying read-only data stays directly inspectable and the
+                                 service-boundary contract (every row surfaced 1:1) is
+                                 preserved. Collapsed so it does not double-render beneath the
+                                 cards — same real collection, no duplicate visual.
+                                 =========================================================== -->
+                            <ItemsControl
+                                Visibility="Collapsed"
+                                ItemsSource="{Binding SettingsDetails}"
+                                ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Settings Actions" FontWeight="SemiBold" />

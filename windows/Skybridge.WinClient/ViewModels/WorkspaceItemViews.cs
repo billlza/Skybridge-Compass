@@ -1,14 +1,40 @@
+using System;
+using System.Collections.Generic;
 using System.Windows.Input;
 using Skybridge.WinClient.Services;
 
 namespace Skybridge.WinClient.ViewModels;
 
+// Left sub-nav row for the Settings two-pane layout (element-matches the Mac
+// SettingsView sidebar: per-tab icon + title, selected = filled pill). The Glyph is
+// derived deterministically from the (stable, English) tab Title so the row carries a
+// Segoe Fluent Icons glyph that mirrors the Mac SF Symbol per tab. Title is the stable
+// filter key the right pane groups against (Section == Title on every detail row).
 public sealed record SettingsTabItemView(
     string Title,
     string Detail)
 {
+    public string Glyph => ResolveGlyph(Title);
+
     public static SettingsTabItemView FromItem(SettingsTabItem item) =>
         new(item.Title, item.Detail);
+
+    // Per-tab Segoe Fluent Icons glyph (PUA codepoints given as \u escapes so they
+    // survive copy/paste/encoding), keyed off the stable English tab title. Mirrors the
+    // Mac SettingsView tab symbols (gear/network/devices/transfer/remote-desktop/
+    // metrics/lock/advanced). Falls back to the gear for any unknown title.
+    private static string ResolveGlyph(string title) => title switch
+    {
+        "General" => "\uE713",        // Settings (gear)
+        "Network" => "\uEC27",        // NetworkAdapter
+        "Devices" => "\uE8B9",        // Devices
+        "File Transfer" => "\uE8E5",  // OpenFile / transfer
+        "Remote Desktop" => "\uE7F4", // Remote
+        "System Monitor" => "\uE9D9", // DataSense / metrics
+        "Permissions" => "\uE72E",    // Lock / permissions
+        "Advanced" => "\uEC7A",       // DeveloperTools / advanced
+        _ => "\uE713"
+    };
 }
 
 public sealed record DashboardMetricView(
@@ -43,15 +69,176 @@ public sealed record SettingsActionItemView(
         new(item.Key, item.Title, item.State, item.Detail);
 }
 
+// One control row inside a Settings card (element-matches a Mac SettingsView row).
+// The backend encodes the card grouping into Label as "Card · Control" (e.g.
+// "Wi-Fi · Prefer 5 GHz"); we split that here so the right pane can group rows into
+// glass section cards (CardName) and label each row by its short ControlName.
+//
+// The CONTROL KIND is classified deterministically from the honest backend Value:
+//   • Toggle  — Value begins with "On"/"Off" (the backend's on/off mirror). Renders a
+//     ToggleSwitch with IsOn from the prefix. ALWAYS read-only (IsSettable=false): the
+//     Windows snapshot is display-only and no set-command exists, so the switch is shown
+//     but disabled — honest, never implying Windows actually performs the toggle.
+//   • Dropdown — Value carries an inline option set "(default · A/B/C)" (and is not a
+//     toggle). DropdownOptions is the parsed option list and DropdownSelection the chosen
+//     one (the text before the parenthesis). Rendered as a display-only ComboBox.
+//   • Value   — everything else (status strings like "Read-only", "Core-owned",
+//     "macOS-only", "Not reported", runtime reads, intent ids). Rendered as right-aligned
+//     status text.
+// No fabricated state: IsSettable is always false (there is no Windows settings store
+// behind the snapshot yet), and every value/option comes straight from the backend string.
 public sealed record SettingsDetailItemView(
     string Section,
     string Label,
     string Value,
     string Detail)
 {
+    private const string CardSeparator = " · ";
+
+    public string CardName => SplitCard(Label).Card;
+
+    public string ControlName => SplitCard(Label).Control;
+
+    public SettingsControlKind ControlKind => ClassifyKind(Value);
+
+    // Display-only across the board: the read-only snapshot has no Windows settings store
+    // behind it, so no row owns a real set-command. The toggle/combo render but stay
+    // disabled — honest, and matches the "Display-only / Not persisted / Core-owned /
+    // Read-only / macOS-only" detail captions the backend already attaches.
+    public bool IsSettable => false;
+
+    // True when the toggle mirrors an "On…" value; false for "Off…" / non-toggles.
+    public bool IsOn =>
+        ControlKind == SettingsControlKind.Toggle &&
+        Value.StartsWith("On", StringComparison.OrdinalIgnoreCase);
+
+    public IReadOnlyList<string> DropdownOptions => ParseOptions(Value);
+
+    public string DropdownSelection => ParseSelection(Value);
+
     public static SettingsDetailItemView FromItem(SettingsDetailItem item) =>
         new(item.Section, item.Label, item.Value, item.Detail);
+
+    private static (string Card, string Control) SplitCard(string label)
+    {
+        if (string.IsNullOrEmpty(label))
+        {
+            return ("General", "");
+        }
+
+        var idx = label.IndexOf(CardSeparator, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return (label, label);
+        }
+
+        var card = label.Substring(0, idx).Trim();
+        var control = label.Substring(idx + CardSeparator.Length).Trim();
+        return (card.Length == 0 ? label : card, control.Length == 0 ? label : control);
+    }
+
+    private static SettingsControlKind ClassifyKind(string value)
+    {
+        var v = value ?? string.Empty;
+        if (v.StartsWith("On", StringComparison.OrdinalIgnoreCase) ||
+            v.StartsWith("Off", StringComparison.OrdinalIgnoreCase))
+        {
+            return SettingsControlKind.Toggle;
+        }
+
+        // A dropdown carries an inline option set, e.g. "30s (default · 15/30/60/120)"
+        // or "Balanced (default · balanced/highPerf/...)". Require both the option
+        // delimiter "·" and a "/"-separated option list to avoid treating prose as a menu.
+        if (HasOptionSet(v))
+        {
+            return SettingsControlKind.Dropdown;
+        }
+
+        return SettingsControlKind.Value;
+    }
+
+    private static bool HasOptionSet(string value)
+    {
+        var open = value.IndexOf('(');
+        var close = value.LastIndexOf(')');
+        if (open < 0 || close <= open)
+        {
+            return false;
+        }
+
+        var inner = value.Substring(open + 1, close - open - 1);
+        return inner.Contains('·') && inner.Contains('/');
+    }
+
+    // Parsed option labels for the display-only ComboBox: the slash-separated tokens after
+    // the "·" inside the parenthesis, with the current selection placed FIRST so a
+    // single-selection (display-only) ComboBox shows the honest current value at index 0
+    // while still surfacing the full Mac option set.
+    private static IReadOnlyList<string> ParseOptions(string value)
+    {
+        var v = value ?? string.Empty;
+        if (!HasOptionSet(v))
+        {
+            return new[] { ParseSelection(v) };
+        }
+
+        var open = v.IndexOf('(');
+        var close = v.LastIndexOf(')');
+        var inner = v.Substring(open + 1, close - open - 1);
+        var dot = inner.IndexOf('·');
+        var listPart = dot >= 0 ? inner.Substring(dot + 1) : inner;
+
+        var options = new List<string>();
+        var selection = ParseSelection(v);
+        options.Add(selection);
+        foreach (var token in listPart.Split('/'))
+        {
+            var trimmed = token.Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            // Avoid a duplicate when an option equals the current selection token.
+            if (!string.Equals(trimmed, selection, StringComparison.OrdinalIgnoreCase))
+            {
+                options.Add(trimmed);
+            }
+        }
+
+        return options;
+    }
+
+    // The current selection is the value text BEFORE the "(default …)" annotation,
+    // e.g. "30s (default · 15/30/60/120)" → "30s"; "Balanced (default · …)" → "Balanced".
+    private static string ParseSelection(string value)
+    {
+        var v = (value ?? string.Empty).Trim();
+        var open = v.IndexOf('(');
+        if (open < 0)
+        {
+            return v;
+        }
+
+        var head = v.Substring(0, open).Trim();
+        return head.Length == 0 ? v : head;
+    }
 }
+
+public enum SettingsControlKind
+{
+    Value,
+    Toggle,
+    Dropdown
+}
+
+// A section card in the Settings right pane: a card title (gray section header on Mac) over
+// a glass card holding that card's control rows. Built by grouping the selected tab's
+// SettingsDetailItemView rows on CardName, preserving the backend's row order within each
+// card. Read-only snapshot of the current selection — rebuilt on every tab/snapshot change.
+public sealed record SettingsCardGroupView(
+    string CardName,
+    System.Collections.Generic.IReadOnlyList<SettingsDetailItemView> Rows);
 
 public sealed record UsbDeviceStatView(
     string Title,
