@@ -20,6 +20,10 @@
         <vm:SystemMetricKeyToGlyphConverter x:Key="SystemMetricGlyphConverter" />
         <vm:SystemMetricKeyToBrushConverter x:Key="SystemMetricAccentBrushConverter" />
         <vm:PlatformToGlyphConverter x:Key="PlatformGlyphConverter" />
+        <vm:PeerStatusToBrushConverter x:Key="PeerStatusBrushConverter" />
+        <vm:StringPresenceToVisibilityConverter x:Key="StringPresenceVisibilityConverter" />
+        <vm:ServiceKindToGlyphConverter x:Key="ServiceKindGlyphConverter" />
+        <vm:ServiceKindToBrushConverter x:Key="ServiceKindBrushConverter" />
         <vm:WeatherConditionToGlyphConverter x:Key="WeatherConditionGlyphConverter" />
         <vm:WeatherConditionToBrushConverter x:Key="WeatherConditionBrushConverter" />
         <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
@@ -422,27 +426,141 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             DiscoveredPeerItemTemplate — the RICH per-peer row for the full
+             Device Discovery page's DiscoveredPeers ListView. Element-matches the
+             Mac OnlineDeviceCard / EnhancedDeviceRow:
+               [status-tinted device-type icon chip 44x44]
+               + [ name (.headline white)  · trust badge · status dot ]
+                 [ "<Platform> • <ServiceKind>" secondary line ]
+                 [ connection-type chip (transport icon + ServiceKind label) ]
+                 [ DeviceId (.caption muted) ]
+                 [ Capabilities (.caption2 secondary, only if present) ]
+                 [ Fingerprint  (.caption2 muted,    only if present) ]
+                 [ TrustSummary (.caption2 secondary, only if present) ]
+             All fields are LIVE DiscoveredPeerView data (DNS-SD browser): DeviceId /
+             DisplayName / Platform / ServiceKind / PublicKeyFingerprint /
+             CapabilitiesSummary / TrustSummary. The device-type icon is keyed off
+             Platform (PlatformGlyphConverter); the status dot + icon tint are keyed
+             off PublicKeyFingerprint presence (green when the peer advertises a
+             verifiable identity, muted gray otherwise) — no fabricated state.
+             Wrapped in GlassCard so the full-page peer list matches the carded
+             dashboard look (closes the asymmetry noted in recon). Contains NO
+             inline button element — connect actions live on the page's shared
+             action surfaces, so the gated button count is unaffected.
+             =================================================================== -->
         <DataTemplate x:Key="DiscoveredPeerItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="16">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="2*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Spacing="3">
-                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceId}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="{Binding Platform}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding ServiceKind}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-                <StackPanel Grid.Column="2" Spacing="3">
-                    <TextBlock Text="{Binding CapabilitiesSummary}" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding PublicKeyFingerprint}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding TrustSummary}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-            </Grid>
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,8">
+                <Grid ColumnSpacing="14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Status-tinted device-type icon chip (Mac 50x50 status chip) -->
+                    <Border
+                        Width="44"
+                        Height="44"
+                        CornerRadius="10"
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        VerticalAlignment="Top">
+                        <FontIcon
+                            Glyph="{Binding Platform, Converter={StaticResource PlatformGlyphConverter}}"
+                            FontSize="20"
+                            Foreground="{Binding PublicKeyFingerprint, Converter={StaticResource PeerStatusBrushConverter}}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
+                    <!-- Info column -->
+                    <StackPanel Grid.Column="1" Spacing="6">
+                        <!-- Name row: name + trust badge + status dot -->
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{Binding DisplayName}"
+                                FontWeight="SemiBold"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <!-- Trust badge (EB95 = Shield ~ SF "checkmark.shield.fill"),
+                                 only shown when the peer carries a trust summary. -->
+                            <Border
+                                Style="{StaticResource BadgeSuccess}"
+                                VerticalAlignment="Center"
+                                Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <FontIcon Glyph="&#xEB95;" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <TextBlock Text="Trusted" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                            <Ellipse
+                                Style="{StaticResource StatusDot}"
+                                Fill="{Binding PublicKeyFingerprint, Converter={StaticResource PeerStatusBrushConverter}}"
+                                VerticalAlignment="Center" />
+                        </StackPanel>
+                        <!-- Platform / ServiceKind secondary line -->
+                        <TextBlock FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}">
+                            <Run Text="{Binding Platform}" />
+                            <Run Text=" &#x2022; " />
+                            <Run Text="{Binding ServiceKind}" />
+                        </TextBlock>
+                        <!-- Connection-type chip: transport icon + ServiceKind label -->
+                        <Border
+                            Style="{StaticResource ConnectionTypeChip}"
+                            BorderBrush="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                            HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon
+                                    Glyph="{Binding ServiceKind, Converter={StaticResource ServiceKindGlyphConverter}}"
+                                    FontSize="11"
+                                    Foreground="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                                    VerticalAlignment="Center" />
+                                <TextBlock
+                                    Text="{Binding ServiceKind}"
+                                    FontSize="11"
+                                    FontWeight="Medium"
+                                    Foreground="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                                    VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                        <!-- DeviceId -->
+                        <TextBlock
+                            Text="{Binding DeviceId}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        <!-- Capabilities (only when present) -->
+                        <TextBlock
+                            Text="{Binding CapabilitiesSummary}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            Visibility="{Binding CapabilitiesSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        <!-- Fingerprint (only when present) -->
+                        <TextBlock
+                            Text="{Binding PublicKeyFingerprint}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                            Visibility="{Binding PublicKeyFingerprint, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        <!-- Trust summary (only when present) -->
+                        <TextBlock
+                            Text="{Binding TrustSummary}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                    </StackPanel>
+                    <!-- Trailing chevron affordance (Mac TrustedDeviceCard chevron).
+                         E76C = ChevronRight. Decorative; no command. -->
+                    <FontIcon
+                        Grid.Column="2"
+                        Glyph="&#xE76C;"
+                        FontSize="12"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                        VerticalAlignment="Center" />
+                </Grid>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="UsbDeviceItemTemplate">
             <Grid Padding="0,8" ColumnSpacing="12">
@@ -1051,18 +1169,109 @@
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
                                     <TextBlock Text="Device Discovery" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding DiscoveryStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
+                                <!-- Live discovered-peer count badge (Mac "discovery.onlineDevices(n)").
+                                     Bound to DiscoveredPeerCount (change-notified via
+                                     WorkspaceCountNotifier). -->
+                                <Border Grid.Column="1" Style="{StaticResource Badge}" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon Glyph="&#xE772;" FontSize="12" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Border>
                                 <ItemsControl
-                                    Grid.Column="1"
+                                    Grid.Column="2"
                                     ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"
                                     ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                     ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
                                     VerticalAlignment="Center" />
                             </Grid>
+
+                            <!-- ===================================================================
+                                 Connection-mode segmented header — element-matches the Mac
+                                 EnhancedDeviceDiscoveryView connectionModePicker (4 equal-width
+                                 tabs: Local Scan / QR Code / Cloud Link / Connection Code, each a
+                                 VStack of accent icon over title over subtitle). This is a
+                                 NON-INTERACTIVE orientation header (the Windows page already shows
+                                 ALL four connection surfaces stacked below — there is no mode swap
+                                 to drive), so it is built from Borders + FontIcons + TextBlocks and
+                                 contains NO inline button element, keeping the gated button count at 7.
+                                 The first tab (Local Scan) carries the selected styling (accent
+                                 fill + 3px bottom indicator) because the page leads with the local
+                                 scan surface, mirroring the Mac default selection.
+                                 =================================================================== -->
+                            <Border
+                                AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.ConnectionModeHeader"
+                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Tab 1: Local Scan (green) — selected -->
+                                    <Grid Grid.Column="0">
+                                        <Border Background="{StaticResource SkyBridgeSelectedNavFillBrush}" CornerRadius="12,0,0,0" Opacity="0.18" />
+                                        <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                            <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Local Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Same network" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        </StackPanel>
+                                        <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" />
+                                    </Grid>
+                                    <!-- Tab 2: QR Code (blue) -->
+                                    <StackPanel Grid.Column="1" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xED14;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="QR Code" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Scan to pair" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                    <!-- Tab 3: Cloud Link (purple) -->
+                                    <StackPanel Grid.Column="2" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Cloud Link" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Across networks" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                    <!-- Tab 4: Connection Code (orange) -->
+                                    <StackPanel Grid.Column="3" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Connection Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
+                                        <TextBlock Text="6-digit code" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- ===================================================================
+                                 Local Scan info banner — element-matches the Mac localScan
+                                 InfoBanner (green wifi.router icon + title + description, glass
+                                 card r12, 1px stroke). Orientation card for the local-scan surface.
+                                 =================================================================== -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE701;" FontSize="26" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock Text="Local network discovery" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock Text="Devices advertising over DNS-SD on this network appear below." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
 
                             <Grid ColumnSpacing="12" RowSpacing="10">
                                 <Grid.RowDefinitions>
@@ -1229,7 +1438,55 @@
                                 </StackPanel>
                             </Grid>
 
-                            <ListView ItemsSource="{Binding DiscoveredPeers}" ItemTemplate="{StaticResource DiscoveredPeerItemTemplate}" MinHeight="86" SelectionMode="None" />
+                            <!-- ===================================================================
+                                 Discovered-devices group — element-matches the Mac localScan
+                                 discovered "online devices" section: a section header ("Discovered
+                                 devices" + live count) over the rich peer list, framed with a faint
+                                 green tint ring (Mac "Recently / discovered" group, green@0.35).
+                                 The DiscoveredPeers ListView keeps its DiscoveredPeerItemTemplate
+                                 binding (template-key preserved for the parity gate); the rows are
+                                 now the rich Mac OnlineDeviceCard-style cards. An honest empty state
+                                 shows when no peers are present (CountToVisibilityConverter "Empty").
+                                 =================================================================== -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeSuccessBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <StackPanel Spacing="12">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xE701;" FontSize="16" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="Discovered devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
+                                        </Border>
+                                    </Grid>
+                                    <!-- Populated rich list (Visible when count > 0) -->
+                                    <ListView
+                                        ItemsSource="{Binding DiscoveredPeers}"
+                                        ItemTemplate="{StaticResource DiscoveredPeerItemTemplate}"
+                                        MinHeight="86"
+                                        SelectionMode="None"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                    <!-- Honest empty state (Visible when count == 0) — Mac
+                                         emptyStateView: large muted icon + title + message. -->
+                                    <StackPanel
+                                        Spacing="8"
+                                        Padding="0,28"
+                                        HorizontalAlignment="Center"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                        <FontIcon Glyph="&#xE721;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="No devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Start a scan to discover devices advertising on this network." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
