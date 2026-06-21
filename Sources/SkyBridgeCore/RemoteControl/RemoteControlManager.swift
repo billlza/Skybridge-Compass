@@ -735,6 +735,10 @@ public final class RemoteControlManager: BaseManager {
         Task {
             await peer.outboundFramePump.close()
         }
+        if #available(macOS 14.0, *), let sender = peer.realtimeAudioSender {
+            peer.realtimeAudioSender = nil
+            Task { await sender.close(reason: "remote-control-stopped") }
+        }
         stopInteractionTelemetry(for: deviceId)
         screenCaptureStartupRetryCountByPeerId.removeValue(forKey: deviceId)
         invalidateScreenSharingStartupState(for: deviceId)
@@ -782,6 +786,10 @@ public final class RemoteControlManager: BaseManager {
         stopInteractionTelemetry(for: previousPeer.id)
         Task {
             await previousPeer.outboundFramePump.close()
+        }
+        if #available(macOS 14.0, *), let sender = previousPeer.realtimeAudioSender {
+            previousPeer.realtimeAudioSender = nil
+            Task { await sender.close(reason: "session-superseded") }
         }
         if #available(macOS 14.0, *) {
             releaseSOAStateIfUnretained(for: previousPeer)

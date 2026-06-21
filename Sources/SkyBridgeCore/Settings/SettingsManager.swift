@@ -120,6 +120,7 @@ public class SettingsManager: ObservableObject, Sendable {
  // MARK: - 通用设置
     @Published public var autoScanOnStartup: Bool = true
     @Published public var showSystemNotifications: Bool = true
+    @Published public var showFileTransferNotifications: Bool = true
     @Published public var useDarkMode: Bool = false
     @Published public var scanInterval: Int = 30
     @Published public var showDeviceDetails: Bool = true
@@ -635,6 +636,7 @@ public class SettingsManager: ObservableObject, Sendable {
  // 通用设置
             "autoScanOnStartup": autoScanOnStartup,
             "showSystemNotifications": showSystemNotifications,
+            "showFileTransferNotifications": showFileTransferNotifications,
             "useDarkMode": useDarkMode,
             "scanInterval": scanInterval,
             "showDeviceDetails": showDeviceDetails,
@@ -884,6 +886,7 @@ public class SettingsManager: ObservableObject, Sendable {
  // 通用设置
         if let value = settings["autoScanOnStartup"] as? Bool { autoScanOnStartup = value }
         if let value = settings["showSystemNotifications"] as? Bool { showSystemNotifications = value }
+        if let value = settings["showFileTransferNotifications"] as? Bool { showFileTransferNotifications = value }
         if let value = settings["useDarkMode"] as? Bool { useDarkMode = value }
         if let value = settings["scanInterval"] as? Int { scanInterval = value }
         if let value = settings["showDeviceDetails"] as? Bool { showDeviceDetails = value }
@@ -1443,6 +1446,7 @@ public class SettingsManager: ObservableObject, Sendable {
  // 通用设置
         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+        showFileTransferNotifications = userDefaults.bool(forKey: "Settings.ShowFileTransferNotifications", defaultValue: true)
         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
@@ -1589,6 +1593,10 @@ public class SettingsManager: ObservableObject, Sendable {
             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
         }.store(in: &settingsCancellables)
 
+        $showFileTransferNotifications.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowFileTransferNotifications")
+        }.store(in: &settingsCancellables)
+
         $useDarkMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
             self?.applyThemeMode() // 立即应用主题变化
@@ -1716,7 +1724,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $wifiScanTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
-            self?.postWiFiSettingsChanged(["scanInterval": Double(value)])
+            self?.postWiFiSettingsChanged(["scanTimeout": Double(value)])
         }.store(in: &settingsCancellables)
 
         $enableBonjourDiscovery.sink { [weak self] value in

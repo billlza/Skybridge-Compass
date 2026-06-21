@@ -94,6 +94,9 @@ public class DeviceDiscoveryManager: BaseManager {
         browsers.removeAll()
         listener?.cancel()
         listener = nil
+
+ // 清理 Bonjour TXT 信息缓存（完整销毁时释放）
+        Self.bonjourInfoByDeviceId.removeAll()
     }
 
  // MARK: - 公共方法
@@ -595,11 +598,17 @@ public class DeviceDiscoveryManager: BaseManager {
                     }
                     if didChange {
 	// 合并后重新判定本机（异步）
+                        let targetId = existingDevice.id
                         Task { [weak self] in
                             guard let self = self else { return }
                             var updated = existingDevice
                             await self.applyLocalFlag(&updated, selfId: selfId)
-                            await MainActor.run { self.discoveredDevices[existingIndex] = updated }
+                            await MainActor.run {
+                                if let idx = self.discoveredDevices.firstIndex(where: { $0.id == targetId }) {
+                                    self.discoveredDevices[idx] = updated
+                                }
+                                // else: row was removed during teardown — drop the stale merge, no-op
+                            }
                         }
                         self.logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
                     }

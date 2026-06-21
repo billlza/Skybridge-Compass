@@ -2421,6 +2421,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let deviceTrustCandidatesById = Dictionary(uniqueKeysWithValues: devices.map { device in
             (device.id, Self.deviceTrustLookupCandidates(for: device))
         })
+        let hardTokensById = Dictionary(uniqueKeysWithValues: devices.map { device in
+            (device.id, Self.hardIdentityTokensByKind(for: device))
+        })
+        let peerAliasesById = Dictionary(uniqueKeysWithValues: devices.map { device in
+            (device.id, Self.normalizedPeerAliases(for: device))
+        })
 
         func find(_ id: UUID) -> UUID {
             var current = id
@@ -2438,15 +2444,26 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         for lhsIndex in devices.indices {
+            let lhsDevice = devices[lhsIndex]
+            let lhsHard = hardTokensById[lhsDevice.id] ?? [:]
+            let lhsNetwork = peerAliasesById[lhsDevice.id] ?? []
             for rhsIndex in devices.index(after: lhsIndex)..<devices.endIndex {
-                if Self.shouldCoalesceEquivalentPhysicalDevices(devices[lhsIndex], devices[rhsIndex])
+                let rhsDevice = devices[rhsIndex]
+                if Self.shouldCoalesceEquivalentPhysicalDevices(
+                    lhsDevice,
+                    rhsDevice,
+                    lhsHard: lhsHard,
+                    rhsHard: hardTokensById[rhsDevice.id] ?? [:],
+                    lhsNetwork: lhsNetwork,
+                    rhsNetwork: peerAliasesById[rhsDevice.id] ?? []
+                )
                     || shouldCoalesceTrustedAliasDevices(
-                        devices[lhsIndex],
-                        devices[rhsIndex],
+                        lhsDevice,
+                        rhsDevice,
                         deviceTrustCandidatesById: deviceTrustCandidatesById,
                         trustRecordCandidateSets: trustAliasCandidateSets
                     ) {
-                    union(devices[lhsIndex].id, devices[rhsIndex].id)
+                    union(lhsDevice.id, rhsDevice.id)
                 }
             }
         }
@@ -2763,8 +2780,27 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard lhs.id != rhs.id else { return true }
         guard !lhs.isLocalDevice, !rhs.isLocalDevice else { return false }
 
-        let lhsHard = hardIdentityTokensByKind(for: lhs)
-        let rhsHard = hardIdentityTokensByKind(for: rhs)
+        return shouldCoalesceEquivalentPhysicalDevices(
+            lhs,
+            rhs,
+            lhsHard: hardIdentityTokensByKind(for: lhs),
+            rhsHard: hardIdentityTokensByKind(for: rhs),
+            lhsNetwork: normalizedPeerAliases(for: lhs),
+            rhsNetwork: normalizedPeerAliases(for: rhs)
+        )
+    }
+
+    nonisolated static func shouldCoalesceEquivalentPhysicalDevices(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice,
+        lhsHard: [String: Set<String>],
+        rhsHard: [String: Set<String>],
+        lhsNetwork: Set<String>,
+        rhsNetwork: Set<String>
+    ) -> Bool {
+        guard lhs.id != rhs.id else { return true }
+        guard !lhs.isLocalDevice, !rhs.isLocalDevice else { return false }
+
         var hasSharedHardIdentityMatch = false
         var hasStableIdentityConflict = false
         for kind in Set(lhsHard.keys).intersection(rhsHard.keys) {
@@ -2798,8 +2834,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return true
         }
 
-        let lhsNetwork = normalizedPeerAliases(for: lhs)
-        let rhsNetwork = normalizedPeerAliases(for: rhs)
         if !lhsNetwork.isEmpty, !lhsNetwork.isDisjoint(with: rhsNetwork) {
             return true
         }

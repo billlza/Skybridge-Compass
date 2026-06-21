@@ -1370,6 +1370,10 @@ struct RemoteDesktopSettingsView: View {
                         Text(mapping.displayName).tag(mapping)
                     }
                 }
+                .disabled(true)
+                Text("键盘布局映射暂未支持，按键将按原始键码透传")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("双击间隔: \(settingsManager.settings.interactionSettings.doubleClickInterval) 毫秒")

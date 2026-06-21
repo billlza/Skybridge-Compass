@@ -40,6 +40,10 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  // MARK: - 生命周期管理属性
     private var isStarted = false
+
+ /// 策略同步通知观察者令牌
+ /// nonisolated(unsafe)：令牌仅在 init 写入、deinit 读取移除；deinit 时实例已是唯一引用，访问独占且安全
+    nonisolated(unsafe) private var policyObserver: NSObjectProtocol?
     
  // MARK: - 初始化
     
@@ -53,7 +57,13 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         loadTrustedDevices()
         setupPolicyObservers()
     }
-    
+
+    deinit {
+        if let policyObserver {
+            NotificationCenter.default.removeObserver(policyObserver)
+        }
+    }
+
  // MARK: - 生命周期管理方法
     
  /// 启动P2P安全管理器
@@ -565,7 +575,7 @@ public class P2PSecurityManager: ObservableObject, Sendable {
  // MARK: - 策略持久化
     private func setupPolicyObservers() {
  // 简化：在变更时直接持久化
-        NotificationCenter.default.addObserver(forName: NSNotification.Name("sec.policy.sync"), object: nil, queue: .main) { [weak self] _ in
+        policyObserver = NotificationCenter.default.addObserver(forName: NSNotification.Name("sec.policy.sync"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.persistPolicies()
             }

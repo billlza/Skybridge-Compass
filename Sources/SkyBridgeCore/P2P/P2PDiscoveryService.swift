@@ -2642,16 +2642,7 @@ public class P2PDiscoveryService: BaseManager {
         return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
     }
 
- /// 统一的入站控制包模型，JSON使用Base64承载二进制字段
-    private struct SecurePacket: Codable {
-        enum PacketType: String, Codable { case message, keyExchange, heartbeat }
-        let type: PacketType
-        let data: Data
-        let signature: Data
-        let timestamp: TimeInterval
-    }
-
-    /// 入站控制通道处理（优先 SecurePacket(JSON)，否则回退 HandshakeDriver，与 iOS 互通）
+    /// 入站控制通道处理（回退 HandshakeDriver，与 iOS 互通）
     nonisolated private func handleInboundControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "P2PInboundHandshake")
         var didMarkEstablished = false
@@ -2735,8 +2726,6 @@ public class P2PDiscoveryService: BaseManager {
                 })
             }
         }
-
-        func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
 
         let transport = DirectHandshakeTransport(connection: connection)
         let resolvedPeerId = await MainActor.run { [weak self] in
@@ -3484,29 +3473,6 @@ public class P2PDiscoveryService: BaseManager {
                         }
                     } catch {
                         logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
-                    }
-                    continue
-                }
-
-                if let packet = try? JSONDecoder().decode(SecurePacket.self, from: frame) {
-                    do {
-                        let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
-                        guard ok else {
-                            logger.error("❌ 入站控制包验签失败")
-                            continue
-                        }
-                    } catch {
-                        logger.error("❌ 入站控制包验签异常: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
-                        continue
-                    }
-
-                    switch packet.type {
-                    case .message:
-                        NotificationCenter.default.post(name: Notification.Name("P2PInboundMessage"), object: self, userInfo: ["payload": packet.data])
-                    case .keyExchange:
-                        NotificationCenter.default.post(name: Notification.Name("P2PInboundKeyExchange"), object: self, userInfo: ["payload": packet.data])
-                    case .heartbeat:
-                        try await sendAck(0x09)
                     }
                     continue
                 }
@@ -4329,11 +4295,19 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
-        Task.detached { [serviceType] in
+        let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
+        let strongIdentity = extractStrongIdentity(from: result)
+        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity] in
             let deviceId = P2P_ExtractDeviceName(result)
-            let (ipv4, _) = P2P_ExtractNetworkAddrs(result)
+            let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
             await MainActor.run { [self] in
-                if let idx = self.discoveredDevices.firstIndex(where: { $0.name.contains(deviceId) }) {
+                if let idx = self.findDiscoveredDeviceIndex(
+                    name: deviceId,
+                    ipv4: ipv4,
+                    ipv6: ipv6,
+                    bonjourIdentifier: bonjourUniqueIdentifier,
+                    strongIdentity: strongIdentity
+                ) {
                     let ipv4Str = ipv4 ?? "无"
                     self.logger.info("🔄 更新[\(serviceType)]: \(deviceId) - IPv4: \(ipv4Str)")
                     self.resolveViaNetServiceIfNeeded(result: result, deviceIndex: idx, serviceType: serviceType)

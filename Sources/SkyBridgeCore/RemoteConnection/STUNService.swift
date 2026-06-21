@@ -47,6 +47,16 @@ public actor STUNService {
             )
             let connection = NWConnection(to: endpoint, using: .udp)
 
+            let resumedFlag = OSAllocatedUnfairLock(initialState: false)
+            let resumeOnce: @Sendable ((address: String, port: UInt16)?) -> Void = { value in
+                resumedFlag.withLock { done in
+                    if !done {
+                        done = true
+                        continuation.resume(returning: value)
+                    }
+                }
+            }
+
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
@@ -56,13 +66,13 @@ public actor STUNService {
                         defer { connection.cancel() }
 
                         if let data, error == nil, let result = Self.parseSTUNResponse(data) {
-                            continuation.resume(returning: result)
+                            resumeOnce(result)
                             return
                         }
-                        continuation.resume(returning: nil)
+                        resumeOnce(nil)
                     }
                 case .failed, .cancelled:
-                    continuation.resume(returning: nil)
+                    resumeOnce(nil)
                 default:
                     break
                 }

@@ -10,6 +10,7 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "ThunderboltConnectionManager")
     private let connectionQueue = DispatchQueue(label: "thunderbolt.connection.queue", qos: .userInitiated)
+    private let stateLock = OSAllocatedUnfairLock()
     private var connections: [UUID: NWConnection] = [:]
     private var stats: [UUID: ConnectionStats] = [:]
 
@@ -101,9 +102,8 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                     case .ready:
                         if !resumed {
                             resumed = true
-                            Task { @MainActor in
-                                self.connections[connectionId] = connection
-                            }
+                            self.stateLock.withLock { self.connections[connectionId] = connection }
+                            self.updateStats(for: connectionId)
 
                             let activeConnection = ActiveConnection(method: .thunderbolt(interface: interface), device: device)
                             self.logger.info("Thunderbolt连接建立成功: \(connectionId)")
@@ -134,16 +134,18 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
     public func disconnect(_ connectionId: UUID) async {
         logger.info("断开Thunderbolt连接: \(connectionId)")
 
-        if let connection = connections[connectionId] {
-            connection.cancel()
+        let connection = stateLock.withLock { () -> NWConnection? in
+            let conn = connections[connectionId]
             connections.removeValue(forKey: connectionId)
             stats.removeValue(forKey: connectionId)
+            return conn
         }
+        connection?.cancel()
     }
 
  /// 发送数据
     public func sendData(_ data: Data, connectionId: UUID) async throws {
-        guard let connection = connections[connectionId] else {
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else {
             throw ConnectionError.connectionNotFound
         }
 
@@ -160,16 +162,16 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
 
  /// 获取连接统计信息
     public func getStats(_ connectionId: UUID) -> ConnectionStats? {
-        return stats[connectionId]
+        return stateLock.withLock { stats[connectionId] }
     }
 
  // MARK: - 私有方法
 
- /// 更新连接统计信息（真实测量）
+ /// 更新连接统计信息（基于路径属性的启发式估算，非端到端真实测量）
     private func updateStats(for connectionId: UUID) {
-        guard let connection = connections[connectionId] else { return }
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else { return }
 
- // 🔧 真实测量：Thunderbolt 连接质量
+ // 启发式估算：Thunderbolt 连接质量（基于路径属性推断，非 iperf/RTT 真实测量）
         var bandwidth: Double = 800.0 // 默认 800 Mbps
         var latency: Double = 0.5 // 默认 0.5ms
         var packetLoss: Double = 0.001 // 默认 0.1%
@@ -213,7 +215,7 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
             uptime: Date().timeIntervalSince1970
         )
 
-        self.stats[connectionId] = stats
+        stateLock.withLock { self.stats[connectionId] = stats }
     }
 
  /// 检查Thunderbolt硬件状态

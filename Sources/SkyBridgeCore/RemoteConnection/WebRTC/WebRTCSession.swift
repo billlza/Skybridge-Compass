@@ -742,10 +742,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     private func flushPendingInboundDataIfNeeded() {
-        let handler: (@Sendable (Data) -> Void)?
+        // Read the handler via the getter (which may `stateQueue.sync`) BEFORE
+        // taking inboundDataLock, so we never hold the lock while syncing on the
+        // state queue. Otherwise this thread holds inboundDataLock + blocks on
+        // stateQueue.sync while deliverInboundData (on the state queue) blocks on
+        // inboundDataLock — an AB/BA deadlock.
+        let handler = onData
         var buffered: [Data] = []
         inboundDataLock.lock()
-        handler = onData
         switch Self.pendingInboundFlushPlan(
             hasHandlerInstalled: handler != nil,
             pendingCount: pendingInboundDataBuffers.count
@@ -766,10 +770,13 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     private func flushPendingInboundScreenDataIfNeeded() {
-        let handler: (@Sendable (Data) -> Void)?
+        // Read the handler via the getter (which may `stateQueue.sync`) BEFORE
+        // taking inboundScreenDataLock, so we never hold the lock while syncing
+        // on the state queue. Mirrors flushPendingInboundDataIfNeeded() — avoids
+        // the AB/BA deadlock with deliverInboundScreenData.
+        let handler = onScreenData
         var buffered: [Data] = []
         inboundScreenDataLock.lock()
-        handler = onScreenData
         switch Self.pendingInboundFlushPlan(
             hasHandlerInstalled: handler != nil,
             pendingCount: pendingInboundScreenDataBuffers.count

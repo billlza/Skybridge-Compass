@@ -106,7 +106,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private let securityState = OSAllocatedUnfairLock(initialState: SecurityState())
 
     private var listener: NWListener?
-    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+    private let activeConnections = OSAllocatedUnfairLock(initialState: [ObjectIdentifier: NWConnection]())
 
     private static let testingDelay = OSAllocatedUnfairLock(initialState: UInt64(0))
     private static let testingStartHookStorage = OSAllocatedUnfairLock(initialState: TestingStartHook?.none)
@@ -168,8 +168,12 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     }
 
     func stop() {
-        activeConnections.values.forEach { $0.cancel() }
-        activeConnections.removeAll()
+        let conns = activeConnections.withLock { current -> [NWConnection] in
+            let values = Array(current.values)
+            current.removeAll()
+            return values
+        }
+        conns.forEach { $0.cancel() }
         listener?.cancel()
         listener = nil
     }
@@ -177,11 +181,11 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private func handleConnection(_ connection: NWConnection) {
         let identifier = ObjectIdentifier(connection)
         let clientAddress = remoteAddress(for: connection.endpoint)
-        activeConnections[identifier] = connection
+        activeConnections.withLock { $0[identifier] = connection }
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
-                self?.activeConnections.removeValue(forKey: identifier)
+                self?.activeConnections.withLock { _ = $0.removeValue(forKey: identifier) }
             default:
                 break
             }
@@ -430,6 +434,9 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         guard let link = await callbacks.lookupLink(linkID), link.isActive, !link.isExpired else {
             return makeTextResponse(statusCode: 404, body: "Link not found")
         }
+        guard link.remainingDownloads > 0 else {
+            return makeTextResponse(statusCode: 410, body: "Link exhausted")
+        }
         guard await isAuthorized(request: request, linkID: linkID, requiresPassword: link.password != nil) else {
             if link.password != nil {
                 return redirectResponse(location: "/link/\(urlPathEscape(linkID))", cookie: nil)
@@ -456,6 +463,9 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private func bundleResponse(for linkID: String, request: HTTPRequest) async -> HTTPResponse {
         guard let link = await callbacks.lookupLink(linkID), link.isActive, !link.isExpired else {
             return makeTextResponse(statusCode: 404, body: "Link not found")
+        }
+        guard link.remainingDownloads > 0 else {
+            return makeTextResponse(statusCode: 410, body: "Link exhausted")
         }
         guard await isAuthorized(request: request, linkID: linkID, requiresPassword: link.password != nil) else {
             if link.password != nil {
@@ -1070,6 +1080,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         case 403: return "Forbidden"
         case 404: return "Not Found"
         case 405: return "Method Not Allowed"
+        case 410: return "Gone"
         case 429: return "Too Many Requests"
         case 500: return "Internal Server Error"
         default: return "OK"
@@ -1081,6 +1092,15 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             .trimmingCharacters(in: .whitespaces)
         guard value.lowercased().hasPrefix("bytes=") else { return nil }
         let spec = String(value.dropFirst("bytes=".count))
+        if spec.hasPrefix("-") {
+            // RFC 7233 suffix-byte-range-spec: last N bytes
+            guard let suffix = Int64(spec.dropFirst()), suffix > 0 else { return nil }
+            let length = min(suffix, totalLength)
+            let start = totalLength - length
+            let end = totalLength - 1
+            guard length > 0 else { return nil }
+            return (start, length, "bytes \(start)-\(end)/\(totalLength)")
+        }
         let parts = spec.split(separator: "-", maxSplits: 1).map(String.init)
         guard let start = parts.first.flatMap({ Int64($0) }), start >= 0, start < totalLength else { return nil }
         let end = parts.count > 1 ? min((Int64(parts[1]) ?? (totalLength - 1)), totalLength - 1) : (totalLength - 1)

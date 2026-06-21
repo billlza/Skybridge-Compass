@@ -434,9 +434,10 @@ public class FileTransferEngine: ObservableObject {
                 session.state = .completed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
+                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
             }
-            
+
             return transferId
             
             } catch let error as FileTransferEngineError {
@@ -448,9 +449,10 @@ public class FileTransferEngine: ObservableObject {
                 session.state = .failed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
+                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
             }
-                
+
  // 直接抛出错误（已经是FileTransferEngineError类型）
             throw error
             } catch {
@@ -462,6 +464,7 @@ public class FileTransferEngine: ObservableObject {
                     session.state = .failed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
+                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
                 }
  // 将非FileTransferEngineError错误包装为networkError
@@ -575,6 +578,7 @@ public class FileTransferEngine: ObservableObject {
                 session.state = .failed
                 addToHistory(session)
                 removeActiveTransfer(metadata.transferId)
+                cleanupStreamingArtifacts(for: metadata.transferId)
             }
             throw error
         }
@@ -1703,9 +1707,13 @@ public class FileTransferEngine: ObservableObject {
     
  /// 设置速度监控
     private func setupSpeedMonitoring() {
-        speedCalculationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        speedCalculationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
             Task { @MainActor in
-                self?.calculateTransferSpeed()
+                self.calculateTransferSpeed()
             }
         }
     }
@@ -1716,6 +1724,17 @@ public class FileTransferEngine: ObservableObject {
         let bytesPerSecond = totalBytes - lastBytesTransferred
         transferSpeed = Double(bytesPerSecond)
         lastBytesTransferred = totalBytes
+    }
+
+ /// 清理单次传输产生的流式临时密文（发送端预加密文件 / 接收端临时密文文件）
+ /// 在每个传输的终止点调用，避免大文件加密传输在临时目录中永久泄漏密文副本。
+    private func cleanupStreamingArtifacts(for transferId: String) {
+        if let info = streamingEncryptedFiles.removeValue(forKey: transferId) {
+            try? FileManager.default.removeItem(at: info.url)
+        }
+        if let recvURL = streamingEncryptedRecvFiles.removeValue(forKey: transferId) {
+            try? FileManager.default.removeItem(at: recvURL)
+        }
     }
     
  /// 添加到历史记录
@@ -1851,6 +1870,10 @@ public class FileTransferEngine: ObservableObject {
             try? FileManager.default.removeItem(at: info.url)
         }
         streamingEncryptedFiles.removeAll()
+        for (_, url) in streamingEncryptedRecvFiles {
+            try? FileManager.default.removeItem(at: url)
+        }
+        streamingEncryptedRecvFiles.removeAll()
         isCleanedUp = true
     }
 }

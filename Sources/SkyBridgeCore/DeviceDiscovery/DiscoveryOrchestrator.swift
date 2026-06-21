@@ -269,15 +269,18 @@ public actor DiscoveryOrchestrator {
  // 我们在这里记录一个启动时间 + maxDuration 的估算值
         if options.autoTimeout && options.maxDuration > 0 {
  // 等待扫描完成后记录时间
+            let jobId = job.id
             Task {
                 try? await Task.sleep(nanoseconds: UInt64((options.maxDuration + 1) * 1_000_000_000))
-                self.recordJobCompletion()
+                self.recordJobCompletion(for: jobId)
             }
         }
     }
 
  /// 记录扫描任务完成时间
-    private func recordJobCompletion() {
+    private func recordJobCompletion(for jobId: UUID? = nil) {
+ // 忽略属于已被替换 Job 的过期计时器，避免把新启动的 Job 误置入冷却窗口。
+        if let jobId, currentJob?.id != jobId { return }
         self.lastJobFinishedAt = Date()
         self.logger.debug("📝 记录扫描完成时间，下次可扫描时间: \(Date().addingTimeInterval(self.cooldownConfig.duration))")
     }

@@ -10,6 +10,7 @@ public final class WiFiConnectionManager: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "WiFiConnectionManager")
     private let connectionQueue = DispatchQueue(label: "wifi.connection.queue", qos: .userInitiated)
+    private let stateLock = OSAllocatedUnfairLock()
     private var connections: [UUID: NWConnection] = [:]
     private var stats: [UUID: ConnectionStats] = [:]
 
@@ -97,9 +98,8 @@ public final class WiFiConnectionManager: @unchecked Sendable {
                     case .ready:
                         if !resumed {
                             resumed = true
-                            Task { @MainActor in
-                                self.connections[connectionId] = connection
-                            }
+                            self.stateLock.withLock { self.connections[connectionId] = connection }
+                            self.updateStats(for: connectionId)
 
                             let activeConnection = ActiveConnection(method: .wifi(interface: interface), device: device)
                             self.logger.info("Wi-Fi连接建立成功: \(connectionId)")
@@ -130,16 +130,18 @@ public final class WiFiConnectionManager: @unchecked Sendable {
     public func disconnect(_ connectionId: UUID) async {
         logger.info("断开Wi-Fi连接: \(connectionId)")
 
-        if let connection = connections[connectionId] {
-            connection.cancel()
+        let connection = stateLock.withLock { () -> NWConnection? in
+            let conn = connections[connectionId]
             connections.removeValue(forKey: connectionId)
             stats.removeValue(forKey: connectionId)
+            return conn
         }
+        connection?.cancel()
     }
 
  /// 发送数据
     public func sendData(_ data: Data, connectionId: UUID) async throws {
-        guard let connection = connections[connectionId] else {
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else {
             throw ConnectionError.connectionNotFound
         }
 
@@ -156,16 +158,16 @@ public final class WiFiConnectionManager: @unchecked Sendable {
 
  /// 获取连接统计信息
     public func getStats(_ connectionId: UUID) -> ConnectionStats? {
-        return stats[connectionId]
+        return stateLock.withLock { stats[connectionId] }
     }
 
  // MARK: - 私有方法
 
- /// 更新连接统计信息（真实测量）
+ /// 更新连接统计信息（基于路径属性的启发式估算，非端到端真实测量）
     private func updateStats(for connectionId: UUID) {
-        guard let connection = connections[connectionId] else { return }
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else { return }
 
- // 🔧 真实测量：基于 NWConnection 的路径质量估算带宽
+ // 启发式估算：基于 NWConnection 的路径属性推断带宽（非 iperf/RTT 真实测量）
  // 默认值：普通 Wi-Fi 5 (802.11ac) 水平
         var bandwidth: Double = 100.0 // Mbps
         var latency: Double = 10.0 // ms
@@ -197,7 +199,7 @@ public final class WiFiConnectionManager: @unchecked Sendable {
  // Wi-Fi 7 (802.11be): 实际 1000-3000 Mbps, 极低延迟 (MLO)
 
  // 这里的估算策略：
- // 既然是"真实测量"的模拟，我们给出一个基于现代网络环境的乐观估计值
+ // 这是基于路径属性的启发式估计（非真实测量），给出一个基于现代网络环境的乐观估计值
  // 实际项目中应结合 iperf 或应用层心跳 RTT 来校准
 
                         bandwidth = 800.0 // 乐观估计：Wi-Fi 6/6E 高吞吐
@@ -228,6 +230,6 @@ public final class WiFiConnectionManager: @unchecked Sendable {
             uptime: Date().timeIntervalSince1970
         )
 
-        self.stats[connectionId] = stats
+        stateLock.withLock { self.stats[connectionId] = stats }
     }
 }

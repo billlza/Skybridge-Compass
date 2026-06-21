@@ -83,6 +83,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var connectionCodeErrorMessage: String?
     @State private var onlineDeviceConnectionErrorMessage: String?
     @State private var extendedSearchCountdown: Int = 0
+    @State private var extendedSearchTimer: DispatchSourceTimer?
     @State private var showManualConnectSheet: Bool = false
     @State private var manualIP: String = ""
     @State private var manualPort: String = "11550"
@@ -299,6 +300,8 @@ public struct EnhancedDeviceDiscoveryView: View {
         .onDisappear {
  // 注意:统一设备管理器是单例,不应在这里停止
  // 它会在DashboardViewModel中统一管理生命周期
+            extendedSearchTimer?.cancel()
+            extendedSearchTimer = nil
         }
     }
 
@@ -418,6 +421,8 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .font(.caption)
 
                 Button(action: {
+                    extendedSearchTimer?.cancel()
+                    extendedSearchTimer = nil
                     SettingsManager.shared.enableCompatibilityMode = true
                     unifiedDeviceManager.refreshDevices()
                     extendedSearchCountdown = 15
@@ -427,16 +432,19 @@ public struct EnhancedDeviceDiscoveryView: View {
                         extendedSearchCountdown -= 1
                         if extendedSearchCountdown <= 0 {
                             t?.cancel()
+                            extendedSearchTimer = nil
                             SettingsManager.shared.enableCompatibilityMode = false
                             unifiedDeviceManager.refreshDevices()
                         }
                     }
+                    extendedSearchTimer = t
                     t.resume()
                 }) {
                     Text(extendedSearchCountdown > 0 ? String(format: LocalizationManager.shared.localizedString("discovery.extendedSearch.active"), extendedSearchCountdown) : LocalizationManager.shared.localizedString("discovery.extendedSearch.static"))
                 }
                 .buttonStyle(.bordered)
                 .font(.caption)
+                .disabled(extendedSearchCountdown > 0)
 
                 Button(LocalizationManager.shared.localizedString("discovery.manualConnect.title")) { showManualConnectSheet = true }
                 .buttonStyle(.bordered)

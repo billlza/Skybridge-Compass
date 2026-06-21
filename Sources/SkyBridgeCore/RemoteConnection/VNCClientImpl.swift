@@ -187,7 +187,9 @@ public actor VNCClientImpl {
     private var protocolVersion: RFBProtocolVersion?
     private var serverSecurityTypes: [VNCSecurityType] = []
     private var framebufferInfo: FramebufferInfo?
-    private var frameBuffer: UnsafeMutableRawPointer?
+ // nonisolated(unsafe)：原始指针仅在 actor 隔离的方法内读写（已串行化）；deinit 兜底释放需从 nonisolated 上下文访问，
+ // 此时实例为唯一引用、访问独占，故安全。属性为 private，外部无法绕过隔离访问。
+    nonisolated(unsafe) private var frameBuffer: UnsafeMutableRawPointer?
 
     @Published private(set) var state: VNCConnectionState = .disconnected
     @Published private(set) var currentFrame: CGImage?
@@ -205,6 +207,12 @@ public actor VNCClientImpl {
             buffer.deallocate()
             frameBuffer = nil
         }
+    }
+
+ /// 兜底释放：若客户端在未显式 disconnect()/cleanup() 的情况下被丢弃，
+ /// 仍能回收原始帧缓冲区，避免泄漏。cleanup() 已将指针置为 nil，故不会重复释放。
+    deinit {
+        frameBuffer?.deallocate()
     }
 
  // MARK: - Connection
@@ -245,6 +253,7 @@ public actor VNCClientImpl {
             logger.info("✅ VNC 连接成功: \(self.configuration.host)")
 
         } catch {
+            cleanup()
             state = .failed(error)
             logger.error("❌ VNC 连接失败: \(error.localizedDescription)")
             throw error
@@ -606,12 +615,22 @@ public actor VNCClientImpl {
         let encodingValue = Int32(bigEndian: header[8..<12].withUnsafeBytes { $0.load(as: Int32.self) })
         let encoding = VNCEncoding(rawValue: encodingValue) ?? .raw
 
+ // 几何/尺寸校验：矩形必须完全位于已协商的帧缓冲区内，
+ // 防止恶意服务器通过超大 width/height 触发无界内存分配
+        guard let fbInfo = framebufferInfo else {
+            throw VNCClientError.protocolError("Rectangle received before ServerInit")
+        }
+        guard width <= fbInfo.width, height <= fbInfo.height,
+              x + width <= fbInfo.width, y + height <= fbInfo.height else {
+            throw VNCClientError.protocolError("Rectangle geometry exceeds framebuffer: \(x),\(y) \(width)x\(height) vs \(fbInfo.width)x\(fbInfo.height)")
+        }
+
  // 根据编码类型接收数据
         let pixelData: Data
 
         switch encoding {
         case .raw:
-            let bytesPerPixel = (framebufferInfo?.bitsPerPixel ?? 32) / 8
+            let bytesPerPixel = fbInfo.bitsPerPixel / 8
             let dataSize = width * height * bytesPerPixel
             pixelData = try await receiveData(count: dataSize, connection: connection)
 
@@ -623,7 +642,7 @@ public actor VNCClientImpl {
  // 降级策略：不支持的编码类型按 Raw 格式解码
  // 支持的高级编码（Tight, ZRLE, Hextile）需要额外的解压实现
             logger.debug("使用 Raw 降级解码：编码类型 \(encoding.rawValue)")
-            let bytesPerPixel = (framebufferInfo?.bitsPerPixel ?? 32) / 8
+            let bytesPerPixel = fbInfo.bitsPerPixel / 8
             let dataSize = width * height * bytesPerPixel
             pixelData = try await receiveData(count: dataSize, connection: connection)
         }
@@ -791,6 +810,15 @@ public actor VNCClientImpl {
                 guard rect.data.count >= 4 else { continue }
                 let srcX = Int(UInt16(bigEndian: rect.data[0..<2].withUnsafeBytes { $0.load(as: UInt16.self) }))
                 let srcY = Int(UInt16(bigEndian: rect.data[2..<4].withUnsafeBytes { $0.load(as: UInt16.self) }))
+
+ // 边界校验：源/目标矩形必须完全位于帧缓冲区内，防止越界的 memmove
+                guard rect.x >= 0, rect.y >= 0, srcX >= 0, srcY >= 0,
+                      rect.width >= 0, rect.height >= 0,
+                      rect.x + rect.width <= fbInfo.width,
+                      rect.y + rect.height <= fbInfo.height,
+                      srcX + rect.width <= fbInfo.width,
+                      srcY + rect.height <= fbInfo.height
+                else { continue }
 
  // 逐行复制（处理重叠情况）
                 if srcY < rect.y {

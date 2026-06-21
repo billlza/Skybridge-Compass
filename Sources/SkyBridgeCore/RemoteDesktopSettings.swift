@@ -674,7 +674,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     }
     
     private func displaySettingsToDict() -> [String: Any] {
-        return [
+        var dict: [String: Any] = [
             "resolution": settings.displaySettings.resolution.rawValue,
             "colorDepth": settings.displaySettings.colorDepth.rawValue,
             "refreshRate": settings.displaySettings.refreshRate.rawValue,
@@ -690,6 +690,12 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             "encodingProfile": settings.displaySettings.encodingProfile.rawValue,
             "lowLatencyMode": settings.displaySettings.lowLatencyMode
         ]
+        dict["renderingMode"] = settings.displaySettings.renderingMode.rawValue
+        // captureDisplayID 为可选；JSONSerialization 无法编码 nil，仅在存在时写入。
+        if let id = settings.displaySettings.captureDisplayID {
+            dict["captureDisplayID"] = Int(id)
+        }
+        return dict
     }
     
     private func loadDisplaySettingsFromDict(_ dict: [String: Any]) {
@@ -749,8 +755,15 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let lowLatencyMode = dict["lowLatencyMode"] as? Bool {
             settings.displaySettings.lowLatencyMode = lowLatencyMode
         }
+        if let renderingModeString = dict["renderingMode"] as? String,
+           let mode = RenderingMode(rawValue: renderingModeString) {
+            settings.displaySettings.renderingMode = mode
+        }
+        if let raw = dict["captureDisplayID"] as? Int {
+            settings.displaySettings.captureDisplayID = raw > 0 ? UInt32(raw) : nil
+        }
     }
-    
+
  // MARK: - 私有方法 - 交互设置
     
     private func saveInteractionSettings() {

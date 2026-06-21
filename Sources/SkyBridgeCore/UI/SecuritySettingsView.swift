@@ -12,9 +12,6 @@ public struct SecuritySettingsView: View {
     @ObservedObject var securityManager: P2PSecurityManager
     @Environment(\.dismiss) private var dismiss
     
-    @State private var showingTrustedDevices = true
-    @State private var showingEncryptionSettings = false
-    @State private var showingSecurityPolicies = false
     @State private var selectedDevice: P2PDevice?
     @State private var showingDeviceDetails = false
     @State private var showingTrustManagement = false

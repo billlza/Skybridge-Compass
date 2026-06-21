@@ -1267,7 +1267,7 @@ public class FileTransferManager: BaseManager {
 
             // Show a system notification so the user sees it even if they are not on the File Transfer page.
             #if canImport(UserNotifications)
-            if Self.canUseUserNotificationsSafely() {
+            if Self.canUseUserNotificationsSafely() && SettingsManager.shared.showFileTransferNotifications {
                 let content = UNMutableNotificationContent()
                 content.title = LocalizationManager.shared.localizedString("notifications.fileReceived.completed")
                 content.subtitle = effectiveDeviceName
@@ -2268,7 +2268,7 @@ public class FileTransferManager: BaseManager {
  // 接收块数据
         let chunkData = try await receiveData(length: header.length, from: connection)
         let chunk = try JSONDecoder().decode(FileChunk.self, from: chunkData)
-        if chunk.size < 0 || chunk.size > maxChunkSizeBytes {
+        if chunk.size <= 0 || chunk.size > maxChunkSizeBytes {
             throw FileTransferError.invalidHeader
         }
         guard let nonce = chunk.nonce, nonce.count == 12,

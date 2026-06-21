@@ -67,6 +67,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private var fingerprintProvider: (@Sendable (DiscoveredDevice) async -> IdentityFingerprint?)?
     private var pendingUpdates: Set<DiscoveredDevice> = []
 
+ /// 最近被 `.removed` 浏览事件移除的设备身份及其时间戳，用于在短 TTL 内压制
+ /// 在途 detached 解析 Task 把已移除设备重新插回 pendingUpdates 导致的“幽灵设备”。
+ /// key = 有稳定 deviceId 时为该 id，否则为 "name:" + 清洗后的名称。仅在 @MainActor 上读写。
+    private var recentlyRemovedIdentities: [String: Date] = [:]
+    private let removedTTL: TimeInterval = 5.0
+
  // USB设备管理器
     private var usbManager: USBCConnectionManager?
     private var usbCancellable: AnyCancellable?
@@ -352,6 +358,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     browser.cancel()
                 }
                 self.browsers.removeAll()
+ // 扫描停止后清空已发布的设备列表，避免下游读取到已不再广播的陈旧路由
+                self.discoveredDevices.removeAll()
             }
         }
 
@@ -497,7 +505,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             connection = NWConnection(to: endpoint, using: params)
         }
-        connections[device.id.uuidString] = connection
+        let connKey = device.id.uuidString
+ // 若同一设备已有在途连接，先解除其 handler 再取消，避免：
+ // 1) 旧 NWConnection 失去唯一引用却未 cancel（保活 TCP socket 泄漏）；
+ // 2) 旧 handler 的 .cancelled 回调异步 removeValue 误删新写入的条目。
+        if let old = connections[connKey] {
+            old.stateUpdateHandler = nil
+            old.cancel()
+        }
+        connections[connKey] = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
@@ -849,6 +865,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         let updates = pendingUpdates
         pendingUpdates.removeAll()
 
+ // 清理过期的移除身份守卫，限制字典增长
+        let now = Date()
+        recentlyRemovedIdentities = recentlyRemovedIdentities.filter { now.timeIntervalSince($0.value) < removedTTL }
+
  // 批量生成候选弱指纹并持久化，提高后续合并命中率
         let fpMap = await generateFingerprintsBatch(for: updates)
 
@@ -857,6 +877,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  // 批量更新设备列表（严格防止不同设备错误合并）
         for device in updates {
+ // 守卫：若该身份在 TTL 内刚被 `.removed` 移除，跳过这条在途解析结果，避免幽灵设备复活
+            if isRecentlyRemoved(device) { continue }
+
  // 硬闸：只有 SkyBridge 来源才允许判定本机
             let eligibleForLocal =
                 device.services.contains(where: { $0.lowercased().contains("skybridge") })
@@ -1564,6 +1587,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         if let stableId = strong.deviceId, !stableId.isEmpty {
             await MainActor.run {
                 discoveredDevices.removeAll { $0.deviceId == stableId }
+ // 记录移除身份并立即清理已排队的同身份候选，关闭“移除后又被在途 Task 插回”的竞态
+                recentlyRemovedIdentities[stableId] = Date()
+                pendingUpdates = pendingUpdates.filter { !isRecentlyRemoved($0) }
             }
             return
         }
@@ -1573,14 +1599,27 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                .replacingOccurrences(of: ".local", with: "")
 
             await MainActor.run {
+                let targetCleanName = cleanName.filter { $0.isLetter || $0.isNumber }
  // 只移除完全匹配的设备
                 discoveredDevices.removeAll { device in
                     let deviceCleanName = device.name.filter { $0.isLetter || $0.isNumber }
-                    let targetCleanName = cleanName.filter { $0.isLetter || $0.isNumber }
                     return deviceCleanName == targetCleanName && !targetCleanName.isEmpty
+                }
+ // 记录移除身份（按清洗后的名称键）并清理已排队的同名候选
+                if !targetCleanName.isEmpty {
+                    recentlyRemovedIdentities["name:" + targetCleanName] = Date()
+                    pendingUpdates = pendingUpdates.filter { !isRecentlyRemoved($0) }
                 }
             }
         }
+    }
+
+ /// 判断候选设备是否命中 TTL 内刚被移除的身份（同时覆盖稳定 deviceId 与清洗后名称两种键）。
+ /// 仅在 @MainActor 上调用，与 recentlyRemovedIdentities 的读写共享 actor 隔离，无额外加锁。
+    private func isRecentlyRemoved(_ d: DiscoveredDevice) -> Bool {
+        if let id = d.deviceId, !id.isEmpty, recentlyRemovedIdentities[id] != nil { return true }
+        let cleaned = d.name.filter { $0.isLetter || $0.isNumber }
+        return !cleaned.isEmpty && recentlyRemovedIdentities["name:" + cleaned] != nil
     }
 
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
@@ -3088,33 +3127,42 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func waitForConnection(_ connection: NWConnection) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let resumed = OSAllocatedUnfairLock(initialState: false)
-            connection.stateUpdateHandler = { state in
-                let shouldResume = resumed.withLock { isResumed -> Bool in
-                    guard !isResumed else { return false }
-                    switch state {
-                    case .ready, .failed:
-                        return true
-                    default:
-                        return false
-                    }
-                }
-
-                guard shouldResume else { return }
-
- // 标记为已恢复，避免重复调用
- // withLock 返回闭包的值，这里闭包返回 Void，不需要返回值
+ // 仅第一个解析者获得 true，确保 continuation 只 resume 一次
+ // 用 @Sendable 闭包而非局部函数，以便在 @Sendable 的 stateUpdateHandler / asyncAfter 闭包中捕获
+            let claim: @Sendable () -> Bool = {
                 resumed.withLock { isResumed in
+                    if isResumed { return false }
                     isResumed = true
+                    return true
                 }
+            }
 
+            connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
+                    guard claim() else { return }
+                    connection.stateUpdateHandler = nil
                     continuation.resume()
                 case .failed(let error):
+                    guard claim() else { return }
+                    connection.stateUpdateHandler = nil
                     continuation.resume(throwing: error)
+                case .cancelled:
+                    guard claim() else { return }
+                    connection.stateUpdateHandler = nil
+                    continuation.resume(throwing: DeviceDiscoveryError.deviceNotConnected)
                 default:
+ // .setup/.preparing/.waiting 为瞬态；卡死的 .waiting 由下方超时兜底
                     break
                 }
+            }
+
+ // 🔧 超时兜底（对齐 measureLinkQuality 的模式），避免不可达对端在 .waiting/.preparing 永久挂起
+            discoveryQueue.asyncAfter(deadline: .now() + 10.0) {
+                guard claim() else { return }
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+                continuation.resume(throwing: DeviceDiscoveryError.connectionTimeout)
             }
         }
     }

@@ -242,7 +242,6 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @Published var requiresCaptcha: Bool = false  // 是否需要行为验证
     @Published var showCaptchaView: Bool = false  // 是否显示验证码视图
     @Published var captchaPassed: Bool = false    // 验证码是否通过
-    @Published var currentPasswordStrength: PasswordStrength = .weak  // 当前密码强度
 
     private struct RiskCheckOutcome {
         let auditTicket: String?
@@ -268,7 +267,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
     private let authService: AuthenticationService
     private var cancellables = Set<AnyCancellable>()
-    private var phoneCodeTimer: Timer?
+ // nonisolated(unsafe)：仅在 @MainActor 方法内读写（已串行化）；deinit 需从 nonisolated 上下文失效，实例已唯一引用，访问独占且安全。
+    nonisolated(unsafe) private var phoneCodeTimer: Timer?
     private var browserAuthenticationSession: ASWebAuthenticationSession?
     private let nebulaPresentationContextProvider = NebulaBrowserPresentationContextProvider()
     private var sessionGeneration = 0
@@ -1085,7 +1085,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             )
         }
 
-        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let queryItems = (components.queryItems ?? []).reduce(into: [String: String]()) { $0[$1.name] = $1.value ?? "" }
         if let error = queryItems["error"], !error.isEmpty {
             let description = queryItems["error_description"].flatMap { $0.isEmpty ? nil : $0 } ?? error
             throw NSError(domain: "Nebula", code: -3, userInfo: [NSLocalizedDescriptionKey: description])
@@ -1344,7 +1344,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private func startPhoneCodeCountdown() {
         phoneCodeCountdown = 60
         phoneCodeTimer?.invalidate()
-        phoneCodeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        phoneCodeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+ // 计时器调度在 @MainActor 的主 run-loop 上，此闭包体已在主线程执行：
+ // 在此同步失效孤儿计时器，避免把非 Sendable 的 timer 送入 main.async 闭包（Swift 6 数据竞争诊断）。
+            guard self != nil else {
+                timer.invalidate()
+                return
+            }
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
@@ -2797,7 +2803,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // MARK: - 清理资源
     deinit {
- // Combine会自动清理cancellables，Timer在deinit时也会自动清理
+ // Combine会自动清理cancellables；但run-loop调度的Timer不会随deinit自动释放，需显式失效以避免孤儿计时器持续触发
+        phoneCodeTimer?.invalidate()
     }
 
  /// 强制重新认证 - 清除无效的访问令牌

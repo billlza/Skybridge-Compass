@@ -364,7 +364,17 @@ final class WebRTCInboundFileTransferReceiver {
                     transferId: state.transferId,
                     errorMessage: "Save failed: \(error.localizedDescription)"
                 )
-                transfers.removeValue(forKey: state.transferId)
+                try? FileManager.default.removeItem(at: state.tempURL)
+                removeTransfer(state.transferId)
+                try? await sendMessage(
+                    CrossNetworkFileTransferMessage(
+                        op: .error,
+                        transferId: state.transferId,
+                        message: "Save failed"
+                    ),
+                    "tx/webrtc-ft-error"
+                )
+                return
             }
         }
 
@@ -469,7 +479,8 @@ final class WebRTCInboundFileTransferReceiver {
                 transferId: state.transferId,
                 errorMessage: "Save failed: \(error.localizedDescription)"
             )
-            transfers.removeValue(forKey: state.transferId)
+            try? FileManager.default.removeItem(at: state.tempURL)
+            removeTransfer(state.transferId)
             try await sendMessage(
                 CrossNetworkFileTransferMessage(
                     op: .error,

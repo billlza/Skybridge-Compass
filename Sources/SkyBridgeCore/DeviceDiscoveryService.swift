@@ -90,8 +90,6 @@ public final class DeviceDiscoveryService: ObservableObject {
     private var lastScanTimes: [String: Date] = [:]
  /// 动态扫描间隔（秒），根据网络活跃度调整
     private var scanInterval: TimeInterval = 30.0
- /// 设备发现锁，防止并发添加重复设备
-    private let discoveryLock = NSLock()
 
  // 🔧 性能优化：CPU 使用控制（已放宽限制以提高响应速度）
     private var consecutiveScanCount: Int = 0
@@ -99,6 +97,12 @@ public final class DeviceDiscoveryService: ObservableObject {
     private let maxConsecutiveScans = 10 // 连续扫描10次后休眠（放宽）
     private let scanCooldownPeriod: TimeInterval = 2.0 // 2秒冷却期（缩短）
     private var discoveryTimeoutTask: Task<Void, Never>?
+
+ // 🔧 生命周期通知观察者令牌（block-based 观察者必须按令牌移除，不能用 removeObserver(self)）
+ /// 注册在 NotificationCenter.default 上的观察者令牌
+    private var defaultCenterObserverTokens: [NSObjectProtocol] = []
+ /// 注册在 NSWorkspace.shared.notificationCenter 上的观察者令牌
+    private var workspaceObserverTokens: [NSObjectProtocol] = []
 
  // 🔧 性能优化：端口扫描缓存
     private var portScanCache: [String: [Int: (isOpen: Bool, timestamp: Date)]] = [:]
@@ -347,9 +351,10 @@ public final class DeviceDiscoveryService: ObservableObject {
     nonisolated deinit {
         SkyBridgeLogger.discovery.traceOnly("🗑 DeviceDiscoveryService 正在销毁，清理资源...")
  // Swift 6.2.1 最佳实践：在 nonisolated deinit 中只清理可以安全访问的资源
- // 移除通知观察者（这是安全的，因为 self 引用本身是可用的）
-        NotificationCenter.default.removeObserver(self)
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+ // 注意：基于 block 的通知观察者必须按令牌移除（见 teardownLifecycleNotifications()），
+ // 而不能用 removeObserver(self)（后者只移除 target-action 观察者，对 block 观察者无效）。
+ // 从 nonisolated deinit 中无法安全访问 @MainActor 隔离的令牌数组，
+ // 故此处不做移除；清理由显式的 @MainActor teardown 路径负责。
  // 注意：不要在 deinit 中访问 actor-isolated 的属性（如 cancellables）
  // 这些资源会由 ARC 自动释放
     }
@@ -358,7 +363,7 @@ public final class DeviceDiscoveryService: ObservableObject {
     @MainActor
     private func setupLifecycleNotifications() {
  // 应用即将进入活跃状态
-        NotificationCenter.default.addObserver(
+        defaultCenterObserverTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
             queue: OperationQueue.main
@@ -378,10 +383,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                     await self.start(force: true)
                 }
             }
-        }
+        })
 
  // 应用即将失去活跃状态
-        NotificationCenter.default.addObserver(
+        defaultCenterObserverTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification,
             object: nil,
             queue: OperationQueue.main
@@ -393,10 +398,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                 // leads to reconnect/handshake loops. We keep discovery running in background.
                 SkyBridgeLogger.discovery.debugOnly("⏸ 应用失去活跃（保持设备发现常驻，不暂停）")
             }
-        }
+        })
 
  // 系统即将休眠
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserverTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
             queue: OperationQueue.main
@@ -408,10 +413,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                 self.stopDiscovery()
                 self.stopExternalDeviceScanning()
             }
-        }
+        })
 
  // 系统唤醒
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserverTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: OperationQueue.main
@@ -430,7 +435,23 @@ public final class DeviceDiscoveryService: ObservableObject {
                 await self.start()
                 self.startExternalDeviceScanning()
             }
+        })
+    }
+
+ /// 移除生命周期通知观察者
+ /// ⚠️ 注意：单例 `shared` 永不释放，请勿对其调用此方法，否则会静默关闭
+ /// 应用活跃/休眠/唤醒的自动扫描行为。此方法仅用于非单例实例的正确清理。
+    @MainActor
+    private func teardownLifecycleNotifications() {
+        for token in defaultCenterObserverTokens {
+            NotificationCenter.default.removeObserver(token)
         }
+        defaultCenterObserverTokens.removeAll()
+
+        for token in workspaceObserverTokens {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        workspaceObserverTokens.removeAll()
     }
 
  /// 绑定优化管理器的设备列表到本服务
@@ -1527,6 +1548,7 @@ public final class DeviceDiscoveryService: ObservableObject {
  // 清理扫描缓存
         scannedIPs.removeAll()
         lastScanTimes.removeAll()
+        portScanCache.removeAll()
 
         logger.info("设备发现已停止，缓存已清理")
     }

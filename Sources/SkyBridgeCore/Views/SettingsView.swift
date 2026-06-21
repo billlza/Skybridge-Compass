@@ -549,9 +549,6 @@ public struct SettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 60)
                         }
-                        
-                        Toggle(localizationManager.localizedString("settings.network.connection.enableEncryption"), isOn: $settingsManager.enableConnectionEncryption)
-                        strictCertificateValidationNotice
                     }
                 }
             }
@@ -1275,7 +1272,7 @@ public struct SettingsView: View {
                 
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.options.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.showNotification"), isOn: $settingsManager.showSystemNotifications)
+                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.showNotification"), isOn: $settingsManager.showFileTransferNotifications)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.resumeEnabled"), isOn: $settingsManager.autoRetryFailedTransfers)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepHistory"), isOn: $settingsManager.keepTransferHistory)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepAwake"), isOn: $settingsManager.keepSystemAwakeDuringTransfer)
@@ -1975,8 +1972,6 @@ public struct SettingsView: View {
     private func requestNotificationPermission() {
         Task { @MainActor in
             let granted = await settingsManager.requestNotificationPermission()
- // 将最终授权结果写入用户偏好，确保下次启动保持一致
-            UserDefaults.standard.set(granted, forKey: "ShowSystemNotifications")
         SkyBridgeLogger.ui.debugOnly("🔔 [设置] 通知权限已\(granted ? "授予" : "拒绝")")
         }
     }
