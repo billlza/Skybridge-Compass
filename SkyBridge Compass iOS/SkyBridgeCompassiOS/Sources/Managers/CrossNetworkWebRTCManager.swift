@@ -2273,6 +2273,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         queryItems.removeAll { $0.name == "cv" }
         queryItems.removeAll { $0.name == "pv" }
         queryItems.append(URLQueryItem(name: "shard", value: shardKey))
+ // 会话令牌走 URL query(st)而非自定义头:像 Cloudflare 这类代理会在 WebSocket 升级时剥掉
+ // 自定义请求头(X-SkyBridge-*),导致源站收不到令牌(missing_session_token);query 参数能穿过。
+ // 服务端 allowLegacyQueryToken 已开启,这是官方为剥头代理保留的通道。令牌走 wss TLS、短时效、绑定即消耗。
+        if let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            queryItems.append(URLQueryItem(name: "st", value: token))
+        }
         if let envVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !envVersion.isEmpty {
@@ -2306,7 +2313,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let rawProtocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
         let protocolVersion = rawProtocolVersion.isEmpty ? "1" : rawProtocolVersion
-        guard let headers = Self.currentPathSignalingWebSocketHeaders(
+        guard var headers = Self.currentPathSignalingWebSocketHeaders(
             sessionID: shardKey,
             sessionToken: token,
             clientVersion: resolvedClientVersion,
@@ -2314,6 +2321,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         ) else {
             throw SignalingRetryControllerError.invalidWebSocketURL("invalid current-path signaling headers")
         }
+ // 令牌改走 query(st)后,必须从请求头里移除会话凭据:服务端若同时看到"会话头 + query 令牌"
+ // 会判为 conflicting_session_credentials。移除后只剩版本头(会被代理剥掉也无妨,版本同样在 query 的 cv/pv)。
+        headers.removeValue(forKey: "X-SkyBridge-Session-Id")
+        headers.removeValue(forKey: "X-SkyBridge-Session")
         return headers
     }
 

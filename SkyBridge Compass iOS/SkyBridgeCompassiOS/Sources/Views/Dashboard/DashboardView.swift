@@ -1213,6 +1213,17 @@ private struct QRCodeHubSheet: View {
                                     scannerSessionID = UUID()
                                 },
                                 onScanString: { string in
+                                    // Short connection-code QR (skybridge://code/<code>): redeems via the
+                                    // signaling server using the existing connect(withCode:) path. Checked
+                                    // before the self-contained connect-link form so a short code never
+                                    // gets misrouted into the base64-payload parser.
+                                    if let code = CrossNetworkWebRTCManager.extractConnectionCode(fromScannedString: string) {
+                                        guard !interactionState.isSubmittingCode else { return }
+                                        interactionState.startConnectionCodeSubmission()
+                                        SkyBridgeLogger.shared.info("🌐 扫描到跨网连接码二维码")
+                                        onConnectWithCode(code)
+                                        return
+                                    }
                                     if CrossNetworkWebRTCManager.isConnectLinkString(string) {
                                         guard !interactionState.isSubmittingScannedConnectLink else { return }
                                         interactionState.startScannedConnectLinkSubmission()
@@ -1546,9 +1557,9 @@ private struct MyConnectionQRCodeView: View {
                 .accessibilityIdentifier("dashboard.qr.myqr.description")
 
             if selectedTransportMode == .webRTC,
-               let connectLink = crossNetworkManager.currentConnectLink,
-               !connectLink.isEmpty {
-                Text("当前路径二维码已就绪，语义与 macOS 保持一致")
+               let code = crossNetworkManager.localConnectionCode,
+               !code.isEmpty {
+                Text("连接码：\(code)（也可在对端手动输入）")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -1568,13 +1579,13 @@ private struct MyConnectionQRCodeView: View {
         .onChange(of: transportModeRaw) { _, _ in
             Task { await generate() }
         }
-        .onChange(of: crossNetworkManager.currentConnectLink) { _, newValue in
+        .onChange(of: crossNetworkManager.localConnectionCode) { _, newValue in
             guard selectedTransportMode == .webRTC else { return }
             guard let newValue, !newValue.isEmpty else {
                 qrImage = nil
                 return
             }
-            switch renderConnectLinkQRCode(from: newValue) {
+            switch renderConnectionCodeQRCode(from: newValue) {
             case .success(let image):
                 qrImage = image
                 errorText = nil
@@ -1632,19 +1643,27 @@ private struct MyConnectionQRCodeView: View {
     }
 
     private func generateWebRTCQRCode() async -> Result<UIImage, QRCodeGenerationError> {
-        guard let connectLink = await crossNetworkManager.generateConnectLink() else {
+        // Render the short, server-issued connection code (skybridge://code/<code>) instead of the
+        // legacy self-contained skybridge://connect/<base64-json> link. The old link embedded the full
+        // PQC pairing material (ML-DSA-65 public key + signature + ML-KEM-768 public key + metadata),
+        // producing an ~8000+ character payload that exceeded the QR symbol capacity and was unscannable.
+        // The short code is redeemed via the signaling server (connect(withCode:) → lookupConnectionCode),
+        // which recovers the initiator authority and enforces the same current-path trust binding, so the
+        // cross-network security guarantees are unchanged while the QR shrinks to Version 1-2.
+        guard let code = await crossNetworkManager.generateConnectionCode(), !code.isEmpty else {
             return .failure(.message(crossNetworkManager.lastError ?? RuntimeLocalization.string("生成二维码失败")))
         }
-        return renderConnectLinkQRCode(from: connectLink)
+        return renderConnectionCodeQRCode(from: code)
     }
 
-    private func renderConnectLinkQRCode(from connectLink: String?) -> Result<UIImage, QRCodeGenerationError> {
-        guard let connectLink, !connectLink.isEmpty else {
+    private func renderConnectionCodeQRCode(from code: String?) -> Result<UIImage, QRCodeGenerationError> {
+        guard let code, !code.isEmpty else {
             return .failure(.message(RuntimeLocalization.string("生成二维码失败")))
         }
 
+        let link = CrossNetworkWebRTCManager.connectionCodeLink(for: code)
         let image = QRCodeGenerator.shared.generateQRCode(
-            from: connectLink,
+            from: link,
             size: CGSize(width: 420, height: 420),
             foregroundColor: .black,
             backgroundColor: .white

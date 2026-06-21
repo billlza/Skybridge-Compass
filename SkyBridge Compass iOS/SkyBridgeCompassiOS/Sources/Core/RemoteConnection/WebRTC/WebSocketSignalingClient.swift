@@ -98,8 +98,8 @@ public actor WebSocketSignalingClient {
                 return "信令 WebSocket 连接超时"
             case .sendRequiresBound:
                 return "信令通道尚未 bound，不能发送业务消息"
-            case .serverRejected(_):
-                return "信令服务器拒绝请求: \(WebSocketSignalingClient.redactedServerErrorReasonDescription)"
+            case .serverRejected(let reason):
+                return "信令服务器拒绝请求: \(reason)"
             case .backendFailed(let backend, let reason):
                 return "信令后端 \(backend.rawValue) 失败: \(reason)"
             }
@@ -143,7 +143,6 @@ public actor WebSocketSignalingClient {
     }
 
     private let logger = Logger(subsystem: "com.skybridge.signal", category: "WebRTCSignalingWS")
-    nonisolated private static let redactedServerErrorReasonDescription = "<redacted-server-error>"
     nonisolated private static let redactedTransportErrorDescription = "<redacted-transport-error>"
     nonisolated private static let sensitiveLogRedaction = "<redacted>"
     private let url: URL
@@ -443,11 +442,17 @@ public actor WebSocketSignalingClient {
             onOpen: { [weakSelf = ActorBox(self)] in
                 Task { await weakSelf.value?.handleSocketOpen(handleId: handleId) }
             },
-            onClose: { [weakSelf = ActorBox(self)] closeCode, _ in
+            onClose: { [weakSelf = ActorBox(self)] closeCode, reasonData in
                 Task {
+ // 捕获服务器关闭原因（如 1008 session_token_expired / client_version_too_old / session_token_already_bound）。
+ // 之前这里把 reason 丢弃，只剩关闭码，导致一切都被打码成笼统的"websocket未连接"，无从诊断。
+                    let reasonText = reasonData
+                        .flatMap { String(data: $0, encoding: .utf8) }?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let detail = (reasonText?.isEmpty == false) ? reasonText! : "-"
                     await weakSelf.value?.handleClosed(
                         handleId: handleId,
-                        errorDescription: "websocket closed (\(closeCode.rawValue))"
+                        errorDescription: "websocket closed code=\(closeCode.rawValue) reason=\(detail)"
                     )
                 }
             }
@@ -618,8 +623,8 @@ public actor WebSocketSignalingClient {
             }
             if frame.isError {
                 let reason = frame.error ?? "unknown"
-                let redactedReason = Self.redactedServerErrorReasonDescription
-                let error = SignalingError.serverRejected(redactedReason)
+ // 暴露真实服务器错误原因（协议级诊断码，非敏感），便于诊断跨网连接失败的真正卡点。
+                let error = SignalingError.serverRejected(reason)
                 terminalErrorsByHandle[handleId] = error
                 if currentHandle == handleId {
                     isBound = false
@@ -628,11 +633,11 @@ public actor WebSocketSignalingClient {
                 emitLifecycle(
                     phase: .failed,
                     handleId: handleId,
-                    errorDescription: redactedReason,
+                    errorDescription: reason,
                     failureClass: Self.classifyServerError(reason),
                     serverFrameType: frame.type
                 )
-                logger.error("❌ signaling server error: \(redactedReason, privacy: .public)")
+                logger.error("❌ signaling server error: \(reason, privacy: .public)")
             }
         case .unknown:
             onTrace?("recv-unknown bytes=\(text.utf8.count)")
@@ -654,7 +659,9 @@ public actor WebSocketSignalingClient {
             failureClass: .transientNetwork,
             serverFrameType: nil
         )
-        onTrace?("closed backend=\(handleId.backend.rawValue) reason=\(Self.redactedTransportErrorDescription)")
+ // 把真实关闭码/原因打到设备日志（协议级诊断码，非敏感），用于诊断"websocket未连接"卡在服务器哪道关卡。
+        logger.warning("🔌 signaling websocket closed: \(errorDescription, privacy: .public)")
+        onTrace?("closed backend=\(handleId.backend.rawValue) \(errorDescription)")
     }
 
     private func handleErrored(handleId: SignalingHandleID, error: Error) async {

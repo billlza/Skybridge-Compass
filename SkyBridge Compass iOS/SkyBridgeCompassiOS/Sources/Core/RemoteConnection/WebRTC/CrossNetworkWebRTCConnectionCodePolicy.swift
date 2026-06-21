@@ -61,6 +61,42 @@ extension CrossNetworkWebRTCManager {
         CrossNetworkConnectPayloadParserCompat.extractPayload(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
+    /// Short connection-code QR scheme: `skybridge://code/<code>`.
+    ///
+    /// This carries ONLY the server-issued short lease code (see `generateConnectionCode()` →
+    /// `registerConnectionCode`). The scanning peer redeems it through the signaling server via
+    /// `connect(withCode:)`, which recovers the initiator's origin/token/protocol-identity authority
+    /// from the server `lookupConnectionCode` response and enforces the current-path trust binding.
+    /// No PQC key material is embedded in the QR, so the payload stays at QR Version 1-2 (scannable),
+    /// while the cross-network trust guarantees are identical to the legacy `skybridge://connect/...`
+    /// self-contained QR (both are server-backed; neither imports KEM trust from the QR itself).
+    ///
+    /// Returns the normalized, length-validated connection code, or `nil` if `raw` is not a
+    /// well-formed short-code link with a valid code.
+    public static func extractConnectionCode(fromScannedString raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codeToken: String
+        let prefix = "skybridge://code/"
+        if trimmed.hasPrefix(prefix) {
+            codeToken = String(trimmed.dropFirst(prefix.count))
+        } else if let url = URL(string: trimmed),
+                  url.scheme == "skybridge",
+                  url.host == "code" {
+            codeToken = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else {
+            return nil
+        }
+        let sanitized = sanitizeConnectionCodeInput(codeToken)
+        guard !sanitized.isEmpty, isSupportedConnectionCodeLength(sanitized.count) else { return nil }
+        return sanitized
+    }
+
+    /// Render form for the short connection-code QR. Kept alongside the parser so the generate and
+    /// scan sides cannot drift out of sync.
+    public static func connectionCodeLink(for code: String) -> String {
+        "skybridge://code/\(code)"
+    }
+
     nonisolated static func decodeConnectPayload(_ rawPayload: String) -> Data? {
         CrossNetworkConnectPayloadCodec.decodeBase64Payload(rawPayload)
     }
