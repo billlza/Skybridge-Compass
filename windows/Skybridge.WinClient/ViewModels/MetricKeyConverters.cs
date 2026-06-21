@@ -134,3 +134,121 @@ public sealed class QuickActionKeyToBrushConverter : IValueConverter
         throw new NotSupportedException();
     }
 }
+
+/// <summary>
+/// Maps a <c>SystemMonitorMetricView.Label</c> from the dashboard System Performance
+/// summary (CPU / Memory / Disk / Network — the SystemMonitorOverview rows built by
+/// SystemMonitorWorkspaceClient) to a Segoe Fluent Icons glyph, mirroring the Mac
+/// AppleSiliconInfoCard / PerformanceMonitor metric icons.
+///   "CPU"     → E950  (Processor)        ~ SF "cpu"
+///   "Memory"  → EEA0  (Memory)           ~ SF "memorychip"
+///   "Disk"    → EDA2  (HardDrive)        ~ SF "internaldrive"
+///   "Network" → E839  (NetworkTower)     ~ SF "network"
+/// Falls back to a generic gauge glyph (E9D9, Speed) for unknown labels.
+/// </summary>
+public sealed class SystemMetricKeyToGlyphConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var label = value as string ?? string.Empty;
+        return label switch
+        {
+            "CPU" => "\uE950",      // Processor
+            "Memory" => "\uEEA0",   // Memory
+            "Disk" => "\uEDA2",     // HardDrive
+            "Network" => "\uE839",  // NetworkTower
+            _ => "\uE9D9"           // Speed gauge
+        };
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
+/// Maps a <c>SystemMonitorMetricView.Label</c> to a per-metric on-brand accent brush,
+/// so each System Performance summary row's value/icon carries its own hue the way the
+/// Mac metric rows tint per-channel (CPU orange, Memory blue, Disk violet, Network green).
+///   "CPU"     → SkyBridgeWarningBrush         (orange, Mac CPU)
+///   "Memory"  → SkyBridgeNavDashboardBrush    (blue,   Mac Memory)
+///   "Disk"    → SkyBridgeNavQuantumBrush       (violet)
+///   "Network" → SkyBridgeSuccessBrush          (green,  Mac download/network)
+/// Falls back to the shared accent brush.
+/// </summary>
+public sealed class SystemMetricKeyToBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var label = value as string ?? string.Empty;
+        var brushKey = label switch
+        {
+            "CPU" => "SkyBridgeWarningBrush",
+            "Memory" => "SkyBridgeNavDashboardBrush",
+            "Disk" => "SkyBridgeNavQuantumBrush",
+            "Network" => "SkyBridgeSuccessBrush",
+            _ => "SkyBridgeAccentBrush"
+        };
+
+        return MetricKeyToBrushConverter.ResolveBrush(brushKey);
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
+/// Maps a <c>DiscoveredPeerView.Platform</c> (the live DNS-SD peer's platform string,
+/// e.g. "MacOS" / "iOS" / "Windows" / "Android" / "Linux") to a Segoe Fluent Icons
+/// device glyph, so the dashboard Device Discovery summary rows carry a per-device-type
+/// icon like the Mac EnhancedDeviceRow. Matching is case-insensitive and substring-based
+/// so platform enum spellings (e.g. "MacOS", "iOS") still resolve.
+///   windows      → E977  (Windows tile)
+///   android      → E8EA  (CellPhone)
+///   linux / unix → EC7A  (DeveloperTools)
+///   ios handheld → E8EA  (CellPhone)
+///   mac / apple  → E70C  (Laptop)
+/// Falls back to a generic Devices glyph (E772) for unknown platforms.
+/// </summary>
+public sealed class PlatformToGlyphConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var platform = (value as string ?? string.Empty).ToLowerInvariant();
+
+        if (platform.Contains("windows"))
+        {
+            return "\uE977"; // Windows tile
+        }
+
+        if (platform.Contains("android"))
+        {
+            return "\uE8EA"; // CellPhone
+        }
+
+        if (platform.Contains("linux") || platform.Contains("unix"))
+        {
+            return "\uEC7A"; // DeveloperTools
+        }
+
+        if (platform.Contains("ios") || platform.Contains("ipad") || platform.Contains("iphone"))
+        {
+            return "\uE8EA"; // CellPhone (iOS handheld)
+        }
+
+        if (platform.Contains("mac") || platform.Contains("apple") || platform.Contains("osx"))
+        {
+            return "\uE70C"; // Laptop / Mac
+        }
+
+        return "\uE772"; // Devices (generic)
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
