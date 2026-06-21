@@ -50,10 +50,20 @@
     <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#29FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#29FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#E62E3857" />
-    <SolidColorBrush x:Key="SkyBridgePanelFillBrush" Color="#21FFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#1AFFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeCardFillBrush" Color="#24FFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#1AFFFFFF" />
+    <!-- Card/panel fills carry the Mac's subtle diagonal gloss (Material gloss gradient
+         white@0.08 topLeading -> white@0.01 bottomTrailing) instead of a flat tint, so the
+         glass reads with depth rather than as an opaque rectangle (the main 'looks like a
+         knock-off' tell). Top-left lighter, bottom-right near-transparent. -->
+    <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#26FFFFFF" Offset="0.0" />
+        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#26FFFFFF" />
+    <LinearGradientBrush x:Key="SkyBridgeCardFillBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#2BFFFFFF" Offset="0.0" />
+        <GradientStop Color="#0FFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#2EFFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="#8C47618F" />
     <SolidColorBrush x:Key="SkyBridgeSelectedNavFillBrush" Color="#D12368E0" />
 
@@ -110,8 +120,8 @@
     <!-- ===== Corner radii (match Mac layout tokens) ===== -->
     <CornerRadius x:Key="SkyBridgeShellCornerRadius">30</CornerRadius>
     <CornerRadius x:Key="SkyBridgeSidebarCornerRadius">24</CornerRadius>
-    <CornerRadius x:Key="SkyBridgePanelCornerRadius">22</CornerRadius>
-    <CornerRadius x:Key="SkyBridgeCardCornerRadius">18</CornerRadius>
+    <CornerRadius x:Key="SkyBridgePanelCornerRadius">18</CornerRadius>
+    <CornerRadius x:Key="SkyBridgeCardCornerRadius">16</CornerRadius>
     <CornerRadius x:Key="SkyBridgeButtonCornerRadius">12</CornerRadius>
 
     <!-- ===== Override stock Fluent accent so built-in controls adopt the Mac blue ===== -->
