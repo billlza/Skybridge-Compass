@@ -99,6 +99,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcLocalICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
     private var webrtcJoinBootstrapPayloadBySessionId: [String: WebRTCSignalingEnvelope.Payload] = [:]
     private var pendingWebRTCJoinBootstrapBySessionId: [String: (from: String, payload: WebRTCSignalingEnvelope.Payload?)] = [:]
+    /// FIFO insertion order of pendingWebRTCJoinBootstrapBySessionId keys, used to bound the cache against
+    /// adversarial peers sending join frames for many distinct sessionIds that never materialize into a session.
+    private var pendingWebRTCJoinBootstrapOrder: [String] = []
+    private static let pendingWebRTCJoinBootstrapCap = 32
     private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
     private var webrtcJoinHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
@@ -982,11 +986,44 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
     }
 
+    /// Stores an early-arriving join bootstrap, evicting the oldest entry when the cache is at capacity so an
+    /// adversarial peer cannot grow it without bound via distinct sessionIds that never become sessions.
+    private func storePendingWebRTCJoinBootstrap(
+        sessionID: String,
+        from: String,
+        payload: WebRTCSignalingEnvelope.Payload?
+    ) {
+        if pendingWebRTCJoinBootstrapBySessionId[sessionID] == nil {
+            while pendingWebRTCJoinBootstrapOrder.count >= Self.pendingWebRTCJoinBootstrapCap,
+                  let oldest = pendingWebRTCJoinBootstrapOrder.first {
+                pendingWebRTCJoinBootstrapOrder.removeFirst()
+                pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: oldest)
+            }
+            pendingWebRTCJoinBootstrapOrder.append(sessionID)
+        }
+        pendingWebRTCJoinBootstrapBySessionId[sessionID] = (from: from, payload: payload)
+    }
+
+    @discardableResult
+    private func removePendingWebRTCJoinBootstrap(
+        sessionID: String
+    ) -> (from: String, payload: WebRTCSignalingEnvelope.Payload?)? {
+        if let index = pendingWebRTCJoinBootstrapOrder.firstIndex(of: sessionID) {
+            pendingWebRTCJoinBootstrapOrder.remove(at: index)
+        }
+        return pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func removeAllPendingWebRTCJoinBootstraps() {
+        pendingWebRTCJoinBootstrapBySessionId.removeAll()
+        pendingWebRTCJoinBootstrapOrder.removeAll()
+    }
+
     private func adoptPendingWebRTCJoinBootstrapIfPresent(
         sessionID: String,
         session: WebRTCSession
     ) async {
-        guard let pending = pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: sessionID) else {
+        guard let pending = removePendingWebRTCJoinBootstrap(sessionID: sessionID) else {
             return
         }
         guard pending.from != session.localDeviceId else { return }
@@ -1103,7 +1140,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLatestAnswerBySessionId.removeValue(forKey: sessionID)
         webrtcLocalICECandidatesBySessionId.removeValue(forKey: sessionID)
         webrtcJoinBootstrapPayloadBySessionId.removeValue(forKey: sessionID)
-        pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: sessionID)
+        removePendingWebRTCJoinBootstrap(sessionID: sessionID)
         webrtcSignalingAuthTokenBySessionId.removeValue(forKey: sessionID)
         webrtcTurnAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
         webrtcMediaAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
@@ -1212,6 +1249,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcSecureEnvelopeSendCounterBySessionId.removeValue(forKey: sessionID)
         webrtcSecureEnvelopeReplayWindowBySessionId.removeValue(forKey: sessionID)
         webrtcSecureEnvelopeKeyFingerprintBySessionId.removeValue(forKey: sessionID)
+    }
+
+    func clearAllWebRTCSecureEnvelopeState() {
+        webrtcSecureEnvelopeSendCounterBySessionId.removeAll()
+        webrtcSecureEnvelopeReplayWindowBySessionId.removeAll()
+        webrtcSecureEnvelopeKeyFingerprintBySessionId.removeAll()
     }
 
     private func resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: String, keys: SessionKeys) {
@@ -1792,6 +1835,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
+        clearAllWebRTCSecureEnvelopeState()
         webrtcSignalingAuthTokenBySessionId.removeAll()
         webrtcTurnAdmissionLeaseBySessionId.removeAll()
         webrtcMediaAdmissionLeaseBySessionId.removeAll()
@@ -1804,7 +1848,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentPathSignalingOriginBySessionId.removeAll()
         currentPathSignalingWebSocketPathBySessionId.removeAll()
         webrtcLatestOfferBySessionId.removeAll()
-        pendingWebRTCJoinBootstrapBySessionId.removeAll()
+        webrtcLatestAnswerBySessionId.removeAll()
+        webrtcLocalICECandidatesBySessionId.removeAll()
+        webrtcJoinBootstrapPayloadBySessionId.removeAll()
+        webrtcRemoteDesktopHeartbeatAtBySessionId.removeAll()
+        webrtcRemoteVideoFormatsBySessionId.removeAll()
+        webrtcRemoteStreamConfigurationBySessionId.removeAll()
+        webrtcRemoteSecurityIdentityBySessionId.removeAll()
+        webrtcBootstrapReplyFingerprintBySessionId.removeAll()
+        webrtcRekeyInProgressSessionIds.removeAll()
+        webrtcPendingStreamRefreshSessionIds.removeAll()
+        webrtcAwaitingStreamConfigurationSessionIds.removeAll()
+        webrtcSessionReadyDiagnosticSessionIds.removeAll()
+        webrtcInteractionStreamingAllowedSessionIds.removeAll()
+        webrtcRemoteControlNoticeApprovedSessionIds.removeAll()
+        webrtcRemoteControlNoticePendingSessionIds.removeAll()
+        removeAllPendingWebRTCJoinBootstraps()
         pendingWebRTCOfferSessionIds.removeAll()
 
         for (_, task) in webrtcJoinHeartbeatTasksBySessionId {
@@ -1816,6 +1875,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             task.cancel()
         }
         webrtcOfferResendTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcOutboundHeartbeatTasksBySessionId {
+            task.cancel()
+        }
+        webrtcOutboundHeartbeatTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcRemoteLivenessWatchdogTasksBySessionId {
+            task.cancel()
+        }
+        webrtcRemoteLivenessWatchdogTasksBySessionId.removeAll()
         stopAllWebRTCConnectionTimeoutWatchdogs()
 
         // 6) 关闭 WebSocket 信令
@@ -2701,7 +2770,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         ) else {
             throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling origin")
         }
-        return url
+ // 令牌走 query(st):Cloudflare 等代理会在 WebSocket 升级时剥掉 X-SkyBridge-* 自定义头,
+ // 源站收不到令牌(missing_session_token);query 参数能穿过。服务端 allowLegacyQueryToken 已开启。
+ // 在实例层组装(而非静态 builder),与 signalingWebSocketHeaders 的"移除会话头"配套:
+ // 同一连接只用 query 令牌、不带会话头,避免服务端 conflicting_session_credentials;
+ // 静态 builder 保持 header-only,供 CurrentPathProbe 等其它用途复用。
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "st" }
+        items.append(URLQueryItem(name: "st", value: sessionToken))
+        components.queryItems = items
+        return components.url ?? url
     }
 
     private func signalingWebSocketHeaders(shardKey: String) throws -> [String: String] {
@@ -2715,7 +2796,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             ? clientVersion!
             : (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0")
         let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
-        guard let headers = Self.currentPathSignalingWebSocketHeaders(
+        guard var headers = Self.currentPathSignalingWebSocketHeaders(
             sessionID: shardKey,
             sessionToken: sessionToken,
             clientVersion: resolvedClientVersion,
@@ -2723,6 +2804,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         ) else {
             throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling headers")
         }
+ // 令牌改走 query(st)后,从请求头移除会话凭据:服务端若同时见到"会话头 + query 令牌"会判为
+ // conflicting_session_credentials。移除后只剩版本头(被代理剥掉也无妨,版本同样在 query 的 cv/pv)。
+        headers.removeValue(forKey: "X-SkyBridge-Session-Id")
+        headers.removeValue(forKey: "X-SkyBridge-Session")
         return headers
     }
 
@@ -3283,7 +3368,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         guard let session = webrtcSessionsBySessionId[env.sessionId] else {
             if env.type == .join {
-                pendingWebRTCJoinBootstrapBySessionId[env.sessionId] = (from: env.from, payload: env.payload)
+                storePendingWebRTCJoinBootstrap(sessionID: env.sessionId, from: env.from, payload: env.payload)
             }
             if env.type == .join, shouldWakeOffererFromRemoteJoin(sessionID: env.sessionId) {
                 logger.warning(
@@ -3971,14 +4056,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
             guard handshakeState.driver == nil else { return }
             guard !self.webrtcRekeyInProgressSessionIds.contains(sessionID) else { return }
- // 发起者选举不能直接采用可能为空或为 "webrtc-<session>" 占位的标识：
- // answerer 路径从不校验 session.localDeviceId 是否为空，且对端 id 在解析完成前可能仍是占位串，
- // 二者经 canonicalPQCRekeyElectionDeviceId 规范化后都会变成 nil，使选举判为“不可选举”。
- // 与 iOS 的 resolvedPQCRekeyElectionRemoteDeviceId 行为对齐——从多个稳定来源解析出首个可规范化的标识
- //（本端回退到 init 即就绪、恒定可用的 deviceFingerprint），避免在双方都是 OS27 的严格 PQC 引导期，
- // 把本可恢复的瞬时占位态误判为不可选举而直接拆除已授权的连接。
-            let localElectionDeviceId = orderedUniqueCandidateIds([session.localDeviceId, deviceFingerprint])
-                .first { WebRTCPQCHandshakePolicy.canonicalPQCRekeyElectionDeviceId($0) != nil }
+ // 本端选举标识必须使用我们向对端广播的同一个 protocol/account id（session.localDeviceId），
+ // 否则两端会对不同的字符串对做字典序排序，选举结果可能不一致（双方都发起或都等待）。
+ // 不要回退到 deviceFingerprint：那是硬件派生值，并非对端在 pairingPayload.deviceId 中收到的标识，
+ // 会造成跨命名空间比较。当 session.localDeviceId 经规范化后为 nil 时，
+ // shouldInitiatePQCRekey 返回 nil，由下方 3984- 的 guard 走 pending/wait（严格模式下 failStrictClassicBootstrap），
+ // 这与 iOS 的行为一致。
+            let localElectionDeviceId = WebRTCPQCHandshakePolicy.canonicalPQCRekeyElectionDeviceId(session.localDeviceId)
             let remoteElectionDeviceId = orderedUniqueCandidateIds([pairingPayload.deviceId, peerDeviceId, endpointDescription])
                 .first { WebRTCPQCHandshakePolicy.canonicalPQCRekeyElectionDeviceId($0) != nil }
             guard let shouldInitiate = WebRTCPQCHandshakePolicy.shouldInitiatePQCRekey(

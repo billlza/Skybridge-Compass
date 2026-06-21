@@ -225,6 +225,7 @@ struct WebRTCSignalingCurrentPathTests {
             item.value.map { (item.name, $0) }
         })
         #expect(query["shard"] == "ABC123")
+ // 静态 builder 保持 header-only(不含 st);st 由实例层 signalingWebSocketURL 组装,见该方法注释。
         #expect(query["st"] == nil)
         #expect(query["cv"] == "1.2.3")
         #expect(query["pv"] == "2")
