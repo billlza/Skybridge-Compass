@@ -40,8 +40,8 @@ public sealed class WeatherConditionToGlyphConverter : IValueConverter
             "Cloudy" => "☁️",  // cloud                ~ SF cloud.fill
             "Rainy" => "🌧️",   // rain cloud           ~ SF cloud.rain.fill
             "Snowy" => "❄️",   // snowflake            ~ SF cloud.snow.fill
-            "Foggy" => "🌫️",   // fog                  ~ SF cloud.fog.fill
-            "Haze" => "🌫️",    // fog/haze             ~ SF aqi.medium
+            "Foggy" => "☁️",   // cloud (🌫️ FOG renders as tofu in Segoe UI Emoji) ~ SF cloud.fog.fill
+            "Haze" => "☁️",    // cloud (🌫️ FOG renders as tofu)                   ~ SF aqi.medium
             "Stormy" => "⛈️",  // storm cloud + bolt   ~ SF cloud.bolt.rain.fill
             _ => "❓"          // question mark (Unknown) ~ SF questionmark.circle
         };
