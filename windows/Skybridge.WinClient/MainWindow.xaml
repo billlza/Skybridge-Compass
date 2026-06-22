@@ -305,16 +305,16 @@
              PublicKeyFingerprint / ...), which is fed by the Win32 DNS-SD browser.
              =================================================================== -->
         <DataTemplate x:Key="DashboardDeviceSummaryRowTemplate">
-            <Border Style="{StaticResource GlassCard}" Padding="12" Margin="0,0,0,8">
-                <Grid ColumnSpacing="12">
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,10">
+                <Grid ColumnSpacing="14">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <Border
-                        Width="34"
-                        Height="34"
+                        Width="38"
+                        Height="38"
                         CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
@@ -322,14 +322,15 @@
                         VerticalAlignment="Center">
                         <FontIcon
                             Glyph="{Binding Platform, Converter={StaticResource PlatformGlyphConverter}}"
-                            FontSize="16"
+                            FontSize="18"
                             Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}"
                             HorizontalAlignment="Center"
                             VerticalAlignment="Center" />
                     </Border>
-                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
                         <TextBlock
                             Text="{Binding DisplayName}"
+                            FontSize="14"
                             FontWeight="SemiBold"
                             TextTrimming="CharacterEllipsis"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -451,13 +452,13 @@
                     <ColumnDefinition Width="220" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 <TextBlock
                     Grid.Column="2"
                     Text="{Binding Detail}"
                     TextWrapping="Wrap"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
             </Grid>
         </DataTemplate>
         <!-- ===================================================================
@@ -589,11 +590,12 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <!-- Status-tinted device-type icon chip (Mac 50x50 status chip) -->
+                    <!-- Status-tinted device-type icon chip (Mac 40-50px rounded-square
+                         status chip, r12 .continuous). -->
                     <Border
                         Width="44"
                         Height="44"
-                        CornerRadius="10"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                         BorderThickness="1"
@@ -611,6 +613,7 @@
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <TextBlock
                                 Text="{Binding DisplayName}"
+                                FontSize="15"
                                 FontWeight="SemiBold"
                                 VerticalAlignment="Center"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -702,20 +705,20 @@
                     <ColumnDefinition Width="220" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Spacing="3">
-                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceType}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding DeviceType}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="Device ID" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Device ID" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
                 <StackPanel Grid.Column="2" Spacing="3">
-                    <TextBlock Text="Vendor / Product" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Vendor / Product" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>

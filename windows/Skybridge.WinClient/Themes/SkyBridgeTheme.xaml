@@ -11,8 +11,10 @@
     • secondary glow  = Mac cyan  (#00D9FF, the .starryNight secondary)
     • window gradient = .starryNight dark purple-navy (#0D0D26 -> #261A40 -> #14141F)
   Glass card fills/strokes, text colors, status colors and corner radii (shell 30 /
-  sidebar 24 / panel 22 / card 18 / button 12) come from SkyBridgeVisualParity layout
-  tokens (GeneratedVisualParity.swift).
+  sidebar 24 / panel 18 / card 16 / button 12) come from SkyBridgeVisualParity layout
+  tokens (GeneratedVisualParity.swift). NOTE: panel=18 / card=16 are the values the Mac
+  StatCard (16) and DeviceDiscoveryPanel (18) actually render at — an earlier comment
+  here said 22/18, which was drift; the live token values below are authoritative.
 
   This dictionary is ADDITIVE: merged after XamlControlsResources, it redefines accent
   ThemeResources + adds named SkyBridge* brushes. It does NOT change control structure,
@@ -46,24 +48,39 @@
     <SolidColorBrush x:Key="SkyBridgeAccentHoverBrush" Color="{StaticResource SkyBridgeAccentHoverColor}" />
     <SolidColorBrush x:Key="SkyBridgeAccentSecondaryBrush" Color="{StaticResource SkyBridgeAccentSecondaryColor}" />
 
-    <!-- ===== Glass / surface brushes (white over the dark gradient) ===== -->
-    <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#29FFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#29FFFFFF" />
+    <!-- ===== Glass / surface brushes (frosted material over the dark gradient) =====
+         The Mac uses .ultraThinMaterial — a live frosted BLUR that reads as lit glass,
+         lighter at the top edge with real depth, never a flat opaque rectangle (that
+         flatness was the main 'looks like a knock-off' tell). True desktop-blur on
+         Windows needs a window-level SystemBackdrop (Mica/DesktopAcrylic) wired in
+         code-behind, which doesn't exist here; in-app AcrylicBrush only blurs content
+         WITHIN the window and collapses to its fallback over the empty gradient, reading
+         muddy. So the surfaces here are tuned multi-stop GLOSS gradients that emulate the
+         frost optically: a bright top-left highlight rolling off to a faint cool
+         blue-gray bottom (pulled toward starryNight, not pure white), giving the lit-glass
+         curvature the Mac material has while degrading perfectly (this IS the fallback).
+         FUTURE (needs human visual check + code-behind): set Window.SystemBackdrop =
+         DesktopAcrylicBackdrop and drop these tints to ~half opacity for true OS frost. -->
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#2EFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#33FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#E62E3857" />
-    <!-- Card/panel fills carry the Mac's subtle diagonal gloss (Material gloss gradient
-         white@0.08 topLeading -> white@0.01 bottomTrailing) instead of a flat tint, so the
-         glass reads with depth rather than as an opaque rectangle (the main 'looks like a
-         knock-off' tell). Top-left lighter, bottom-right near-transparent. -->
-    <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="1,1">
-        <GradientStop Color="#26FFFFFF" Offset="0.0" />
-        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    <!-- Panel = large section surface. 3-stop gloss: bright cool-white top-left
+         highlight (#33) -> mid body (#1F) -> faint blue-tinted bottom-right (#14, the
+         starryNight slate bleeding through) so the panel reads as a curved lit pane. -->
+    <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="0.85,1">
+        <GradientStop Color="#33FFFFFF" Offset="0.0" />
+        <GradientStop Color="#1FFFFFFF" Offset="0.5" />
+        <GradientStop Color="#14BCD0F2" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#26FFFFFF" />
-    <LinearGradientBrush x:Key="SkyBridgeCardFillBrush" StartPoint="0,0" EndPoint="1,1">
-        <GradientStop Color="#2BFFFFFF" Offset="0.0" />
-        <GradientStop Color="#0FFFFFFF" Offset="1.0" />
+    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#2EFFFFFF" />
+    <!-- Card = nested glass, a touch brighter than the panel so it lifts off it.
+         Same cool-tinted roll-off (top-left highlight -> blue-gray base). -->
+    <LinearGradientBrush x:Key="SkyBridgeCardFillBrush" StartPoint="0,0" EndPoint="0.85,1">
+        <GradientStop Color="#3DFFFFFF" Offset="0.0" />
+        <GradientStop Color="#24FFFFFF" Offset="0.5" />
+        <GradientStop Color="#1ABCD0F2" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#2EFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#33FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="#8C47618F" />
     <SolidColorBrush x:Key="SkyBridgeSelectedNavFillBrush" Color="#D12368E0" />
 

@@ -20,15 +20,17 @@
 
     <!-- ===================================================================
          GlassPanel — the reusable replacement for inline glass Borders.
-         Fill = SkyBridgePanelFillBrush, 1px SkyBridgePanelStrokeBrush,
-         CornerRadius 22 (panel token), Padding 18.
+         Fill = SkyBridgePanelFillBrush (frosted gloss), 1px SkyBridgePanelStrokeBrush,
+         CornerRadius 18 (panel token), Padding 20 to match the Mac
+         DeviceDiscoveryPanel content padding (cardInset 18 -> live 20). The extra
+         breathing room is part of the "airy / frosted, not cramped" Mac feel.
          =================================================================== -->
     <Style x:Key="GlassPanel" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SkyBridgePanelFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgePanelStrokeBrush}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="{StaticResource SkyBridgePanelCornerRadius}" />
-        <Setter Property="Padding" Value="18" />
+        <Setter Property="Padding" Value="20" />
     </Style>
 
     <!-- A slightly tighter glass surface for nested cards / chips. -->
@@ -41,7 +43,7 @@
     </Style>
 
     <!-- ===================================================================
-         MetricCard — glass card, r18. Used directly as a Border style and
+         MetricCard — glass card, r16 (card token, == Mac StatCard radius). Used as a Border style and
          consumed by the WorkspaceMetricCardTemplate refinement in MainWindow.
          Layout (accent icon → label 12 → value 30 bold, NO caption) is expressed
          in the DataTemplate; this style supplies the glass chrome + sizing.
@@ -224,11 +226,13 @@
          picking the matching style (success / warning / neutral / danger /
          accent). Each is a Border style; caller places a TextBlock inside.
          =================================================================== -->
+    <!-- Badge radius 6: Mac inline name-pills sit at r4-6 (Local pill r4, status pills
+         r6); 6 keeps a crisp small-pill silhouette instead of the over-rounded r10. -->
     <Style x:Key="Badge" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="CornerRadius" Value="6" />
         <Setter Property="Padding" Value="8,3" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
@@ -246,13 +250,15 @@
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeAccentBrush}" />
     </Style>
 
-    <!-- ConnectionTypeChip: a capsule for transport / connection-type tags. -->
+    <!-- ConnectionTypeChip: transport / connection-type tag. Mac connection-type pills
+         are r6 with H8/V4 padding (NOT a full capsule) — r6 here matches that crisp
+         look instead of the over-rounded r14 which read as a generic capsule. -->
     <Style x:Key="ConnectionTypeChip" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeAccentBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="14" />
-        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="8,4" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
