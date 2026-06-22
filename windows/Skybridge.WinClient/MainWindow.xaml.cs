@@ -1,5 +1,6 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
 using Skybridge.WinClient.ViewModels;
 using Windows.Graphics;
 
@@ -43,5 +44,38 @@ public sealed partial class MainWindow : Window
                 area.X + System.Math.Max(0, (area.Width - width) / 2),
                 area.Y + System.Math.Max(0, (area.Height - height) / 2)));
         }
+    }
+
+    // Ctrl+Shift+Down / Ctrl+Shift+Up — move the selected sidebar feature, matching the
+    // macOS app's Cmd+Shift+Up/Down sidebar navigation. The NavigationView's SelectedItem is
+    // TwoWay-bound to ViewModel.SelectedFeature, so setting it here drives both the highlight
+    // and the content pane.
+    private void OnSidebarNavigateNext(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = MoveSidebarSelection(1);
+    }
+
+    private void OnSidebarNavigatePrevious(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = MoveSidebarSelection(-1);
+    }
+
+    private bool MoveSidebarSelection(int delta)
+    {
+        var items = ViewModel.NavigationItems;
+        if (items.Count == 0)
+        {
+            return false;
+        }
+
+        var currentIndex = ViewModel.SelectedFeature is { } current ? items.IndexOf(current) : -1;
+        var nextIndex = System.Math.Clamp(currentIndex + delta, 0, items.Count - 1);
+        if (nextIndex == currentIndex)
+        {
+            return false;
+        }
+
+        ViewModel.SelectedFeature = items[nextIndex];
+        return true;
     }
 }

@@ -10,6 +10,14 @@
         x:Name="RootShell"
         Background="{StaticResource SkyBridgeWindowGradientBrush}"
         d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
+        <!-- Sidebar keyboard navigation, matching the macOS app's Cmd+Shift+Up/Down.
+             On Windows the native chord is Ctrl+Shift+Up/Down (向日葵/SunloginClient maps
+             a Mac Cmd to Win Ctrl, so the same physical chord works over remote control).
+             Moves the selected sidebar feature one step, clamped to the list bounds. -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="Down" Invoked="OnSidebarNavigateNext" />
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="Up" Invoked="OnSidebarNavigatePrevious" />
+        </Grid.KeyboardAccelerators>
         <Grid.Resources>
         <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
         <vm:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
@@ -39,6 +47,10 @@
         <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
         <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
         <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
+        <!-- Soft Remote-Desktop accent fill for the selected connection-mode segment
+             (element-matches the Mac segmented control's selected pill =
+             accentColor.opacity(0.2)). Indigo RD-nav hue (#6E7BF2) at ~33% alpha. -->
+        <SolidColorBrush x:Key="SkyBridgeRemoteDesktopSoftBrush" Color="#556E7BF2" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -2096,8 +2108,35 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- ===================================================================
+                         Remote Desktop screen — recomposed into a two-pane layout that
+                         element-matches the Mac RemoteDesktopView (sessionSidebar +
+                         remoteWorkspaceContent).
+
+                         LEFT pane (~300px glass) = search field + 3-tab connection-mode
+                         segmented control (Auto / Near / Far) + Active Sessions list +
+                         Recent Connections section + bottom New Connection action.
+                         RIGHT pane = "Trusted Active Sessions" card + "Preview" card +
+                         Quality + control facts.
+
+                         GATE-CRITICAL ordering (verify-windows-ui-parity.ps1 L3628):
+                         Text="Remote Desktop"  ->  RemoteDesktopHeaderActions  ->
+                         RemoteDesktopActions  ->  Text="Active Sessions". The header,
+                         the header-actions ItemsControl, and the FIRST RemoteDesktopActions
+                         ItemsControl stay above the two-pane grid in exactly that order.
+
+                         BUTTON BUDGET (matrix L511 = 7): NO inline button element is added.
+                         The segmented control is non-interactive Borders; every clickable
+                         connect/refresh control routes through the shared
+                         WorkspaceActionButtonTemplate via RemoteDesktopActions /
+                         RemoteDesktopHeaderActions ItemsControls (buttons live in the
+                         DataTemplate, not inline here).
+                         =================================================================== -->
                     <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
+                            <!-- Header: title + status (left) and the Refresh-Sessions
+                                 header action (right). Mac toolbar new-connection menu +
+                                 refresh + gear collapse onto these data-driven actions. -->
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -2115,30 +2154,257 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
+                            <!-- The canonical Remote Desktop action row (Recommended /
+                                 Advanced Connect / Performance Overlay / Quality / Settings /
+                                 Full Screen / Disconnect). Kept here, directly under the
+                                 header, to preserve the gate-required action order. These ARE
+                                 the Mac "+ menu / refresh / gear / connect" actions. -->
                             <ItemsControl
                                 ItemsSource="{Binding RemoteDesktopActions}"
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
+                            <!-- Two-pane body: ~300px session sidebar (left) + workspace
+                                 content (right). -->
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="2*" />
+                                    <ColumnDefinition Width="300" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding RemoteDesktopSessions}" ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsRemoteDesktopSelected}" />
-                                </StackPanel>
+                                <!-- ===== LEFT PANE — session sidebar (Mac sessionSidebar) ===== -->
+                                <Border Grid.Column="0" Style="{StaticResource GlassCard}" VerticalAlignment="Stretch">
+                                    <StackPanel Spacing="12">
+                                        <!-- Search field (Mac searchBar): magnifier + plain
+                                             text field over a glass surface. Filters the
+                                             session rows by target name via RemoteDesktopSearchText. -->
+                                        <Border
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="10,2">
+                                            <Grid ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <FontIcon Glyph="&#xE721;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                                <TextBox
+                                                    Grid.Column="1"
+                                                    Text="{Binding RemoteDesktopSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                    PlaceholderText="Search sessions..."
+                                                    BorderThickness="0"
+                                                    Background="Transparent"
+                                                    IsEnabled="{Binding IsRemoteDesktopSelected}"
+                                                    VerticalAlignment="Center" />
+                                            </Grid>
+                                        </Border>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Quality" FontWeight="SemiBold" />
-                                    <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
-                                    <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                        <!-- Connection-mode segmented control (Mac
+                                             connectionModeSelector): a glass "track" holding 3
+                                             equal segments (Auto / Near / Far), each = icon over
+                                             label. Auto is the selected (soft-accent pill) default,
+                                             matching connectionMode = .auto on the Mac. These are
+                                             non-interactive display segments (no live Near/Far
+                                             command on Windows yet): they describe the available
+                                             modes without faking a transport. -->
+                                        <Border
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="4">
+                                            <Grid ColumnSpacing="4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <!-- Auto (selected) — E945 = Light(bulb), reads as
+                                                     "smart/auto" ~ Mac wand.and.stars. Valid Segoe
+                                                     Fluent Icons glyph. -->
+                                                <Border Grid.Column="0" CornerRadius="6" Padding="0,8" Background="{StaticResource SkyBridgeRemoteDesktopSoftBrush}">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE945;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Auto" FontSize="11" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <!-- Near — E701 = Wifi ~ SF wifi.circle.fill -->
+                                                <Border Grid.Column="1" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE701;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Near" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <!-- Far — E774 = Globe ~ SF globe -->
+                                                <Border Grid.Column="2" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE774;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Far" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- Active Sessions section (Mac sessionList "Active
+                                             Sessions" section). Bound to RemoteDesktopSessions
+                                             (gate L1119). The preview rows + their search-filtered
+                                             slice render here; the empty state shows when the
+                                             filtered count is 0. -->
+                                        <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
+                                        <ListView
+                                            ItemsSource="{Binding RemoteDesktopSessions}"
+                                            ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}"
+                                            MinHeight="118"
+                                            SelectionMode="None"
+                                            IsEnabled="{Binding IsRemoteDesktopSelected}"
+                                            Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                        <StackPanel
+                                            Spacing="6"
+                                            Padding="0,18"
+                                            HorizontalAlignment="Center"
+                                            Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                            <FontIcon Glyph="&#xE7F4;" FontSize="26" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="No active sessions" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Trusted sessions appear here once verified" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        </StackPanel>
+
+                                        <!-- Recent Connections section (Mac sessionList "Recent
+                                             Connections"). The preview rows carrying State="Recent"
+                                             already surface in the list above; this honest note
+                                             documents that recents reconnect only once a verified
+                                             peer key is provided (no fake reconnect entries). -->
+                                        <TextBlock Text="Recent Connections" FontWeight="SemiBold" />
+                                        <TextBlock
+                                            Text="Recent peers reconnect only after a verified peer key is provided."
+                                            FontSize="12"
+                                            TextWrapping="Wrap"
+                                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+
+                                        <!-- Bottom New Connection action (Mac bottomActionBar).
+                                             Reuses the data-driven RemoteDesktopActions row so no
+                                             inline button element is added; the Recommended/Advanced
+                                             connect actions live here for the sidebar footer. -->
+                                        <ItemsControl
+                                            ItemsSource="{Binding RemoteDesktopActions}"
+                                            ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                            ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- ===== RIGHT PANE — workspace content (Mac remoteWorkspaceContent) ===== -->
+                                <StackPanel Grid.Column="1" Spacing="16">
+                                    <!-- "Trusted Active Sessions" card (Mac trustedActiveSessionsPanel):
+                                         header + count/"No active session" trailing + descriptive
+                                         text + the two connect actions. -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Trusted Active Sessions" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                <!-- Trailing badge: shows "No active session" when
+                                                     empty (Mac trailing), session count otherwise. -->
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Text="No active session"
+                                                    FontSize="12"
+                                                    FontWeight="SemiBold"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                    Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}" />
+                                                <Border
+                                                    Grid.Column="1"
+                                                    Style="{StaticResource BadgeSuccess}"
+                                                    Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}">
+                                                    <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                                </Border>
+                                            </Grid>
+                                            <TextBlock
+                                                Text="Trusted peers will appear here once a verified remote session is established."
+                                                FontSize="13"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            <!-- The two connect actions (Recommended / Advanced) —
+                                                 reuses RemoteDesktopActions, no inline button element. -->
+                                            <ItemsControl
+                                                ItemsSource="{Binding RemoteDesktopActions}"
+                                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- "Preview" card (Mac previewPanel): header + Idle trailing +
+                                         big monitor glyph + "Select a session to start Remote
+                                         Desktop" + subtitle + the two actions. Honest idle state —
+                                         no live frame source until transport is wired. -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="14">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Preview" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                <TextBlock Grid.Column="1" Text="Idle" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            </Grid>
+                                            <!-- Idle empty-state surface (Mac emptyStateView over the
+                                                 black.opacity(0.22) backdrop). -->
+                                            <Border
+                                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                                CornerRadius="14"
+                                                MinHeight="320"
+                                                Padding="24">
+                                                <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="400">
+                                                    <FontIcon Glyph="&#xE7F4;" FontSize="56" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="Select a session to start Remote Desktop"
+                                                        FontSize="18"
+                                                        FontWeight="SemiBold"
+                                                        TextAlignment="Center"
+                                                        TextWrapping="Wrap"
+                                                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                        HorizontalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="Connect from Device Discovery for a one-tap session. Manual RDP/VNC/SSH is an advanced path."
+                                                        FontSize="13"
+                                                        TextAlignment="Center"
+                                                        TextWrapping="Wrap"
+                                                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                        HorizontalAlignment="Center" />
+                                                    <!-- The same two actions, large, in the idle
+                                                         preview (Mac controlSize(.large)) — reuses
+                                                         RemoteDesktopActions, no inline button element. -->
+                                                    <ItemsControl
+                                                        ItemsSource="{Binding RemoteDesktopActions}"
+                                                        ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                        ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
+                                                        HorizontalAlignment="Center" />
+                                                </StackPanel>
+                                            </Border>
+
+                                            <!-- Quality (Mac video-quality controls): bitrate +
+                                                 framerate profile pickers, sourced from the
+                                                 RemoteDesktopProfileCatalogClient. -->
+                                            <TextBlock Text="Quality" FontWeight="SemiBold" />
+                                            <Grid ColumnSpacing="10">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <ComboBox Grid.Column="0" ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                                <ComboBox Grid.Column="1" ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Control facts (transport / channel-map / encode plan). -->
+                                    <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                                 </StackPanel>
                             </Grid>
-
-                            <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 

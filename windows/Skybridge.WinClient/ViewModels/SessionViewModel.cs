@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Windows.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -114,6 +115,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarThemeStatus = "";
     private string _selectedBitrate = "";
     private string _selectedFramerate = "";
+    private string _remoteDesktopSearchText = "";
+    // Unfiltered master snapshot of the Remote Desktop session rows. The read-only
+    // snapshot applier (single writer) replaces RemoteDesktopSessions; we mirror that
+    // here so the left-pane search box can re-project the visible rows without inventing
+    // any data. Mirrors the SettingsTabs/SettingsDetails CollectionChanged re-derive
+    // pattern used a few lines below in the ctor.
+    private readonly List<RemoteDesktopSessionItemView> _remoteDesktopSessionMaster = new();
+    // Re-entrancy guard: true while ApplyRemoteDesktopSessionFilter is mutating
+    // RemoteDesktopSessions, so the CollectionChanged mirror does not treat the
+    // filter's own Clear/Add churn as a fresh snapshot.
+    private bool _isFilteringRemoteDesktopSessions;
+    // Coalesce guard: at most one deferred re-filter is queued on the UI sync context per
+    // applier burst, so a multi-event Clear+Add snapshot schedules a single re-filter.
+    private bool _remoteDesktopFilterReapplyQueued;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private SettingsTabItemView? _selectedSettingsTab;
@@ -493,6 +508,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // keep a valid left-pane selection and re-derive the right-pane (selected-tab) slice.
         SettingsTabs.CollectionChanged += OnSettingsTabsChanged;
         SettingsDetails.CollectionChanged += OnSettingsDetailsChanged;
+        // Drive the Remote Desktop left-pane search: when the read-only snapshot applier
+        // replaces RemoteDesktopSessions, re-capture the unfiltered master and re-apply the
+        // current search text so the visible rows stay in sync. Mirrors the Settings hooks
+        // directly above. The filter is the only re-projector of RemoteDesktopSessions; a
+        // re-entrancy guard keeps it from reacting to its own Clear/Add churn.
+        RemoteDesktopSessions.CollectionChanged += OnRemoteDesktopSessionsChanged;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
         var workspaceShellStateSource = new WorkspaceShellStateSource(this);
@@ -626,6 +647,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // (routed through the action catalog / command bindings); read-only snapshot — no
         // preference, file, permission, or runtime setting is touched.
         RefreshSettingsCommand.Execute(null);
+        // Kick the first Remote Desktop read-only snapshot on startup so the Remote Desktop
+        // two-pane shows its session preview rows + control facts immediately instead of an
+        // empty Active Sessions list and empty facts (the screen was previously empty until a
+        // manual "Refresh Sessions"). Mirrors the Weather/SystemMonitor/FileTransfer/Settings
+        // kicks above. Uses the EXISTING RefreshRemoteDesktopCommand (routed through the
+        // command bindings); fully read-only/fail-closed — no live transport is opened, no
+        // session is started. The rows it loads are honest previews, not live sessions.
+        RefreshRemoteDesktopCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -1217,6 +1246,88 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _remoteDesktopProfileSelectionCoordinator.ApplyFramerateSelection(value);
             }
         }
+    }
+
+    /// <summary>
+    /// Free-text filter for the Remote Desktop left-pane session list, element-matching
+    /// the Mac RemoteDesktopView search field (filters the active/recent session rows by
+    /// target name). Purely a view-state filter over the existing
+    /// <see cref="RemoteDesktopSessions"/> rows projected by the read-only snapshot — it
+    /// never fabricates rows and never reaches the engine.
+    /// </summary>
+    public string RemoteDesktopSearchText
+    {
+        get => _remoteDesktopSearchText;
+        set
+        {
+            if (SetField(ref _remoteDesktopSearchText, value ?? ""))
+            {
+                ApplyRemoteDesktopSessionFilter();
+            }
+        }
+    }
+
+    // Mirror the unfiltered master from the snapshot applier's replace. The applier does a
+    // Clear() + per-item Add() burst (WorkspaceCollectionProjector.Replace), so this fires
+    // several times per snapshot; each fire just re-captures the current rows, leaving the
+    // master complete after the final Add. We deliberately do NOT mutate RemoteDesktopSessions
+    // from inside this handler (the applier is still appending to it), which would corrupt the
+    // list / re-enter. Instead, when a search is active we re-apply the filter on the captured
+    // UI synchronization context — i.e. AFTER the applier's synchronous burst settles — matching
+    // the codebase's captured-context style (no DispatcherQueue). Changes the filter itself
+    // makes are skipped via the guard.
+    private void OnRemoteDesktopSessionsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (_isFilteringRemoteDesktopSessions)
+        {
+            return;
+        }
+
+        _remoteDesktopSessionMaster.Clear();
+        _remoteDesktopSessionMaster.AddRange(RemoteDesktopSessions);
+
+        if (_remoteDesktopSearchText.Length > 0 && !_remoteDesktopFilterReapplyQueued)
+        {
+            // Defer the re-filter until the current synchronous Clear+Add burst completes so we
+            // never mutate the collection the applier is mid-way through populating.
+            var context = SynchronizationContext.Current;
+            if (context is not null)
+            {
+                _remoteDesktopFilterReapplyQueued = true;
+                context.Post(_ =>
+                {
+                    _remoteDesktopFilterReapplyQueued = false;
+                    ApplyRemoteDesktopSessionFilter();
+                }, null);
+            }
+        }
+    }
+
+    // Re-project RemoteDesktopSessions from the unfiltered master, keeping only rows whose
+    // target name contains the search text (case-insensitive). When the search is empty the
+    // full master is restored. This is the only re-projector of RemoteDesktopSessions outside
+    // the snapshot applier; the guard prevents the CollectionChanged mirror from looping.
+    private void ApplyRemoteDesktopSessionFilter()
+    {
+        _isFilteringRemoteDesktopSessions = true;
+        try
+        {
+            RemoteDesktopSessions.Clear();
+            foreach (var session in _remoteDesktopSessionMaster)
+            {
+                if (_remoteDesktopSearchText.Length == 0 ||
+                    (session.TargetName?.Contains(_remoteDesktopSearchText, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    RemoteDesktopSessions.Add(session);
+                }
+            }
+        }
+        finally
+        {
+            _isFilteringRemoteDesktopSessions = false;
+        }
+
+        _workspaceCountNotifier.RemoteDesktopSessionsChanged();
     }
 
     public ICommand ConnectCommand { get; }
