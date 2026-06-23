@@ -27,7 +27,7 @@ namespace Skybridge.WinClient.ViewModels;
 //  UI never pretends an inert control works.
 // =====================================================================================
 
-public enum SettingsControlKind
+public enum SettableControlKind
 {
     Toggle,
     Dropdown,
@@ -48,7 +48,7 @@ public sealed class SettingsControlViewModel : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public SettingsControlViewModel(
-        SettingsControlKind kind,
+        SettableControlKind kind,
         string label,
         object? value = null,
         IEnumerable<string>? options = null,
@@ -72,7 +72,7 @@ public sealed class SettingsControlViewModel : INotifyPropertyChanged
     }
 
     /// <summary>What this row IS — drives the DataTemplate selection in the card.</summary>
-    public SettingsControlKind Kind { get; }
+    public SettableControlKind Kind { get; }
 
     /// <summary>The control's display label (e.g. "启动时自动扫描设备").</summary>
     public string Label
@@ -122,17 +122,17 @@ public sealed class SettingsControlViewModel : INotifyPropertyChanged
     }
 
     // ---- Kind shortcuts for XAML visibility binding (no converter needed) ------------
-    public bool IsToggle => Kind == SettingsControlKind.Toggle;
-    public bool IsDropdown => Kind == SettingsControlKind.Dropdown;
-    public bool IsSlider => Kind == SettingsControlKind.Slider;
-    public bool IsTextField => Kind == SettingsControlKind.TextField;
-    public bool IsStatus => Kind == SettingsControlKind.Status;
-    public bool IsLocked => Kind == SettingsControlKind.Locked;
-    public bool IsAppleOnly => Kind == SettingsControlKind.AppleOnly;
+    public bool IsToggle => Kind == SettableControlKind.Toggle;
+    public bool IsDropdown => Kind == SettableControlKind.Dropdown;
+    public bool IsSlider => Kind == SettableControlKind.Slider;
+    public bool IsTextField => Kind == SettableControlKind.TextField;
+    public bool IsStatus => Kind == SettableControlKind.Status;
+    public bool IsLocked => Kind == SettableControlKind.Locked;
+    public bool IsAppleOnly => Kind == SettableControlKind.AppleOnly;
 
     /// <summary>True for the read-only kinds (Status/Locked/AppleOnly) — never settable.</summary>
     public bool IsReadOnlyRow =>
-        Kind is SettingsControlKind.Status or SettingsControlKind.Locked or SettingsControlKind.AppleOnly;
+        Kind is SettableControlKind.Status or SettableControlKind.Locked or SettableControlKind.AppleOnly;
 
     /// <summary>Whether a caption should render (non-empty).</summary>
     public bool HasCaption => !string.IsNullOrWhiteSpace(_caption);
