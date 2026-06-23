@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  UserProfileOverlay — the Mac "用户资料" modal as an in-window UserControl layer. Hosted as a
+  full-bleed Grid in MainWindow, its Visibility bound to ViewModel.ShowProfileOverlay. Like
+  the AuthOverlay it is a plain panel (no ContentDialog), so the whole crash class is gone.
+
+  Element parity with the Mac UserProfileOverlay.swift:
+    • dimmed frosted backdrop (tap-outside closes)
+    • centered ~420-wide glass card: title "用户资料" + close X
+    • 120px circular avatar (real Image from AvatarUrl, glyph fallback)
+    • info card with 4 rows: 星云ID (+ copy), 昵称 (+ 编辑), 邮箱 (未绑定 + 绑定),
+      手机号 (未绑定 + 绑定)
+    • a full-width 编辑信息 action button
+
+  All buttons live HERE (a UserControl), so MainWindow.xaml's gated <Button> count is unchanged.
+-->
+<UserControl
+    x:Class="Skybridge.WinClient.UserProfileOverlay"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Skybridge.WinClient.ViewModels"
+    mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <vm:AvatarUrlToImageSourceConverter x:Key="AvatarUrlImageSourceConverter" />
+        <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+
+        <!-- Inline link button (复制 / 编辑 / 绑定): flat, accent caption. -->
+        <Style x:Key="ProfileLinkButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="4,2" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource SkyBridgeAccentHoverBrush}" />
+        </Style>
+
+        <!-- Value pill: read-only value chip (quaternary fill, r8). -->
+        <Style x:Key="ProfileValuePill" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="12,10" />
+        </Style>
+
+        <!-- Copy icon button (doc.on.doc): 32x32 quaternary chip, accent glyph. -->
+        <Style x:Key="ProfileCopyButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Width" Value="32" />
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+    </UserControl.Resources>
+
+    <!-- Backdrop: dimmed frosted scrim. Tapping it closes the overlay (tap-outside). -->
+    <Grid x:Name="Backdrop" Tapped="OnBackdropTapped" Background="#B3000000">
+
+        <!-- Centered card. Its own Tapped is marked handled so a tap on the card does NOT
+             bubble to the backdrop and close the overlay. -->
+        <Border
+            Width="420"
+            MaxHeight="640"
+            VerticalAlignment="Center"
+            HorizontalAlignment="Center"
+            Tapped="OnCardTapped"
+            Style="{StaticResource GlassPanel}"
+            CornerRadius="20"
+            Padding="0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- ===================== TOP TOOLBAR (title + close X) ===================== -->
+                <Grid Grid.Row="0" Padding="24,20">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        Text="用户资料"
+                        FontSize="20"
+                        FontWeight="SemiBold"
+                        VerticalAlignment="Center"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <Button
+                        Grid.Column="1"
+                        Click="OnClose"
+                        Style="{StaticResource ProfileLinkButtonStyle}"
+                        ToolTipService.ToolTip="关闭">
+                        <FontIcon Glyph="&#xEF2C;" FontSize="20" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </Button>
+                </Grid>
+
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="24,0,24,24">
+                    <StackPanel Spacing="20">
+
+                        <!-- ===================== AVATAR ===================== -->
+                        <Grid Width="120" Height="120" HorizontalAlignment="Center" Margin="0,8,0,0">
+                            <!-- Gradient + initials glyph fallback (shows when AvatarUrl is empty) -->
+                            <Border Width="120" Height="120" CornerRadius="60">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                        <GradientStop Color="#FF3072EF" Offset="0.0" />
+                                        <GradientStop Color="#FFB07CF5" Offset="1.0" />
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <FontIcon Glyph="&#xE77B;" FontSize="46" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <!-- Real avatar paints on top only when AvatarUrl resolves (converter
+                                 returns null otherwise, so the glyph shows through). -->
+                            <Ellipse Width="120" Height="120">
+                                <Ellipse.Fill>
+                                    <ImageBrush
+                                        Stretch="UniformToFill"
+                                        ImageSource="{Binding AvatarUrl, Converter={StaticResource AvatarUrlImageSourceConverter}}" />
+                                </Ellipse.Fill>
+                            </Ellipse>
+                            <!-- Subtle ring -->
+                            <Ellipse Width="120" Height="120" Stroke="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" StrokeThickness="3" />
+                        </Grid>
+
+                        <!-- Display name (centered, under the avatar) -->
+                        <TextBlock
+                            Text="{Binding DisplayName}"
+                            FontSize="18"
+                            FontWeight="SemiBold"
+                            TextAlignment="Center"
+                            HorizontalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+
+                        <!-- ===================== INFO CARD (4 rows) ===================== -->
+                        <Border Style="{StaticResource GlassCard}" CornerRadius="16" Padding="20">
+                            <StackPanel Spacing="20">
+
+                                <!-- Row 1 — 星云ID (read-only, copyable) -->
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="星云ID" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Style="{StaticResource ProfileValuePill}">
+                                            <TextBlock Text="{Binding NebulaId}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        </Border>
+                                        <Button
+                                            Grid.Column="1"
+                                            Click="OnCopyNebulaId"
+                                            Style="{StaticResource ProfileCopyButtonStyle}"
+                                            ToolTipService.ToolTip="复制星云ID">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="15" Foreground="{StaticResource SkyBridgeAccentHoverBrush}" />
+                                        </Button>
+                                    </Grid>
+                                </StackPanel>
+
+                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+
+                                <!-- Row 2 — 昵称 (display name; 编辑 hint for now) -->
+                                <StackPanel Spacing="8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="昵称" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <Button
+                                            Grid.Column="1"
+                                            Click="OnEditHint"
+                                            Style="{StaticResource ProfileLinkButtonStyle}"
+                                            Content="编辑" />
+                                    </Grid>
+                                    <Border Style="{StaticResource ProfileValuePill}">
+                                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                    </Border>
+                                </StackPanel>
+
+                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+
+                                <!-- Row 3 — 邮箱 (value + copy, or 未绑定 + 绑定) -->
+                                <StackPanel Spacing="8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="邮箱" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <!-- 绑定 (when unbound) -->
+                                        <Button
+                                            Grid.Column="1"
+                                            Click="OnBindHint"
+                                            Visibility="{Binding EmailUnbound, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource ProfileLinkButtonStyle}"
+                                            Content="绑定" />
+                                    </Grid>
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Style="{StaticResource ProfileValuePill}">
+                                            <TextBlock Text="{Binding EmailDisplay}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        </Border>
+                                        <!-- copy (only when a real email is bound) -->
+                                        <Button
+                                            Grid.Column="1"
+                                            Click="OnCopyEmail"
+                                            Visibility="{Binding HasEmail, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource ProfileCopyButtonStyle}"
+                                            ToolTipService.ToolTip="复制邮箱">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="15" Foreground="{StaticResource SkyBridgeAccentHoverBrush}" />
+                                        </Button>
+                                    </Grid>
+                                </StackPanel>
+
+                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+
+                                <!-- Row 4 — 手机号 (value, or 未绑定 + 绑定) -->
+                                <StackPanel Spacing="8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="手机号" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <Button
+                                            Grid.Column="1"
+                                            Click="OnBindHint"
+                                            Visibility="{Binding PhoneNumberUnbound, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource ProfileLinkButtonStyle}"
+                                            Content="绑定" />
+                                    </Grid>
+                                    <Border Style="{StaticResource ProfileValuePill}">
+                                        <TextBlock Text="{Binding PhoneNumberDisplay}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                    </Border>
+                                </StackPanel>
+
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Inline hint for the not-yet-wired edit/bind actions -->
+                        <TextBlock
+                            x:Name="ActionHint"
+                            Visibility="Collapsed"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            TextAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+
+                        <!-- ===================== 编辑信息 action button ===================== -->
+                        <Button
+                            Click="OnEditHint"
+                            HorizontalAlignment="Stretch"
+                            Style="{StaticResource PrimaryButton}"
+                            Height="44"
+                            MinHeight="44">
+                            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE70F;" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                <TextBlock Text="编辑信息" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            </StackPanel>
+                        </Button>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

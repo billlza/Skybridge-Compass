@@ -60,6 +60,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private readonly WeatherStateCoordinator _weatherStateCoordinator;
+    // Owns the account identity lifecycle + its own Supabase auth client / DPAPI store and
+    // the sign-out command (the AsyncRelayCommand construction lives in the coordinator, not
+    // here). Self-provisioned in the ctor; never routed through the DI composition root.
+    private readonly AccountSessionCoordinator _accountSessionCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
@@ -105,6 +109,25 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _weatherSource = "";
     private string _weatherUpdatedRelative = "";
     private string _weatherErrorMessage = "";
+    // Account block identity (sidebar PaneFooter). Driven by the AccountSessionCoordinator,
+    // which self-provisions its own Supabase auth client + DPAPI session store (it is NOT
+    // injected through SessionViewModelDependencies — same escape hatch as the weather seam).
+    private string _displayName = "Sign in";
+    private string _nebulaId = "";
+    private string _avatarUrl = "";
+    private string _email = "";
+    private string _phoneNumber = "";
+    private bool _isSignedIn;
+    // In-window account overlays (replace the crashing ContentDialog). AuthOverlay shows the
+    // full Mac login when signed-OUT; UserProfileOverlay shows the 用户资料 modal when
+    // signed-IN. Both are plain Visibility-bound Grid layers in MainWindow — no XamlRoot,
+    // no single-dialog-at-a-time rule, no async-void ShowAsync teardown.
+    private bool _showAuthOverlay;
+    private bool _showProfileOverlay;
+    // AuthOverlay email-form state: the inline error string + a busy flag while the real
+    // Supabase sign-in is in flight (drives the button spinner / disabled state).
+    private string _authErrorMessage = "";
+    private bool _isAuthBusy;
     private int _onlineDeviceCount;
     private int _activeSessionCount;
     private int _transferTaskCount;
@@ -388,6 +411,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => WeatherErrorMessage = value,
             value => StatusMessage = value);
         RefreshWeatherCommand = _weatherStateCoordinator.RefreshCommand;
+        // Self-provision the account coordinator (it owns its Supabase auth client + DPAPI
+        // session store internally) and forward its identity into the SetField-backed props.
+        // The sign-out command + auth client come FROM the coordinator (the command-ownership
+        // and DI-root escape hatches) — the VM only forwards them out for binding/dialog use.
+        _accountSessionCoordinator = new AccountSessionCoordinator();
+        _accountSessionCoordinator.IdentityChanged += OnAccountIdentityChanged;
+        SignOutCommand = _accountSessionCoordinator.SignOutCommand;
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
         DiscoveredPeers = collections.DiscoveredPeers;
@@ -817,6 +847,219 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         get => _weatherErrorMessage;
         private set => SetField(ref _weatherErrorMessage, value);
+    }
+
+    // ---- Account block identity (sidebar PaneFooter) --------------------------------
+    // These four are forwarded from the AccountSessionCoordinator's IdentityChanged event.
+    // When signed out, DisplayName is "Sign in" (the account block's call-to-action).
+
+    public string DisplayName
+    {
+        get => _displayName;
+        private set => SetField(ref _displayName, value);
+    }
+
+    public string NebulaId
+    {
+        get => _nebulaId;
+        private set => SetField(ref _nebulaId, value);
+    }
+
+    public string AvatarUrl
+    {
+        get => _avatarUrl;
+        private set => SetField(ref _avatarUrl, value);
+    }
+
+    // 邮箱 / 手机号 for the user-profile overlay rows. Empty (→ "未绑定" in the UI) when the
+    // account has not bound them — never fabricated. Forwarded from the coordinator identity.
+    public string Email
+    {
+        get => _email;
+        private set
+        {
+            if (SetField(ref _email, value))
+            {
+                OnPropertyChanged(nameof(HasEmail));
+                OnPropertyChanged(nameof(EmailUnbound));
+                OnPropertyChanged(nameof(EmailDisplay));
+            }
+        }
+    }
+
+    public string PhoneNumber
+    {
+        get => _phoneNumber;
+        private set
+        {
+            if (SetField(ref _phoneNumber, value))
+            {
+                OnPropertyChanged(nameof(HasPhoneNumber));
+                OnPropertyChanged(nameof(PhoneNumberUnbound));
+                OnPropertyChanged(nameof(PhoneNumberDisplay));
+            }
+        }
+    }
+
+    // Bound by the profile overlay rows: a real value when bound, else the Mac "未绑定" text.
+    // The *Unbound flags exist so the 绑定 buttons' Visibility can use the plain
+    // BooleanToVisibilityConverter (which ignores its parameter) without inverting in XAML.
+    public bool HasEmail => !string.IsNullOrWhiteSpace(_email);
+
+    public bool EmailUnbound => !HasEmail;
+
+    public string EmailDisplay => HasEmail ? _email : "未绑定";
+
+    public bool HasPhoneNumber => !string.IsNullOrWhiteSpace(_phoneNumber);
+
+    public bool PhoneNumberUnbound => !HasPhoneNumber;
+
+    public string PhoneNumberDisplay => HasPhoneNumber ? _phoneNumber : "未绑定";
+
+    public bool IsSignedIn
+    {
+        get => _isSignedIn;
+        private set => SetField(ref _isSignedIn, value);
+    }
+
+    // ---- In-window account overlays (replace the crashing ContentDialog) ------------
+
+    // True while the full-screen Mac login overlay is shown (signed-OUT account-block tap).
+    // Bound to the AuthOverlay layer's Visibility in MainWindow via BoolToVisibilityConverter.
+    public bool ShowAuthOverlay
+    {
+        get => _showAuthOverlay;
+        set => SetField(ref _showAuthOverlay, value);
+    }
+
+    // True while the 用户资料 overlay is shown (signed-IN account-block tap). Bound to the
+    // UserProfileOverlay layer's Visibility.
+    public bool ShowProfileOverlay
+    {
+        get => _showProfileOverlay;
+        set => SetField(ref _showProfileOverlay, value);
+    }
+
+    // AuthOverlay email-form inline error (empty = hidden) + busy flag (sign-in in flight).
+    public string AuthErrorMessage
+    {
+        get => _authErrorMessage;
+        private set
+        {
+            if (SetField(ref _authErrorMessage, value))
+            {
+                OnPropertyChanged(nameof(HasAuthError));
+            }
+        }
+    }
+
+    public bool HasAuthError => !string.IsNullOrWhiteSpace(_authErrorMessage);
+
+    public bool IsAuthBusy
+    {
+        get => _isAuthBusy;
+        private set => SetField(ref _isAuthBusy, value);
+    }
+
+    // The account block was Tapped: route to the right overlay by signed-in state. Called
+    // from MainWindow's (now trivial, non-throwing) Tapped handler.
+    public void ToggleAccountOverlay()
+    {
+        if (IsSignedIn)
+        {
+            ShowProfileOverlay = true;
+        }
+        else
+        {
+            AuthErrorMessage = string.Empty;
+            ShowAuthOverlay = true;
+        }
+    }
+
+    public void HideAuthOverlay()
+    {
+        ShowAuthOverlay = false;
+        AuthErrorMessage = string.Empty;
+    }
+
+    public void HideProfileOverlay() => ShowProfileOverlay = false;
+
+    // Guest mode (游客模式体验): the Mac activates a local, no-network guest session; on
+    // Windows the shell already runs fully signed-out, so "guest" = just dismiss the login
+    // and browse the shell. We do NOT fabricate a signed-in identity.
+    public void EnterGuestMode() => HideAuthOverlay();
+
+    // The in-window AuthOverlay's 邮箱登录 button calls this. Runs the REAL Supabase
+    // email/password sign-in via the coordinator (which applies + persists on success). On
+    // success: hide the overlay (IsSignedIn flips via the identity event). On failure: keep
+    // the overlay open and surface the inline error. Never throws into the UI.
+    public async Task SignInWithEmailAsync(string email, string password)
+    {
+        if (IsAuthBusy)
+        {
+            return;
+        }
+
+        AuthErrorMessage = string.Empty;
+        IsAuthBusy = true;
+        try
+        {
+            var result = await _accountSessionCoordinator
+                .SignInWithEmailAsync(email, password);
+
+            if (result.Success)
+            {
+                HideAuthOverlay();
+            }
+            else
+            {
+                AuthErrorMessage = result.ErrorMessage;
+            }
+        }
+        finally
+        {
+            IsAuthBusy = false;
+        }
+    }
+
+    // Sign-out command — OWNED by the coordinator (the AsyncRelayCommand is constructed there,
+    // never in this VM). The account block's sign-out confirm dialog invokes this.
+    public ICommand SignOutCommand { get; }
+
+    // The Supabase auth client the account seam signs in with — forwarded from the
+    // coordinator so any external caller and the coordinator share one client/seam. (The
+    // in-window AuthOverlay now drives sign-in via SignInWithEmailAsync, not this directly.)
+    public ISupabaseAuthClient AuthClient => _accountSessionCoordinator.AuthClient;
+
+    // Applies an externally-obtained token (e.g. a future OAuth callback) — persists + sets
+    // identity. The in-window email login uses SignInWithEmailAsync instead.
+    public Task ApplyAuthAsync(AuthToken token) => _accountSessionCoordinator.ApplyAuthAsync(token);
+
+    // Fired on launch (on the dispatcher) to restore a remembered session and show the user.
+    public Task HydrateFromStoreAsync() => _accountSessionCoordinator.HydrateFromStoreAsync();
+
+    private void OnAccountIdentityChanged(object? sender, AccountIdentity identity)
+    {
+        // Continuations resume on the captured UI context (callers await on the UI thread),
+        // so these SetField setters run on the UI thread — no DispatcherQueue needed, matching
+        // the house async-refresh idiom (see WeatherStateCoordinator).
+        DisplayName = identity.IsSignedIn && !string.IsNullOrWhiteSpace(identity.DisplayName)
+            ? identity.DisplayName
+            : "Sign in";
+        NebulaId = identity.NebulaId;
+        AvatarUrl = identity.AvatarUrl;
+        Email = identity.Email;
+        PhoneNumber = identity.PhoneNumber;
+        IsSignedIn = identity.IsSignedIn;
+
+        // If a sign-out happened while the profile overlay was open, close it (nothing to
+        // show signed-out). Sign-in is what closes the auth overlay — handled in the
+        // SignInWithEmailAsync success path so a hydrate-driven identity change doesn't
+        // surprise a user who is mid-typing in the (already-hidden) login.
+        if (!identity.IsSignedIn)
+        {
+            ShowProfileOverlay = false;
+        }
     }
 
     public int OnlineDeviceCount

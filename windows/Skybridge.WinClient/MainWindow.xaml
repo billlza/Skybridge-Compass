@@ -5,6 +5,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:Skybridge.WinClient.ViewModels"
+    xmlns:local="using:Skybridge.WinClient"
     mc:Ignorable="d">
     <Grid
         x:Name="RootShell"
@@ -47,6 +48,7 @@
         <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
         <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
         <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
+        <vm:AvatarUrlToImageSourceConverter x:Key="AvatarUrlImageSourceConverter" />
         <!-- Soft Remote-Desktop accent fill for the selected connection-mode segment
              (element-matches the Mac segmented control's selected pill =
              accentColor.opacity(0.2)). Indigo RD-nav hue (#6E7BF2) at ~33% alpha. -->
@@ -1137,9 +1139,16 @@
             <NavigationView.PaneFooter>
                 <StackPanel Padding="16,8,16,16" Spacing="12">
                     <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
-                    <!-- Account block (Mac account footer): avatar + session label +
-                         live ConnectionStatus + chevron + gear. Display-only chrome. -->
+                    <!-- Account block (Mac account footer): REAL signed-in user. The avatar
+                         + DisplayName + NebulaId bind to the live Supabase identity the
+                         AccountSessionCoordinator resolves; the whole Border is Tapped to
+                         open the in-window AuthOverlay (signed out) or the UserProfileOverlay
+                         (signed in) — the crashing ContentDialog is gone. Still pure Border /
+                         Grid / Ellipse / FontIcon / TextBlock chrome — the Tapped handler is
+                         the trigger, so no Button element is added. -->
                     <Border
+                        x:Name="AccountBlock"
+                        Tapped="OnAccountBlockTapped"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                         BorderThickness="1"
@@ -1152,14 +1161,27 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <!-- Circular avatar (~36px) with a person glyph -->
-                            <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center">
-                                <FontIcon Glyph="&#xE77B;" FontSize="18" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                            </Border>
-                            <!-- Session label over the live connection status -->
+                            <!-- Circular avatar (~36px): the accent-glyph fallback (person
+                                 glyph) sits underneath; the real avatar Ellipse paints on top
+                                 only when AvatarUrl resolves to a valid http(s) image (the
+                                 converter returns null otherwise, so the Ellipse's ImageBrush
+                                 has no source and the glyph shows through). -->
+                            <Grid Width="36" Height="36" VerticalAlignment="Center">
+                                <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource SkyBridgeAccentBrush}">
+                                    <FontIcon Glyph="&#xE77B;" FontSize="18" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <Ellipse Width="36" Height="36">
+                                    <Ellipse.Fill>
+                                        <ImageBrush
+                                            Stretch="UniformToFill"
+                                            ImageSource="{Binding AvatarUrl, Converter={StaticResource AvatarUrlImageSourceConverter}}" />
+                                    </Ellipse.Fill>
+                                </Ellipse>
+                            </Grid>
+                            <!-- DisplayName ("Sign in" when signed out) over the NEBULA id -->
                             <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                                <TextBlock Text="Local Session" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                                <TextBlock Text="{Binding ConnectionStatus}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                <TextBlock Text="{Binding DisplayName}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                <TextBlock Text="{Binding NebulaId}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                             </StackPanel>
                             <!-- Chevron affordance (decorative) -->
                             <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
@@ -2668,5 +2690,31 @@
             </ScrollViewer>
         </Grid>
         </NavigationView>
+
+        <!-- ===================================================================
+             Account overlays — full-bleed layers over the whole shell (both
+             sidebar + content columns), on top of the NavigationView (later in
+             markup = higher z-order). These REPLACE the crashing SignInDialog /
+             sign-out ContentDialog: each is a UserControl in the window's visual
+             tree, so there is no XamlRoot, no single-dialog-at-a-time rule, and
+             no async-void ShowAsync teardown. Visibility is bound to the VM
+             flags (set true on the account-block Tapped handler). The
+             UserControls carry ALL their own button elements, so the gated
+             MainWindow.xaml button-element count is unchanged.
+
+               • AuthOverlay         — visible when signed-OUT + ShowAuthOverlay
+               • UserProfileOverlay  — visible when signed-IN  + ShowProfileOverlay
+             =================================================================== -->
+        <local:AuthOverlay
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
+            DataContext="{Binding}"
+            Visibility="{Binding ShowAuthOverlay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+        <local:UserProfileOverlay
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
+            DataContext="{Binding}"
+            Visibility="{Binding ShowProfileOverlay, Converter={StaticResource BoolToVisibilityConverter}}" />
     </Grid>
 </Window>
