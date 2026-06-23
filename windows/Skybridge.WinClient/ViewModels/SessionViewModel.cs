@@ -795,10 +795,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // shows its 8 tabs + grouped section cards immediately instead of an empty screen
         // (the screen was previously empty until a manual Refresh Status). The
         // CollectionChanged hooks above auto-select the first tab once the tabs land, so the
-        // right pane is populated without any user interaction. Uses the EXISTING command
-        // (routed through the action catalog / command bindings); read-only snapshot — no
-        // preference, file, permission, or runtime setting is touched.
-        RefreshSettingsCommand.Execute(null);
+        // right pane is populated without any user interaction.
+        //
+        // IMPORTANT: we call the refresh ACTION directly, NOT RefreshSettingsCommand. That
+        // command's CanExecute (CanRefreshSettings → CanUseSelectedWorkspaceFeature) is gated
+        // on the Settings feature being the *currently selected* one — which is false at
+        // startup (Dashboard is the default feature). So RefreshSettingsCommand.Execute(null)
+        // here was silently swallowed (CanExecute=false) and the tabs NEVER landed; navigating
+        // to Settings later only re-raises selection notifications (RefreshSelectedFeatureState),
+        // it does NOT re-pull a snapshot — so the page stayed permanently empty until the user
+        // manually clicked the header Refresh. RefreshSettingsActionSnapshotAsync is the
+        // un-gated direct await+apply path (no busy-coordinator, no feature gate); it fills
+        // SettingsTabs/Actions/Details from the static read-only snapshot regardless of which
+        // feature is selected. Read-only snapshot — no preference, file, permission, or runtime
+        // setting is touched.
+        _ = _readOnlyWorkspaceRefreshActions.RefreshSettingsActionSnapshotAsync();
         // Kick the first Remote Desktop read-only snapshot on startup so the Remote Desktop
         // two-pane shows its session preview rows + control facts immediately instead of an
         // empty Active Sessions list and empty facts (the screen was previously empty until a
