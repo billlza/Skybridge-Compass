@@ -124,8 +124,8 @@ internal interface IClipboardSessionKeyProvider
 ///
 /// Field roles in the HKDF (see <see cref="ClipboardKeyDerivation"/>):
 ///   * <see cref="SharedPairingSecret"/> — the HKDF input keying material (IKM): the
-///     shared pairing/connection secret both peers possess (the connection code, or
-///     a stronger shared secret once one is cross-platform-available).
+///     shared pairing/connection secret both peers possess. This must be non-public
+///     secret material, not the public pairing envelope or peer public key.
 ///   * <see cref="SessionId"/> — the HKDF salt: a per-session, both-sides-observable
 ///     identifier (the WebRTC proof's transportSecretFingerprintHex), so a NEW
 ///     session with the SAME pairing secret still derives DISTINCT key material.

@@ -12,17 +12,17 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-thiserror = "1.0"
+thiserror = "2.0"
 async-trait = "0.1"
-tokio = { version = "1.40", features = ["macros", "rt", "time"] }
+tokio = { version = "1.52", features = ["macros", "rt", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 p256 = { version = "0.13", features = ["ecdh"] }
 rand_core = "0.6"
 aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
+hkdf = "0.13"
+sha2 = "0.11"
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 # Post-quantum cryptography (pure Rust, no C/liboqs — keeps the CI hermetic/offline).
 # ML-KEM-768 (FIPS 203) for the pure-PQC suite, X-Wing (X25519+ML-KEM-768 IETF hybrid)
 # for the preferred hybrid suite, ML-DSA-65 (FIPS 204) for PQC handshake signatures.

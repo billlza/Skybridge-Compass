@@ -236,6 +236,7 @@ internal static class Program
         var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
         var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
         var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var ipcToken = opts.GetValueOrDefault("ipc-token", "");
         var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
 
         Console.WriteLine("[session-offer] creating peer connection...");
@@ -264,7 +265,7 @@ internal static class Program
         if (dc.readyState != RTCDataChannelState.open)
             return Fail("session-offer: DataChannel did not open");
 
-        return await PumpUntilDoneAsync(dc, ipcPort, portOut, holdSeconds, "session-offer");
+        return await PumpUntilDoneAsync(dc, ipcPort, portOut, holdSeconds, "session-offer", ipcToken);
     }
 
     // ---------------------------------------------------------- session-answer
@@ -278,6 +279,7 @@ internal static class Program
         var answerOut = opts.GetValueOrDefault("answer-out", "answer.json");
         var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
         var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var ipcToken = opts.GetValueOrDefault("ipc-token", "");
         var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
 
         Console.WriteLine($"[session-answer] waiting for offer at {offerIn} ...");
@@ -310,7 +312,7 @@ internal static class Program
         if (channel.readyState != RTCDataChannelState.open)
             return Fail("session-answer: DataChannel did not open");
 
-        return await PumpUntilDoneAsync(channel, ipcPort, portOut, holdSeconds, "session-answer");
+        return await PumpUntilDoneAsync(channel, ipcPort, portOut, holdSeconds, "session-answer", ipcToken);
     }
 
     // Shared session tail: write the bound IPC port (so the launcher can connect
@@ -318,7 +320,7 @@ internal static class Program
     // DataChannel/app close or after --hold-seconds (if > 0). hold-seconds<=0
     // means run until the channel/app closes (production behavior).
     private static async Task<int> PumpUntilDoneAsync(
-        RTCDataChannel dc, int ipcPort, string portOutPath, int holdSeconds, string tag)
+        RTCDataChannel dc, int ipcPort, string portOutPath, int holdSeconds, string tag, string? ipcToken)
     {
         using var cts = new CancellationTokenSource();
         if (holdSeconds > 0) cts.CancelAfter(TimeSpan.FromSeconds(holdSeconds));
@@ -333,16 +335,17 @@ internal static class Program
                     File.WriteAllText(tmp, port.ToString(), new UTF8Encoding(false));
                     File.Move(tmp, portOutPath, overwrite: true);
                 }
-                catch (IOException ex)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
-                    Console.Error.WriteLine($"[{tag}] could not write ipc-port-out: {ex.Message}");
+                    throw new InvalidOperationException(
+                        $"[{tag}] could not write ipc-port-out '{portOutPath}': {ex.Message}", ex);
                 }
             }
         }
 
         try
         {
-            await SessionTransport.RunSessionAsync(dc, ipcPort, ReportPort, tag, cts.Token);
+            await SessionTransport.RunSessionAsync(dc, ipcPort, ReportPort, tag, cts.Token, ipcToken);
         }
         catch (OperationCanceledException)
         {
@@ -451,6 +454,12 @@ internal static class Program
 
     private static void WriteProofAtomic(string path, ProofDocument proof)
     {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
         var json = JsonSerializer.Serialize(proof, ProofDocument.JsonOptions);
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, json, new UTF8Encoding(false));

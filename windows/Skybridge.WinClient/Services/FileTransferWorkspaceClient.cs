@@ -392,7 +392,15 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
             TrafficPaddingPlan.Sbp2Fixed(512));
         var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
         var fileChannel = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.File);
-        var manifestPayload = Encoding.UTF8.GetBytes("file-manifest:name=sample.mov;bytes=73400320");
+        var planner = await _coreBridge.PlanFileTransferReadinessAsync(
+            Array.Empty<FileTransferRouteCandidate>(),
+            null,
+            null,
+            CoreFileTransferManifestMode.IntentOnly,
+            Array.Empty<FileTransferManifestFile>(),
+            1024 * 1024,
+            channelMappings);
+        var manifestPayload = Encoding.UTF8.GetBytes(BuildPlannerFramePayload(planner));
         var manifestFrame = await _coreBridge.EncodeFrameAsync(
             CoreChannelKind.File,
             1,
@@ -403,32 +411,101 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
         var queue = new List<FileTransferQueueItem>
         {
             new(
-                "sample.mov",
-                "Queued",
-                "70 MB",
-                fileChannel.BindingKind.ToString(),
-                $"frame={metadata.EncodedLen} bytes; payload={decodedPayload.Length} bytes")
+                "Manifest planner",
+                planner.Status.ToString(),
+                $"{planner.ManifestFileCount} files / {FormatPlannerBytes(planner.ManifestTotalBytes)}",
+                BuildPlannerChannelValue(planner, fileChannel),
+                $"code={planner.Code}; frame={metadata.EncodedLen} bytes; payload={decodedPayload.Length} bytes")
         };
         AddSelectionIntentQueueItems(queue, selectionIntent);
         var history = new List<FileTransferHistoryItem>
         {
             new(
-                "archive.zip",
-                "Verified",
-                "HMAC tag recorded",
-                "Signature OK")
+                "Planner snapshot",
+                planner.Status.ToString(),
+                BuildManifestPlannerDetail(planner),
+                "No file bytes dispatched")
         };
         var security = new List<FileTransferSecurityFact>
         {
             new("Transport plan", plan.Transport.Kind.ToString(), $"audit={plan.Transport.AuditCode}; channels={channelMappings.Count}"),
             new("Channel", fileChannel.BindingKind.ToString(), $"reliability={fileChannel.Reliability}; HOL isolated={fileChannel.HeadOfLineIsolated}"),
+            new("Manifest planner", planner.Status.ToString(), BuildManifestPlannerDetail(planner)),
+            new("Route readiness", planner.Code.ToString(), BuildPlannerRouteDetail(planner)),
             new("Manifest frame", $"{metadata.FrameHeaderLen} byte header", $"flags=0x{metadata.Flags:x4}; decoded={metadata.DecodedPayloadLen}"),
             new("Selection intent", BuildSelectionIntentState(selectionIntent), BuildSelectionIntentDetail(selectionIntent)),
-            new("HMAC", "pending live transfer", "mac parity placeholder; no local files are read"),
+            new("HMAC", "pending live transfer", BuildPlannerDigestDetail(planner)),
             new("Signature", "pending live transfer", "pairing/trust layer must verify sender identity")
         };
 
         return new FileTransferWorkspaceSnapshot(DateTimeOffset.UtcNow, queue, history, security);
+    }
+
+    private static string BuildPlannerFramePayload(FileTransferPlannerVerdict planner) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "file-transfer-plan:status={0};code={1};files={2};bytes={3};chunks={4}",
+            planner.Status,
+            planner.Code,
+            planner.ManifestFileCount,
+            planner.ManifestTotalBytes,
+            planner.ManifestTotalChunks);
+
+    private static string BuildPlannerChannelValue(
+        FileTransferPlannerVerdict planner,
+        ChannelMapping fileChannel) =>
+        planner.FileChannelBindingKind?.ToString() ?? fileChannel.BindingKind.ToString();
+
+    private static string BuildManifestPlannerDetail(FileTransferPlannerVerdict planner) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "code={0}; files={1}; bytes={2}; chunks={3}; audit={4}",
+            planner.Code,
+            planner.ManifestFileCount,
+            planner.ManifestTotalBytes,
+            planner.ManifestTotalChunks,
+            planner.Audit);
+
+    private static string BuildPlannerRouteDetail(FileTransferPlannerVerdict planner)
+    {
+        if (planner.SelectedHost is null || planner.SelectedPort is null)
+        {
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "route=none; addressClass={0}; source={1}",
+                planner.SelectedAddressClass,
+                planner.SelectedRouteSource);
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "route={0}:{1}; addressClass={2}; source={3}",
+            planner.SelectedHost,
+            planner.SelectedPort,
+            planner.SelectedAddressClass,
+            planner.SelectedRouteSource);
+    }
+
+    private static string BuildPlannerDigestDetail(FileTransferPlannerVerdict planner) =>
+        planner.ManifestDigest is null
+            ? "pending real manifest; no local files are read"
+            : $"manifest digest={Convert.ToHexString(planner.ManifestDigest).ToLowerInvariant()}";
+
+    private static string FormatPlannerBytes(ulong bytes)
+    {
+        if (bytes < 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0} B", bytes);
+        }
+
+        var kib = bytes / 1024.0;
+        if (kib < 1024)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{0:0.#} KiB", kib);
+        }
+
+        var mib = kib / 1024.0;
+        return string.Format(CultureInfo.InvariantCulture, "{0:0.#} MiB", mib);
     }
 
     public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>

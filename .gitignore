@@ -126,6 +126,11 @@ public
 # Temporary folders
 tmp/
 temp/
+webrtc-signaling/
+windows/Skybridge.WebRtcHelper/sig-*.json
+windows/Skybridge.WebRtcHelper/*webrtc*proof*.json
+windows/Skybridge.WebRtcHelper/*webrtc*offer*.json
+windows/Skybridge.WebRtcHelper/*webrtc*answer*.json
 
 # Rust / Windows native
 /target
@@ -134,4 +139,3 @@ core/skybridge-core/target
 **/obj/
 !core/skybridge-core/src/bin/
 !core/skybridge-core/src/bin/*.rs
-

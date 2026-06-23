@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Channels;
 using SIPSorcery.Net;
 
@@ -41,6 +43,11 @@ namespace Skybridge.WebRtcHelper;
 internal static class SessionTransport
 {
     public const int Sbf1HeaderLen = 20;
+    private const byte Sbf1Version = 1;
+    private const uint MaxPayloadBytes = 64u * 1024 * 1024;
+    private const int InboundQueueCapacity = 256;
+    private const int IpcAuthMaxLineBytes = 1024;
+    private static readonly TimeSpan IpcAuthTimeout = TimeSpan.FromSeconds(5);
     private static readonly byte[] Sbf1Magic = { 0x53, 0x42, 0x46, 0x31 }; // "SBF1"
 
     // Reads exactly one SBF1 frame (header + declared payload) from a stream.
@@ -65,11 +72,10 @@ internal static class SessionTransport
         // Hard cap so a bogus/hostile length can't allocate the process to death.
         // 64 MiB is far above any real clipboard/file CHUNK; large files are sent
         // as many END_OF_MESSAGE-flagged frames, not one giant payload.
-        const uint maxPayload = 64u * 1024 * 1024;
-        if (payloadLen > maxPayload)
+        if (payloadLen > MaxPayloadBytes)
         {
             throw new InvalidDataException(
-                $"data-plane frame payload_len {payloadLen} exceeds {maxPayload} cap; refusing");
+                $"data-plane frame payload_len {payloadLen} exceeds {MaxPayloadBytes} cap; refusing");
         }
 
         var frame = new byte[Sbf1HeaderLen + (int)payloadLen];
@@ -124,14 +130,16 @@ internal static class SessionTransport
         int loopbackPort,
         Action<int> reportBoundPort,
         string tag,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? ipcToken = null)
     {
         // Inbound (DataChannel -> app) frames are buffered here so the SCTP
         // receive callback never blocks on a slow/absent loopback reader.
-        var inbound = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
+        var inbound = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(InboundQueueCapacity)
         {
             SingleReader = true,
             SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait
         });
 
         dc.onmessage += (_, _, data) =>
@@ -140,7 +148,20 @@ internal static class SessionTransport
             // That is one whole SBF1 frame. Forward verbatim.
             if (data is { Length: > 0 })
             {
-                inbound.Writer.TryWrite(data);
+                if (!TryValidateFrame(data, out var validationError))
+                {
+                    inbound.Writer.TryComplete(new InvalidDataException(
+                        $"peer sent invalid SBF1 frame: {validationError}"));
+                    return;
+                }
+
+                if (!inbound.Writer.TryWrite(data))
+                {
+                    inbound.Writer.TryComplete(new InvalidDataException(
+                        $"peer inbound SBF1 queue exceeded {InboundQueueCapacity} frames"));
+                    return;
+                }
+
                 if (data.Length >= Sbf1HeaderLen)
                 {
                     Console.WriteLine(
@@ -201,6 +222,12 @@ internal static class SessionTransport
                 {
                     client.NoDelay = true;
                     using var stream = client.GetStream();
+                    if (!string.IsNullOrWhiteSpace(ipcToken)
+                        && !await AuthenticateIpcClientAsync(stream, ipcToken!, tag, linked.Token).ConfigureAwait(false))
+                    {
+                        continue;
+                    }
+
                     // Pump both directions for this client; either ending tears down both.
                     using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
                     var appToPeer = PumpAppToPeerAsync(stream, dc, tag, sessionCts.Token);
@@ -225,6 +252,131 @@ internal static class SessionTransport
         {
             listener.Stop();
         }
+    }
+
+    private static bool TryValidateFrame(byte[] frame, out string error)
+    {
+        if (frame.Length < Sbf1HeaderLen)
+        {
+            error = $"frame length {frame.Length} is shorter than SBF1 header";
+            return false;
+        }
+
+        if (!frame.AsSpan(0, 4).SequenceEqual(Sbf1Magic))
+        {
+            error = "missing SBF1 magic";
+            return false;
+        }
+
+        if (frame[4] != Sbf1Version)
+        {
+            error = $"unsupported SBF1 version {frame[4]}";
+            return false;
+        }
+
+        if (!IsKnownChannel(frame[5]))
+        {
+            error = $"unknown SBF1 channel {frame[5]}";
+            return false;
+        }
+
+        var payloadLen = BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(16, 4));
+        if (payloadLen > MaxPayloadBytes)
+        {
+            error = $"payload_len {payloadLen} exceeds {MaxPayloadBytes}";
+            return false;
+        }
+
+        var expectedLength = Sbf1HeaderLen + (long)payloadLen;
+        if (frame.LongLength != expectedLength)
+        {
+            error = $"payload_len {payloadLen} does not match frame length {frame.Length}";
+            return false;
+        }
+
+        error = "";
+        return true;
+    }
+
+    private static bool IsKnownChannel(byte channel) => channel is >= 1 and <= 5;
+
+    private static async Task<bool> AuthenticateIpcClientAsync(
+        NetworkStream stream,
+        string expectedToken,
+        string tag,
+        CancellationToken ct)
+    {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(IpcAuthTimeout);
+
+        string line;
+        try
+        {
+            line = await ReadAuthLineAsync(stream, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            Console.Error.WriteLine($"[{tag}] data-plane IPC auth timed out");
+            return false;
+        }
+        catch (IOException ex)
+        {
+            Console.Error.WriteLine($"[{tag}] data-plane IPC auth read failed: {ex.Message}");
+            return false;
+        }
+        catch (InvalidDataException ex)
+        {
+            Console.Error.WriteLine($"[{tag}] data-plane IPC auth rejected: {ex.Message}");
+            return false;
+        }
+
+        const string prefix = "SKYBRIDGE-IPCTOKEN ";
+        if (!line.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"[{tag}] data-plane IPC auth rejected: missing token prefix");
+            return false;
+        }
+
+        var presentedToken = line[prefix.Length..].Trim();
+        if (!FixedTimeEquals(presentedToken, expectedToken))
+        {
+            Console.Error.WriteLine($"[{tag}] data-plane IPC auth rejected: token mismatch");
+            return false;
+        }
+
+        Console.WriteLine($"[{tag}] data-plane IPC client authenticated");
+        return true;
+    }
+
+    private static async Task<string> ReadAuthLineAsync(Stream stream, CancellationToken ct)
+    {
+        var bytes = new List<byte>(IpcAuthMaxLineBytes);
+        var buffer = new byte[1];
+        while (bytes.Count < IpcAuthMaxLineBytes)
+        {
+            var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new IOException("data-plane IPC closed before auth token");
+            }
+
+            if (buffer[0] == (byte)'\n')
+            {
+                return Encoding.UTF8.GetString(bytes.ToArray()).TrimEnd('\r');
+            }
+
+            bytes.Add(buffer[0]);
+        }
+
+        throw new InvalidDataException($"auth line exceeds {IpcAuthMaxLineBytes} bytes");
+    }
+
+    private static bool FixedTimeEquals(string presentedToken, string expectedToken)
+    {
+        var presented = Encoding.UTF8.GetBytes(presentedToken);
+        var expected = Encoding.UTF8.GetBytes(expectedToken);
+        return presented.Length == expected.Length
+            && CryptographicOperations.FixedTimeEquals(presented, expected);
     }
 
     // App (loopback) -> peer (DataChannel). Reads whole SBF1 frames off the
@@ -295,7 +447,11 @@ internal static class SessionTransport
         {
             await t.ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex) when (ex is OperationCanceledException
+            or IOException
+            or ObjectDisposedException
+            or EndOfStreamException
+            or InvalidDataException)
         {
             // Both pumps are torn down via cancellation; swallow their unwind.
         }

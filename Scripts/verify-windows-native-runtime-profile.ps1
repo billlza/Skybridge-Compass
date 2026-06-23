@@ -86,6 +86,18 @@ var runtimeVariables = new[]
     "SKYBRIDGE_WINDOWS_MSQUIC_ROLE",
     "SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT",
     "SKYBRIDGE_WINDOWS_MSQUIC_ACCEPT_TIMEOUT_MS",
+    "SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE",
+    "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE",
+    "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT",
+    "SKYBRIDGE_WINDOWS_CLIPBOARD_SYNC",
+    "SKYBRIDGE_WINDOWS_CLIPBOARD_IMAGES",
+    "SKYBRIDGE_WINDOWS_WEBRTC_HELPER_PATH",
+    "SKYBRIDGE_WINDOWS_WEBRTC_SIGNALING_DIR",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_FILE_NAME",
+    "SKYBRIDGE_WINDOWS_WEBRTC_OFFER_FILE_NAME",
+    "SKYBRIDGE_WINDOWS_WEBRTC_ANSWER_FILE_NAME",
+    "SKYBRIDGE_WINDOWS_WEBRTC_ICE_SERVERS",
+    "SKYBRIDGE_WINDOWS_WEBRTC_LAUNCH_TIMEOUT_MS",
     "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES"
 };
 
@@ -256,6 +268,46 @@ try
     AssertType<FfiEngineClient>(nativePendingDependencies.EngineClient, "native engine");
     AssertNestedType<NativeWindowsDnsSdBrowseClient>(nativePendingDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "native DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(nativePendingDependencies.ConnectionPreflightClient, "_transportAdapterClient", "native pending adapter");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE", "webrtc-helper");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE", "answer");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT", "49152");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_CLIPBOARD_SYNC", "enabled");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_CLIPBOARD_IMAGES", "disabled");
+    var sessionDataPlaneDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<WebRtcSessionEngineClient>(sessionDataPlaneDependencies.EngineClient, "WebRTC session data-plane engine");
+    AssertNestedType<FfiEngineClient>(sessionDataPlaneDependencies.EngineClient, "_innerEngine", "WebRTC session data-plane inner engine");
+    AssertNestedType<WebRtcHelperLaunchClient>(sessionDataPlaneDependencies.EngineClient, "_helperLaunchClient", "WebRTC session data-plane helper launcher");
+    var sessionOptions = GetNested<WebRtcSessionEngineOptions>(sessionDataPlaneDependencies.EngineClient, "_options");
+    AssertEqual(true, sessionOptions.AsAnswerer, "WebRTC session role");
+    AssertEqual(49152, sessionOptions.PreferredIpcPort, "WebRTC session preferred IPC port");
+    AssertEqual(true, sessionOptions.StartClipboardSync, "WebRTC session clipboard sync gate");
+    AssertEqual(false, sessionOptions.SyncClipboardImages, "WebRTC session clipboard image gate");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE", "loopback");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE must be webrtc-helper when set.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE", "webrtc-helper");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE", "relay");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE must be offer or answer when set.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE", "webrtc-helper");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT", "70000");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT must be an integer in the range 0..65535.");
 
     var verifiedProofPath = WriteVerifiedWebRtcProof("webrtc-proof-valid.json");
     ConfigureVerifiedWebRtcEnvironment(verifiedProofPath);

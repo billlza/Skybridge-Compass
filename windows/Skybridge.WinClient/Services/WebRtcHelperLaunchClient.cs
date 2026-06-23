@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -101,7 +102,7 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
 
         // A stale proof from a previous run must never satisfy the freshness gate. Remove it before
         // launch so a missing proof after a non-zero exit fails closed instead of replaying old bytes.
-        TryDeleteFile(proofPath);
+        DeleteStaleFile(proofPath);
 
         var startInfo = new ProcessStartInfo
         {
@@ -221,6 +222,7 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
 
         var offerPath = _options.ResolveOfferPath();
         var answerPath = _options.ResolveAnswerPath();
+        var ipcToken = GenerateIpcToken();
 
         var startInfo = new ProcessStartInfo
         {
@@ -245,6 +247,8 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
         // 0 => OS-chosen free loopback port; the helper prints the actual port.
         startInfo.ArgumentList.Add("--ipc-port");
         startInfo.ArgumentList.Add(request.PreferredIpcPort.ToString());
+        startInfo.ArgumentList.Add("--ipc-token");
+        startInfo.ArgumentList.Add(ipcToken);
         if (!string.IsNullOrWhiteSpace(_options.IceServersCsv))
         {
             startInfo.ArgumentList.Add("--ice-servers");
@@ -329,7 +333,7 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
             throw;
         }
 
-        return new WebRtcHelperSession(process, boundPort, offerPath, answerPath);
+        return new WebRtcHelperSession(process, boundPort, offerPath, answerPath, ipcToken);
     }
 
     private static int SafeExitCode(Process process)
@@ -338,7 +342,7 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
         {
             return process.HasExited ? process.ExitCode : -1;
         }
-        catch
+        catch (InvalidOperationException)
         {
             return -1;
         }
@@ -351,7 +355,7 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
         return trimmed.Length <= max ? trimmed : trimmed[..max] + "...";
     }
 
-    private static void TryDeleteFile(string path)
+    private static void DeleteStaleFile(string path)
     {
         try
         {
@@ -360,13 +364,20 @@ public sealed class WebRtcHelperLaunchClient : IWebRtcHelperLaunchClient
                 File.Delete(path);
             }
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // A locked stale proof is non-fatal here: the freshness gate downstream still rejects it.
+            throw new InvalidOperationException(
+                $"Could not remove stale WebRTC proof '{path}'; refusing to launch with replayable proof state.", ex);
         }
-        catch (UnauthorizedAccessException)
-        {
-        }
+    }
+
+    private static string GenerateIpcToken()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
     }
 
     private static void TryKill(Process process)
@@ -443,12 +454,20 @@ public sealed class WebRtcHelperSession : IAsyncDisposable
 {
     private readonly Process _process;
 
-    internal WebRtcHelperSession(Process process, int ipcPort, string offerPath, string answerPath)
+    internal WebRtcHelperSession(
+        Process process,
+        int ipcPort,
+        string offerPath,
+        string answerPath,
+        string ipcToken)
     {
         _process = process ?? throw new ArgumentNullException(nameof(process));
         IpcPort = ipcPort;
         OfferPath = offerPath;
         AnswerPath = answerPath;
+        IpcToken = string.IsNullOrWhiteSpace(ipcToken)
+            ? throw new ArgumentException("WebRTC helper session requires an IPC token.", nameof(ipcToken))
+            : ipcToken;
     }
 
     /// <summary>The loopback TCP port the helper's SBF1 IPC is listening on (127.0.0.1).</summary>
@@ -457,6 +476,8 @@ public sealed class WebRtcHelperSession : IAsyncDisposable
     public string OfferPath { get; }
 
     public string AnswerPath { get; }
+
+    public string IpcToken { get; }
 
     /// <summary>True while the helper process is still running (data plane live).</summary>
     public bool IsRunning
@@ -467,10 +488,10 @@ public sealed class WebRtcHelperSession : IAsyncDisposable
             {
                 return !_process.HasExited;
             }
-            catch
-            {
-                return false;
-            }
+                catch (InvalidOperationException)
+                {
+                    return false;
+                }
         }
     }
 
@@ -561,9 +582,20 @@ public sealed class WebRtcHelperLaunchOptions
     private string ResolvePath(string fileName)
     {
         EnsureSignalingDirectory();
-        return Path.IsPathRooted(fileName)
-            ? fileName
-            : Path.Combine(SignalingDirectory, fileName);
+        var candidate = Path.IsPathRooted(fileName)
+            ? Path.GetFullPath(fileName)
+            : Path.GetFullPath(Path.Combine(SignalingDirectory, fileName));
+        var root = Path.GetFullPath(SignalingDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+
+        if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"WebRTC helper signaling artifact '{fileName}' must resolve inside '{SignalingDirectory}'.");
+        }
+
+        return candidate;
     }
 
     private void EnsureSignalingDirectory()
@@ -627,6 +659,7 @@ public sealed class LaunchingWebRtcVerifiedPreflightClient : IConnectionPrefligh
         // Point a runtime verified adapter at the just-written fresh proof; the standard preflight then
         // re-validates it (identity/echo/freshness) and flips IsLiveAdapterReady=true on success.
         var runtimeAdapter = new VerifiedWebRtcDataChannelTransportAdapterClient(
+            _coreBridge,
             new WindowsVerifiedWebRtcDataChannelOptions(launchResult.ProofPath, _proofMaxAgeMs));
         var inner = new ConnectionPreflightClient(_coreBridge, runtimeAdapter);
         return await inner.BuildReadOnlySnapshotAsync(discoveredPeer, pairingMaterial).ConfigureAwait(false);

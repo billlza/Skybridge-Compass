@@ -201,6 +201,8 @@ public sealed record PairingMaterial(
     bool VerifiedAgainstDiscoveryFingerprint,
     string Source)
 {
+    public string? SharedPairingSecret { get; init; }
+
     public IPeerPublicKeyProvider ToPeerPublicKeyProvider() =>
         new StaticPeerPublicKeyProvider(PeerPublicKey);
 }

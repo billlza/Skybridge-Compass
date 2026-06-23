@@ -135,6 +135,99 @@ public sealed class CoreBridge
         });
     }
 
+    public Task<VerifiedWebRtcSessionLaunch> VerifyWebRtcSessionLaunchAsync(
+        string proofJson,
+        string expectedDeviceId,
+        string expectedFingerprint,
+        CoreTransportKind transport,
+        CoreTransportAuditCode transportAudit,
+        ulong maxAgeMs)
+    {
+        ArgumentNullException.ThrowIfNull(proofJson);
+        ArgumentNullException.ThrowIfNull(expectedDeviceId);
+        ArgumentNullException.ThrowIfNull(expectedFingerprint);
+        if (maxAgeMs == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxAgeMs), "WebRTC proof max age must be greater than zero.");
+        }
+
+        var proofJsonBytes = Encoding.UTF8.GetBytes(proofJson);
+        var expectedDeviceIdBytes = Encoding.UTF8.GetBytes(expectedDeviceId);
+        var expectedFingerprintBytes = Encoding.UTF8.GetBytes(expectedFingerprint);
+
+        return Task.Run(() =>
+        {
+            var handles = new List<GCHandle>();
+
+            nint Pin(byte[] bytes)
+            {
+                if (bytes.Length == 0)
+                {
+                    return nint.Zero;
+                }
+
+                var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                handles.Add(handle);
+                return handle.AddrOfPinnedObject();
+            }
+
+            try
+            {
+                var result = NativeMethods.VerifyWebRtcSessionLaunch(
+                    Pin(proofJsonBytes),
+                    (nuint)proofJsonBytes.Length,
+                    Pin(expectedDeviceIdBytes),
+                    (nuint)expectedDeviceIdBytes.Length,
+                    Pin(expectedFingerprintBytes),
+                    (nuint)expectedFingerprintBytes.Length,
+                    transport,
+                    transportAudit,
+                    maxAgeMs,
+                    out var launch);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"WebRTC session launch proof failed: {result}");
+                }
+
+                return VerifiedWebRtcSessionLaunch.FromNative(launch);
+            }
+            finally
+            {
+                foreach (var handle in handles)
+                {
+                    if (handle.IsAllocated)
+                    {
+                        handle.Free();
+                    }
+                }
+            }
+        });
+    }
+
+    public Task<SignalingLifecycleSnapshot> ProjectSignalingLifecycleAsync(
+        SignalingLifecycleSnapshot current,
+        SignalingLifecycleEvent lifecycleEvent)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(lifecycleEvent);
+
+        return Task.Run(() =>
+        {
+            var result = NativeMethods.ProjectSignalingLifecycleState(
+                current.ToNative(),
+                lifecycleEvent.ToNative(),
+                out var projected);
+
+            if (result != SkybridgeErrorCode.Ok)
+            {
+                throw new InvalidOperationException($"Signaling lifecycle projection failed: {result}");
+            }
+
+            return SignalingLifecycleSnapshot.FromNative(projected);
+        });
+    }
+
     public Task<ChannelMapping> MapChannelAsync(CoreTransportKind transport, CoreChannelKind channel)
     {
         return Task.Run(() =>
@@ -178,6 +271,78 @@ public sealed class CoreBridge
             }
 
             return ConnectionPlan.FromNative(plan);
+        });
+    }
+
+    public Task<FileTransferPlannerVerdict> PlanFileTransferReadinessAsync(
+        IReadOnlyList<FileTransferRouteCandidate> routeCandidates,
+        string? targetPeerId,
+        ulong? requiredListenerGeneration,
+        CoreFileTransferManifestMode manifestMode,
+        IReadOnlyList<FileTransferManifestFile> manifestFiles,
+        ulong chunkSize,
+        IReadOnlyList<ChannelMapping> channelMappings)
+    {
+        ArgumentNullException.ThrowIfNull(routeCandidates);
+        ArgumentNullException.ThrowIfNull(manifestFiles);
+        ArgumentNullException.ThrowIfNull(channelMappings);
+
+        return Task.Run(() =>
+        {
+            var nativeRouteCandidates = new NativeFileTransferRouteCandidate[routeCandidates.Count];
+            for (var index = 0; index < routeCandidates.Count; index++)
+            {
+                nativeRouteCandidates[index] = routeCandidates[index].ToNative();
+            }
+
+            var nativeManifestFiles = new NativeFileTransferManifestFile[manifestFiles.Count];
+            for (var index = 0; index < manifestFiles.Count; index++)
+            {
+                nativeManifestFiles[index] = manifestFiles[index].ToNative();
+            }
+
+            var nativeChannelMappings = new NativeChannelMapping[channelMappings.Count];
+            for (var index = 0; index < channelMappings.Count; index++)
+            {
+                nativeChannelMappings[index] = channelMappings[index].ToNative();
+            }
+
+            var targetPeerIdBytes = Encoding.UTF8.GetBytes(targetPeerId ?? "");
+            var targetPeerIdHandle = targetPeerIdBytes.Length == 0
+                ? default
+                : GCHandle.Alloc(targetPeerIdBytes, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.PlanFileTransferReadiness(
+                    nativeRouteCandidates,
+                    (nuint)nativeRouteCandidates.Length,
+                    targetPeerIdBytes.Length == 0 ? nint.Zero : targetPeerIdHandle.AddrOfPinnedObject(),
+                    (nuint)targetPeerIdBytes.Length,
+                    requiredListenerGeneration.GetValueOrDefault(),
+                    requiredListenerGeneration.HasValue ? (byte)1 : (byte)0,
+                    manifestMode,
+                    nativeManifestFiles,
+                    (nuint)nativeManifestFiles.Length,
+                    chunkSize,
+                    nativeChannelMappings,
+                    (nuint)nativeChannelMappings.Length,
+                    out var verdict);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"File transfer readiness planning failed: {result}");
+                }
+
+                return FileTransferPlannerVerdict.FromNative(verdict);
+            }
+            finally
+            {
+                if (targetPeerIdHandle.IsAllocated)
+                {
+                    targetPeerIdHandle.Free();
+                }
+            }
         });
     }
 
@@ -438,6 +603,25 @@ public sealed class CoreBridge
             nuint capabilityDigestLen,
             out NativeTransportBindingDigest digest);
 
+        [DllImport("skybridge_core", EntryPoint = "skybridge_verify_webrtc_session_launch")]
+        public static extern SkybridgeErrorCode VerifyWebRtcSessionLaunch(
+            nint proofJsonPtr,
+            nuint proofJsonLen,
+            nint expectedDeviceIdPtr,
+            nuint expectedDeviceIdLen,
+            nint expectedFingerprintPtr,
+            nuint expectedFingerprintLen,
+            CoreTransportKind transport,
+            CoreTransportAuditCode transportAudit,
+            ulong maxAgeMs,
+            out NativeVerifiedWebRtcSessionLaunch launch);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_project_signaling_lifecycle_state")]
+        public static extern SkybridgeErrorCode ProjectSignalingLifecycleState(
+            NativeSignalingLifecycleState current,
+            NativeSignalingLifecycleEvent lifecycleEvent,
+            out NativeSignalingLifecycleState projected);
+
         [DllImport("skybridge_core", EntryPoint = "skybridge_map_channel")]
         public static extern SkybridgeErrorCode MapChannel(
             CoreTransportKind transport,
@@ -455,6 +639,22 @@ public sealed class CoreBridge
             NativeCryptoSuitePolicy suitePolicy,
             NativeTrafficPaddingPlan trafficPadding,
             out NativeConnectionPlan plan);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_plan_file_transfer_readiness")]
+        public static extern SkybridgeErrorCode PlanFileTransferReadiness(
+            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] NativeFileTransferRouteCandidate[] routeCandidates,
+            nuint routeCandidateCount,
+            nint targetPeerIdPtr,
+            nuint targetPeerIdLen,
+            ulong requiredListenerGeneration,
+            byte hasRequiredListenerGeneration,
+            CoreFileTransferManifestMode manifestMode,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 8)] NativeFileTransferManifestFile[] manifestFiles,
+            nuint manifestFileCount,
+            ulong chunkSize,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 11)] NativeChannelMapping[] channelMappings,
+            nuint channelMappingCount,
+            out NativeFileTransferPlannerVerdict verdict);
 
         [DllImport("skybridge_core", EntryPoint = "skybridge_parse_discovery_advertisement")]
         public static extern SkybridgeErrorCode ParseDiscoveryAdvertisement(
@@ -601,6 +801,125 @@ public enum CoreCryptoSuiteAuditCode
     LegacyPolicyFallback = 4
 }
 
+public enum CoreSignalingLifecyclePhase
+{
+    Idle = 0,
+    Connecting = 1,
+    SocketOpen = 2,
+    Bound = 3,
+    Reconnecting = 4,
+    Closing = 5,
+    Closed = 6,
+    Failed = 7
+}
+
+public enum CoreSignalingReadiness
+{
+    Idle = 0,
+    TransportReady = 1,
+    HandshakeComplete = 2
+}
+
+public enum CoreSignalingHealth
+{
+    Healthy = 0,
+    DegradedRecoverable = 1,
+    DegradedFatal = 2
+}
+
+public enum CoreSignalingFailureClass
+{
+    None = 0,
+    AuthBindRejected = 1,
+    InvalidShardOrSessionMismatch = 2,
+    TokenExpired = 3,
+    ProtocolViolation = 4,
+    TransientNetwork = 5,
+    TransientServer = 6
+}
+
+public enum CoreSignalingLifecycleEventKind
+{
+    Connecting = 1,
+    SocketOpen = 2,
+    Bound = 3,
+    Reconnecting = 4,
+    Closing = 5,
+    Closed = 6,
+    TransportReady = 7,
+    HandshakeComplete = 8,
+    Failed = 9
+}
+
+public enum CoreFileTransferReadinessStatus
+{
+    Blocked = 0,
+    IntentOnly = 1,
+    Ready = 2
+}
+
+public enum CoreFileTransferReadinessCode
+{
+    Ok = 0,
+    IntentOnlyNoFiles = 1,
+    MissingRoute = 2,
+    TooManyCandidates = 3,
+    MissingIdentity = 4,
+    TargetPeerMismatch = 5,
+    UnsupportedServiceType = 6,
+    InvalidHost = 7,
+    RequestedPeerToPeerRoute = 8,
+    UnresolvedBonjourRoute = 9,
+    ResolvedPeerToPeerRoute = 10,
+    InvalidPort = 11,
+    RouteStalePort = 12,
+    RouteProvenanceMismatch = 13,
+    MissingFileChannel = 14,
+    InvalidManifest = 15,
+    ManifestPathRejected = 16,
+    ManifestHashRejected = 17,
+    ManifestTooLarge = 18,
+    ByteCountOverflow = 19
+}
+
+public enum CoreFileTransferAddressClass
+{
+    Invalid = 0,
+    BonjourService = 1,
+    LinkLocal = 2,
+    LanDirect = 3
+}
+
+public enum CoreFileTransferRouteSource
+{
+    AuthenticatedSession = 0,
+    RecentAuthenticatedInboundTransfer = 1,
+    ClassicSessionRegistry = 2,
+    PresenceOutbound = 3,
+    PresenceInbound = 4,
+    Unified = 5,
+    Manual = 6,
+    BonjourResolved = 7,
+    Unknown = 8
+}
+
+public enum CoreFileTransferPortProvenance
+{
+    Unknown = 0,
+    ListenerTruth = 1,
+    PresenceDescriptor = 2,
+    PairingPayload = 3,
+    HeartbeatPayload = 4,
+    RegistryState = 5,
+    ManualInput = 6
+}
+
+public enum CoreFileTransferManifestMode
+{
+    IntentOnly = 0,
+    Transfer = 1
+}
+
 public sealed record PeerCapabilities(
     CorePeerPlatform Platform,
     bool SupportsAppleNative,
@@ -714,6 +1033,210 @@ public sealed record TransportBindingMaterial(
     ulong TimestampWindowMs,
     byte[] CapabilityDigest);
 
+public sealed record VerifiedWebRtcSessionLaunch(
+    string PeerDeviceId,
+    string PeerPublicKeyFingerprint,
+    string HelperName,
+    string AdapterBinding,
+    string LocalEndpoint,
+    string RemoteEndpoint,
+    string SelectedCandidatePair,
+    string? RelayId,
+    ulong TimestampWindowMs,
+    long CapturedAtUnixMs,
+    ulong ProofAgeMs,
+    byte[] TransportSecretFingerprint,
+    byte[] CapabilityDigest,
+    byte[] TransportBindingDigest)
+{
+    internal static VerifiedWebRtcSessionLaunch FromNative(NativeVerifiedWebRtcSessionLaunch launch) =>
+        new(
+            ReadFixedUtf8(launch.PeerDeviceId, launch.PeerDeviceIdLen),
+            ReadFixedUtf8(launch.PeerPublicKeyFingerprint, launch.PeerPublicKeyFingerprintLen),
+            ReadFixedUtf8(launch.HelperName, launch.HelperNameLen),
+            ReadFixedUtf8(launch.AdapterBinding, launch.AdapterBindingLen),
+            ReadFixedUtf8(launch.LocalEndpoint, launch.LocalEndpointLen),
+            ReadFixedUtf8(launch.RemoteEndpoint, launch.RemoteEndpointLen),
+            ReadFixedUtf8(launch.SelectedCandidatePair, launch.SelectedCandidatePairLen),
+            launch.RelayIdLen == 0 ? null : ReadFixedUtf8(launch.RelayId, launch.RelayIdLen),
+            launch.TimestampWindowMs,
+            launch.CapturedAtUnixMs,
+            launch.ProofAgeMs,
+            RequireBytes(launch.TransportSecretFingerprint, 32, "transport secret fingerprint"),
+            RequireBytes(launch.CapabilityDigest, 32, "capability digest"),
+            RequireBytes(launch.TransportBindingDigest, 32, "transport binding digest"));
+
+    public TransportBindingMaterial BuildTransportBindingMaterial(CoreTransportKind transport)
+    {
+        if (transport != CoreTransportKind.WebRtcDataChannel)
+        {
+            throw new InvalidOperationException("Verified WebRTC session launch material can only bind WebRtcDataChannel transport.");
+        }
+
+        return new(
+            transport,
+            LocalEndpoint,
+            RemoteEndpoint,
+            SelectedCandidatePair,
+            (byte[])TransportSecretFingerprint.Clone(),
+            RelayId,
+            TimestampWindowMs,
+            (byte[])CapabilityDigest.Clone());
+    }
+
+    private static string ReadFixedUtf8(byte[]? buffer, nuint len)
+    {
+        var bytes = buffer ?? Array.Empty<byte>();
+        var count = len > (nuint)bytes.Length ? bytes.Length : (int)len;
+        return Encoding.UTF8.GetString(bytes, 0, count);
+    }
+
+    private static byte[] RequireBytes(byte[]? buffer, int expectedLength, string label)
+    {
+        if (buffer is null || buffer.Length != expectedLength)
+        {
+            throw new InvalidOperationException($"skybridge_core returned an invalid WebRTC {label}.");
+        }
+
+        return (byte[])buffer.Clone();
+    }
+}
+
+public sealed record SignalingLifecycleSnapshot(
+    string SessionId,
+    string Backend,
+    ulong Generation,
+    CoreSignalingLifecyclePhase LifecyclePhase,
+    CoreSignalingHealth SignalingHealth,
+    CoreSignalingReadiness Readiness,
+    CoreSignalingReadiness LastEstablishedReadiness,
+    CoreSignalingFailureClass FailureClass,
+    string? NegotiatedSuite,
+    uint ReconnectAttemptCount,
+    bool BusinessSendsAllowed,
+    bool CanReportConnected)
+{
+    public static SignalingLifecycleSnapshot Idle { get; } =
+        new(
+            "",
+            "",
+            0,
+            CoreSignalingLifecyclePhase.Idle,
+            CoreSignalingHealth.Healthy,
+            CoreSignalingReadiness.Idle,
+            CoreSignalingReadiness.Idle,
+            CoreSignalingFailureClass.None,
+            null,
+            0,
+            false,
+            false);
+
+    internal NativeSignalingLifecycleState ToNative()
+    {
+        var sessionId = WriteFixedUtf8(SessionId, 128, out var sessionIdLen);
+        var backend = WriteFixedUtf8(Backend, 128, out var backendLen);
+        var negotiatedSuite = WriteFixedUtf8(NegotiatedSuite ?? "", 64, out var negotiatedSuiteLen);
+
+        return new()
+        {
+            SessionId = sessionId,
+            SessionIdLen = sessionIdLen,
+            Backend = backend,
+            BackendLen = backendLen,
+            Generation = Generation,
+            LifecyclePhase = LifecyclePhase,
+            SignalingHealth = SignalingHealth,
+            Readiness = Readiness,
+            LastEstablishedReadiness = LastEstablishedReadiness,
+            FailureClass = FailureClass,
+            NegotiatedSuite = negotiatedSuite,
+            NegotiatedSuiteLen = negotiatedSuiteLen,
+            ReconnectAttemptCount = ReconnectAttemptCount,
+            BusinessSendsAllowed = BusinessSendsAllowed ? (byte)1 : (byte)0,
+            CanReportConnected = CanReportConnected ? (byte)1 : (byte)0
+        };
+    }
+
+    internal static SignalingLifecycleSnapshot FromNative(NativeSignalingLifecycleState state) =>
+        new(
+            ReadFixedUtf8(state.SessionId, state.SessionIdLen),
+            ReadFixedUtf8(state.Backend, state.BackendLen),
+            state.Generation,
+            state.LifecyclePhase,
+            state.SignalingHealth,
+            state.Readiness,
+            state.LastEstablishedReadiness,
+            state.FailureClass,
+            state.NegotiatedSuiteLen == 0 ? null : ReadFixedUtf8(state.NegotiatedSuite, state.NegotiatedSuiteLen),
+            state.ReconnectAttemptCount,
+            state.BusinessSendsAllowed != 0,
+            state.CanReportConnected != 0);
+
+    private static byte[] WriteFixedUtf8(string value, int capacity, out nuint len)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        if (bytes.Length > capacity)
+        {
+            throw new InvalidOperationException($"Signaling lifecycle text exceeds {capacity} bytes.");
+        }
+
+        var buffer = new byte[capacity];
+        Buffer.BlockCopy(bytes, 0, buffer, 0, bytes.Length);
+        len = (nuint)bytes.Length;
+        return buffer;
+    }
+
+    private static string ReadFixedUtf8(byte[]? buffer, nuint len)
+    {
+        var bytes = buffer ?? Array.Empty<byte>();
+        var count = len > (nuint)bytes.Length ? bytes.Length : (int)len;
+        return Encoding.UTF8.GetString(bytes, 0, count);
+    }
+}
+
+public sealed record SignalingLifecycleEvent(
+    string SessionId,
+    string Backend,
+    ulong Generation,
+    CoreSignalingLifecycleEventKind Kind,
+    CoreSignalingFailureClass FailureClass,
+    string? NegotiatedSuite)
+{
+    internal NativeSignalingLifecycleEvent ToNative()
+    {
+        var sessionId = WriteFixedUtf8(SessionId, 128, out var sessionIdLen);
+        var backend = WriteFixedUtf8(Backend, 128, out var backendLen);
+        var negotiatedSuite = WriteFixedUtf8(NegotiatedSuite ?? "", 64, out var negotiatedSuiteLen);
+
+        return new()
+        {
+            SessionId = sessionId,
+            SessionIdLen = sessionIdLen,
+            Backend = backend,
+            BackendLen = backendLen,
+            Generation = Generation,
+            Kind = Kind,
+            FailureClass = FailureClass,
+            NegotiatedSuite = negotiatedSuite,
+            NegotiatedSuiteLen = negotiatedSuiteLen
+        };
+    }
+
+    private static byte[] WriteFixedUtf8(string value, int capacity, out nuint len)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        if (bytes.Length > capacity)
+        {
+            throw new InvalidOperationException($"Signaling lifecycle event text exceeds {capacity} bytes.");
+        }
+
+        var buffer = new byte[capacity];
+        Buffer.BlockCopy(bytes, 0, buffer, 0, bytes.Length);
+        len = (nuint)bytes.Length;
+        return buffer;
+    }
+}
+
 public sealed record ChannelMapping(
     CoreChannelKind Channel,
     CoreReliabilityKind Reliability,
@@ -728,6 +1251,16 @@ public sealed record ChannelMapping(
             mapping.MaxRetransmits,
             mapping.BindingKind,
             mapping.HeadOfLineIsolated != 0);
+
+    internal NativeChannelMapping ToNative() =>
+        new()
+        {
+            Channel = Channel,
+            Reliability = Reliability,
+            MaxRetransmits = MaxRetransmits,
+            BindingKind = BindingKind,
+            HeadOfLineIsolated = HeadOfLineIsolated ? (byte)1 : (byte)0
+        };
 }
 
 internal static class CoreChannelMappingResolver
@@ -785,6 +1318,201 @@ internal static class CoreChannelMappingResolver
         CoreChannelKind.Telemetry,
         CoreChannelKind.Realtime
     };
+}
+
+public sealed record FileTransferRouteCandidate(
+    string PeerId,
+    string DeviceName,
+    string RequestedHost,
+    string? ResolvedHost,
+    string ServiceType,
+    ushort? Port,
+    CoreFileTransferRouteSource RouteSource,
+    CoreFileTransferPortProvenance PortProvenance,
+    ulong? ListenerGeneration)
+{
+    internal NativeFileTransferRouteCandidate ToNative()
+    {
+        ArgumentNullException.ThrowIfNull(PeerId);
+        ArgumentNullException.ThrowIfNull(DeviceName);
+        ArgumentNullException.ThrowIfNull(RequestedHost);
+        ArgumentNullException.ThrowIfNull(ServiceType);
+
+        var peerId = CoreBridgeFixedUtf8.Write(PeerId, 128, nameof(PeerId), out var peerIdLen);
+        var deviceName = CoreBridgeFixedUtf8.Write(DeviceName, 128, nameof(DeviceName), out var deviceNameLen);
+        var requestedHost = CoreBridgeFixedUtf8.Write(RequestedHost, 128, nameof(RequestedHost), out var requestedHostLen);
+        var resolvedHost = CoreBridgeFixedUtf8.Write(ResolvedHost ?? "", 128, nameof(ResolvedHost), out var resolvedHostLen);
+        var serviceType = CoreBridgeFixedUtf8.Write(ServiceType, 64, nameof(ServiceType), out var serviceTypeLen);
+
+        return new()
+        {
+            PeerId = peerId,
+            PeerIdLen = peerIdLen,
+            DeviceName = deviceName,
+            DeviceNameLen = deviceNameLen,
+            RequestedHost = requestedHost,
+            RequestedHostLen = requestedHostLen,
+            ResolvedHost = resolvedHost,
+            ResolvedHostLen = resolvedHostLen,
+            ServiceType = serviceType,
+            ServiceTypeLen = serviceTypeLen,
+            Port = Port.GetValueOrDefault(),
+            HasPort = Port.HasValue ? (byte)1 : (byte)0,
+            RouteSource = RouteSource,
+            PortProvenance = PortProvenance,
+            ListenerGeneration = ListenerGeneration.GetValueOrDefault(),
+            HasListenerGeneration = ListenerGeneration.HasValue ? (byte)1 : (byte)0
+        };
+    }
+}
+
+public sealed record FileTransferManifestFile(
+    string DisplayName,
+    string RelativePath,
+    ulong ByteLen,
+    string Sha256Hex,
+    string MimeType)
+{
+    internal NativeFileTransferManifestFile ToNative()
+    {
+        ArgumentNullException.ThrowIfNull(DisplayName);
+        ArgumentNullException.ThrowIfNull(RelativePath);
+        ArgumentNullException.ThrowIfNull(Sha256Hex);
+        ArgumentNullException.ThrowIfNull(MimeType);
+
+        var displayName = CoreBridgeFixedUtf8.Write(DisplayName, 128, nameof(DisplayName), out var displayNameLen);
+        var relativePath = CoreBridgeFixedUtf8.Write(RelativePath, 256, nameof(RelativePath), out var relativePathLen);
+        var sha256Hex = CoreBridgeFixedUtf8.Write(Sha256Hex, 64, nameof(Sha256Hex), out var sha256HexLen);
+        var mimeType = CoreBridgeFixedUtf8.Write(MimeType, 64, nameof(MimeType), out var mimeTypeLen);
+
+        return new()
+        {
+            DisplayName = displayName,
+            DisplayNameLen = displayNameLen,
+            RelativePath = relativePath,
+            RelativePathLen = relativePathLen,
+            ByteLen = ByteLen,
+            Sha256Hex = sha256Hex,
+            Sha256HexLen = sha256HexLen,
+            MimeType = mimeType,
+            MimeTypeLen = mimeTypeLen
+        };
+    }
+}
+
+public sealed record FileTransferPlannerVerdict(
+    CoreFileTransferReadinessStatus Status,
+    CoreFileTransferReadinessCode Code,
+    CoreFileTransferAddressClass SelectedAddressClass,
+    CoreFileTransferRouteSource SelectedRouteSource,
+    string? SelectedPeerId,
+    string? SelectedDeviceName,
+    string? SelectedHost,
+    ushort? SelectedPort,
+    ulong? SelectedListenerGeneration,
+    ushort ManifestVersion,
+    nuint ManifestFileCount,
+    ulong ManifestTotalBytes,
+    ulong ManifestTotalChunks,
+    ulong ManifestChunkSize,
+    byte[]? ManifestDigest,
+    CoreAdapterBindingKind? FileChannelBindingKind,
+    bool FileChannelHeadOfLineIsolated,
+    nuint FrameHeaderLen,
+    string Audit)
+{
+    internal static FileTransferPlannerVerdict FromNative(NativeFileTransferPlannerVerdict verdict)
+    {
+        var selectedPeerId = ReadOptionalFixedUtf8(
+            verdict.SelectedPeerId,
+            verdict.SelectedPeerIdLen,
+            "file transfer selected peer id");
+        var selectedDeviceName = ReadOptionalFixedUtf8(
+            verdict.SelectedDeviceName,
+            verdict.SelectedDeviceNameLen,
+            "file transfer selected device name");
+        var selectedHost = ReadOptionalFixedUtf8(
+            verdict.SelectedHost,
+            verdict.SelectedHostLen,
+            "file transfer selected host");
+        var manifestDigest = verdict.HasManifestDigest == 0
+            ? null
+            : CoreBridgeFixedUtf8.RequireBytes(verdict.ManifestDigest, 32, "file transfer manifest digest");
+        CoreAdapterBindingKind? fileChannelBinding = verdict.HasFileChannel == 0
+            ? null
+            : verdict.FileChannelBindingKind;
+
+        return new(
+            verdict.Status,
+            verdict.Code,
+            verdict.SelectedAddressClass,
+            verdict.SelectedRouteSource,
+            selectedPeerId,
+            selectedDeviceName,
+            selectedHost,
+            selectedHost is null ? null : verdict.SelectedPort,
+            verdict.HasSelectedListenerGeneration == 0 ? null : verdict.SelectedListenerGeneration,
+            verdict.ManifestVersion,
+            verdict.ManifestFileCount,
+            verdict.ManifestTotalBytes,
+            verdict.ManifestTotalChunks,
+            verdict.ManifestChunkSize,
+            manifestDigest,
+            fileChannelBinding,
+            verdict.FileChannelHeadOfLineIsolated != 0,
+            verdict.FrameHeaderLen,
+            CoreBridgeFixedUtf8.Read(verdict.Audit, verdict.AuditLen, "file transfer audit"));
+    }
+
+    private static string? ReadOptionalFixedUtf8(byte[]? buffer, nuint len, string label) =>
+        len == 0 ? null : CoreBridgeFixedUtf8.Read(buffer, len, label);
+}
+
+internal static class CoreBridgeFixedUtf8
+{
+    public static byte[] Write(string value, int capacity, string label, out nuint len)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        if (bytes.Length > capacity)
+        {
+            throw new InvalidOperationException($"{label} exceeds the {capacity}-byte skybridge_core FFI field capacity.");
+        }
+
+        var buffer = new byte[capacity];
+        Buffer.BlockCopy(bytes, 0, buffer, 0, bytes.Length);
+        len = (nuint)bytes.Length;
+        return buffer;
+    }
+
+    public static string Read(byte[]? buffer, nuint len, string label)
+    {
+        if (buffer is null)
+        {
+            if (len == 0)
+            {
+                return "";
+            }
+
+            throw new InvalidOperationException($"skybridge_core returned a null {label} buffer with non-zero length.");
+        }
+
+        if (len > (nuint)buffer.Length)
+        {
+            throw new InvalidOperationException($"skybridge_core returned a {label} length outside the fixed FFI buffer.");
+        }
+
+        return Encoding.UTF8.GetString(buffer, 0, (int)len);
+    }
+
+    public static byte[] RequireBytes(byte[]? buffer, int expectedLength, string label)
+    {
+        if (buffer is null || buffer.Length != expectedLength)
+        {
+            throw new InvalidOperationException($"skybridge_core returned an invalid {label}.");
+        }
+
+        return (byte[])buffer.Clone();
+    }
 }
 
 public sealed record FrameMetadata(
@@ -971,6 +1699,112 @@ internal struct NativeTransportBindingDigest
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NativeVerifiedWebRtcSessionLaunch
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] PeerDeviceId;
+
+    public nuint PeerDeviceIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] PeerPublicKeyFingerprint;
+
+    public nuint PeerPublicKeyFingerprintLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] HelperName;
+
+    public nuint HelperNameLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] AdapterBinding;
+
+    public nuint AdapterBindingLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] LocalEndpoint;
+
+    public nuint LocalEndpointLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] RemoteEndpoint;
+
+    public nuint RemoteEndpointLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] SelectedCandidatePair;
+
+    public nuint SelectedCandidatePairLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] RelayId;
+
+    public nuint RelayIdLen;
+    public ulong TimestampWindowMs;
+    public long CapturedAtUnixMs;
+    public ulong ProofAgeMs;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] TransportSecretFingerprint;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] CapabilityDigest;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] TransportBindingDigest;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeSignalingLifecycleState
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] SessionId;
+
+    public nuint SessionIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] Backend;
+
+    public nuint BackendLen;
+    public ulong Generation;
+    public CoreSignalingLifecyclePhase LifecyclePhase;
+    public CoreSignalingHealth SignalingHealth;
+    public CoreSignalingReadiness Readiness;
+    public CoreSignalingReadiness LastEstablishedReadiness;
+    public CoreSignalingFailureClass FailureClass;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] NegotiatedSuite;
+
+    public nuint NegotiatedSuiteLen;
+    public uint ReconnectAttemptCount;
+    public byte BusinessSendsAllowed;
+    public byte CanReportConnected;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeSignalingLifecycleEvent
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] SessionId;
+
+    public nuint SessionIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] Backend;
+
+    public nuint BackendLen;
+    public ulong Generation;
+    public CoreSignalingLifecycleEventKind Kind;
+    public CoreSignalingFailureClass FailureClass;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] NegotiatedSuite;
+
+    public nuint NegotiatedSuiteLen;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct NativeChannelMapping
 {
     public CoreChannelKind Channel;
@@ -978,6 +1812,112 @@ internal struct NativeChannelMapping
     public ushort MaxRetransmits;
     public CoreAdapterBindingKind BindingKind;
     public byte HeadOfLineIsolated;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeFileTransferRouteCandidate
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] PeerId;
+
+    public nuint PeerIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] DeviceName;
+
+    public nuint DeviceNameLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] RequestedHost;
+
+    public nuint RequestedHostLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] ResolvedHost;
+
+    public nuint ResolvedHostLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] ServiceType;
+
+    public nuint ServiceTypeLen;
+    public ushort Port;
+    public byte HasPort;
+    public CoreFileTransferRouteSource RouteSource;
+    public CoreFileTransferPortProvenance PortProvenance;
+    public ulong ListenerGeneration;
+    public byte HasListenerGeneration;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeFileTransferManifestFile
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] DisplayName;
+
+    public nuint DisplayNameLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] RelativePath;
+
+    public nuint RelativePathLen;
+    public ulong ByteLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] Sha256Hex;
+
+    public nuint Sha256HexLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] MimeType;
+
+    public nuint MimeTypeLen;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeFileTransferPlannerVerdict
+{
+    public CoreFileTransferReadinessStatus Status;
+    public CoreFileTransferReadinessCode Code;
+    public CoreFileTransferAddressClass SelectedAddressClass;
+    public CoreFileTransferRouteSource SelectedRouteSource;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] SelectedPeerId;
+
+    public nuint SelectedPeerIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] SelectedDeviceName;
+
+    public nuint SelectedDeviceNameLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] SelectedHost;
+
+    public nuint SelectedHostLen;
+    public ushort SelectedPort;
+    public ulong SelectedListenerGeneration;
+    public byte HasSelectedListenerGeneration;
+    public ushort ManifestVersion;
+    public nuint ManifestFileCount;
+    public ulong ManifestTotalBytes;
+    public ulong ManifestTotalChunks;
+    public ulong ManifestChunkSize;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] ManifestDigest;
+
+    public byte HasManifestDigest;
+    public CoreAdapterBindingKind FileChannelBindingKind;
+    public byte HasFileChannel;
+    public byte FileChannelHeadOfLineIsolated;
+    public nuint FrameHeaderLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] Audit;
+
+    public nuint AuditLen;
 }
 
 [StructLayout(LayoutKind.Sequential)]

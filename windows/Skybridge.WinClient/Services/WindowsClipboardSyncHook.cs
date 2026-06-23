@@ -42,7 +42,8 @@ namespace Skybridge.WinClient.Services;
 // previous DerivedDevelopmentKeyProvider is now a DEBUG-only test type
 // (TestOnlyDeterministicClipboardKeyProvider) and is not reachable here. If the
 // session material is missing, this hook throws and the caller must NOT start
-// clipboard sync (fail closed; never send under a placeholder key).
+// clipboard sync (fail closed; never send under public pairing material or a
+// placeholder key).
 
 internal static class WindowsClipboardSyncHook
 {
@@ -71,7 +72,8 @@ internal static class WindowsClipboardSyncHook
     /// <param name="dataPlane">The live data plane (clipboard rides channel 3).</param>
     /// <param name="sharedPairingSecret">
     /// The shared pairing/connection secret both peers possess (the validated
-    /// connection code). Used as the HKDF input keying material. Must be non-empty.
+    /// non-public secret, not the public pairing envelope). Used as the HKDF input
+    /// keying material. Must be non-empty.
     /// </param>
     /// <param name="sessionId">
     /// The per-session, both-sides-observable id used as the HKDF salt — the WebRTC

@@ -16,8 +16,17 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private const string MsQuicRoleVariable = "SKYBRIDGE_WINDOWS_MSQUIC_ROLE";
     private const string MsQuicDialRole = "dial";
     private const string MsQuicListenRole = "listen";
+    private const string SessionDataPlaneVariable = "SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE";
+    private const string WebRtcHelperSessionDataPlaneMode = "webrtc-helper";
+    private const string WebRtcSessionRoleVariable = "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE";
+    private const string WebRtcSessionOfferRole = "offer";
+    private const string WebRtcSessionAnswerRole = "answer";
+    private const string WebRtcSessionIpcPortVariable = "SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT";
+    private const string ClipboardSyncVariable = "SKYBRIDGE_WINDOWS_CLIPBOARD_SYNC";
+    private const string ClipboardImagesVariable = "SKYBRIDGE_WINDOWS_CLIPBOARD_IMAGES";
     private const string SettingsSystemPreferencesVariable = "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES";
     private const string EnabledMode = "enabled";
+    private const string DisabledMode = "disabled";
 
     public static bool IsNativeRuntimeRequested() =>
         string.Equals(
@@ -32,7 +41,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
         var connectionPreflightClient = CreateConnectionPreflightClientFromEnvironment(coreBridge);
 
         return new SessionViewModelDependencies(
-            new FfiEngineClient(),
+            CreateEngineClientFromEnvironment(),
             discoveryClient,
             new WindowsDiscoveryBrowserClient(discoveryClient, new NativeWindowsDnsSdBrowseClient()),
             new DeviceDiscoveryInputDefaultsClient(),
@@ -58,6 +67,28 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new SessionCommandStateClient(),
             new WorkspaceCommandStateClient());
     }
+
+    private static IEngineClient CreateEngineClientFromEnvironment()
+    {
+        var engineClient = CreateBaseEngineClient();
+        var mode = Environment.GetEnvironmentVariable(SessionDataPlaneVariable);
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return engineClient;
+        }
+
+        if (string.Equals(mode, WebRtcHelperSessionDataPlaneMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new WebRtcSessionEngineClient(
+                engineClient,
+                new WebRtcHelperLaunchClient(CreateWebRtcHelperLaunchOptionsFromEnvironment()),
+                CreateWebRtcSessionEngineOptionsFromEnvironment());
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_SESSION_DATA_PLANE must be webrtc-helper when set.");
+    }
+
+    private static IEngineClient CreateBaseEngineClient() => new FfiEngineClient();
 
     public static ISettingsWorkspaceClient CreateSettingsWorkspaceClientFromEnvironment() =>
         IsEnabled(SettingsSystemPreferencesVariable)
@@ -87,7 +118,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
 
         // Keep the explicit `transportAdapterClient` local: verify-windows-ffi-client.ps1
         // asserts the literal factory signal "ConnectionPreflightClient(coreBridge, transportAdapterClient)".
-        var transportAdapterClient = CreateTransportAdapterFromEnvironment();
+        var transportAdapterClient = CreateTransportAdapterFromEnvironment(coreBridge);
         return new ConnectionPreflightClient(coreBridge, transportAdapterClient);
     }
 
@@ -100,6 +131,13 @@ internal static class WindowsNativeRuntimeDependencyFactory
             Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_ANSWER_FILE_NAME"),
             Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_ICE_SERVERS"),
             ReadWebRtcHelperLaunchTimeout());
+
+    private static WebRtcSessionEngineOptions CreateWebRtcSessionEngineOptionsFromEnvironment() =>
+        new(
+            ReadWebRtcSessionAsAnswerer(),
+            ReadWebRtcSessionIpcPort(),
+            IsEnabled(ClipboardSyncVariable),
+            !IsDisabled(ClipboardImagesVariable));
 
     private static string ResolveWebRtcHelperExecutablePath()
     {
@@ -140,7 +178,40 @@ internal static class WindowsNativeRuntimeDependencyFactory
         throw new InvalidOperationException("SKYBRIDGE_WINDOWS_WEBRTC_LAUNCH_TIMEOUT_MS must be a positive unsigned integer.");
     }
 
-    private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment()
+    private static bool ReadWebRtcSessionAsAnswerer()
+    {
+        var raw = Environment.GetEnvironmentVariable(WebRtcSessionRoleVariable);
+        if (string.IsNullOrWhiteSpace(raw)
+            || string.Equals(raw, WebRtcSessionOfferRole, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.Equals(raw, WebRtcSessionAnswerRole, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE must be offer or answer when set.");
+    }
+
+    private static int ReadWebRtcSessionIpcPort()
+    {
+        var raw = Environment.GetEnvironmentVariable(WebRtcSessionIpcPortVariable);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return 0;
+        }
+
+        if (int.TryParse(raw, out var value) && value is >= 0 and <= 65535)
+        {
+            return value;
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_IPC_PORT must be an integer in the range 0..65535.");
+    }
+
+    private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment(CoreBridge coreBridge)
     {
         var mode = Environment.GetEnvironmentVariable(TransportAdapterVariable);
         if (string.IsNullOrWhiteSpace(mode))
@@ -166,6 +237,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
         if (string.Equals(mode, VerifiedWebRtcTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
         {
             return new VerifiedWebRtcDataChannelTransportAdapterClient(
+                coreBridge,
                 new WindowsVerifiedWebRtcDataChannelOptions(
                     Required("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH", VerifiedWebRtcTransportAdapterMode),
                     ReadWebRtcProofMaxAgeMs()));
@@ -225,6 +297,12 @@ internal static class WindowsNativeRuntimeDependencyFactory
         string.Equals(
             Environment.GetEnvironmentVariable(variable),
             EnabledMode,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDisabled(string variable) =>
+        string.Equals(
+            Environment.GetEnvironmentVariable(variable),
+            DisabledMode,
             StringComparison.OrdinalIgnoreCase);
 
     private static ConnectionLaunchAdapterKind ReadAdapterKind()

@@ -134,13 +134,30 @@ public sealed class VerifiedWebRtcDataChannelTransportAdapterClient : IWindowsTr
     };
 
     private readonly WindowsVerifiedWebRtcDataChannelOptions _options;
+    private readonly CoreBridge? _coreBridge;
 
     public VerifiedWebRtcDataChannelTransportAdapterClient(WindowsVerifiedWebRtcDataChannelOptions options)
+        : this(null, options, useCoreBridge: false)
     {
-        _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
-    public Task<WindowsTransportAdapterSnapshot> PrepareAsync(WindowsTransportAdapterRequest request)
+    public VerifiedWebRtcDataChannelTransportAdapterClient(
+        CoreBridge coreBridge,
+        WindowsVerifiedWebRtcDataChannelOptions options)
+        : this(coreBridge ?? throw new ArgumentNullException(nameof(coreBridge)), options, useCoreBridge: true)
+    {
+    }
+
+    private VerifiedWebRtcDataChannelTransportAdapterClient(
+        CoreBridge? coreBridge,
+        WindowsVerifiedWebRtcDataChannelOptions options,
+        bool useCoreBridge = false)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _coreBridge = useCoreBridge ? coreBridge : null;
+    }
+
+    public async Task<WindowsTransportAdapterSnapshot> PrepareAsync(WindowsTransportAdapterRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -160,7 +177,13 @@ public sealed class VerifiedWebRtcDataChannelTransportAdapterClient : IWindowsTr
             throw new InvalidOperationException("Windows verified WebRTC adapter requires the Core transport audit to be WebRtcInterop.");
         }
 
-        var proof = ReadProof(_options.ProofPath);
+        var proofJson = ReadProofJson(_options.ProofPath);
+        if (_coreBridge is not null)
+        {
+            return await PrepareWithCoreProofAsync(request, proofJson).ConfigureAwait(false);
+        }
+
+        var proof = ReadProof(proofJson);
         ValidateProofIdentity(proof, request);
         ValidateProofFreshness(proof);
 
@@ -191,7 +214,7 @@ public sealed class VerifiedWebRtcDataChannelTransportAdapterClient : IWindowsTr
                 $"captured_at_unix_ms={proof.CapturedAtUnixMs}; max_age_ms={_options.MaxProofAgeMs}; proof={_options.ProofPath}")
         };
 
-        return Task.FromResult(new WindowsTransportAdapterSnapshot(
+        return new WindowsTransportAdapterSnapshot(
             ConnectionLaunchAdapterKind.WebRtcDataChannel,
             IsLiveAdapterReady: true,
             adapterBinding,
@@ -202,18 +225,60 @@ public sealed class VerifiedWebRtcDataChannelTransportAdapterClient : IWindowsTr
             relayId,
             proof.TimestampWindowMs,
             capabilityDigest,
-            facts));
+            facts);
     }
 
-    private WindowsVerifiedWebRtcDataChannelProof ReadProof(string proofPath)
+    private async Task<WindowsTransportAdapterSnapshot> PrepareWithCoreProofAsync(
+        WindowsTransportAdapterRequest request,
+        string proofJson)
+    {
+        var launch = await _coreBridge!.VerifyWebRtcSessionLaunchAsync(
+            proofJson,
+            request.PairingMaterial.DeviceId,
+            request.PairingMaterial.PublicKeyFingerprint,
+            request.TransportKind,
+            request.TransportAudit,
+            _options.MaxProofAgeMs).ConfigureAwait(false);
+        var facts = new[]
+        {
+            new ConnectionPreflightFact(
+                "Windows WebRTC adapter",
+                "helper proof verified by Core",
+                $"{launch.HelperName} opened a WebRTC DataChannel and echoed an SBF1 frame before Rust Core accepted binding material."),
+            new ConnectionPreflightFact(
+                "WebRTC proof",
+                "fresh",
+                $"captured_at_unix_ms={launch.CapturedAtUnixMs}; max_age_ms={_options.MaxProofAgeMs}; proof={_options.ProofPath}")
+        };
+
+        return new WindowsTransportAdapterSnapshot(
+            ConnectionLaunchAdapterKind.WebRtcDataChannel,
+            IsLiveAdapterReady: true,
+            launch.AdapterBinding,
+            launch.LocalEndpoint,
+            launch.RemoteEndpoint,
+            launch.SelectedCandidatePair,
+            launch.TransportSecretFingerprint,
+            launch.RelayId,
+            launch.TimestampWindowMs,
+            launch.CapabilityDigest,
+            facts);
+    }
+
+    private string ReadProofJson(string proofPath)
     {
         if (!File.Exists(proofPath))
         {
             throw new InvalidOperationException($"Windows verified WebRTC adapter proof file does not exist: {proofPath}");
         }
 
+        return File.ReadAllText(proofPath);
+    }
+
+    private WindowsVerifiedWebRtcDataChannelProof ReadProof(string proofJson)
+    {
         var proof = JsonSerializer.Deserialize<WindowsVerifiedWebRtcDataChannelProof>(
-            File.ReadAllText(proofPath),
+            proofJson,
             ProofJsonOptions);
         if (proof is null)
         {

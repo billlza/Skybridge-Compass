@@ -1,6 +1,9 @@
 use serde::Deserialize;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+use crate::transport::{SkyBridgeTransportKind, TransportAuditReason, TransportBindingMaterial};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedWebRtcProofSummary {
@@ -13,8 +16,16 @@ pub struct VerifiedWebRtcProofSummary {
     pub selected_candidate_pair: String,
     pub relay_id: Option<String>,
     pub timestamp_window_ms: u64,
+    pub transport_secret_fingerprint: [u8; 32],
+    pub capability_digest: [u8; 32],
     pub captured_at_unix_ms: i64,
     pub proof_age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWebRtcSessionLaunch {
+    pub proof: VerifiedWebRtcProofSummary,
+    pub transport_binding_digest: [u8; 32],
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -39,6 +50,10 @@ pub enum WebRtcProofError {
     InvalidSbf1Magic,
     #[error("WebRTC proof requires a {0}.")]
     MissingText(&'static str),
+    #[error("WebRTC proof {0} is not a routable helper endpoint.")]
+    InvalidEndpoint(&'static str),
+    #[error("WebRTC proof selected candidate pair is missing real ICE material.")]
+    InvalidCandidatePair,
     #[error("WebRTC proof {0} must be 64 lowercase hex characters.")]
     InvalidHex(&'static str),
     #[error("WebRTC proof requires a non-zero timestamp window.")]
@@ -47,6 +62,10 @@ pub enum WebRtcProofError {
     MissingCapturedAt,
     #[error("WebRTC proof is stale or from the future.")]
     StaleOrFuture,
+    #[error("WebRTC session launch requires Core WebRtcDataChannel transport.")]
+    UnsupportedTransport,
+    #[error("WebRTC session launch requires Core WebRtcInterop transport audit.")]
+    UnsupportedTransportAudit,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +105,69 @@ pub fn validate_webrtc_proof_json(
         max_age_ms,
         now_unix_ms,
     )
+}
+
+pub fn verify_webrtc_session_launch_json(
+    json: &str,
+    expected_device_id: &str,
+    expected_fingerprint: &str,
+    max_age_ms: u64,
+    transport: SkyBridgeTransportKind,
+    transport_audit: TransportAuditReason,
+) -> Result<VerifiedWebRtcSessionLaunch, WebRtcProofError> {
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| WebRtcProofError::StaleOrFuture)?
+        .as_millis() as i64;
+    verify_webrtc_session_launch_json_at(
+        json,
+        expected_device_id,
+        expected_fingerprint,
+        max_age_ms,
+        transport,
+        transport_audit,
+        now_unix_ms,
+    )
+}
+
+pub fn verify_webrtc_session_launch_json_at(
+    json: &str,
+    expected_device_id: &str,
+    expected_fingerprint: &str,
+    max_age_ms: u64,
+    transport: SkyBridgeTransportKind,
+    transport_audit: TransportAuditReason,
+    now_unix_ms: i64,
+) -> Result<VerifiedWebRtcSessionLaunch, WebRtcProofError> {
+    if transport != SkyBridgeTransportKind::WebRtcDataChannel {
+        return Err(WebRtcProofError::UnsupportedTransport);
+    }
+    if transport_audit != TransportAuditReason::WebRtcInterop {
+        return Err(WebRtcProofError::UnsupportedTransportAudit);
+    }
+
+    let proof = validate_webrtc_proof_json_at(
+        json,
+        expected_device_id,
+        expected_fingerprint,
+        max_age_ms,
+        now_unix_ms,
+    )?;
+    let binding = TransportBindingMaterial {
+        transport_kind: SkyBridgeTransportKind::WebRtcDataChannel,
+        local_endpoint: proof.local_endpoint.clone(),
+        remote_endpoint: proof.remote_endpoint.clone(),
+        selected_candidate_pair: proof.selected_candidate_pair.clone(),
+        transport_secret_fingerprint: proof.transport_secret_fingerprint.to_vec(),
+        relay_id: proof.relay_id.clone(),
+        timestamp_window_ms: proof.timestamp_window_ms,
+        capability_digest: proof.capability_digest.to_vec(),
+    };
+
+    Ok(VerifiedWebRtcSessionLaunch {
+        proof,
+        transport_binding_digest: binding.transcript_digest(),
+    })
 }
 
 pub fn validate_webrtc_proof_json_at(
@@ -129,15 +211,15 @@ pub fn validate_webrtc_proof_json_at(
     }
 
     let adapter_binding = require_text(proof.adapter_binding, "adapter binding")?;
-    let local_endpoint = require_text(proof.local_endpoint, "local endpoint")?;
-    let remote_endpoint = require_text(proof.remote_endpoint, "remote endpoint")?;
-    let selected_candidate_pair =
-        require_text(proof.selected_candidate_pair, "selected candidate pair")?;
-    require_lower_hex_64(
+    let local_endpoint = require_endpoint(proof.local_endpoint, "local endpoint")?;
+    let remote_endpoint = require_endpoint(proof.remote_endpoint, "remote endpoint")?;
+    let selected_candidate_pair = require_candidate_pair(proof.selected_candidate_pair)?;
+    let transport_secret_fingerprint = parse_lower_hex_32(
         proof.transport_secret_fingerprint_hex.as_deref(),
         "transport secret fingerprint",
     )?;
-    require_lower_hex_64(proof.capability_digest_hex.as_deref(), "capability digest")?;
+    let capability_digest =
+        parse_lower_hex_32(proof.capability_digest_hex.as_deref(), "capability digest")?;
 
     let timestamp_window_ms = proof
         .timestamp_window_ms
@@ -170,6 +252,8 @@ pub fn validate_webrtc_proof_json_at(
         selected_candidate_pair,
         relay_id: proof.relay_id.and_then(non_empty_trimmed),
         timestamp_window_ms,
+        transport_secret_fingerprint,
+        capability_digest,
         captured_at_unix_ms,
         proof_age_ms: age as u64,
     })
@@ -179,6 +263,32 @@ fn require_text(value: Option<String>, label: &'static str) -> Result<String, We
     value
         .and_then(non_empty_trimmed)
         .ok_or(WebRtcProofError::MissingText(label))
+}
+
+fn require_endpoint(
+    value: Option<String>,
+    label: &'static str,
+) -> Result<String, WebRtcProofError> {
+    let value = require_text(value, label)?;
+    let (host, port) =
+        parse_endpoint_host_port(&value).ok_or(WebRtcProofError::InvalidEndpoint(label))?;
+    if port == 0 || is_rejected_endpoint_host(host) {
+        return Err(WebRtcProofError::InvalidEndpoint(label));
+    }
+    Ok(value)
+}
+
+fn require_candidate_pair(value: Option<String>) -> Result<String, WebRtcProofError> {
+    let value = require_text(value, "selected candidate pair")?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if is_placeholder_text(&normalized)
+        || normalized.contains("127.0.0.1:0")
+        || normalized.contains("localhost:0")
+        || normalized.contains("no-fingerprint")
+    {
+        return Err(WebRtcProofError::InvalidCandidatePair);
+    }
+    Ok(value)
 }
 
 fn require_raw_text(
@@ -198,11 +308,97 @@ fn non_empty_trimmed(value: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn require_lower_hex_64(value: Option<&str>, label: &'static str) -> Result<(), WebRtcProofError> {
-    if value.is_some_and(is_lower_hex_64) {
-        Ok(())
-    } else {
-        Err(WebRtcProofError::InvalidHex(label))
+fn parse_endpoint_host_port(value: &str) -> Option<(&str, u16)> {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix('[') {
+        let closing = rest.find(']')?;
+        let host = &rest[..closing];
+        let suffix = &rest[closing + 1..];
+        let port = suffix.strip_prefix(':')?.parse::<u16>().ok()?;
+        if host.trim().is_empty() {
+            return None;
+        }
+        return Some((host, port));
+    }
+
+    let (host, port) = value.rsplit_once(':')?;
+    if host.trim().is_empty()
+        || port.is_empty()
+        || host.contains('/')
+        || host.contains('\\')
+        || host.contains(':')
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some((host, port.parse::<u16>().ok()?))
+}
+
+fn is_rejected_endpoint_host(host: &str) -> bool {
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized == "localhost"
+        || normalized == "localhost.localdomain"
+        || is_placeholder_text(&normalized)
+    {
+        return true;
+    }
+
+    let host_without_zone = normalized
+        .split_once('%')
+        .map(|(host, _)| host)
+        .unwrap_or(normalized.as_str());
+    match host_without_zone.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ip == Ipv4Addr::new(255, 255, 255, 255)
+        }
+        Ok(IpAddr::V6(ip)) => ip.is_unspecified() || ip.is_loopback() || ip.is_multicast(),
+        Err(_) => false,
+    }
+}
+
+fn is_placeholder_text(value: &str) -> bool {
+    matches!(
+        value,
+        "placeholder"
+            | "unknown"
+            | "none"
+            | "null"
+            | "n/a"
+            | "no-endpoint"
+            | "no-candidate"
+            | "no-candidate-pair"
+            | "missing"
+    )
+}
+
+fn parse_lower_hex_32(
+    value: Option<&str>,
+    label: &'static str,
+) -> Result<[u8; 32], WebRtcProofError> {
+    let value = value.ok_or(WebRtcProofError::InvalidHex(label))?;
+    if !is_lower_hex_64(value) {
+        return Err(WebRtcProofError::InvalidHex(label));
+    }
+
+    let mut bytes = [0u8; 32];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        let high = from_lower_hex(value.as_bytes()[index * 2], label)?;
+        let low = from_lower_hex(value.as_bytes()[index * 2 + 1], label)?;
+        *slot = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn from_lower_hex(value: u8, label: &'static str) -> Result<u8, WebRtcProofError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(WebRtcProofError::InvalidHex(label)),
     }
 }
 
@@ -216,6 +412,7 @@ fn is_lower_hex_64(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{SkyBridgeTransportKind, TransportAuditReason};
 
     const FINGERPRINT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
@@ -257,7 +454,66 @@ mod tests {
         assert_eq!(summary.helper_name, "schema-smoke-webrtc-helper");
         assert_eq!(summary.relay_id.as_deref(), Some("relay-helper"));
         assert_eq!(summary.timestamp_window_ms, 15_000);
+        assert_eq!(summary.transport_secret_fingerprint, [0x66; 32]);
+        assert_eq!(summary.capability_digest, [0x77; 32]);
         assert_eq!(summary.proof_age_ms, 1_000);
+    }
+
+    #[test]
+    fn builds_core_owned_session_launch_binding() {
+        let launch = verify_webrtc_session_launch_json_at(
+            &proof_json(""),
+            "mac-1",
+            FINGERPRINT,
+            60_000,
+            SkyBridgeTransportKind::WebRtcDataChannel,
+            TransportAuditReason::WebRtcInterop,
+            101_000,
+        )
+        .expect("session launch proof should validate");
+
+        let material = TransportBindingMaterial {
+            transport_kind: SkyBridgeTransportKind::WebRtcDataChannel,
+            local_endpoint: "windows.lan:5443".to_string(),
+            remote_endpoint: "mac.lan:5443".to_string(),
+            selected_candidate_pair: "webrtc/dtls/sctp/helper-selected".to_string(),
+            transport_secret_fingerprint: vec![0x66; 32],
+            relay_id: Some("relay-helper".to_string()),
+            timestamp_window_ms: 15_000,
+            capability_digest: vec![0x77; 32],
+        };
+
+        assert_eq!(
+            launch.transport_binding_digest,
+            material.transcript_digest()
+        );
+    }
+
+    #[test]
+    fn rejects_non_webrtc_session_launch_transport() {
+        let err = verify_webrtc_session_launch_json_at(
+            &proof_json(""),
+            "mac-1",
+            FINGERPRINT,
+            60_000,
+            SkyBridgeTransportKind::AppleNative,
+            TransportAuditReason::WebRtcInterop,
+            101_000,
+        )
+        .unwrap_err();
+        assert_eq!(err, WebRtcProofError::UnsupportedTransport);
+
+        let audit_err = verify_webrtc_session_launch_json_at(
+            &proof_json(""),
+            "mac-1",
+            FINGERPRINT,
+            60_000,
+            SkyBridgeTransportKind::WebRtcDataChannel,
+            TransportAuditReason::AppleNativeDefault,
+            101_000,
+        )
+        .unwrap_err();
+        assert_eq!(audit_err, WebRtcProofError::UnsupportedTransportAudit);
     }
 
     #[test]
@@ -293,5 +549,39 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(invalid_hex, WebRtcProofError::InvalidExpectedFingerprint);
+    }
+
+    #[test]
+    fn rejects_placeholder_endpoint_and_candidate_material() {
+        let placeholder_local = proof_json("").replace(
+            r#""localEndpoint": "windows.lan:5443""#,
+            r#""localEndpoint": "127.0.0.1:0""#,
+        );
+        let endpoint_err = validate_webrtc_proof_json_at(
+            &placeholder_local,
+            "mac-1",
+            FINGERPRINT,
+            60_000,
+            101_000,
+        )
+        .unwrap_err();
+        assert_eq!(
+            endpoint_err,
+            WebRtcProofError::InvalidEndpoint("local endpoint")
+        );
+
+        let missing_candidate = proof_json("").replace(
+            r#""selectedCandidatePair": "webrtc/dtls/sctp/helper-selected""#,
+            r#""selectedCandidatePair": "no-candidate-pair""#,
+        );
+        let candidate_err = validate_webrtc_proof_json_at(
+            &missing_candidate,
+            "mac-1",
+            FINGERPRINT,
+            60_000,
+            101_000,
+        )
+        .unwrap_err();
+        assert_eq!(candidate_err, WebRtcProofError::InvalidCandidatePair);
     }
 }

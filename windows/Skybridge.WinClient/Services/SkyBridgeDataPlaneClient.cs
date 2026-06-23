@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -40,10 +41,12 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
     private const byte Sbf1Version = 1;
     private const ushort FlagSbp2Padded = 0x0001;
     private const ushort FlagEndOfMessage = 0x0002;
+    private const uint MaxPayloadBytes = 64u * 1024 * 1024;
     private static readonly byte[] Sbf1Magic = { 0x53, 0x42, 0x46, 0x31 }; // "SBF1"
 
     private readonly string _host;
     private readonly int _port;
+    private readonly string? _ipcToken;
     private readonly bool _autoReconnect;
     private readonly TimeSpan _reconnectDelay;
     private readonly object _gate = new();
@@ -64,6 +67,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
     public SkyBridgeDataPlaneClient(
         int port,
         string host = "127.0.0.1",
+        string? ipcToken = null,
         bool autoReconnect = true,
         TimeSpan? reconnectDelay = null)
     {
@@ -74,6 +78,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
 
         _host = string.IsNullOrWhiteSpace(host) ? "127.0.0.1" : host;
         _port = port;
+        _ipcToken = string.IsNullOrWhiteSpace(ipcToken) ? null : ipcToken.Trim();
         _autoReconnect = autoReconnect;
         _reconnectDelay = reconnectDelay ?? TimeSpan.FromMilliseconds(500);
     }
@@ -151,6 +156,8 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
         try
         {
             await client.ConnectAsync(_host, _port, ct).ConfigureAwait(false);
+            var stream = client.GetStream();
+            await SendIpcTokenAsync(stream, ct).ConfigureAwait(false);
         }
         catch
         {
@@ -187,7 +194,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception ex) when (IsRecoverableDataPlaneException(ex))
             {
                 // Socket dropped / desynced. Mark disconnected and (maybe) retry.
             }
@@ -208,7 +215,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception ex) when (IsRecoverableDataPlaneException(ex))
             {
                 // Helper not back yet; loop and retry after another delay.
             }
@@ -280,6 +287,13 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
 
     private static bool IsKnownChannel(byte code) => code is >= 1 and <= 5;
 
+    private static bool IsRecoverableDataPlaneException(Exception ex) =>
+        ex is IOException
+            or SocketException
+            or EndOfStreamException
+            or InvalidDataException
+            or ObjectDisposedException;
+
     private static byte[] EncodeSbf1(byte channelCode, ulong sequence, ushort flags, ReadOnlySpan<byte> payload)
     {
         var buf = new byte[Sbf1HeaderLen + payload.Length];
@@ -311,8 +325,17 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
         }
 
         var payloadLen = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(16, 4));
-        const uint maxPayload = 64u * 1024 * 1024;
-        if (payloadLen > maxPayload)
+        if (header[4] != Sbf1Version)
+        {
+            throw new InvalidDataException($"data-plane frame version {header[4]} is not supported");
+        }
+
+        if (!IsKnownChannel(header[5]))
+        {
+            throw new InvalidDataException($"data-plane frame channel {header[5]} is not supported");
+        }
+
+        if (payloadLen > MaxPayloadBytes)
         {
             throw new InvalidDataException($"data-plane frame payload_len {payloadLen} exceeds cap");
         }
@@ -326,6 +349,18 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
         }
 
         return frame;
+    }
+
+    private async Task SendIpcTokenAsync(NetworkStream stream, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_ipcToken))
+        {
+            return;
+        }
+
+        var line = Encoding.UTF8.GetBytes($"SKYBRIDGE-IPCTOKEN {_ipcToken}\n");
+        await stream.WriteAsync(line, ct).ConfigureAwait(false);
+        await stream.FlushAsync(ct).ConfigureAwait(false);
     }
 
     private static async Task<int> ReadFullyAsync(NetworkStream stream, Memory<byte> buffer, bool allowCleanEof, CancellationToken ct)
@@ -375,7 +410,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 await _pumpTask.ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex) when (ex is OperationCanceledException || IsRecoverableDataPlaneException(ex))
             {
                 // pump unwinds via cancellation
             }

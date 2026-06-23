@@ -36,6 +36,8 @@ internal sealed class Cand
 // fields for a production signaling plane.
 internal sealed class Signal
 {
+    private const long MaxSignalFileBytes = 4 * 1024 * 1024;
+
     [JsonPropertyName("type")] public string Type { get; init; } = "";
     [JsonPropertyName("sdp")] public string Sdp { get; init; } = "";
     [JsonPropertyName("candidates")] public List<Cand> Candidates { get; init; } = new();
@@ -44,8 +46,17 @@ internal sealed class Signal
 
     public static void Write(string path, string type, string sdp, List<Cand> candidates)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        EnsureParentDirectory(path);
+
         var sig = new Signal { Type = type, Sdp = sdp, Candidates = candidates };
         var json = JsonSerializer.Serialize(sig, Options);
+        if (Encoding.UTF8.GetByteCount(json) > MaxSignalFileBytes)
+        {
+            throw new InvalidOperationException(
+                $"signal payload exceeds {MaxSignalFileBytes} bytes; refusing to write {path}");
+        }
+
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, json, new UTF8Encoding(false));
         File.Move(tmp, path, overwrite: true);
@@ -62,8 +73,11 @@ internal sealed class Signal
             {
                 try
                 {
-                    var sig = JsonSerializer.Deserialize<Signal>(File.ReadAllText(path));
-                    if (sig is not null && !string.IsNullOrWhiteSpace(sig.Sdp)) return sig;
+                    var sig = ReadSignalFile(path);
+                    if (sig is not null && !string.IsNullOrWhiteSpace(sig.Sdp))
+                    {
+                        return sig;
+                    }
                 }
                 catch (JsonException) { /* writer mid-flight (partial JSON); retry */ }
                 catch (IOException) { /* file locked by the transfer (scp) mid-write; retry */ }
@@ -71,5 +85,26 @@ internal sealed class Signal
             await Task.Delay(250);
         }
         throw new TimeoutException($"signal file not available within {timeout.TotalSeconds:F0}s: {path}");
+    }
+
+    private static Signal? ReadSignalFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (info.Length > MaxSignalFileBytes)
+        {
+            throw new InvalidDataException(
+                $"signal file {path} is {info.Length} bytes, exceeding the {MaxSignalFileBytes} byte cap");
+        }
+
+        return JsonSerializer.Deserialize<Signal>(File.ReadAllText(path));
+    }
+
+    private static void EnsureParentDirectory(string path)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
     }
 }

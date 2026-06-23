@@ -8,19 +8,30 @@ use skybridge_core::ffi::{
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
     skybridge_engine_send_input, skybridge_engine_snapshot, skybridge_engine_state,
     skybridge_engine_throttle_stream, skybridge_map_channel,
-    skybridge_parse_discovery_advertisement, skybridge_plan_connection, skybridge_select_transport,
+    skybridge_parse_discovery_advertisement, skybridge_plan_connection,
+    skybridge_plan_file_transfer_readiness, skybridge_project_signaling_lifecycle_state,
+    skybridge_select_transport, skybridge_verify_webrtc_session_launch,
     SkybridgeAdapterBindingKind, SkybridgeBuffer, SkybridgeChannelKind, SkybridgeChannelMapping,
     SkybridgeConnectionPlan, SkybridgeCryptoProviderCapabilities, SkybridgeCryptoSuiteAuditCode,
     SkybridgeCryptoSuiteKind, SkybridgeCryptoSuitePolicy, SkybridgeDiscoveryAdvertisement,
     SkybridgeDiscoveryServiceKind, SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent,
-    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeFrameMetadata, SkybridgeNetworkPath,
-    SkybridgePeerCapabilities, SkybridgePeerPlatform, SkybridgeReliabilityKind,
-    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
+    SkybridgeEventKind, SkybridgeFileTransferAddressClass, SkybridgeFileTransferManifestFile,
+    SkybridgeFileTransferManifestMode, SkybridgeFileTransferPlannerVerdict,
+    SkybridgeFileTransferPortProvenance, SkybridgeFileTransferReadinessCode,
+    SkybridgeFileTransferReadinessStatus, SkybridgeFileTransferRouteCandidate,
+    SkybridgeFileTransferRouteSource, SkybridgeFlowRate, SkybridgeFrameMetadata,
+    SkybridgeNetworkPath, SkybridgePeerCapabilities, SkybridgePeerPlatform,
+    SkybridgeReliabilityKind, SkybridgeSessionConfig, SkybridgeSessionState,
+    SkybridgeSignalingFailureClass, SkybridgeSignalingHealth, SkybridgeSignalingLifecycleEvent,
+    SkybridgeSignalingLifecycleEventKind, SkybridgeSignalingLifecyclePhase,
+    SkybridgeSignalingLifecycleState, SkybridgeSignalingReadiness, SkybridgeStreamMetrics,
     SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode, SkybridgeTransportBindingDigest,
-    SkybridgeTransportKind, SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
+    SkybridgeTransportKind, SkybridgeTransportSelection, SkybridgeVerifiedWebRtcSessionLaunch,
+    SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DISCOVERY_FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const TRANSPORT_BINDING_DIGEST: [u8; 32] = [0x42; 32];
@@ -144,8 +155,184 @@ fn empty_discovery_advertisement() -> SkybridgeDiscoveryAdvertisement {
     }
 }
 
+fn empty_verified_webrtc_session_launch() -> SkybridgeVerifiedWebRtcSessionLaunch {
+    SkybridgeVerifiedWebRtcSessionLaunch {
+        peer_device_id: [0; 64],
+        peer_device_id_len: 0,
+        peer_public_key_fingerprint: [0; 64],
+        peer_public_key_fingerprint_len: 0,
+        helper_name: [0; 128],
+        helper_name_len: 0,
+        adapter_binding: [0; 256],
+        adapter_binding_len: 0,
+        local_endpoint: [0; 256],
+        local_endpoint_len: 0,
+        remote_endpoint: [0; 256],
+        remote_endpoint_len: 0,
+        selected_candidate_pair: [0; 256],
+        selected_candidate_pair_len: 0,
+        relay_id: [0; 128],
+        relay_id_len: 0,
+        timestamp_window_ms: 0,
+        captured_at_unix_ms: 0,
+        proof_age_ms: 0,
+        transport_secret_fingerprint: [0; 32],
+        capability_digest: [0; 32],
+        transport_binding_digest: [0; 32],
+    }
+}
+
+fn empty_signaling_lifecycle_state() -> SkybridgeSignalingLifecycleState {
+    SkybridgeSignalingLifecycleState {
+        session_id: [0; 128],
+        session_id_len: 0,
+        backend: [0; 128],
+        backend_len: 0,
+        generation: 0,
+        lifecycle_phase: SkybridgeSignalingLifecyclePhase::Idle,
+        signaling_health: SkybridgeSignalingHealth::Healthy,
+        readiness: SkybridgeSignalingReadiness::Idle,
+        last_established_readiness: SkybridgeSignalingReadiness::Idle,
+        failure_class: SkybridgeSignalingFailureClass::None,
+        negotiated_suite: [0; 64],
+        negotiated_suite_len: 0,
+        reconnect_attempt_count: 0,
+        business_sends_allowed: 0,
+        can_report_connected: 0,
+    }
+}
+
+fn fixed_bytes<const N: usize>(value: &str) -> ([u8; N], usize) {
+    let bytes = value.as_bytes();
+    assert!(bytes.len() <= N);
+    let mut buffer = [0; N];
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    (buffer, bytes.len())
+}
+
+fn signaling_event(
+    kind: SkybridgeSignalingLifecycleEventKind,
+    generation: u64,
+) -> SkybridgeSignalingLifecycleEvent {
+    let (session_id, session_id_len) = fixed_bytes("session-ffi");
+    let (backend, backend_len) = fixed_bytes("wss-primary");
+    SkybridgeSignalingLifecycleEvent {
+        session_id,
+        session_id_len,
+        backend,
+        backend_len,
+        generation,
+        kind,
+        failure_class: SkybridgeSignalingFailureClass::None,
+        negotiated_suite: [0; 64],
+        negotiated_suite_len: 0,
+    }
+}
+
+fn signaling_event_with_suite(
+    kind: SkybridgeSignalingLifecycleEventKind,
+    generation: u64,
+    suite: &str,
+) -> SkybridgeSignalingLifecycleEvent {
+    let mut event = signaling_event(kind, generation);
+    let (suite, suite_len) = fixed_bytes(suite);
+    event.negotiated_suite = suite;
+    event.negotiated_suite_len = suite_len;
+    event
+}
+
 fn fixed_utf8<const N: usize>(buffer: &[u8; N], len: usize) -> &str {
     std::str::from_utf8(&buffer[..len]).expect("valid utf-8")
+}
+
+fn empty_file_transfer_verdict() -> SkybridgeFileTransferPlannerVerdict {
+    SkybridgeFileTransferPlannerVerdict {
+        status: SkybridgeFileTransferReadinessStatus::Blocked,
+        code: SkybridgeFileTransferReadinessCode::MissingRoute,
+        selected_address_class: SkybridgeFileTransferAddressClass::Invalid,
+        selected_route_source: SkybridgeFileTransferRouteSource::Unknown,
+        selected_peer_id: [0; 128],
+        selected_peer_id_len: 0,
+        selected_device_name: [0; 128],
+        selected_device_name_len: 0,
+        selected_host: [0; 128],
+        selected_host_len: 0,
+        selected_port: 0,
+        selected_listener_generation: 0,
+        has_selected_listener_generation: 0,
+        manifest_version: 0,
+        manifest_file_count: 0,
+        manifest_total_bytes: 0,
+        manifest_total_chunks: 0,
+        manifest_chunk_size: 0,
+        manifest_digest: [0; 32],
+        has_manifest_digest: 0,
+        file_channel_binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        has_file_channel: 0,
+        file_channel_head_of_line_isolated: 0,
+        frame_header_len: 0,
+        audit: [0; 256],
+        audit_len: 0,
+    }
+}
+
+fn file_transfer_candidate(
+    requested_host: &str,
+    resolved_host: Option<&str>,
+    service_type: Option<&str>,
+    port: u16,
+    provenance: SkybridgeFileTransferPortProvenance,
+    listener_generation: u64,
+) -> SkybridgeFileTransferRouteCandidate {
+    let (peer_id, peer_id_len) = fixed_bytes("id:peer-1");
+    let (device_name, device_name_len) = fixed_bytes("Desk Mac");
+    let (requested_host, requested_host_len) = fixed_bytes(requested_host);
+    let (resolved_host, resolved_host_len) =
+        resolved_host.map(fixed_bytes).unwrap_or(([0; 128], 0));
+    let (service_type, service_type_len) = service_type.map(fixed_bytes).unwrap_or(([0; 64], 0));
+
+    SkybridgeFileTransferRouteCandidate {
+        peer_id,
+        peer_id_len,
+        device_name,
+        device_name_len,
+        requested_host,
+        requested_host_len,
+        resolved_host,
+        resolved_host_len,
+        service_type,
+        service_type_len,
+        port,
+        has_port: 1,
+        route_source: SkybridgeFileTransferRouteSource::AuthenticatedSession,
+        port_provenance: provenance,
+        listener_generation,
+        has_listener_generation: 1,
+    }
+}
+
+fn file_transfer_manifest_file(
+    display_name: &str,
+    relative_path: &str,
+    byte_len: u64,
+    sha256_hex: &str,
+) -> SkybridgeFileTransferManifestFile {
+    let (display_name, display_name_len) = fixed_bytes(display_name);
+    let (relative_path, relative_path_len) = fixed_bytes(relative_path);
+    let (sha256_hex, sha256_hex_len) = fixed_bytes(sha256_hex);
+    let (mime_type, mime_type_len) = fixed_bytes("application/octet-stream");
+
+    SkybridgeFileTransferManifestFile {
+        display_name,
+        display_name_len,
+        relative_path,
+        relative_path_len,
+        byte_len,
+        sha256_hex,
+        sha256_hex_len,
+        mime_type,
+        mime_type_len,
+    }
 }
 
 fn empty_frame_metadata() -> SkybridgeFrameMetadata {
@@ -158,6 +345,28 @@ fn empty_frame_metadata() -> SkybridgeFrameMetadata {
         payload_len: 0,
         decoded_payload_len: 0,
     }
+}
+
+fn webrtc_session_proof_json(captured_at_unix_ms: i64) -> String {
+    format!(
+        r#"{{
+  "helperName": "ffi-session-helper",
+  "peerDeviceId": "mac-ffi",
+  "peerPublicKeyFingerprint": "{DISCOVERY_FP}",
+  "dataChannelOpen": true,
+  "sbf1EchoVerified": true,
+  "sbf1FrameMagic": "SBF1",
+  "adapterBinding": "verified webrtc datachannel helper",
+  "localEndpoint": "windows.lan:5443",
+  "remoteEndpoint": "mac.lan:5443",
+  "selectedCandidatePair": "webrtc/dtls/sctp/ffi-selected",
+  "transportSecretFingerprintHex": "6666666666666666666666666666666666666666666666666666666666666666",
+  "capabilityDigestHex": "7777777777777777777777777777777777777777777777777777777777777777",
+  "relayId": "relay-ffi",
+  "timestampWindowMs": 15000,
+  "capturedAtUnixMs": {captured_at_unix_ms}
+}}"#
+    )
 }
 
 #[test]
@@ -720,6 +929,541 @@ fn ffi_transport_binding_digest_exports_core_transcript() {
         )
     };
     assert_eq!(null_out, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_webrtc_session_launch_verifies_proof_and_binding_digest() {
+    let captured_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_millis() as i64;
+    let proof = webrtc_session_proof_json(captured_at_unix_ms);
+    let expected_device_id = b"mac-ffi";
+    let expected_fingerprint = DISCOVERY_FP.as_bytes();
+    let mut launch = empty_verified_webrtc_session_launch();
+
+    let result = unsafe {
+        skybridge_verify_webrtc_session_launch(
+            proof.as_ptr(),
+            proof.len(),
+            expected_device_id.as_ptr(),
+            expected_device_id.len(),
+            expected_fingerprint.as_ptr(),
+            expected_fingerprint.len(),
+            SkybridgeTransportKind::WebRtcDataChannel,
+            SkybridgeTransportAuditCode::WebRtcInterop,
+            60_000,
+            &mut launch,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        fixed_utf8(&launch.peer_device_id, launch.peer_device_id_len),
+        "mac-ffi"
+    );
+    assert_eq!(
+        fixed_utf8(
+            &launch.peer_public_key_fingerprint,
+            launch.peer_public_key_fingerprint_len
+        ),
+        DISCOVERY_FP
+    );
+    assert_eq!(
+        fixed_utf8(&launch.helper_name, launch.helper_name_len),
+        "ffi-session-helper"
+    );
+    assert_eq!(launch.transport_secret_fingerprint, [0x66; 32]);
+    assert_eq!(launch.capability_digest, [0x77; 32]);
+    assert_eq!(launch.timestamp_window_ms, 15_000);
+    assert!(launch.proof_age_ms <= 60_000);
+
+    let local_endpoint = b"windows.lan:5443";
+    let remote_endpoint = b"mac.lan:5443";
+    let candidate_pair = b"webrtc/dtls/sctp/ffi-selected";
+    let secret_fingerprint = [0x66u8; 32];
+    let capability_digest = [0x77u8; 32];
+    let relay_id = b"relay-ffi";
+    let mut expected_digest = SkybridgeTransportBindingDigest { digest: [0; 32] };
+    let digest_result = unsafe {
+        skybridge_transport_binding_digest(
+            SkybridgeTransportKind::WebRtcDataChannel,
+            local_endpoint.as_ptr(),
+            local_endpoint.len(),
+            remote_endpoint.as_ptr(),
+            remote_endpoint.len(),
+            candidate_pair.as_ptr(),
+            candidate_pair.len(),
+            secret_fingerprint.as_ptr(),
+            secret_fingerprint.len(),
+            relay_id.as_ptr(),
+            relay_id.len(),
+            15_000,
+            capability_digest.as_ptr(),
+            capability_digest.len(),
+            &mut expected_digest,
+        )
+    };
+
+    assert_eq!(digest_result, SkybridgeErrorCode::Ok);
+    assert_eq!(launch.transport_binding_digest, expected_digest.digest);
+
+    let apple_native_result = unsafe {
+        skybridge_verify_webrtc_session_launch(
+            proof.as_ptr(),
+            proof.len(),
+            expected_device_id.as_ptr(),
+            expected_device_id.len(),
+            expected_fingerprint.as_ptr(),
+            expected_fingerprint.len(),
+            SkybridgeTransportKind::AppleNative,
+            SkybridgeTransportAuditCode::AppleNativeDefault,
+            60_000,
+            &mut launch,
+        )
+    };
+    assert_eq!(
+        apple_native_result,
+        SkybridgeErrorCode::UnsupportedTransport
+    );
+}
+
+#[test]
+fn ffi_webrtc_session_launch_rejects_placeholder_endpoint() {
+    let captured_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_millis() as i64;
+    let proof = webrtc_session_proof_json(captured_at_unix_ms).replace(
+        r#""localEndpoint": "windows.lan:5443""#,
+        r#""localEndpoint": "127.0.0.1:0""#,
+    );
+    let expected_device_id = b"mac-ffi";
+    let expected_fingerprint = DISCOVERY_FP.as_bytes();
+    let mut launch = empty_verified_webrtc_session_launch();
+
+    let result = unsafe {
+        skybridge_verify_webrtc_session_launch(
+            proof.as_ptr(),
+            proof.len(),
+            expected_device_id.as_ptr(),
+            expected_device_id.len(),
+            expected_fingerprint.as_ptr(),
+            expected_fingerprint.len(),
+            SkybridgeTransportKind::WebRtcDataChannel,
+            SkybridgeTransportAuditCode::WebRtcInterop,
+            60_000,
+            &mut launch,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_signaling_lifecycle_keeps_socket_open_distinct_from_connected() {
+    let mut state = empty_signaling_lifecycle_state();
+    let socket_event = signaling_event(SkybridgeSignalingLifecycleEventKind::SocketOpen, 1);
+
+    let result =
+        unsafe { skybridge_project_signaling_lifecycle_state(state, socket_event, &mut state) };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        state.lifecycle_phase,
+        SkybridgeSignalingLifecyclePhase::SocketOpen
+    );
+    assert_eq!(state.readiness, SkybridgeSignalingReadiness::Idle);
+    assert_eq!(state.business_sends_allowed, 0);
+    assert_eq!(state.can_report_connected, 0);
+
+    let bound_event = signaling_event(SkybridgeSignalingLifecycleEventKind::Bound, 1);
+    let result =
+        unsafe { skybridge_project_signaling_lifecycle_state(state, bound_event, &mut state) };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        state.lifecycle_phase,
+        SkybridgeSignalingLifecyclePhase::Bound
+    );
+    assert_eq!(state.business_sends_allowed, 1);
+    assert_eq!(state.can_report_connected, 0);
+}
+
+#[test]
+fn ffi_signaling_lifecycle_ignores_stale_generation_events() {
+    let mut state = empty_signaling_lifecycle_state();
+    let bound = signaling_event(SkybridgeSignalingLifecycleEventKind::Bound, 3);
+    let result = unsafe { skybridge_project_signaling_lifecycle_state(state, bound, &mut state) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+
+    let stale_socket_open = signaling_event(SkybridgeSignalingLifecycleEventKind::SocketOpen, 2);
+    let result = unsafe {
+        skybridge_project_signaling_lifecycle_state(state, stale_socket_open, &mut state)
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        state.lifecycle_phase,
+        SkybridgeSignalingLifecyclePhase::Bound
+    );
+    assert_eq!(state.generation, 3);
+}
+
+#[test]
+fn ffi_signaling_lifecycle_rejects_readiness_before_bound() {
+    let mut state = empty_signaling_lifecycle_state();
+    let ready = signaling_event(SkybridgeSignalingLifecycleEventKind::TransportReady, 1);
+    let result = unsafe { skybridge_project_signaling_lifecycle_state(state, ready, &mut state) };
+    assert_eq!(result, SkybridgeErrorCode::InvalidInput);
+    assert_eq!(state.can_report_connected, 0);
+}
+
+#[test]
+fn ffi_signaling_lifecycle_preserves_audit_after_post_handshake_failure() {
+    let mut state = empty_signaling_lifecycle_state();
+    let bound = signaling_event(SkybridgeSignalingLifecycleEventKind::Bound, 1);
+    let result = unsafe { skybridge_project_signaling_lifecycle_state(state, bound, &mut state) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+
+    let ready = signaling_event(SkybridgeSignalingLifecycleEventKind::TransportReady, 1);
+    let result = unsafe { skybridge_project_signaling_lifecycle_state(state, ready, &mut state) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+
+    let handshake = signaling_event_with_suite(
+        SkybridgeSignalingLifecycleEventKind::HandshakeComplete,
+        1,
+        "xwing-hybrid",
+    );
+    let result =
+        unsafe { skybridge_project_signaling_lifecycle_state(state, handshake, &mut state) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        state.readiness,
+        SkybridgeSignalingReadiness::HandshakeComplete
+    );
+    assert_eq!(state.can_report_connected, 1);
+
+    let mut failed = signaling_event(SkybridgeSignalingLifecycleEventKind::Failed, 1);
+    failed.failure_class = SkybridgeSignalingFailureClass::TokenExpired;
+    let result = unsafe { skybridge_project_signaling_lifecycle_state(state, failed, &mut state) };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        state.lifecycle_phase,
+        SkybridgeSignalingLifecyclePhase::Failed
+    );
+    assert_eq!(
+        state.signaling_health,
+        SkybridgeSignalingHealth::DegradedFatal
+    );
+    assert_eq!(state.readiness, SkybridgeSignalingReadiness::Idle);
+    assert_eq!(
+        state.last_established_readiness,
+        SkybridgeSignalingReadiness::HandshakeComplete
+    );
+    assert_eq!(state.can_report_connected, 0);
+}
+
+#[test]
+fn ffi_signaling_lifecycle_rejects_missing_handshake_suite() {
+    let mut state = empty_signaling_lifecycle_state();
+    let handshake = signaling_event(SkybridgeSignalingLifecycleEventKind::HandshakeComplete, 1);
+
+    let result =
+        unsafe { skybridge_project_signaling_lifecycle_state(state, handshake, &mut state) };
+
+    assert_eq!(result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_file_transfer_readiness_exports_ready_route_and_manifest_plan() {
+    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let route = [file_transfer_candidate(
+        "192.168.31.20",
+        None,
+        None,
+        8080,
+        SkybridgeFileTransferPortProvenance::ListenerTruth,
+        7,
+    )];
+    let files = [file_transfer_manifest_file(
+        "a.bin",
+        "folder/a.bin",
+        1_500_000,
+        HASH,
+    )];
+    let target = b"peer-1";
+    let mut verdict = empty_file_transfer_verdict();
+
+    let result = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            route.as_ptr(),
+            route.len(),
+            target.as_ptr(),
+            target.len(),
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            files.as_ptr(),
+            files.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(verdict.status, SkybridgeFileTransferReadinessStatus::Ready);
+    assert_eq!(verdict.code, SkybridgeFileTransferReadinessCode::Ok);
+    assert_eq!(
+        verdict.selected_address_class,
+        SkybridgeFileTransferAddressClass::LanDirect
+    );
+    assert_eq!(
+        fixed_utf8(&verdict.selected_peer_id, verdict.selected_peer_id_len),
+        "peer-1"
+    );
+    assert_eq!(
+        fixed_utf8(&verdict.selected_host, verdict.selected_host_len),
+        "192.168.31.20"
+    );
+    assert_eq!(verdict.selected_port, 8080);
+    assert_eq!(verdict.has_selected_listener_generation, 1);
+    assert_eq!(verdict.selected_listener_generation, 7);
+    assert_eq!(verdict.manifest_version, 1);
+    assert_eq!(verdict.manifest_file_count, 1);
+    assert_eq!(verdict.manifest_total_bytes, 1_500_000);
+    assert_eq!(verdict.manifest_total_chunks, 2);
+    assert_eq!(verdict.manifest_chunk_size, 1024 * 1024);
+    assert_eq!(verdict.has_manifest_digest, 1);
+    assert_ne!(verdict.manifest_digest, [0; 32]);
+    assert_eq!(verdict.has_file_channel, 1);
+    assert_eq!(
+        verdict.file_channel_binding_kind,
+        SkybridgeAdapterBindingKind::WebRtcDataChannel
+    );
+    assert_eq!(verdict.file_channel_head_of_line_isolated, 1);
+    assert_eq!(verdict.frame_header_len, 20);
+}
+
+#[test]
+fn ffi_file_transfer_readiness_keeps_intent_only_distinct_from_ready_manifest() {
+    let mut verdict = empty_file_transfer_verdict();
+
+    let result = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            0,
+            0,
+            SkybridgeFileTransferManifestMode::IntentOnly,
+            ptr::null(),
+            0,
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        verdict.status,
+        SkybridgeFileTransferReadinessStatus::IntentOnly
+    );
+    assert_eq!(
+        verdict.code,
+        SkybridgeFileTransferReadinessCode::IntentOnlyNoFiles
+    );
+    assert_eq!(verdict.has_manifest_digest, 0);
+    assert_eq!(verdict.manifest_file_count, 0);
+    assert_eq!(verdict.selected_host_len, 0);
+    assert_eq!(verdict.has_file_channel, 1);
+}
+
+#[test]
+fn ffi_file_transfer_readiness_rejects_link_local_and_stale_ports() {
+    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let link_local = [file_transfer_candidate(
+        "fe80::1%en0",
+        None,
+        None,
+        8080,
+        SkybridgeFileTransferPortProvenance::ListenerTruth,
+        7,
+    )];
+    let files = [file_transfer_manifest_file("a.bin", "a.bin", 1, HASH)];
+    let mut verdict = empty_file_transfer_verdict();
+
+    let result = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            link_local.as_ptr(),
+            link_local.len(),
+            ptr::null(),
+            0,
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            files.as_ptr(),
+            files.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        verdict.status,
+        SkybridgeFileTransferReadinessStatus::Blocked
+    );
+    assert_eq!(
+        verdict.code,
+        SkybridgeFileTransferReadinessCode::RequestedPeerToPeerRoute
+    );
+    assert_eq!(verdict.has_manifest_digest, 1);
+
+    let stale = [file_transfer_candidate(
+        "192.168.31.20",
+        None,
+        None,
+        49444,
+        SkybridgeFileTransferPortProvenance::RegistryState,
+        7,
+    )];
+    let result = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            stale.as_ptr(),
+            stale.len(),
+            ptr::null(),
+            0,
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            files.as_ptr(),
+            files.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        verdict.status,
+        SkybridgeFileTransferReadinessStatus::Blocked
+    );
+    assert_eq!(
+        verdict.code,
+        SkybridgeFileTransferReadinessCode::RouteStalePort
+    );
+}
+
+#[test]
+fn ffi_file_transfer_readiness_rejects_manifest_paths_and_bad_ffi_inputs() {
+    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let route = [file_transfer_candidate(
+        "192.168.31.20",
+        None,
+        None,
+        8080,
+        SkybridgeFileTransferPortProvenance::ListenerTruth,
+        7,
+    )];
+    let traversal = [file_transfer_manifest_file("a.bin", "../a.bin", 1, HASH)];
+    let mut verdict = empty_file_transfer_verdict();
+
+    let result = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            route.as_ptr(),
+            route.len(),
+            ptr::null(),
+            0,
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            traversal.as_ptr(),
+            traversal.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        verdict.status,
+        SkybridgeFileTransferReadinessStatus::Blocked
+    );
+    assert_eq!(
+        verdict.code,
+        SkybridgeFileTransferReadinessCode::ManifestPathRejected
+    );
+
+    let null_out = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            route.as_ptr(),
+            route.len(),
+            ptr::null(),
+            0,
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            traversal.as_ptr(),
+            traversal.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(null_out, SkybridgeErrorCode::InvalidInput);
+
+    let null_candidates_with_count = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            ptr::null(),
+            1,
+            ptr::null(),
+            0,
+            7,
+            1,
+            SkybridgeFileTransferManifestMode::Transfer,
+            traversal.as_ptr(),
+            traversal.len(),
+            1024 * 1024,
+            WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+            WEBRTC_CHANNEL_MAPPINGS.len(),
+            &mut verdict,
+        )
+    };
+    assert_eq!(null_candidates_with_count, SkybridgeErrorCode::InvalidInput);
+
+    let invalid_utf8 = [0xffu8];
+    let invalid_target = unsafe {
+        skybridge_plan_file_transfer_readiness(
+            ptr::null(),
+            0,
+            invalid_utf8.as_ptr(),
+            invalid_utf8.len(),
+            0,
+            0,
+            SkybridgeFileTransferManifestMode::IntentOnly,
+            ptr::null(),
+            0,
+            1024 * 1024,
+            ptr::null(),
+            0,
+            &mut verdict,
+        )
+    };
+    assert_eq!(invalid_target, SkybridgeErrorCode::InvalidInput);
 }
 
 #[test]
