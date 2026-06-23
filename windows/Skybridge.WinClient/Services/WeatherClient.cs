@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.Devices.Geolocation;
 
 namespace Skybridge.WinClient.Services;
 
@@ -23,11 +24,15 @@ namespace Skybridge.WinClient.Services;
 //    omitted (they only activate when the user has API keys set). If AQI cannot be
 //    determined it degrades gracefully (cell hidden), exactly like the Mac.
 //
-//  Location: if no city is supplied we hand wttr.in an EMPTY path
-//  (https://wttr.in/?format=j1), which makes wttr.in geolocate by the caller's egress
-//  IP — this is the prompt's "use wttr.in's IP-based default" path. Open-Meteo needs
-//  explicit coordinates, so the fallback only runs once wttr.in has given us a fix or a
-//  caller coordinate is known.
+//  Location: we FIRST try the device's real location via the Windows Location Service
+//  (Windows.Devices.Geolocation.Geolocator — GPS/Wi-Fi/cell, the OS-level fix). When
+//  that succeeds we query wttr.in BY COORDINATES (https://wttr.in/{lat},{lon}?format=j1)
+//  so a proxy/VPN egress IP can no longer move the forecast to the wrong city. If the
+//  global Windows Location setting is OFF, access is denied, or the fix times out, we
+//  fall back to the EMPTY-path request (https://wttr.in/?format=j1) which makes wttr.in
+//  geolocate by the caller's egress IP — the prompt's "IP-based default" path. The
+//  IP-fallback case is surfaced in the snapshot Source ("wttr.in (approx)") so the card
+//  footer can honestly note the location is approximate. We never invent coordinates.
 // =====================================================================================
 
 public interface IWeatherClient
@@ -52,6 +57,15 @@ public sealed class WeatherClient : IWeatherClient
 
     private static readonly TimeSpan PrimaryTimeout = TimeSpan.FromSeconds(5);
 
+    // Device-location budget: ~3 km accuracy is plenty for a city-level forecast, and an
+    // 8 s GetGeoposition timeout with a 1-minute maxAge keeps the first paint snappy
+    // (a fresh OS-cached fix returns instantly; only a cold GPS warm-up burns the budget).
+    private static readonly uint LocationDesiredAccuracyInMeters = 3000;
+
+    private static readonly TimeSpan LocationMaximumAge = TimeSpan.FromMinutes(1);
+
+    private static readonly TimeSpan LocationTimeout = TimeSpan.FromSeconds(8);
+
     public string BuildInitialStatus() => DefaultInitialStatus;
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -72,8 +86,34 @@ public sealed class WeatherClient : IWeatherClient
 
     public async Task<WeatherSnapshot> BuildReadOnlySnapshotAsync()
     {
-        // Strategy 1: wttr.in (IP-geolocated since no city is supplied here).
-        var wttr = await TryFetchWttrAsync().ConfigureAwait(false);
+        // Step 0: try the device's REAL location via the Windows Location Service. This
+        // MUST happen before any ConfigureAwait(false) hop so RequestAccessAsync /
+        // GetGeopositionAsync run on the caller's captured (UI/STA) context — the weather
+        // refresh is kicked from the SessionViewModel on the UI thread and RefreshAsync
+        // awaits us with ConfigureAwait(true), so we are still on that context here, before
+        // the first await below. The whole attempt is guarded; ANY failure (no UI context,
+        // COM apartment issue, location OFF, denied, or timeout) yields null and we fall
+        // through to the IP-based default path. It never throws into the UI.
+        var coordinates = await TryGetDeviceCoordinatesAsync().ConfigureAwait(false);
+
+        // Strategy 1a: wttr.in BY COORDINATES (real device fix). Immune to proxy/VPN IP.
+        if (coordinates is { } point)
+        {
+            var byCoords = await TryFetchWttrAsync(BuildCoordinateLocation(point), approximate: false)
+                .ConfigureAwait(false);
+            if (byCoords is not null)
+            {
+                return byCoords;
+            }
+            // Coordinate query failed (network/parse) — fall through to the IP default so a
+            // transient wttr.in hiccup on the lat,lon path still yields a forecast.
+        }
+
+        // Strategy 1b: wttr.in IP-geolocated default (empty path). Used when the device
+        // location is unavailable/denied, or the coordinate query failed. Flagged
+        // approximate so the card can honestly note the location may be off behind a VPN.
+        var wttr = await TryFetchWttrAsync(location: string.Empty, approximate: true)
+            .ConfigureAwait(false);
         if (wttr is not null)
         {
             return wttr;
@@ -84,6 +124,52 @@ public sealed class WeatherClient : IWeatherClient
         // clear failure the VM renders as the error/retry state (never fake numbers).
         throw new WeatherUnavailableException(
             "Weather is currently unavailable. Check your network connection and retry.");
+    }
+
+    // ---- Windows Location Service (device GPS/Wi-Fi fix) -----------------------------
+
+    private static async Task<BasicGeoposition?> TryGetDeviceCoordinatesAsync()
+    {
+        try
+        {
+            // RequestAccessAsync surfaces the OS consent state for the unpackaged app and
+            // requires a UI/STA-friendly context; it returns Allowed only when the global
+            // Windows Location setting is ON and this app is permitted. Anything else
+            // (Denied/Unspecified) means we honestly cannot use the device fix.
+            var access = await Geolocator.RequestAccessAsync();
+            if (access != GeolocationAccessStatus.Allowed)
+            {
+                return null;
+            }
+
+            var geolocator = new Geolocator
+            {
+                DesiredAccuracyInMeters = LocationDesiredAccuracyInMeters
+            };
+
+            // maxAge accepts a recent OS-cached fix (instant); timeout bounds a cold warm-up
+            // so a missing/blocked sensor can never wedge the refresh. The WinRT projection
+            // returns a non-null Geoposition on success; any failure threw above and is
+            // caught below, so we read the coordinate point directly.
+            var position = await geolocator.GetGeopositionAsync(LocationMaximumAge, LocationTimeout);
+            return position.Coordinate.Point.Position;
+        }
+        catch (Exception)
+        {
+            // No location source, sensor disabled, COM apartment mismatch (off a UI thread),
+            // timeout, or any WinRT failure — degrade silently to the IP-based path. The
+            // weather card must never error out just because location is unavailable.
+            return null;
+        }
+    }
+
+    private static string BuildCoordinateLocation(BasicGeoposition point)
+    {
+        // wttr.in accepts "lat,lon". Invariant-culture decimals so a comma-decimal locale
+        // (e.g. de-DE) can't corrupt the path into "lat;lon" with stray commas.
+        var lat = point.Latitude.ToString("0.####", CultureInfo.InvariantCulture);
+        var lon = point.Longitude.ToString("0.####", CultureInfo.InvariantCulture);
+        return $"{lat},{lon}";
     }
 
     private static HttpClient CreateHttpClient()
@@ -102,15 +188,22 @@ public sealed class WeatherClient : IWeatherClient
 
     // ---- wttr.in (primary) ----------------------------------------------------------
 
-    private static async Task<WeatherSnapshot?> TryFetchWttrAsync()
+    // location: "" => wttr.in geolocates by egress IP (the "IP-based default"); a "lat,lon"
+    // string => wttr.in resolves the forecast at the device's real coordinates.
+    // approximate: true tags the snapshot Source so the card can note the fix is IP-derived.
+    private static async Task<WeatherSnapshot?> TryFetchWttrAsync(string location, bool approximate)
     {
         try
         {
             using var cts = new CancellationTokenSource(PrimaryTimeout);
-            // Empty location => wttr.in geolocates by egress IP (the Mac's
-            // "IP-based default"). format=j1 => full JSON.
+            // {location} is either empty (IP geolocation) or an invariant-culture "lat,lon"
+            // (digits, '.', '-', ',' only — all path-safe, so no escaping needed and the
+            // URL reads exactly as https://wttr.in/{lat},{lon}?format=j1).
+            var path = string.IsNullOrEmpty(location)
+                ? "https://wttr.in/?format=j1"
+                : $"https://wttr.in/{location}?format=j1";
             using var response = await HttpClient
-                .GetAsync("https://wttr.in/?format=j1", cts.Token)
+                .GetAsync(path, cts.Token)
                 .ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
@@ -125,7 +218,7 @@ public sealed class WeatherClient : IWeatherClient
                 .ParseAsync(stream, cancellationToken: cts.Token)
                 .ConfigureAwait(false);
 
-            return ParseWttr(document.RootElement);
+            return ParseWttr(document.RootElement, approximate);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or OperationCanceledException)
         {
@@ -134,7 +227,7 @@ public sealed class WeatherClient : IWeatherClient
         }
     }
 
-    private static WeatherSnapshot? ParseWttr(JsonElement root)
+    private static WeatherSnapshot? ParseWttr(JsonElement root, bool approximate)
     {
         if (!root.TryGetProperty("current_condition", out var conditions) ||
             conditions.ValueKind != JsonValueKind.Array ||
@@ -168,7 +261,12 @@ public sealed class WeatherClient : IWeatherClient
         }
 
         var location = ResolveWttrLocation(root);
-        var source = aqi is null ? "wttr.in" : "wttr.in + AQI";
+        // Honest provenance in the source/footer: tag IP-geolocated results "(approx)" so
+        // the user knows the location may be the proxy/VPN egress, not their real city. A
+        // real device fix carries no tag (it's the true location). AQI presence is appended
+        // exactly as before so the existing source contract is preserved otherwise.
+        var baseSource = approximate ? "wttr.in (approx)" : "wttr.in";
+        var source = aqi is null ? baseSource : $"{baseSource} + AQI";
 
         return WeatherSnapshot.Create(
             temperatureC,
