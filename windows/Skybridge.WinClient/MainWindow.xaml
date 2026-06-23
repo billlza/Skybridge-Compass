@@ -33,6 +33,7 @@
         <vm:SystemIndicatorStateToBrushConverter x:Key="SystemIndicatorStateBrushConverter" />
         <vm:PlatformToGlyphConverter x:Key="PlatformGlyphConverter" />
         <vm:PeerStatusToBrushConverter x:Key="PeerStatusBrushConverter" />
+        <vm:ConnectionStatusToDotBrushConverter x:Key="ConnectionStatusDotBrushConverter" />
         <vm:StringPresenceToVisibilityConverter x:Key="StringPresenceVisibilityConverter" />
         <vm:ServiceKindToGlyphConverter x:Key="ServiceKindGlyphConverter" />
         <vm:ServiceKindToBrushConverter x:Key="ServiceKindBrushConverter" />
@@ -41,6 +42,7 @@
         <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
         <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
         <vm:WeatherPhaseToVisibilityConverter x:Key="WeatherPhaseVisibilityConverter" />
+        <vm:SystemProxyStateToBrushConverter x:Key="SystemProxyStateBrushConverter" />
         <vm:FileTransferStateToBrushConverter x:Key="FileTransferStateBrushConverter" />
         <vm:FileTransferStateToGlyphConverter x:Key="FileTransferStateGlyphConverter" />
         <vm:FileTransferDirectionToGlyphConverter x:Key="FileTransferDirectionGlyphConverter" />
@@ -1226,27 +1228,117 @@
                             Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     </StackPanel>
 
+                    <!-- ===========================================================
+                         Top bar status cluster — Mac TopNavigationBarView parity.
+
+                         The Mac top bar is a row of rich glass CAPSULE pills (IP/
+                         location, net speed, latency, connection, FPS) then a bell +
+                         paintbrush action cluster. We port that density here with the
+                         TopBarGlassPill capsule style + small colored Segoe Fluent
+                         icons matching the Mac iconColor (speed cyan, latency mint,
+                         connection green/amber/red dot, FPS orange). Pills are
+                         Border-based display chrome (no Button element), so the
+                         gated MainWindow button count is unchanged; the only interactive
+                         affordances stay the bell + theme buttons inside the existing
+                         TopBarActions ItemsControl.
+
+                         HONESTY (the user rejects fabricated telemetry):
+                          • IP / location + proxy pill — OMITTED. The Windows session/
+                            top-bar layer has NO egress-region / system-proxy / public-IP
+                            concept, and there is no bindable local-host name on the VM
+                            (the sidebar header omits the device line for the same
+                            reason). Rather than invent a city/host, the pill is dropped.
+                          • Net speed + Latency pills — rendered as MUTED "—" placeholders
+                            (no bytes/sec counters and no RTT/ping probe exist on Windows
+                            yet; see "wire later" note). Muted text + a tooltip that says
+                            it's pending, so it never reads as a real measured value.
+                          • Connection pill — REAL: live ConnectionStatus text + a dot
+                            colored off the real EngineConnectionState (green/amber/red).
+                          • FPS / Diagnostics pill — the real coarse busy/nominal health
+                            label (TopBarDiagnosticsStatus); NOT a fabricated frame rate.
+                          • Bell + theme — the existing TopBarActions (in-memory bell
+                            toggle + theme), no fake numeric badge.
+
+                         Order note: the structural parity gate (verify-windows-ui-parity)
+                         asserts ConnectionStatus → DiagnosticsStatus(FPS) → TopBarActions
+                         appear in that order. The added network pills sit BEFORE the
+                         connection pill (matching the Mac left→right: network pills,
+                         then connection, then FPS, then actions), preserving the gate. -->
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <!-- Net speed (Mac pill 2): ↓↑ arrows, cyan. REAL now — bound to
+                             TopBarNetworkSpeed, fed by the TopBarNetworkCoordinator (cumulative
+                             interface byte counters → delta ÷ elapsed = bytes/sec, base-1000
+                             formatted "↓ 24.0 KB/s · ↑ 6.1 KB/s"). Shows the honest
+                             "↓ — · ↑ —" placeholder until the first sample lands. -->
                         <Border
-                            Style="{StaticResource StatusPill}"
-                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus">
+                            Style="{StaticResource TopBarGlassPill}"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.NetworkSpeed"
+                            ToolTipService.ToolTip="Network throughput (down / up), sampled every ~2s">
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" />
-                                <FontIcon Glyph="&#xE9F5;" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
+                                <FontIcon Glyph="&#xEC4A;" FontSize="12" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarNetworkSpeed}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <!-- Latency (Mac pill 3): stopwatch, mint. REAL now — bound to
+                             TopBarNetworkLatency, measured by a HEAD probe to the fast endpoint
+                             (Stopwatch elapsed ms, refreshed every ~15s). Shows the honest
+                             "— ms" placeholder on probe failure. -->
+                        <Border
+                            Style="{StaticResource TopBarGlassPill}"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.NetworkLatency"
+                            ToolTipService.ToolTip="Round-trip latency to the SkyBridge endpoint, refreshed every ~15s">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE916;" FontSize="12" Foreground="{StaticResource SkyBridgeWeatherWindBrush}" />
+                                <TextBlock Text="{Binding TopBarNetworkLatency}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <!-- IP + proxy (Mac pill 1): globe icon, BLUE when direct / ORANGE when a
+                             system proxy is configured (icon color driven by IsSystemProxyEnabled
+                             via SystemProxyStateBrushConverter). Bound to TopBarIpLocation, fed by
+                             the coordinator (ipapi.co {city,country_code} + HKCU ProxyEnable read):
+                             "City · 代理" / "City · 直连", or the honest "IP · 不可用" on failure.
+                             This pill was previously OMITTED; it is now wired to real data. -->
+                        <Border
+                            Style="{StaticResource TopBarGlassPill}"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.IpLocation"
+                            ToolTipService.ToolTip="Public IP location and system-proxy state, refreshed every ~5min">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE774;" FontSize="12" Foreground="{Binding IsSystemProxyEnabled, Converter={StaticResource SystemProxyStateBrushConverter}}" />
+                                <TextBlock Text="{Binding TopBarIpLocation}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <!-- Connection status (Mac pill 4): REAL. Colored dot off the live
+                             EngineConnectionState (green/amber/red) + the live status text.
+                             KEEP the gated automation id + TopBarConnectionStatus binding.
+                             Wider H-pad (12,6) mirrors the Mac connection pill. -->
+                        <Border
+                            Style="{StaticResource TopBarGlassPill}"
+                            Padding="12,6"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
+                                <FontIcon Glyph="&#xE9F5;" FontSize="12" Foreground="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
                                 <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
+                        <!-- FPS / Diagnostics (Mac pill 5): speedometer, orange. This is the
+                             real coarse busy/nominal HEALTH label (TopBarDiagnosticsStatus),
+                             not a measured frame rate — kept honest per the audit. -->
                         <Border
-                            Style="{StaticResource StatusPill}"
+                            Style="{StaticResource TopBarGlassPill}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
                             ToolTipService.ToolTip="FPS / Diagnostics">
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeWarningBrush}" />
                                 <FontIcon Glyph="&#xE9D9;" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" />
                                 <TextBlock Text="FPS" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                 <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
+                        <!-- Bell + theme action cluster (Mac actions A/B): the existing
+                             TopBarActions ItemsControl renders the in-memory notification
+                             bell + the theme toggle as the only interactive buttons. No
+                             fabricated unread badge. Shared resources kept verbatim for
+                             the structural parity gate. -->
                         <ItemsControl
                             AutomationProperties.AutomationId="Skybridge.Actions.TopBar"
                             ItemsSource="{Binding TopBarActions}"

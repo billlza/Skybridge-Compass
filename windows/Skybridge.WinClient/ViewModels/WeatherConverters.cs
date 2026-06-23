@@ -133,6 +133,29 @@ public sealed class WeatherMetricTintToBrushConverter : IValueConverter
 }
 
 /// <summary>
+/// Top-bar IP/location pill: system-proxy state (bool IsSystemProxyEnabled) -> the globe
+/// icon brush. Mirrors the Mac top-bar location pill color cue: ORANGE when a system proxy
+/// is configured (the egress is proxied — "代理"), BLUE when direct ("直连"). Resolves the
+/// two theme brushes through the standard fallback chain so it can never crash on a missing
+/// resource. true => SkyBridgeWeatherAqiOrangeBrush (orange); false => SkyBridgeWeatherRainyBrush
+/// (the same blue used for the "rainy"/info accent elsewhere).
+/// </summary>
+public sealed class SystemProxyStateToBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var proxyEnabled = value is bool flag && flag;
+        var brushKey = proxyEnabled
+            ? "SkyBridgeWeatherAqiOrangeBrush" // orange — proxied egress
+            : "SkyBridgeWeatherRainyBrush";     // blue — direct connection
+        return MetricKeyToBrushConverter.ResolveBrush(brushKey);
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>
 /// Weather phase token ("Loading" | "Loaded" | "Error") -> Visibility. The target phase
 /// is passed as the ConverterParameter; the element is Visible only when the current
 /// phase string equals that parameter. Drives the three mutually-exclusive state layers

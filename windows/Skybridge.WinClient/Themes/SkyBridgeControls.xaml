@@ -85,6 +85,28 @@
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
+    <!-- ===================================================================
+         TopBarGlassPill — the Mac TopNavigationBarView rich glass CAPSULE
+         (TopBarGlassPillModifier). The Mac pill is a stadium/capsule: frosted
+         .glassEffect fill, a 1px lighter-white stroke (white @ ~18%), H-pad 10 /
+         V-pad 6, icon→text gap 6, .caption text in the secondary color.
+         On Windows we approximate the live frost with the shared shell-surface
+         glass fill + the brighter shell stroke (the lighter 1px border the Mac
+         draws), and a large CornerRadius so the short pill reads as a true
+         capsule (radius ≳ height/2 once V-pad 6 + ~16px caption is in). This is
+         tighter/denser than the chunkier StatusPill (r16, H12/V7), matching the
+         Mac top-bar pill density. Border-based (no Button) so the gated button
+         count is unaffected. The connection pill overrides Padding to 12,6 to
+         mirror the Mac's wider H-pad on the connection-status pill. -->
+    <Style x:Key="TopBarGlassPill" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="Padding" Value="10,6" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
     <!-- 8px status dot for StatusPill / list rows. Color set inline by caller
          (e.g. Fill="{StaticResource SkyBridgeSuccessBrush}"); default success. -->
     <Style x:Key="StatusDot" TargetType="Ellipse">

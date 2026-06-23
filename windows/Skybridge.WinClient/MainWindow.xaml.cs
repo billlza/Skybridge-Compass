@@ -32,6 +32,15 @@ public sealed partial class MainWindow : Window
         {
             await ViewModel.HydrateFromStoreAsync();
         });
+
+        // Stop the live top-bar network telemetry loop (and release its PeriodicTimer) when the
+        // window closes so the background sampling task doesn't outlive the UI. Non-throwing.
+        Closed += OnWindowClosed;
+    }
+
+    private void OnWindowClosed(object sender, WindowEventArgs args)
+    {
+        ViewModel.DisposeNetworkCoordinator();
     }
 
     // The sidebar account block was Tapped. This used to open a ContentDialog (SignInDialog /

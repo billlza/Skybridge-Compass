@@ -64,6 +64,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     // the sign-out command (the AsyncRelayCommand construction lives in the coordinator, not
     // here). Self-provisioned in the ctor; never routed through the DI composition root.
     private readonly AccountSessionCoordinator _accountSessionCoordinator;
+    // Owns the live top-bar network telemetry loop (net speed / latency / IP+proxy) and its
+    // own ITopBarNetworkStatusClient. Self-provisioned in the ctor; never routed through the
+    // DI composition root. Disposed via DisposeNetworkCoordinator on teardown.
+    private readonly TopBarNetworkCoordinator _topBarNetworkCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
@@ -109,6 +113,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _weatherSource = "";
     private string _weatherUpdatedRelative = "";
     private string _weatherErrorMessage = "";
+    // Live top-bar network pills (net speed / latency / IP+proxy). Driven by the
+    // TopBarNetworkCoordinator, which self-provisions its own ITopBarNetworkStatusClient (it
+    // is NOT injected through SessionViewModelDependencies — same escape hatch as the weather
+    // seam). These start at the honest placeholders and flip to real values once sampled.
+    private string _topBarNetworkSpeed = TopBarNetworkCoordinator.PlaceholderSpeed;
+    private string _topBarNetworkLatency = TopBarNetworkCoordinator.PlaceholderLatency;
+    private string _topBarIpLocation = TopBarNetworkCoordinator.PlaceholderLocationUnavailable;
+    private bool _isSystemProxyEnabled;
     // Account block identity (sidebar PaneFooter). Driven by the AccountSessionCoordinator,
     // which self-provisions its own Supabase auth client + DPAPI session store (it is NOT
     // injected through SessionViewModelDependencies — same escape hatch as the weather seam).
@@ -418,6 +430,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _accountSessionCoordinator = new AccountSessionCoordinator();
         _accountSessionCoordinator.IdentityChanged += OnAccountIdentityChanged;
         SignOutCommand = _accountSessionCoordinator.SignOutCommand;
+        // Self-provision the top-bar network coordinator (it owns its own real
+        // ITopBarNetworkStatusClient — net-speed counters, latency HEAD probe, ipapi.co +
+        // registry proxy read — internally, NOT via the DI root). Forward its four scalar
+        // values into the SetField-backed props. These are string/bool updates only (no
+        // collections), so the periodic loop never touches the WorkspaceCollectionProjector
+        // path and cannot reintroduce the dashboard flicker.
+        _topBarNetworkCoordinator = new TopBarNetworkCoordinator(
+            value => TopBarNetworkSpeed = value,
+            value => TopBarNetworkLatency = value,
+            value => TopBarIpLocation = value,
+            value => IsSystemProxyEnabled = value);
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
         DiscoveredPeers = collections.DiscoveredPeers;
@@ -667,6 +690,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // Execute, consistent with the Weather/SystemMonitor kicks above. Read-only
         // snapshot — no picker is opened and no local files are read.
         RefreshFileTransferCommand.Execute(null);
+        // Kick the live top-bar network telemetry loop (net speed every ~2 s, latency every
+        // ~15 s, IP/proxy every ~300 s). The coordinator samples on a thread-pool task and
+        // marshals only scalar string/bool updates back to the UI dispatcher, so this never
+        // blocks the ctor and never mutates a collection. Mirrors the Mac top-bar service
+        // start() that the dashboard triggers on show.
+        _topBarNetworkCoordinator.Start();
         // Kick the first Settings read-only snapshot on startup so the Settings two-pane
         // shows its 8 tabs + grouped section cards immediately instead of an empty screen
         // (the screen was previously empty until a manual Refresh Status). The
@@ -1108,6 +1137,36 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         get => _topBarThemeStatus;
         private set => SetField(ref _topBarThemeStatus, value);
+    }
+
+    // Live top-bar network telemetry, forwarded from the TopBarNetworkCoordinator. The
+    // coordinator mutates these from the UI dispatcher (scalar SetField updates only — no
+    // collections), so the net-speed / latency / IP+proxy pills bind to real measured values
+    // and fall back to honest placeholders ("↓ — · ↑ —" / "— ms" / "IP · 不可用") on failure.
+    public string TopBarNetworkSpeed
+    {
+        get => _topBarNetworkSpeed;
+        private set => SetField(ref _topBarNetworkSpeed, value);
+    }
+
+    public string TopBarNetworkLatency
+    {
+        get => _topBarNetworkLatency;
+        private set => SetField(ref _topBarNetworkLatency, value);
+    }
+
+    public string TopBarIpLocation
+    {
+        get => _topBarIpLocation;
+        private set => SetField(ref _topBarIpLocation, value);
+    }
+
+    // Drives the IP pill's globe-icon color (blue when direct, orange when a system proxy is
+    // configured). Read from HKCU ProxyEnable by the coordinator's client.
+    public bool IsSystemProxyEnabled
+    {
+        get => _isSystemProxyEnabled;
+        private set => SetField(ref _isSystemProxyEnabled, value);
     }
 
     public FeatureEntry SelectedFeature
@@ -1789,6 +1848,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    // Stop + dispose the live top-bar network telemetry loop (cancels its token, stops and
+    // releases the PeriodicTimer). Called from MainWindow's Closed handler so the background
+    // sampling task and timer don't outlive the window. Idempotent and non-throwing.
+    public void DisposeNetworkCoordinator()
+    {
+        _topBarNetworkCoordinator.Dispose();
     }
 
 }

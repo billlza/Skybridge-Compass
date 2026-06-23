@@ -34,6 +34,54 @@ public sealed class PeerStatusToBrushConverter : IValueConverter
 }
 
 /// <summary>
+/// Maps the live <see cref="SessionViewModel.ConnectionStatus"/> string (the
+/// <c>ToString()</c> of the REAL <c>EngineConnectionState</c> enum:
+/// "Disconnected" / "Connecting" / "Connected" / "Reconnecting" / "ShuttingDown")
+/// to the top-bar connection-status dot brush, element-matching the Mac
+/// TopNavigationBarView connection dot (connectionIndicatorColor):
+///   Connected               → SkyBridgeSuccessBrush (green,  Mac .green)
+///   Connecting / Reconnecting → SkyBridgeWarningBrush (orange, Mac .orange)
+///   Disconnected / ShuttingDown / else → SkyBridgeDangerBrush (red, Mac .red)
+///
+/// Keyed off REAL session state only — the dot can no longer be hard-coded green
+/// while the engine is actually disconnected. Matching is case-insensitive and
+/// substring-based so enum-spelling variants still resolve; an unknown state is
+/// treated as not-connected (red) rather than faked-healthy.
+/// </summary>
+public sealed class ConnectionStatusToDotBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var state = (value as string ?? string.Empty).ToLowerInvariant();
+
+        string key;
+        if (state.Contains("reconnect") || state.Contains("connecting"))
+        {
+            // "reconnecting" / "connecting" — in-progress, amber.
+            key = "SkyBridgeWarningBrush";
+        }
+        else if (state.Contains("connected"))
+        {
+            // "connected" — green. (Checked AFTER connecting so "connecting"
+            // doesn't fall through to green on the "connect" substring.)
+            key = "SkyBridgeSuccessBrush";
+        }
+        else
+        {
+            // "disconnected" / "shuttingdown" / unknown — red, never faked green.
+            key = "SkyBridgeDangerBrush";
+        }
+
+        return MetricKeyToBrushConverter.ResolveBrush(key);
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
 /// Maps a string to <see cref="Visibility"/>: Visible when the string is non-empty,
 /// Collapsed when null/empty/whitespace. Used so the rich peer row only renders its
 /// fingerprint / trust / capabilities sub-rows when there is real data to show (the Mac
