@@ -3,6 +3,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:Skybridge.WinClient"
+    xmlns:vm="using:Skybridge.WinClient.ViewModels"
     RequestedTheme="Dark">
     <Application.Resources>
         <ResourceDictionary>
@@ -11,6 +12,20 @@
                 <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeControls.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- Device-Discovery peer-card display gates (显示设备详情 / 紧凑模式 / 显示设备图标).
+                 ONE shared instance so the per-item DiscoveredPeerItemTemplate (its own namescope)
+                 and the SessionViewModel's SettingsCoordinator effect sinks read/write the SAME
+                 object. The cards bind {Binding ShowDetails/ShowIcons/CardPadding/IconSize,
+                 Source={StaticResource DeviceDisplayPrefs}}; the sinks resolve it from
+                 Application.Current.Resources and push the live settings into it. -->
+            <vm:DeviceDisplayPrefs x:Key="DeviceDisplayPrefs" />
+
+            <!-- System-Monitor metric tile show-flags (系统监控 > 显示项 CPU/内存/磁盘/网络/温度/
+                 风扇转速). ONE shared instance: the SettingsCoordinator monitor-gate sink pushes the
+                 six flags in (via the SessionViewModel) and the per-tile MonitorTileVisibilityConverter
+                 reads them to show/hide each tile. -->
+            <vm:MonitorDisplayPrefs x:Key="MonitorDisplayPrefs" />
 
             <!-- ===================================================================
                  NavigationView on-brand theme-resource overrides.

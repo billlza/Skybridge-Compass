@@ -40,6 +40,42 @@ public sealed class SettingsControlKindToVisibilityConverter : IValueConverter
 }
 
 /// <summary>
+/// Maps the currently <c>SelectedSettingsTab</c> (a <see cref="SettingsTabItemView"/>) to a
+/// <see cref="Visibility"/> for the SettingsView master-detail HOST: the right pane stacks the
+/// eight per-tab UserControls and shows exactly the one whose stable English tab title matches
+/// the <c>ConverterParameter</c> (e.g. "General" / "Network" / … / "Advanced"). All others
+/// collapse, so only the selected tab's content is realized/visible.
+///
+/// The match is on <see cref="SettingsTabItemView.Title"/> — the same stable key the right-pane
+/// card projection already groups against (Section == Title). A null selection or an
+/// unrecognized parameter collapses the layer. Pure view-state; invents nothing.
+/// </summary>
+public sealed class SettingsTabKeyToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var title = value switch
+        {
+            SettingsTabItemView tab => tab.Title,
+            string s => s,
+            _ => string.Empty
+        };
+
+        var wanted = (parameter as string ?? string.Empty).Trim();
+
+        return !string.IsNullOrEmpty(wanted)
+            && string.Equals(title, wanted, StringComparison.Ordinal)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+    {
+        throw new NotSupportedException();
+    }
+}
+
+/// <summary>
 /// Maps a settings detail row's status <c>Value</c> string to a tint brush for the
 /// right-aligned value-row status text, so honest "non-settable" markers read at a glance
 /// the way the Mac SettingsView tints its read-only / platform-gated labels:

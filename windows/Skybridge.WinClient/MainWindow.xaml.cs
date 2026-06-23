@@ -1,9 +1,12 @@
+using System;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Skybridge.WinClient.ViewModels;
 using Windows.Graphics;
+using Windows.UI;
 
 namespace Skybridge.WinClient;
 
@@ -22,6 +25,28 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured());
         RootShell.DataContext = ViewModel;
+
+        // Subscribe to the two Settings theme effects the VM cannot host itself (it has no
+        // FrameworkElement). The VM raises these from the SettingsCoordinator's live-effect hooks
+        // (on a settings change and once at startup via ApplyInitialEffects). MainWindow owns the
+        // RootShell FrameworkElement + the Application resources, so it applies them here.
+        ViewModel.DarkModeEffectRequested += OnDarkModeEffectRequested;
+        ViewModel.AccentColorEffectRequested += OnAccentColorEffectRequested;
+
+        // Provide the Settings Export/Import file pickers (they need this window's HWND, which the
+        // VM cannot reach). The EXISTING Export/Import toolbar actions call these to get a path,
+        // then the real SettingsCoordinator.ExportTo/ImportFrom runs — no new command, no new button.
+        ViewModel.ExportSettingsPathRequested = PickExportSettingsPathAsync;
+        ViewModel.ImportSettingsPathRequested = PickImportSettingsPathAsync;
+
+        // Apply the persisted theme + accent ONCE here, after subscribing. The VM's
+        // ApplyInitialEffects (in its ctor) ran before these handlers were attached, so its
+        // theme/accent events had no listener yet — every other effect (pills, DD prefs, logger,
+        // discovery, signal) is applied via VM props/resources and already took. We close that gap
+        // by reading the live persisted values straight off the coordinator and applying them now.
+        OnDarkModeEffectRequested(ViewModel.Settings.UseDarkMode);
+        OnAccentColorEffectRequested(ViewModel.Settings.ThemeColorHex);
+
         SizeAndCenter();
 
         // Restore a remembered Supabase session (DPAPI) on launch so the account block shows
@@ -40,7 +65,75 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        ViewModel.DarkModeEffectRequested -= OnDarkModeEffectRequested;
+        ViewModel.AccentColorEffectRequested -= OnAccentColorEffectRequested;
         ViewModel.DisposeNetworkCoordinator();
+    }
+
+    // 启用深色模式 live effect: set the root FrameworkElement.RequestedTheme. The app ships
+    // dark-locked at App.xaml (RequestedTheme="Dark"); overriding it on the root content element
+    // re-themes the whole visual tree live. Non-throwing — a theme set never faults, but guard the
+    // root just in case it is not yet realized.
+    private void OnDarkModeEffectRequested(bool useDark)
+    {
+        if (RootShell is { } root)
+        {
+            root.RequestedTheme = useDark ? ElementTheme.Dark : ElementTheme.Light;
+        }
+    }
+
+    // 主题颜色 live effect: override the SkyBridgeAccentColor + SkyBridgeAccentBrush application
+    // resources with the chosen hex and re-tint. Every surface that uses
+    // {StaticResource SkyBridgeAccentBrush} re-reads on the next layout pass; we nudge the root's
+    // RequestedTheme to force an immediate resource re-evaluation. Defensive parse — an invalid hex
+    // leaves the accent untouched (never crashes, never blanks the accent).
+    private void OnAccentColorEffectRequested(string hex)
+    {
+        if (!TryParseHexColor(hex, out var color))
+        {
+            return;
+        }
+
+        var resources = Application.Current?.Resources;
+        if (resources is null)
+        {
+            return;
+        }
+
+        resources["SkyBridgeAccentColor"] = color;
+        resources["SkyBridgeAccentBrush"] = new SolidColorBrush(color);
+
+        // Force a re-tint: toggle the root theme to itself so StaticResource consumers re-resolve.
+        if (RootShell is { } root)
+        {
+            var current = root.RequestedTheme;
+            root.RequestedTheme = current == ElementTheme.Dark ? ElementTheme.Default : ElementTheme.Dark;
+            root.RequestedTheme = current;
+        }
+    }
+
+    // Parse "#RRGGBB" / "#AARRGGBB" (and the 6/8-digit forms without '#') into a Color. Returns
+    // false on any malformed input — the caller then leaves the accent unchanged.
+    private static bool TryParseHexColor(string? hex, out Color color)
+    {
+        color = default;
+        var s = (hex ?? string.Empty).Trim().TrimStart('#');
+        if (s.Length == 6)
+        {
+            s = "FF" + s; // assume opaque
+        }
+
+        if (s.Length != 8 ||
+            !byte.TryParse(s.Substring(0, 2), System.Globalization.NumberStyles.HexNumber, null, out var a) ||
+            !byte.TryParse(s.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out var r) ||
+            !byte.TryParse(s.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out var g) ||
+            !byte.TryParse(s.Substring(6, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
+        {
+            return false;
+        }
+
+        color = Color.FromArgb(a, r, g, b);
+        return true;
     }
 
     // The sidebar account block was Tapped. This used to open a ContentDialog (SignInDialog /
@@ -57,6 +150,50 @@ public sealed partial class MainWindow : Window
     private void OnAccountBlockTapped(object sender, TappedRoutedEventArgs e)
     {
         ViewModel.ToggleAccountOverlay();
+    }
+
+    // Export settings: a FileSavePicker initialized with this window's HWND (required unpackaged).
+    // Returns the chosen path, or null on cancel. Defensive — any picker failure yields null and
+    // the action reports the honest cancel/fail message.
+    private async System.Threading.Tasks.Task<string?> PickExportSettingsPathAsync()
+    {
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileSavePicker
+            {
+                SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.DocumentsLibrary,
+                SuggestedFileName = "skybridge-settings",
+            };
+            picker.FileTypeChoices.Add("SkyBridge settings", new System.Collections.Generic.List<string> { ".json" });
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSaveFileAsync();
+            return file?.Path;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // Import settings: a FileOpenPicker initialized with this window's HWND. Returns the chosen
+    // path, or null on cancel/failure.
+    private async System.Threading.Tasks.Task<string?> PickImportSettingsPathAsync()
+    {
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker
+            {
+                SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.DocumentsLibrary,
+            };
+            picker.FileTypeFilter.Add(".json");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSingleFileAsync();
+            return file?.Path;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private void SizeAndCenter()

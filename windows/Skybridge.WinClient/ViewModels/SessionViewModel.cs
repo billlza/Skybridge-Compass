@@ -68,6 +68,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     // own ITopBarNetworkStatusClient. Self-provisioned in the ctor; never routed through the
     // DI composition root. Disposed via DisposeNetworkCoordinator on teardown.
     private readonly TopBarNetworkCoordinator _topBarNetworkCoordinator;
+    // Owns the Settings page persistence + bindable surface (it self-provisions its own
+    // SettingsService + SettingsStore writing %LOCALAPPDATA%\SkyBridge\settings.json). Exposed
+    // publicly as Settings for {Binding Settings.<Prop>}. Self-provisioned in the ctor; never
+    // routed through the DI composition root. Disposed via DisposeNetworkCoordinator on teardown.
+    private readonly SettingsCoordinator _settingsCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
@@ -121,6 +126,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarNetworkLatency = TopBarNetworkCoordinator.PlaceholderLatency;
     private string _topBarIpLocation = TopBarNetworkCoordinator.PlaceholderLocationUnavailable;
     private bool _isSystemProxyEnabled;
+    // Settings-driven display gates (live effects from SettingsCoordinator). The three top-bar
+    // pill-visibility bools gate the IP/location, net-speed, and latency pills (网络 > 顶部栏); the
+    // DD card bools gate detail-rows (显示设备详情), density (紧凑模式), and the device icon chip
+    // (显示设备图标). All default to the persisted setting defaults (true/true/true/true/true/false)
+    // and are pushed live by SettingsCoordinator's effect sinks. They are plain SetField scalars —
+    // no collection mutation, no projection path.
+    private bool _showTopBarSpeedPill = true;
+    private bool _showTopBarLatencyPill = true;
+    private bool _showTopBarIpLocationPill = true;
+    private bool _showDeviceDetailRows = true;
+    private bool _deviceCardsCompact;
+    private bool _showDeviceIconChips = true;
     // Account block identity (sidebar PaneFooter). Driven by the AccountSessionCoordinator,
     // which self-provisions its own Supabase auth client + DPAPI session store (it is NOT
     // injected through SessionViewModelDependencies — same escape hatch as the weather seam).
@@ -390,12 +407,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _systemMonitorClient,
             value => SystemMonitorStatus = value,
             value => StatusMessage = value);
-        _settingsWorkspaceActions = new SettingsWorkspaceActions(
-            _workspaceBusyCoordinator,
-            _settingsClient,
-            _readOnlyWorkspaceRefreshActions.RefreshSettingsActionSnapshotAsync,
-            value => SettingsStatus = value,
-            value => StatusMessage = value);
+        // NOTE: _settingsWorkspaceActions is constructed LATER (after _settingsCoordinator exists),
+        // so its real Export/Import/Reset/Apply work can route through the coordinator. See the
+        // `_settingsWorkspaceActions = new SettingsWorkspaceActions(...)` block just after the
+        // SettingsCoordinator is self-provisioned below.
         _topBarWorkspaceActions = new TopBarWorkspaceActions(
             _workspaceBusyCoordinator,
             dependencies.TopBarStatusClient,
@@ -441,6 +456,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => TopBarNetworkLatency = value,
             value => TopBarIpLocation = value,
             value => IsSystemProxyEnabled = value);
+        // The Settings coordinator is self-provisioned LATER in this ctor (after the discovery
+        // browser actions exist), so its live-effect sinks can route into the discovery Start/Stop/
+        // Refresh delegates. See the `_settingsCoordinator = new SettingsCoordinator(...)` block
+        // below, just after `_discoveryBrowserActions`. Owns its own SettingsService + SettingsStore
+        // (plaintext JSON at %LOCALAPPDATA%\SkyBridge\settings.json), NOT via the DI root.
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
         DiscoveredPeers = collections.DiscoveredPeers;
@@ -490,6 +510,81 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             () => PairingStatus,
             value => ExtendedSearchCountdown = value,
             value => DiscoveryBrowserStatus = value);
+        // Self-provision the Settings coordinator with its LIVE-EFFECT sinks. It owns its own
+        // SettingsService + SettingsStore (plaintext JSON at %LOCALAPPDATA%\SkyBridge\settings.json)
+        // internally, NOT via the DI root. The sinks route each REAL-FULL effect into the
+        // subsystems this VM already owns — thin Action delegates, the same shape the TopBar /
+        // Weather / DashboardMetrics coordinators use. Disposed in DisposeNetworkCoordinator.
+        _settingsCoordinator = new SettingsCoordinator(
+            service: null,
+            sinks: new SettingsEffectSinks
+            {
+                // 启用深色模式 / 主题颜色 — routed up to MainWindow (it owns the RootShell
+                // FrameworkElement + the Application resources). The VM only re-raises the request.
+                SetDarkMode = isDark => DarkModeEffectRequested?.Invoke(isDark),
+                SetAccentHex = hex => AccentColorEffectRequested?.Invoke(hex),
+                // 紧凑模式 / 显示设备详情 / 显示设备图标 — push into the change-notifying
+                // DeviceDisplayPrefs resource the DD peer cards bind to (a per-item DataTemplate
+                // can't reach the page VM), AND mirror onto the VM SetField bools for any other
+                // consumer. Both update live. ResolveDeviceDisplayPrefs() returns the SAME instance
+                // the cards bind via {StaticResource DeviceDisplayPrefs}.
+                SetCompactMode = value =>
+                {
+                    DeviceCardsCompact = value;
+                    if (ResolveDeviceDisplayPrefs() is { } prefs) { prefs.Compact = value; }
+                },
+                SetShowDeviceDetails = value =>
+                {
+                    ShowDeviceDetailRows = value;
+                    if (ResolveDeviceDisplayPrefs() is { } prefs) { prefs.ShowDetails = value; }
+                },
+                SetShowDeviceIcons = value =>
+                {
+                    ShowDeviceIconChips = value;
+                    if (ResolveDeviceDisplayPrefs() is { } prefs) { prefs.ShowIcons = value; }
+                },
+                // 顶部网络信息 — the three pill-visibility bools the top-bar pills bind to.
+                SetTopBarPillVisibility = (ip, speed, latency) =>
+                {
+                    ShowTopBarIpLocationPill = ip;
+                    ShowTopBarSpeedPill = speed;
+                    ShowTopBarLatencyPill = latency;
+                },
+                // 网络发现 + 启动时自动扫描 + 扫描间隔 — issue the EXISTING gated discovery browser
+                // actions (Start/Stop/Refresh), never new commands. Fire-and-forget (the actions
+                // run through the busy coordinator); the VM's discovery getters already carry the
+                // mDNS/timeout/custom-port/custom-service knobs into the request a Refresh rebuilds.
+                StartDiscovery = () => _discoveryBrowserActions.StartAsync(),
+                StopDiscovery = () => _discoveryBrowserActions.StopAsync(),
+                RefreshDiscovery = () => _discoveryBrowserActions.RefreshAsync(),
+                // 启用实时天气 — gate the existing weather loop (start re-fetch / stop).
+                SetWeatherEnabled = SetWeatherLoopEnabled,
+                // 剪贴板同步 — flip the clipboard-sync gate the session-start path consults.
+                SetClipboardSyncEnabled = value => IsClipboardSyncEnabled = value,
+                // 信号平滑 alpha — push the EMA coefficient into the real signal smoother.
+                SetSignalSmoothingAlpha = alpha => WindowsSignalSmoother.Alpha = alpha,
+                // 传输时保持唤醒 — arm/disarm the SetThreadExecutionState gate used during transfers.
+                SetKeepAwakeDuringTransfer = value => KeepSystemAwakeDuringTransfer = value,
+                // 系统监控 显示项 — push the six metric show-flags into the MonitorDisplayPrefs
+                // resource the tiles read, then re-issue the System-Monitor read so the projected
+                // tile collection re-renders (hidden metrics' tiles drop). Observable, live.
+                SetMonitorMetricVisibility = (cpu, mem, disk, net, temp, fan) =>
+                    ApplyMonitorMetricVisibility(cpu, mem, disk, net, temp, fan),
+            });
+        // Construct the Settings actions NOW (after the coordinator exists) so Export/Import/Reset/
+        // Apply do REAL work through the coordinator instead of in-memory intent stubs. The file
+        // pickers need the window HWND, so they are routed to MainWindow via the VM events below
+        // (null in a window-less test host → the action falls back to the existing intent message,
+        // surface/counts unchanged). This uses the EXISTING gated action surface — no new command.
+        _settingsWorkspaceActions = new SettingsWorkspaceActions(
+            _workspaceBusyCoordinator,
+            _settingsClient,
+            _readOnlyWorkspaceRefreshActions.RefreshSettingsActionSnapshotAsync,
+            value => SettingsStatus = value,
+            value => StatusMessage = value,
+            _settingsCoordinator,
+            () => ExportSettingsPathRequested is { } h ? h() : Task.FromResult<string?>(null),
+            () => ImportSettingsPathRequested is { } h ? h() : Task.FromResult<string?>(null));
         _crossNetworkConnectionActions = new CrossNetworkConnectionActions(
             _workspaceBusyCoordinator,
             _crossNetworkConnectionClient,
@@ -722,6 +817,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // Uses the EXISTING RefreshUsbManagementCommand; read-only WinRT enumeration — no device
         // is opened/written and no fake rows are fabricated (empty when nothing is connected).
         RefreshUsbManagementCommand.Execute(null);
+        // Apply the persisted Settings as LIVE effects on launch so the saved theme / accent /
+        // top-bar pill visibility / DD card density+detail+icon gates / logger level / signal-
+        // smoother alpha / clipboard + keep-awake gates take effect immediately — without waiting
+        // for the first user edit. Seed the weather-loop flag from the persisted setting first so
+        // the auto-load above is not duplicated (the dashboard weather card already kicked once).
+        // ApplyInitialEffects also issues the discovery Start + arms the re-scan timer when
+        // 启动时自动扫描设备 is on (and Bonjour is enabled), so a fresh launch begins scanning on the
+        // configured cadence — the EXISTING gated DiscoveryBrowser actions, never a new command.
+        _isWeatherLoopEnabled = _settingsCoordinator.EnableRealTimeWeather;
+        _settingsCoordinator.ApplyInitialEffects();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -1077,6 +1182,131 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     // Fired on launch (on the dispatcher) to restore a remembered session and show the user.
     public Task HydrateFromStoreAsync() => _accountSessionCoordinator.HydrateFromStoreAsync();
 
+    // The Settings page bindable surface. The Settings tab views bind {Binding Settings.<Prop>,
+    // Mode=TwoWay} — each property delegates to a self-provisioned SettingsService that
+    // write-throughs to %LOCALAPPDATA%\SkyBridge\settings.json. Self-provisioned in the ctor;
+    // never routed through the DI composition root.
+    public SettingsCoordinator Settings => _settingsCoordinator;
+
+    // Raised when the dark-mode setting changes (and once at startup). MainWindow subscribes and
+    // sets the root FrameworkElement.RequestedTheme — the VM has no FrameworkElement, so the
+    // theme swap is routed up to the shell that owns RootShell. Argument: true = Dark, false = Light.
+    public event Action<bool>? DarkModeEffectRequested;
+
+    // Raised when the theme-color setting changes (and once at startup). MainWindow subscribes and
+    // overrides the SkyBridgeAccentColor/Brush application resources to the chosen hex, then forces
+    // a re-tint. Argument: the "#RRGGBB" hex string.
+    public event Action<string>? AccentColorEffectRequested;
+
+    // Settings Export/Import file pickers. The Export/Import toolbar actions invoke these to get a
+    // user-chosen path (a FileSavePicker / FileOpenPicker that needs the window HWND, which the VM
+    // does not own). MainWindow assigns these; a null handler (test host) makes the action fall back
+    // to its honest intent message. Return null/empty when the user cancels.
+    public Func<Task<string?>>? ExportSettingsPathRequested;
+    public Func<Task<string?>>? ImportSettingsPathRequested;
+
+    /// <summary>
+    /// Live clipboard-sync gate (远程桌面 > 交互 > 剪贴板同步). The session-start path that spins up
+    /// the WindowsClipboardSyncService consults this before starting — when off, the clipboard pump
+    /// is never started (fail-closed gate; no fabricated effect). Pushed by the SettingsCoordinator.
+    /// </summary>
+    public bool IsClipboardSyncEnabled { get; private set; } = true;
+
+    /// <summary>
+    /// Live keep-awake gate (文件传输 > 选项 > 传输时保持唤醒). The transfer path consults this and
+    /// calls SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) for the duration of a
+    /// transfer when on, releasing it when the transfer ends. Pushed by the SettingsCoordinator.
+    /// </summary>
+    public bool KeepSystemAwakeDuringTransfer { get; private set; }
+
+    // Tracks whether the real-time weather loop is currently enabled (高级 > 性能 > 启用实时天气).
+    // The weather card has no periodic timer (it is a one-shot startup kick + a manual refresh
+    // button); so the honest gate is: when enabled, an immediate refresh is kicked (and the
+    // startup auto-load is allowed); when disabled, no auto-refresh fires. Default false matches
+    // the persisted EnableRealTimeWeather default.
+    private bool _isWeatherLoopEnabled;
+
+    // Live-effect sink for 启用实时天气: enabling it kicks an immediate weather refresh (so the card
+    // populates the moment the user turns it on); disabling it simply stops further auto-refreshes
+    // (the manual refresh button stays available, like the Mac). No fabricated data — the card
+    // shows the Loading state until a real snapshot lands. Idempotent on repeated same-value calls.
+    private void SetWeatherLoopEnabled(bool enabled)
+    {
+        if (_isWeatherLoopEnabled == enabled)
+        {
+            return;
+        }
+
+        _isWeatherLoopEnabled = enabled;
+        if (enabled)
+        {
+            // Fire-and-forget the existing weather refresh command (async-void Execute, house style).
+            RefreshWeatherCommand.Execute(null);
+        }
+    }
+
+    // Resolve the single DeviceDisplayPrefs instance declared as an application resource
+    // (App.xaml x:Key="DeviceDisplayPrefs") — the SAME instance the DiscoveredPeer cards bind to
+    // via {StaticResource DeviceDisplayPrefs}. Returns null only if the app/resources are not yet
+    // realized (a unit-test host), in which case the DD-card effect is a harmless no-op and the
+    // VM SetField mirror still updates. Never throws.
+    private static DeviceDisplayPrefs? ResolveDeviceDisplayPrefs() =>
+        ResolveResource<DeviceDisplayPrefs>("DeviceDisplayPrefs");
+
+    private static MonitorDisplayPrefs? ResolveMonitorDisplayPrefs() =>
+        ResolveResource<MonitorDisplayPrefs>("MonitorDisplayPrefs");
+
+    private static T? ResolveResource<T>(string key) where T : class
+    {
+        try
+        {
+            var resources = Microsoft.UI.Xaml.Application.Current?.Resources;
+            if (resources is not null &&
+                resources.TryGetValue(key, out var value) &&
+                value is T typed)
+            {
+                return typed;
+            }
+        }
+        catch (Exception)
+        {
+            // No realized application/resources (test host) — no-op.
+        }
+
+        return null;
+    }
+
+    // 系统监控 显示项 effect: push the six metric show-flags into the MonitorDisplayPrefs resource the
+    // tiles' MonitorTileVisibilityConverter reads, then re-issue the System-Monitor read so the
+    // projected tile collection re-renders (the converters re-run, hidden metrics drop). Only
+    // re-projects when a flag actually changed, so the startup apply / unchanged toggles don't kick
+    // a redundant read.
+    private void ApplyMonitorMetricVisibility(bool cpu, bool mem, bool disk, bool net, bool temp, bool fan)
+    {
+        var prefs = ResolveMonitorDisplayPrefs();
+        if (prefs is null)
+        {
+            return;
+        }
+
+        var changed =
+            prefs.ShowCpu != cpu || prefs.ShowMemory != mem || prefs.ShowDisk != disk ||
+            prefs.ShowNetwork != net || prefs.ShowTemperature != temp || prefs.ShowFanSpeed != fan;
+
+        prefs.ShowCpu = cpu;
+        prefs.ShowMemory = mem;
+        prefs.ShowDisk = disk;
+        prefs.ShowNetwork = net;
+        prefs.ShowTemperature = temp;
+        prefs.ShowFanSpeed = fan;
+
+        if (changed)
+        {
+            // Re-project the tile collection so the visibility converters re-evaluate live.
+            RefreshSystemMonitorCommand.Execute(null);
+        }
+    }
+
     private void OnAccountIdentityChanged(object? sender, AccountIdentity identity)
     {
         // Continuations resume on the captured UI context (callers await on the UI thread),
@@ -1177,6 +1407,55 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         get => _isSystemProxyEnabled;
         private set => SetField(ref _isSystemProxyEnabled, value);
+    }
+
+    // ---- Settings-driven display gates (live effects from SettingsCoordinator) ----------
+    // Each is pushed by the SettingsCoordinator effect sinks when its setting changes (and once at
+    // startup via ApplyInitialEffects). The top-bar pills bind their Visibility to the three
+    // ShowTopBar* bools; the Device Discovery peer cards bind detail-row Visibility / density /
+    // icon-chip Visibility to the three Device* bools. Real, observable, never fabricated.
+
+    /// <summary>网络 > 顶部栏 > 显示实时网速 — gates the top-bar net-speed pill's Visibility.</summary>
+    public bool ShowTopBarSpeedPill
+    {
+        get => _showTopBarSpeedPill;
+        private set => SetField(ref _showTopBarSpeedPill, value);
+    }
+
+    /// <summary>网络 > 顶部栏 > 显示公网延迟 — gates the top-bar latency pill's Visibility.</summary>
+    public bool ShowTopBarLatencyPill
+    {
+        get => _showTopBarLatencyPill;
+        private set => SetField(ref _showTopBarLatencyPill, value);
+    }
+
+    /// <summary>网络 > 顶部栏 > 显示公网IP与位置 — gates the top-bar IP/location pill's Visibility.</summary>
+    public bool ShowTopBarIpLocationPill
+    {
+        get => _showTopBarIpLocationPill;
+        private set => SetField(ref _showTopBarIpLocationPill, value);
+    }
+
+    /// <summary>通用 > 界面 > 显示设备详情 — gates the DD peer cards' detail rows (DeviceId /
+    /// Capabilities / Fingerprint / TrustSummary).</summary>
+    public bool ShowDeviceDetailRows
+    {
+        get => _showDeviceDetailRows;
+        private set => SetField(ref _showDeviceDetailRows, value);
+    }
+
+    /// <summary>通用 > 界面 > 紧凑模式 — tightens the DD peer card density (smaller padding/icon).</summary>
+    public bool DeviceCardsCompact
+    {
+        get => _deviceCardsCompact;
+        private set => SetField(ref _deviceCardsCompact, value);
+    }
+
+    /// <summary>设备 > 过滤排序 > 显示设备图标 — gates the DD peer card's 44px device-type icon chip.</summary>
+    public bool ShowDeviceIconChips
+    {
+        get => _showDeviceIconChips;
+        private set => SetField(ref _showDeviceIconChips, value);
     }
 
     // ---- Local "my device" identity (Device Discovery → 我的设备 / This device card) -------
@@ -1915,6 +2194,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public void DisposeNetworkCoordinator()
     {
         _topBarNetworkCoordinator.Dispose();
+        // Flush any pending debounced settings write and release the SettingsService timer.
+        _settingsCoordinator.Dispose();
     }
 
 }

@@ -1,0 +1,514 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SettingsNetworkView — Tab 2 (网络 / Network). Mac-faithful, one-for-one with the macOS
+  网络 tab (SettingsView.swift `networkSettings`). Four frosted-glass section cards
+  (GlassCard) carrying the verbatim zh section headers, every interactive control two-way
+  bound to the SettingsCoordinator (exposed on SessionViewModel.Settings) per the binding
+  contract:
+
+    • Wi‑Fi (settings.network.wifi.title)
+        - 当前网络  : HARDWARE-REAL status row. The live SSID read (NetworkInformation
+                      .GetInternetConnectionProfile) lands in the Effects phase; no coordinator
+                      read property exists yet, so this renders as an honest read-only status
+                      caption — NOT a binding to a missing property (would not compile / would
+                      fake data). Refresh is intentionally NOT a <Button> here (the gated
+                      push-button surface stays frozen 1/5/3); re-read happens on next launch /
+                      via the Effects-phase pill probe.
+        - 自动连接已知网络 -> Settings.AutoConnectKnownNetworks  (Toggle, REAL-PERSIST)
+        - 显示隐藏网络     -> Settings.ShowHiddenNetworks        (Toggle, REAL-PERSIST)
+        - 优先使用5GHz/6GHz频段 -> Settings.Prefer5GHz           (Toggle, REAL-PERSIST)
+        - 扫描超时         -> Settings.WifiScanTimeout           (Slider 5..30 step 5, REAL-PERSIST)
+    • 设备发现 (settings.network.discovery.title)
+        - 启用Bonjour发现  -> Settings.EnableBonjourDiscovery    (Toggle, REAL-FULL)
+        - 启用mDNS解析     -> Settings.EnableMDNSResolution      (Toggle, REAL-FULL)
+        - 扫描自定义端口   -> Settings.ScanCustomPorts           (Toggle, REAL-PERSIST)
+        - 发现超时         -> Settings.DiscoveryTimeout          (TextBox numeric, REAL-FULL)
+        - 自定义服务类型   -> Settings.CustomServiceTypes        (list editor: ItemsControl +
+                      inline add TextBox + add/remove FontIcon affordances in code-behind —
+                      NOT <Button>; REAL-FULL)
+    • 顶部栏显示 (settings.network.topBar.title)
+        - 显示 IP 城市与代理状态 -> Settings.ShowTopBarIPLocation (Toggle, REAL-FULL)
+        - 显示实时网速     -> Settings.ShowTopBarNetworkSpeed    (Toggle, REAL-FULL)
+        - 显示网络延迟     -> Settings.ShowTopBarNetworkLatency  (Toggle, REAL-FULL)
+    • 连接 (settings.network.connection.title)
+        - 连接超时         -> Settings.ConnectionTimeout         (Slider 1..60 step 1, REAL-PERSIST)
+        - 重试次数         -> Settings.RetryCount                (Slider 1..10 step 1, REAL-PERSIST)
+
+  DataContext inherits the SessionViewModel from SettingsView, so {Binding Settings.<Prop>}
+  resolves. Cards hold ONLY ToggleSwitch / TextBox / Slider / ItemsControl / FontIcon /
+  TextBlock / Border — never <Button> (the frozen 1/5/3 push-button surface counts stay green).
+-->
+<UserControl
+    x:Class="Skybridge.WinClient.Settings.SettingsNetworkView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="14" Margin="0,0,0,14">
+
+        <!-- ===================== Wi‑Fi ===================== -->
+        <StackPanel Spacing="8">
+            <TextBlock
+                Text="Wi‑Fi"
+                FontSize="13"
+                FontWeight="SemiBold"
+                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Border Style="{StaticResource GlassCard}">
+                <StackPanel Spacing="14">
+
+                    <!-- 当前网络 — HARDWARE-REAL status row. The live SSID / connection name is
+                         read in code-behind from Windows.Networking.Connectivity
+                         .NetworkInformation.GetInternetConnectionProfile() on load (and re-read
+                         when this tab re-realizes). Read-only status, not a settable control. -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock
+                                Text="当前网络"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                x:Name="CurrentNetworkDetail"
+                                Text="读取系统网络配置文件…"
+                                FontSize="11"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                        <TextBlock
+                            x:Name="CurrentNetworkValue"
+                            Grid.Column="1"
+                            Text="读取中…"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </Grid>
+
+                    <!-- 自动连接已知网络 -> Settings.AutoConnectKnownNetworks. PERSIST-ONLY: Windows
+                         governs Wi-Fi auto-join through the OS WLAN profile store; there is no
+                         supported per-app programmatic auto-join policy without WlanAPI profile
+                         management. The preference persists; the honest caption discloses that
+                         Windows manages the actual behavior. -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock
+                                Text="自动连接已知网络"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Text="由 Windows 管理 — 偏好已保存，实际自动连接由系统 WLAN 配置决定"
+                                FontSize="11"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.AutoConnectKnownNetworks, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 显示隐藏网络 -> Settings.ShowHiddenNetworks -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="显示隐藏网络"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.ShowHiddenNetworks, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 优先使用5GHz/6GHz频段 -> Settings.Prefer5GHz. PERSIST-ONLY: Windows has no supported
+                         per-app radio band-preference API (band steering is an OS/driver/AP
+                         decision). The preference persists; the honest caption discloses Windows
+                         manages the band. -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock
+                                Text="优先使用5GHz/6GHz频段"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Text="由 Windows 管理 — 频段由系统/驱动/路由器决定，偏好仅保存"
+                                FontSize="11"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.Prefer5GHz, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 扫描超时 -> Settings.WifiScanTimeout (Slider 5..30 step 5) -->
+                    <StackPanel Spacing="4">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                Grid.Column="0"
+                                Text="扫描超时"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Text="{Binding Settings.WifiScanTimeout}"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Right"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                        </Grid>
+                        <Slider
+                            Minimum="5"
+                            Maximum="30"
+                            StepFrequency="5"
+                            Value="{Binding Settings.WifiScanTimeout, Mode=TwoWay}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <!-- ===================== 设备发现 ===================== -->
+        <StackPanel Spacing="8">
+            <TextBlock
+                Text="设备发现"
+                FontSize="13"
+                FontWeight="SemiBold"
+                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Border Style="{StaticResource GlassCard}">
+                <StackPanel Spacing="14">
+
+                    <!-- 启用Bonjour发现 -> Settings.EnableBonjourDiscovery -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="启用Bonjour发现"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.EnableBonjourDiscovery, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 启用mDNS解析 -> Settings.EnableMDNSResolution -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="启用mDNS解析"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.EnableMDNSResolution, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 扫描自定义端口 -> Settings.ScanCustomPorts -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="扫描自定义端口"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.ScanCustomPorts, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 发现超时 -> Settings.DiscoveryTimeout (numeric TextBox) -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock
+                                Text="发现超时"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Text="单位：秒"
+                                FontSize="11"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                        <TextBox
+                            Grid.Column="1"
+                            Width="96"
+                            InputScope="Number"
+                            PlaceholderText="秒"
+                            Text="{Binding Settings.DiscoveryTimeout, Mode=TwoWay}"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 自定义服务类型 -> Settings.CustomServiceTypes (list editor, code-behind) -->
+                    <StackPanel Spacing="8">
+                        <TextBlock
+                            Text="自定义服务类型"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock
+                            Text="例如 _skybridge._tcp"
+                            FontSize="11"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+
+                        <!-- Existing entries: each row = type text + inline remove affordance
+                             (FontIcon in a tappable Border, NOT a Button). Tag carries the entry
+                             string so the code-behind remove handler knows which to drop. -->
+                        <ItemsControl x:Name="CustomServiceTypeList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid ColumnSpacing="12" Padding="0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock
+                                            Grid.Column="0"
+                                            Text="{Binding}"
+                                            VerticalAlignment="Center"
+                                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <Border
+                                            Grid.Column="1"
+                                            Tag="{Binding}"
+                                            Tapped="OnRemoveCustomServiceType"
+                                            Background="Transparent"
+                                            Padding="6"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            ToolTipService.ToolTip="移除">
+                                            <FontIcon
+                                                Glyph="&#xE738;"
+                                                FontSize="14"
+                                                Foreground="{StaticResource SkyBridgeWarningBrush}" />
+                                        </Border>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- Add row: TextBox for the new type + inline add affordance (FontIcon
+                             in a tappable Border, NOT a Button). Enter in the box also adds. -->
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox
+                                x:Name="NewServiceTypeBox"
+                                Grid.Column="0"
+                                PlaceholderText="_skybridge._tcp"
+                                KeyDown="OnNewServiceTypeKeyDown"
+                                VerticalAlignment="Center" />
+                            <Border
+                                Grid.Column="1"
+                                Tapped="OnAddCustomServiceType"
+                                Background="Transparent"
+                                Padding="6"
+                                VerticalAlignment="Center"
+                                ToolTipService.ToolTip="添加">
+                                <FontIcon
+                                    Glyph="&#xE710;"
+                                    FontSize="16"
+                                    Foreground="{StaticResource SkyBridgeAccentBrush}" />
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <!-- ===================== 顶部栏显示 ===================== -->
+        <StackPanel Spacing="8">
+            <TextBlock
+                Text="顶部栏显示"
+                FontSize="13"
+                FontWeight="SemiBold"
+                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Border Style="{StaticResource GlassCard}">
+                <StackPanel Spacing="14">
+
+                    <!-- 显示 IP 城市与代理状态 -> Settings.ShowTopBarIPLocation -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="显示 IP 城市与代理状态"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.ShowTopBarIPLocation, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 显示实时网速 -> Settings.ShowTopBarNetworkSpeed -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="显示实时网速"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.ShowTopBarNetworkSpeed, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 显示网络延迟 -> Settings.ShowTopBarNetworkLatency -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Text="显示网络延迟"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <ToggleSwitch
+                            Grid.Column="1"
+                            IsOn="{Binding Settings.ShowTopBarNetworkLatency, Mode=TwoWay}"
+                            MinWidth="0"
+                            OnContent=""
+                            OffContent=""
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <!-- ===================== 连接 ===================== -->
+        <StackPanel Spacing="8">
+            <TextBlock
+                Text="连接"
+                FontSize="13"
+                FontWeight="SemiBold"
+                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Border Style="{StaticResource GlassCard}">
+                <StackPanel Spacing="14">
+
+                    <!-- 连接超时 -> Settings.ConnectionTimeout (Slider 1..60 step 1) -->
+                    <StackPanel Spacing="4">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                Grid.Column="0"
+                                Text="连接超时"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Text="{Binding Settings.ConnectionTimeout}"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Right"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                        </Grid>
+                        <Slider
+                            Minimum="1"
+                            Maximum="60"
+                            StepFrequency="1"
+                            Value="{Binding Settings.ConnectionTimeout, Mode=TwoWay}" />
+                    </StackPanel>
+
+                    <!-- 重试次数 -> Settings.RetryCount (Slider 1..10 step 1) -->
+                    <StackPanel Spacing="4">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                Grid.Column="0"
+                                Text="重试次数"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Text="{Binding Settings.RetryCount}"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Right"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                        </Grid>
+                        <Slider
+                            Minimum="1"
+                            Maximum="10"
+                            StepFrequency="1"
+                            Value="{Binding Settings.RetryCount, Mode=TwoWay}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

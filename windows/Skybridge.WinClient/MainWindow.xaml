@@ -6,6 +6,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:Skybridge.WinClient.ViewModels"
     xmlns:local="using:Skybridge.WinClient"
+    xmlns:settings="using:Skybridge.WinClient.Settings"
     mc:Ignorable="d">
     <Grid
         x:Name="RootShell"
@@ -26,6 +27,7 @@
         <vm:MetricKeyToGlyphConverter x:Key="MetricGlyphConverter" />
         <vm:MetricKeyToBrushConverter x:Key="MetricAccentBrushConverter" />
         <vm:QuickActionKeyToBrushConverter x:Key="QuickActionAccentBrushConverter" />
+        <vm:MonitorTileVisibilityConverter x:Key="MonitorTileVisibilityConverter" />
         <vm:SystemMetricKeyToGlyphConverter x:Key="SystemMetricGlyphConverter" />
         <vm:SystemMetricKeyToBrushConverter x:Key="SystemMetricAccentBrushConverter" />
         <vm:SystemMetricLabelToCaptionConverter x:Key="SystemMetricCaptionConverter" />
@@ -50,6 +52,10 @@
         <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
         <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
         <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
+        <!-- Host-swap converter: shows the per-tab Settings UserControl whose stable English
+             title matches SelectedSettingsTab, so the inline Settings right pane realizes exactly
+             one of the eight interactive tab views at a time. -->
+        <vm:SettingsTabKeyToVisibilityConverter x:Key="SettingsTabKeyVisibilityConverter" />
         <vm:AvatarUrlToImageSourceConverter x:Key="AvatarUrlImageSourceConverter" />
         <!-- USB Management converters (element-match the Mac USBDeviceManagementView
              DeviceCard icons/tints + USBStatCard icons/tints + MFi-badge gate). -->
@@ -477,7 +483,12 @@
              Button — the tile is display-only. Uses the MetricCard glass chrome.
              =================================================================== -->
         <DataTemplate x:Key="SystemMonitorMetricTileTemplate">
-            <Border Style="{StaticResource MetricCard}" Width="232" Height="132">
+            <!-- Tile Visibility ← 系统监控 显示项: the MonitorTileVisibilityConverter maps this
+                 tile's Label to the matching ShowMonitor* flag on the MonitorDisplayPrefs resource;
+                 a metric turned off in Settings collapses its tile (the VM re-projects the
+                 collection on a flag change so this re-evaluates). -->
+            <Border Style="{StaticResource MetricCard}" Width="232" Height="132"
+                    Visibility="{Binding Label, Converter={StaticResource MonitorTileVisibilityConverter}}">
                 <StackPanel Spacing="8">
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Border
@@ -581,7 +592,8 @@
              action surfaces, so the gated button count is unaffected.
              =================================================================== -->
         <DataTemplate x:Key="DiscoveredPeerItemTemplate">
-            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,8">
+            <!-- Padding binds to DeviceDisplayPrefs.CardPadding (紧凑模式 tightens it live). -->
+            <Border Style="{StaticResource GlassCard}" Padding="{Binding CardPadding, Source={StaticResource DeviceDisplayPrefs}}" Margin="0,0,0,8">
                 <Grid ColumnSpacing="14">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -589,10 +601,12 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <!-- Status-tinted device-type icon chip (Mac 40-50px rounded-square
-                         status chip, r12 .continuous). -->
+                         status chip, r12 .continuous). Visibility ← 显示设备图标; Width/Height ←
+                         DeviceDisplayPrefs.IconSize (紧凑模式 shrinks it live). -->
                     <Border
-                        Width="44"
-                        Height="44"
+                        Width="{Binding IconSize, Source={StaticResource DeviceDisplayPrefs}}"
+                        Height="{Binding IconSize, Source={StaticResource DeviceDisplayPrefs}}"
+                        Visibility="{Binding ShowIcons, Source={StaticResource DeviceDisplayPrefs}, Converter={StaticResource BoolToVisibilityConverter}}"
                         CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
@@ -662,33 +676,41 @@
                                     VerticalAlignment="Center" />
                             </StackPanel>
                         </Border>
-                        <!-- DeviceId -->
-                        <TextBlock
-                            Text="{Binding DeviceId}"
-                            FontSize="12"
-                            TextWrapping="Wrap"
-                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
-                        <!-- Capabilities (only when present) -->
-                        <TextBlock
-                            Text="{Binding CapabilitiesSummary}"
-                            FontSize="12"
-                            TextWrapping="Wrap"
-                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
-                            Visibility="{Binding CapabilitiesSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
-                        <!-- Fingerprint (only when present) -->
-                        <TextBlock
-                            Text="{Binding PublicKeyFingerprint}"
-                            FontSize="12"
-                            TextWrapping="Wrap"
-                            Foreground="{StaticResource SkyBridgeTextMutedBrush}"
-                            Visibility="{Binding PublicKeyFingerprint, Converter={StaticResource StringPresenceVisibilityConverter}}" />
-                        <!-- Trust summary (only when present) -->
-                        <TextBlock
-                            Text="{Binding TrustSummary}"
-                            FontSize="12"
-                            TextWrapping="Wrap"
-                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
-                            Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        <!-- Device-detail block (DeviceId / Capabilities / Fingerprint /
+                             TrustSummary) — the whole block's Visibility binds to
+                             DeviceDisplayPrefs.ShowDetails (通用 > 界面 > 显示设备详情); each row keeps
+                             its own presence gate so a blank field still drops out when shown. -->
+                        <StackPanel
+                            Spacing="6"
+                            Visibility="{Binding ShowDetails, Source={StaticResource DeviceDisplayPrefs}, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <!-- DeviceId -->
+                            <TextBlock
+                                Text="{Binding DeviceId}"
+                                FontSize="12"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                            <!-- Capabilities (only when present) -->
+                            <TextBlock
+                                Text="{Binding CapabilitiesSummary}"
+                                FontSize="12"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                Visibility="{Binding CapabilitiesSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                            <!-- Fingerprint (only when present) -->
+                            <TextBlock
+                                Text="{Binding PublicKeyFingerprint}"
+                                FontSize="12"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                Visibility="{Binding PublicKeyFingerprint, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                            <!-- Trust summary (only when present) -->
+                            <TextBlock
+                                Text="{Binding TrustSummary}"
+                                FontSize="12"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        </StackPanel>
                     </StackPanel>
                     <!-- Trailing chevron affordance (Mac TrustedDeviceCard chevron).
                          E76C = ChevronRight. Decorative; no command. -->
@@ -1402,6 +1424,7 @@
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
                             MaxWidth="170"
+                            Visibility="{Binding ShowTopBarSpeedPill, Converter={StaticResource BoolToVisibilityConverter}}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.NetworkSpeed"
                             ToolTipService.ToolTip="Network throughput (down / up), sampled every ~2s">
                             <StackPanel Orientation="Horizontal" Spacing="5">
@@ -1415,6 +1438,7 @@
                              "— ms" placeholder on probe failure. -->
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
+                            Visibility="{Binding ShowTopBarLatencyPill, Converter={StaticResource BoolToVisibilityConverter}}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.NetworkLatency"
                             ToolTipService.ToolTip="Round-trip latency to the SkyBridge endpoint, refreshed every ~15s">
                             <StackPanel Orientation="Horizontal" Spacing="5">
@@ -1431,6 +1455,7 @@
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
                             MaxWidth="170"
+                            Visibility="{Binding ShowTopBarIpLocationPill, Converter={StaticResource BoolToVisibilityConverter}}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.IpLocation"
                             ToolTipService.ToolTip="Public IP location and system-proxy state, refreshed every ~5min">
                             <StackPanel Orientation="Horizontal" Spacing="5">
@@ -3006,16 +3031,39 @@
                                         IsEnabled="{Binding IsSettingsSelected}" />
                                 </StackPanel>
 
+                                <!-- RIGHT — the per-tab interactive UserControl HOST, swapped by
+                                     SelectedSettingsTab. The eight Settings*View tab views are
+                                     stacked; each is gated by SettingsTabKeyVisibilityConverter on
+                                     the selected tab's stable English title so exactly one is
+                                     realized/visible. These ARE the live interactive Settings
+                                     (every control two-way binds to the SettingsCoordinator the
+                                     SessionViewModel exposes as `Settings`). DataContext is the
+                                     SessionViewModel inherited from RootShell, so every binding
+                                     inside the tab views resolves. -->
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="Settings Details" FontWeight="SemiBold" />
                                     <ScrollViewer
                                         VerticalScrollBarVisibility="Auto"
                                         VerticalScrollMode="Auto"
                                         MaxHeight="520">
-                                        <ItemsControl
-                                            AutomationProperties.AutomationId="Skybridge.Settings.SectionCards"
-                                            ItemsSource="{Binding SelectedSettingsTabCards}"
-                                            ItemTemplate="{StaticResource SettingsCardGroupTemplate}" />
+                                        <Grid>
+                                            <settings:SettingsGeneralView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter=General}" />
+                                            <settings:SettingsNetworkView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter=Network}" />
+                                            <settings:SettingsDevicesView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter=Devices}" />
+                                            <settings:SettingsFileTransferView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter='File Transfer'}" />
+                                            <settings:SettingsRemoteDesktopView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter='Remote Desktop'}" />
+                                            <settings:SettingsSystemMonitorView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter='System Monitor'}" />
+                                            <settings:SettingsPermissionsView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter=Permissions}" />
+                                            <settings:SettingsAdvancedView
+                                                Visibility="{Binding SelectedSettingsTab, Converter={StaticResource SettingsTabKeyVisibilityConverter}, ConverterParameter=Advanced}" />
+                                        </Grid>
                                     </ScrollViewer>
                                 </StackPanel>
                             </Grid>
@@ -3032,6 +3080,7 @@
                                  cards — same real collection, no duplicate visual.
                                  =========================================================== -->
                             <ItemsControl
+                                AutomationProperties.AutomationId="Skybridge.Settings.SectionCards"
                                 Visibility="Collapsed"
                                 ItemsSource="{Binding SettingsDetails}"
                                 ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />

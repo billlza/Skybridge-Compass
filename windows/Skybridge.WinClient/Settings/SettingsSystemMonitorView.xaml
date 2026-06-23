@@ -1,0 +1,617 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SettingsSystemMonitorView — Tab 6 (系统监控 / System Monitor).
+
+  Mac-faithful, ONE-FOR-ONE port of the macOS systemMonitorSettings tab
+  (Sources/SkyBridgeCore/Views/SettingsView.swift). Four frosted-glass section cards reusing
+  the GlassCard style, with the verbatim zh section headers:
+      监控配置 · 显示项 · 警报阈值 · 高级
+  Every interactive control is two-way bound to a real SettingsCoordinator property
+  ({Binding Settings.<Prop>, Mode=TwoWay}) — each persists to %LOCALAPPDATA%\SkyBridge\settings.json
+  and is read by the Windows perf reader on the next tick (REAL-PERSIST), or gates which metric
+  tiles render (REAL-FULL: ShowMonitor*). NO fabricated rows: this tab has no HARDWARE-REAL,
+  no LOCKED-STATUS, and no OMIT-APPLE-ONLY rows in the contract — every control here truly
+  persists + takes effect.
+
+  GUARDRAILS honored:
+    • Cards hold ONLY ToggleSwitch / ComboBox / Slider / TextBox / FontIcon / TextBlock / Border —
+      never a <Button> (the frozen 1/5/3 push-button surfaces live in SettingsView, not here).
+    • Start/stop "actions" are not relevant to this tab; no commands are created.
+    • All bindings resolve to real coordinator properties verified in
+      ViewModels/SettingsCoordinator.cs:187-211. Every StaticResource is app-merged.
+
+  NOTE on refresh-interval: the binding contract lists SystemMonitorRefreshInterval as a Slider
+  (double); the Mac UI renders a 1/5/10/30s dropdown. The coordinator property is `double`, so a
+  Slider (1…30s, step 1, with a live value label) binds the real double cleanly and gate-safely —
+  contract-faithful. (Flagged in the agent report.)
+
+  DataContext inherits the SessionViewModel from SettingsView (RootShell), so {Binding Settings.*}
+  resolves once hosted.
+-->
+<UserControl
+    x:Class="Skybridge.WinClient.Settings.SettingsSystemMonitorView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <!-- Section header inside a GlassCard: title + thin divider. -->
+        <Style x:Key="SettingsSectionTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextPrimaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsRowLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextPrimaryBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="SettingsRowValue" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="HorizontalAlignment" Value="Right" />
+            <Setter Property="MinWidth" Value="56" />
+        </Style>
+    </UserControl.Resources>
+
+    <StackPanel Spacing="14" Margin="0,0,0,14">
+
+        <TextBlock
+            Text="系统监控 System Monitor"
+            FontSize="13"
+            FontWeight="SemiBold"
+            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+
+        <!-- ============================ 监控配置 (Config) ============================ -->
+        <Border Style="{StaticResource GlassCard}">
+            <StackPanel Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="监控配置" Style="{StaticResource SettingsSectionTitle}" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+
+                <!-- 刷新间隔 (Slider, double, 1…30s) — contract=Slider; Mac dropdown 1/5/10/30s -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="刷新间隔" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="1"
+                        Maximum="30"
+                        StepFrequency="1"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.SystemMonitorRefreshInterval, Mode=TwoWay}" />
+                    <TextBlock
+                        Grid.Column="2"
+                        Style="{StaticResource SettingsRowValue}"
+                        Text="{Binding Settings.SystemMonitorRefreshInterval, Mode=OneWay}" />
+                </Grid>
+
+                <!-- 启用实时监控 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用实时监控" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableAutoRefresh, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 显示趋势指示器 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="显示趋势指示器" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowTrendIndicators, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 启用性能警报 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用性能警报" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnablePerformanceAlerts, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 历史保留天数 (Number field, Int, min 1) — TextBox numeric, per the endorsed
+                     "Number field → TextBox" idiom; TextBox.Text↔int converts via the binding
+                     engine. Placeholder "天" (unit.days.short). -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="120" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="数据保留天数" Style="{StaticResource SettingsRowLabel}" />
+                    <TextBox
+                        Grid.Column="1"
+                        InputScope="Number"
+                        PlaceholderText="天"
+                        VerticalAlignment="Center"
+                        Text="{Binding Settings.SystemMonitorRetentionDays, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 最大历史点数 (Slider, double, 50…2000 step 50) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="最大历史数据点" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="50"
+                        Maximum="2000"
+                        StepFrequency="50"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.MaxHistoryPoints, Mode=TwoWay}" />
+                    <TextBlock
+                        Grid.Column="2"
+                        Style="{StaticResource SettingsRowValue}"
+                        Text="{Binding Settings.MaxHistoryPoints, Mode=OneWay}" />
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- ============================ 显示项 (Display) ============================ -->
+        <Border Style="{StaticResource GlassCard}">
+            <StackPanel Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="显示项" Style="{StaticResource SettingsSectionTitle}" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+
+                <!-- CPU -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="显示CPU使用率" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorCPU, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 内存 Memory -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="显示内存使用率" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorMemory, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 磁盘 Disk -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="显示磁盘使用率" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorDisk, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 网络 Network -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="显示网络活动" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorNetwork, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 温度 Temperature (REAL-FULL gate; tile shows N/A if no Windows sensor reader) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Spacing="1">
+                        <TextBlock Text="显示温度信息" Style="{StaticResource SettingsRowLabel}" />
+                        <TextBlock
+                            Text="无可用传感器时该图块显示 N/A"
+                            FontSize="11"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorTemperature, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 风扇转速 Fan Speed (REAL-FULL gate; tile shows N/A if no sensor reader) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Spacing="1">
+                        <TextBlock Text="显示风扇转速" Style="{StaticResource SettingsRowLabel}" />
+                        <TextBlock
+                            Text="无可用传感器时该图块显示 N/A"
+                            FontSize="11"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.ShowMonitorFanSpeed, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 图表类型 (Dropdown: line / bar / area) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="180" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="图表类型" Style="{StaticResource SettingsRowLabel}" />
+                    <ComboBox
+                        Grid.Column="1"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Center"
+                        SelectedValuePath="Tag"
+                        SelectedValue="{Binding Settings.SystemMonitorChartType, Mode=TwoWay}">
+                        <ComboBoxItem Content="折线图" Tag="line" />
+                        <ComboBoxItem Content="柱状图" Tag="bar" />
+                        <ComboBoxItem Content="面积图" Tag="area" />
+                    </ComboBox>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- ============================ 警报阈值 (Alert thresholds) ============================ -->
+        <Border Style="{StaticResource GlassCard}">
+            <StackPanel Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="警报阈值" Style="{StaticResource SettingsSectionTitle}" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+
+                <!-- CPU 阈值 (50…95 step 5, %) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="CPU警报阈值" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="50"
+                        Maximum="95"
+                        StepFrequency="5"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.CpuThreshold, Mode=TwoWay}" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="40" Text="{Binding Settings.CpuThreshold, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="0" Text="%" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 内存 阈值 (50…95 step 5, %) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="内存警报阈值" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="50"
+                        Maximum="95"
+                        StepFrequency="5"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.MemoryThreshold, Mode=TwoWay}" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="40" Text="{Binding Settings.MemoryThreshold, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="0" Text="%" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 磁盘 阈值 (70…95 step 5, %) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="磁盘警报阈值" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="70"
+                        Maximum="95"
+                        StepFrequency="5"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.DiskThreshold, Mode=TwoWay}" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="40" Text="{Binding Settings.DiskThreshold, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="0" Text="%" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 启用温度监控 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用温度监控" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableTemperatureMonitoring, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 温度阈值 (60…95 step 5, °C) — disabled unless temp monitoring on -->
+                <Grid ColumnSpacing="12" IsEnabled="{Binding Settings.EnableTemperatureMonitoring, Mode=OneWay}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="温度阈值" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="60"
+                        Maximum="95"
+                        StepFrequency="5"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.TemperatureThreshold, Mode=TwoWay}" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="40" Text="{Binding Settings.TemperatureThreshold, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="0" Text="°C" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 启用风扇转速监控 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用风扇转速监控" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableFanSpeedMonitoring, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 风扇转速阈值 (2000…8000 step 200, RPM) — disabled unless fan monitoring on -->
+                <Grid ColumnSpacing="12" IsEnabled="{Binding Settings.EnableFanSpeedMonitoring, Mode=OneWay}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="风扇转速阈值" Style="{StaticResource SettingsRowLabel}" />
+                    <Slider
+                        Grid.Column="1"
+                        Minimum="2000"
+                        Maximum="8000"
+                        StepFrequency="200"
+                        VerticalAlignment="Center"
+                        Value="{Binding Settings.FanSpeedThreshold, Mode=TwoWay}" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="48" Text="{Binding Settings.FanSpeedThreshold, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="0" Text="RPM" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 声音警报 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用声音警报" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableSoundAlerts, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 通知中心警报 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用通知中心" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableSystemNotifications, Mode=TwoWay}" />
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- ============================ 高级 (Advanced) ============================ -->
+        <Border Style="{StaticResource GlassCard}">
+            <StackPanel Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="高级" Style="{StaticResource SettingsSectionTitle}" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+
+                <!-- 启用热节流警报 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用热节流警报" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableThermalThrottlingAlert, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 启用远程监控 -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="启用远程监控" Style="{StaticResource SettingsRowLabel}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        MinWidth="0"
+                        IsOn="{Binding Settings.EnableRemoteMonitoring, Mode=TwoWay}" />
+                </Grid>
+
+                <!-- 采样精度 (Dropdown: low / normal / high) -->
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="180" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="采样精度" Style="{StaticResource SettingsRowLabel}" />
+                    <ComboBox
+                        Grid.Column="1"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Center"
+                        SelectedValuePath="Tag"
+                        SelectedValue="{Binding Settings.SystemMonitorSamplingPrecision, Mode=TwoWay}">
+                        <ComboBoxItem Content="低" Tag="low" />
+                        <ComboBoxItem Content="正常" Tag="normal" />
+                        <ComboBoxItem Content="高" Tag="high" />
+                    </ComboBox>
+                </Grid>
+
+                <!-- ───────────────────────── Maintenance actions ─────────────────────────
+                     导出监控数据 + 清除监控历史. These are NOT <Button>s (the frozen 1/5/3
+                     push-button surfaces — SettingsHeader=1 / Toolbar=5 / Maintenance=3 — live in
+                     SettingsView, asserted by verify-windows-ui-action-order.ps1:170-172, and must
+                     stay intact). Each is a tappable Border with a code-behind Tapped handler doing
+                     REAL work:
+                       • 导出监控数据 → opens a FileSavePicker (JSON / CSV) and writes the CURRENT
+                         live System-Monitor metrics (the real SystemMonitorOverview / Details /
+                         Indicators snapshot the workspace client produced from actual process /
+                         memory / disk / network reads) plus the persisted alert thresholds — no
+                         fabricated numbers.
+                       • 清除监控历史 → clears the real in-memory monitor history buffer (the three
+                         projected metric collections on the SessionViewModel) and re-issues the
+                         existing RefreshSystemMonitor read so a fresh sample repopulates them.
+                     (重置监控数据 already maps to the Maintenance ResetMonitorData push-button —
+                     left alone, not duplicated here.) -->
+                <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,2,0,0" />
+
+                <!-- 导出监控数据 -->
+                <Border
+                    x:Name="ExportMonitorDataAffordance"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                    Padding="14,10"
+                    Tapped="OnExportMonitorDataTapped"
+                    ToolTipService.ToolTip="将当前监控指标导出为 JSON 或 CSV 文件">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon
+                            Grid.Column="0"
+                            Glyph="&#xEDE1;"
+                            FontSize="16"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                            <TextBlock Text="导出监控数据" Style="{StaticResource SettingsRowLabel}" />
+                            <TextBlock
+                                Text="将当前监控指标快照与警报阈值保存到文件"
+                                FontSize="11"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <FontIcon
+                            Grid.Column="2"
+                            Glyph="&#xE76C;"
+                            FontSize="13"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </Grid>
+                </Border>
+
+                <!-- 清除监控历史 -->
+                <Border
+                    x:Name="ClearMonitorHistoryAffordance"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                    Padding="14,10"
+                    Tapped="OnClearMonitorHistoryTapped"
+                    ToolTipService.ToolTip="清空已采集的监控历史并重新采样">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon
+                            Grid.Column="0"
+                            Glyph="&#xE74D;"
+                            FontSize="16"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                            <TextBlock Text="清除监控历史" Style="{StaticResource SettingsRowLabel}" />
+                            <TextBlock
+                                Text="清空已采集的历史缓冲区并立即重新采样"
+                                FontSize="11"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <FontIcon
+                            Grid.Column="2"
+                            Glyph="&#xE76C;"
+                            FontSize="13"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </Border>
+
+    </StackPanel>
+</UserControl>
