@@ -21,6 +21,7 @@ public sealed class SessionViewModelDependencies
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
         IDashboardMetricsClient? dashboardMetricsClient = null,
+        IWeatherClient? weatherClient = null,
         ITopBarStatusClient? topBarStatusClient = null,
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
@@ -48,6 +49,7 @@ public sealed class SessionViewModelDependencies
         UsbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
         SettingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
         DashboardMetricsClient = dashboardMetricsClient ?? new DashboardMetricsClient();
+        WeatherClient = weatherClient ?? new UnavailableWeatherClient();
         TopBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         ConnectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
         WorkspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
@@ -89,6 +91,8 @@ public sealed class SessionViewModelDependencies
     public ISettingsWorkspaceClient SettingsClient { get; }
 
     public IDashboardMetricsClient DashboardMetricsClient { get; }
+
+    public IWeatherClient WeatherClient { get; }
 
     public ITopBarStatusClient TopBarStatusClient { get; }
 

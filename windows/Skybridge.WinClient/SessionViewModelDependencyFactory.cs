@@ -32,6 +32,7 @@ internal static class SessionViewModelDependencyFactory
             new UsbManagementWorkspaceClient(),
             WindowsNativeRuntimeDependencyFactory.CreateSettingsWorkspaceClientFromEnvironment(),
             new DashboardMetricsClient(),
+            new WeatherClient(),
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
             new WorkspaceActionCatalogClient(),

@@ -57,14 +57,18 @@ public sealed class WeatherClient : IWeatherClient
 
     private static readonly TimeSpan PrimaryTimeout = TimeSpan.FromSeconds(5);
 
-    // Device-location budget: ~3 km accuracy is plenty for a city-level forecast, and an
-    // 8 s GetGeoposition timeout with a 1-minute maxAge keeps the first paint snappy
-    // (a fresh OS-cached fix returns instantly; only a cold GPS warm-up burns the budget).
+    // Device-location budget: ~3 km accuracy is plenty for a city-level forecast. We accept a
+    // fix up to 10 minutes old (weather doesn't move that fast, so reusing the OS-cached fix
+    // avoids a cold re-acquire on most refreshes) and wait up to 22 s for a fresh fix before
+    // falling back to IP geolocation. The longer timeout matters on a cold GPS/Wi-Fi warm-up:
+    // an 8 s budget would expire mid-acquire and bounce to the (wrong) IP city; 22 s lets the
+    // real fix land. Weather fetch is async/off the UI thread, so the longer wait only delays
+    // the card populating, never the app.
     private static readonly uint LocationDesiredAccuracyInMeters = 3000;
 
-    private static readonly TimeSpan LocationMaximumAge = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan LocationMaximumAge = TimeSpan.FromMinutes(10);
 
-    private static readonly TimeSpan LocationTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan LocationTimeout = TimeSpan.FromSeconds(22);
 
     public string BuildInitialStatus() => DefaultInitialStatus;
 
