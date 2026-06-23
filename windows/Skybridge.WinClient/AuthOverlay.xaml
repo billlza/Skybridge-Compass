@@ -6,13 +6,18 @@
   visual tree there is NO XamlRoot, NO single-dialog rule, and NO async-void ShowAsync — the
   entire ContentDialog crash class is gone.
 
-  Element parity with the Mac AuthenticationView:
+  Element parity with the Mac AuthenticationView — FULL-WIDTH spacious layout:
     • starry-night dark background + top-down darkening gradient
-    • brand header: tagline "跨网无感，安全即达。" + 3 capsule pills + logo glyph + title
-    • login card: "选择登录方式" + a 4-tab radio-like picker (Apple / 星云 / 手机 / 邮箱),
-      selected tab gets an accent ring (Apple neutral, Email BLUE, Nebula PURPLE, Phone GREEN)
-    • the selected method's form (Email fully functional; Apple/Nebula/Phone render faithfully)
-    • bottom: full-width 游客模式体验 row with → arrow
+    • top ~35%: centered brand header — tagline "跨网无感，安全即达。" + 3 capsule pills +
+      logo glass tile + "SkyBridge Compass" (blue→cyan gradient title)
+    • bottom ~65%: ONE full-width glass card (r24, ~40px horizontal margin from the window
+      edges, generous ~32 internal padding):
+        – "选择登录方式" gradient headline
+        – a 4-tab radio-like picker spread across the WHOLE card width (each tab Width=*,
+          equal, height 68, icon-over-label). Selected tab gets an accent ring + tint
+          (Microsoft BLUE, Nebula PURPLE, Phone GREEN, Email BLUE)
+        – the selected method's FULL-WIDTH form (Email fully functional; the rest honest)
+        – a full-width 游客模式体验 row with a → arrow
 
   All buttons live HERE (a UserControl), so MainWindow.xaml's gated <Button> count is unchanged.
 -->
@@ -25,13 +30,22 @@
     mc:Ignorable="d">
 
     <UserControl.Resources>
+        <!-- Blue→cyan brand gradient (app accent #FF3072EF → secondary #FF00D9FF), used as
+             the foreground of the app title + the "选择登录方式" headline so they read as the
+             Mac's gradient text. -->
+        <LinearGradientBrush x:Key="BrandTitleGradient" StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="{StaticResource SkyBridgeAccentColor}" Offset="0.0" />
+            <GradientStop Color="{StaticResource SkyBridgeAccentSecondaryColor}" Offset="1.0" />
+        </LinearGradientBrush>
+
         <!-- Glass text/password input chrome (element-matches the Mac LiquidGlassTextField:
-             frosted fill, r12, focus accent border). Defined locally so the whole login is
-             self-contained inside this UserControl. -->
+             frosted fill, r12, focus accent border). Full-width + tall (50) to match the
+             airy Mac fields. Defined locally so the whole login is self-contained here. -->
         <Style x:Key="GlassTextBoxStyle" TargetType="TextBox">
-            <Setter Property="MinHeight" Value="48" />
-            <Setter Property="Padding" Value="14,12" />
-            <Setter Property="FontSize" Value="14" />
+            <Setter Property="MinHeight" Value="50" />
+            <Setter Property="Padding" Value="16,13" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
             <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextPrimaryBrush}" />
             <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
@@ -39,27 +53,28 @@
         </Style>
 
         <Style x:Key="GlassPasswordBoxStyle" TargetType="PasswordBox">
-            <Setter Property="MinHeight" Value="48" />
-            <Setter Property="Padding" Value="14,12" />
-            <Setter Property="FontSize" Value="14" />
+            <Setter Property="MinHeight" Value="50" />
+            <Setter Property="Padding" Value="16,13" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
             <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextPrimaryBrush}" />
             <Setter Property="Background" Value="{StaticResource SkyBridgeShellSurfaceFillBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
             <Setter Property="CornerRadius" Value="12" />
         </Style>
 
-        <!-- Flat text-link button (忘记密码？) — no fill/border, accent-on-hover. -->
+        <!-- Flat text-link button (忘记密码？/ 点击注册) — no fill/border, accent-on-hover. -->
         <Style x:Key="LinkButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="4,2" />
             <Setter Property="Foreground" Value="{StaticResource SkyBridgeTextSecondaryBrush}" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontSize" Value="13" />
         </Style>
 
         <!-- Solid-fill action buttons with a r12 templated body, color set per form. -->
-        <Style x:Key="AppleButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="#FF101012" />
+        <Style x:Key="MicrosoftButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#FF00A4EF" />
             <Setter Property="BorderBrush" Value="#33FFFFFF" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="12" />
@@ -118,40 +133,43 @@
             </Border.Background>
         </Border>
 
-        <!-- Scrollable content column so the login fits small windows without clipping. -->
+        <!-- Scrollable content column so the login fits small windows without clipping. The
+             inner Grid STRETCHES to the full window width (no MaxWidth clamp) and is split
+             into a centered header band (top) + a full-width login card (bottom), matching
+             the Mac's "header above, full-bleed card below" composition. -->
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <Grid HorizontalAlignment="Center" MaxWidth="560" Padding="40,36,40,40">
+            <Grid HorizontalAlignment="Stretch" Padding="40,40,40,40">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <!-- ============================ BRAND HEADER ============================ -->
-                <StackPanel Grid.Row="0" Spacing="14" Margin="0,0,0,24" HorizontalAlignment="Stretch">
-                    <StackPanel Spacing="12" HorizontalAlignment="Center">
+                <StackPanel Grid.Row="0" Spacing="16" Margin="0,16,0,28" HorizontalAlignment="Center">
+                    <StackPanel Spacing="14" HorizontalAlignment="Center">
                         <!-- Tagline -->
                         <TextBlock
                             Text="跨网无感，安全即达。"
-                            FontSize="22"
-                            FontWeight="SemiBold"
+                            FontSize="27"
+                            FontWeight="Bold"
                             TextAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
 
                         <!-- 3 capsule pills: 跨网直达 / 端到端可信 / 零配置协作 -->
                         <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="10,6">
+                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="12,7">
                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                     <FontIcon Glyph="&#xE968;" FontSize="13" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     <TextBlock Text="跨网直达" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="10,6">
+                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="12,7">
                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                     <FontIcon Glyph="&#xE72E;" FontSize="13" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     <TextBlock Text="端到端可信" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="10,6">
+                            <Border Style="{StaticResource GlassCard}" CornerRadius="10" Padding="12,7">
                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                     <FontIcon Glyph="&#xE945;" FontSize="13" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     <TextBlock Text="零配置协作" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
@@ -160,8 +178,11 @@
                         </StackPanel>
                     </StackPanel>
 
-                    <!-- Logo glass tile (40x40, r12) + app title -->
-                    <StackPanel Spacing="8" HorizontalAlignment="Center">
+                    <!-- Logo glass tile (44x44, r12) + app title. No real brand image asset
+                         exists in the Windows project (no Assets/*.png, no <ApplicationIcon>,
+                         no appxmanifest logos), so a tasteful styled glyph is used in an
+                         accent glass frame — no logo is fabricated. -->
+                    <StackPanel Spacing="10" HorizontalAlignment="Center">
                         <Border
                             Width="44"
                             Height="44"
@@ -176,27 +197,36 @@
                             FontWeight="Bold"
                             TextAlignment="Center"
                             HorizontalAlignment="Center"
-                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            Foreground="{StaticResource BrandTitleGradient}" />
                     </StackPanel>
                 </StackPanel>
 
                 <!-- ============================= LOGIN CARD ============================= -->
-                <Border Grid.Row="1" Style="{StaticResource GlassPanel}" CornerRadius="24" Padding="0">
-                    <StackPanel Padding="0,28,0,28">
+                <!-- FULL-WIDTH glass card: stretches edge-to-edge inside the 40px page inset
+                     (so ~40px margin from the window). r24, generous 32 internal padding. -->
+                <Border
+                    Grid.Row="1"
+                    Style="{StaticResource GlassPanel}"
+                    HorizontalAlignment="Stretch"
+                    CornerRadius="24"
+                    Padding="32">
+                    <StackPanel Spacing="20" HorizontalAlignment="Stretch">
 
                         <!-- Method picker -->
-                        <StackPanel Spacing="16" Padding="28,0,28,0">
+                        <StackPanel Spacing="16" HorizontalAlignment="Stretch">
                             <TextBlock
                                 Text="选择登录方式"
-                                FontSize="16"
-                                FontWeight="SemiBold"
-                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                FontSize="18"
+                                FontWeight="Bold"
+                                Foreground="{StaticResource BrandTitleGradient}" />
 
-                            <!-- 4 radio-like tabs. They are Border (not Button) elements driven
-                                 by Tapped + a code-behind selection model (SelectedAuthMethod),
-                                 so the selected ring/accent is trivial to paint and they add no
+                            <!-- 4 radio-like tabs spread across the FULL card width — every
+                                 column Width=* (equal), so each tab is big and fills its share.
+                                 They are Border (not Button) elements driven by Tapped + a
+                                 code-behind selection model (SelectedAuthMethod), so the
+                                 selected ring/accent is trivial to paint and they add no
                                  <Button> anywhere. Each carries a Tag = its method key. -->
-                            <Grid ColumnSpacing="12">
+                            <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="*" />
@@ -204,20 +234,35 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <!-- Apple tab -->
+                                <!-- Microsoft tab (was Apple). Microsoft 4-square logo rendered
+                                     as a 2x2 Grid of colored squares (Segoe has no MS logo). -->
                                 <Border
-                                    x:Name="AppleTab"
+                                    x:Name="MicrosoftTab"
                                     Grid.Column="0"
-                                    Tag="apple"
+                                    Tag="microsoft"
                                     Tapped="OnTabTapped"
-                                    Height="64"
+                                    Height="68"
                                     CornerRadius="12"
                                     Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                                     BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                                     BorderThickness="1">
                                     <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                        <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                                        <TextBlock Text="Apple ID" FontSize="12" FontWeight="Medium" TextAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <!-- Microsoft 4-square: red TL, green TR, blue BL, yellow BR -->
+                                        <Grid Width="20" Height="20" ColumnSpacing="2" RowSpacing="2" HorizontalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="*" />
+                                            </Grid.RowDefinitions>
+                                            <Rectangle Grid.Row="0" Grid.Column="0" Fill="#FFF25022" />
+                                            <Rectangle Grid.Row="0" Grid.Column="1" Fill="#FF7FBA00" />
+                                            <Rectangle Grid.Row="1" Grid.Column="0" Fill="#FF00A4EF" />
+                                            <Rectangle Grid.Row="1" Grid.Column="1" Fill="#FFFFB900" />
+                                        </Grid>
+                                        <TextBlock Text="Microsoft 账号" FontSize="12" FontWeight="Medium" TextAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     </StackPanel>
                                 </Border>
 
@@ -227,13 +272,13 @@
                                     Grid.Column="1"
                                     Tag="nebula"
                                     Tapped="OnTabTapped"
-                                    Height="64"
+                                    Height="68"
                                     CornerRadius="12"
                                     Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                                     BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                                     BorderThickness="1">
                                     <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                        <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="#FFB07CF5" />
+                                        <FontIcon Glyph="&#xE753;" FontSize="22" Foreground="#FFB07CF5" />
                                         <TextBlock Text="星云账号" FontSize="12" FontWeight="Medium" TextAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     </StackPanel>
                                 </Border>
@@ -244,13 +289,13 @@
                                     Grid.Column="2"
                                     Tag="phone"
                                     Tapped="OnTabTapped"
-                                    Height="64"
+                                    Height="68"
                                     CornerRadius="12"
                                     Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                                     BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                                     BorderThickness="1">
                                     <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                        <FontIcon Glyph="&#xE717;" FontSize="20" Foreground="#FF4DC770" />
+                                        <FontIcon Glyph="&#xE717;" FontSize="22" Foreground="#FF4DC770" />
                                         <TextBlock Text="手机号码" FontSize="12" FontWeight="Medium" TextAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     </StackPanel>
                                 </Border>
@@ -261,13 +306,13 @@
                                     Grid.Column="3"
                                     Tag="email"
                                     Tapped="OnTabTapped"
-                                    Height="64"
+                                    Height="68"
                                     CornerRadius="12"
                                     Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                                     BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                                     BorderThickness="1">
                                     <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                        <FontIcon Glyph="&#xE715;" FontSize="20" Foreground="{StaticResource SkyBridgeAccentBrush}" />
+                                        <FontIcon Glyph="&#xE715;" FontSize="22" Foreground="{StaticResource SkyBridgeAccentBrush}" />
                                         <TextBlock Text="电子邮箱" FontSize="12" FontWeight="Medium" TextAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     </StackPanel>
                                 </Border>
@@ -275,12 +320,26 @@
                         </StackPanel>
 
                         <!-- ===================== FORMS (one visible at a time) ===================== -->
+                        <!-- Forms are FULL-WIDTH: they stretch inside the card and rely on the
+                             card's 32 padding (no inner left/right padding), so fields run the
+                             whole card width like the Mac. -->
 
                         <!-- EMAIL form (fully functional) -->
                         <StackPanel
                             x:Name="EmailForm"
-                            Spacing="14"
-                            Padding="28,24,28,0">
+                            Spacing="16"
+                            HorizontalAlignment="Stretch">
+
+                            <!-- 没有账号？点击注册 (hint link; registration is hosted, inert for now) -->
+                            <StackPanel Orientation="Horizontal" Spacing="2" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                <TextBlock Text="没有账号？" FontSize="13" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <Button
+                                    Click="OnRegisterHint"
+                                    Style="{StaticResource LinkButtonStyle}"
+                                    Foreground="{StaticResource SkyBridgeAccentBrush}"
+                                    Content="点击注册" />
+                            </StackPanel>
+
                             <TextBox
                                 x:Name="EmailInput"
                                 PlaceholderText="邮箱地址"
@@ -311,14 +370,14 @@
                                 </StackPanel>
                             </Border>
 
-                            <!-- 邮箱登录 button (BLUE) -->
+                            <!-- 邮箱登录 button (BLUE) — wired to the SAME working handler -->
                             <Button
                                 x:Name="EmailSignInButton"
                                 Click="OnEmailSignIn"
                                 HorizontalAlignment="Stretch"
                                 Style="{StaticResource PrimaryButton}"
-                                Height="48"
-                                MinHeight="48">
+                                Height="50"
+                                MinHeight="50">
                                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <ProgressRing x:Name="SignInSpinner" Width="18" Height="18" IsActive="False" Visibility="Collapsed" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     <FontIcon x:Name="SignInGlyph" Glyph="&#xE715;" FontSize="16" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -334,27 +393,48 @@
                                 Content="忘记密码？" />
                         </StackPanel>
 
-                        <!-- APPLE form -->
+                        <!-- MICROSOFT form -->
                         <StackPanel
-                            x:Name="AppleForm"
+                            x:Name="MicrosoftForm"
                             Visibility="Collapsed"
-                            Spacing="12"
-                            Padding="28,24,28,0">
-                            <!-- BLACK "继续使用 Apple 登录" button -->
+                            Spacing="14"
+                            HorizontalAlignment="Stretch">
+                            <TextBlock
+                                Text="使用 Microsoft 账号登录 SkyBridge Compass。"
+                                FontSize="13"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <!-- BLUE "使用 Microsoft 登录" button. Microsoft OAuth requires the
+                                 Supabase azure provider, which is NOT enabled on this project yet,
+                                 so the button is HONEST: clicking it surfaces an inline message
+                                 rather than faking success or opening a broken flow. -->
                             <Button
-                                Click="OnAppleContinue"
+                                Click="OnMicrosoftContinue"
                                 HorizontalAlignment="Stretch"
-                                Style="{StaticResource AppleButtonStyle}"
+                                Style="{StaticResource MicrosoftButtonStyle}"
                                 Height="50"
                                 MinHeight="50">
-                                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" HorizontalAlignment="Center">
-                                    <FontIcon Glyph="&#xE701;" FontSize="18" Foreground="White" />
-                                    <TextBlock Text="继续使用 Apple 登录" FontWeight="SemiBold" Foreground="White" />
+                                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Center">
+                                    <Grid Width="18" Height="18" ColumnSpacing="2" RowSpacing="2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+                                        <Rectangle Grid.Row="0" Grid.Column="0" Fill="#FFF25022" />
+                                        <Rectangle Grid.Row="0" Grid.Column="1" Fill="#FF7FBA00" />
+                                        <Rectangle Grid.Row="1" Grid.Column="0" Fill="#FF00A4EF" />
+                                        <Rectangle Grid.Row="1" Grid.Column="1" Fill="#FFFFB900" />
+                                    </Grid>
+                                    <TextBlock Text="使用 Microsoft 登录" FontWeight="SemiBold" Foreground="White" />
                                 </StackPanel>
                             </Button>
                             <TextBlock
-                                x:Name="AppleHint"
-                                Text="SkyBridge Compass 将打开 Apple 安全网页完成授权，成功后会自动返回应用。"
+                                x:Name="MicrosoftHint"
+                                Text="Microsoft 账号登录需要在 Supabase 启用 Azure 登录后才能使用。"
                                 FontSize="12"
                                 TextWrapping="Wrap"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -365,7 +445,7 @@
                             x:Name="NebulaForm"
                             Visibility="Collapsed"
                             Spacing="14"
-                            Padding="28,24,28,0">
+                            HorizontalAlignment="Stretch">
                             <Border Style="{StaticResource GlassCard}" CornerRadius="18" Padding="18">
                                 <StackPanel Spacing="10">
                                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -388,8 +468,8 @@
                                 Click="OnNebulaBrowserLogin"
                                 HorizontalAlignment="Stretch"
                                 Style="{StaticResource NebulaButtonStyle}"
-                                Height="48"
-                                MinHeight="48">
+                                Height="50"
+                                MinHeight="50">
                                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <FontIcon Glyph="&#xE774;" FontSize="16" Foreground="White" />
                                     <TextBlock Text="在安全浏览器中登录" FontWeight="SemiBold" Foreground="White" />
@@ -402,14 +482,34 @@
                             x:Name="PhoneForm"
                             Visibility="Collapsed"
                             Spacing="14"
-                            Padding="28,24,28,0">
+                            HorizontalAlignment="Stretch">
+                            <!-- Phone number + a 获取验证码 row, then the OTP field. The OTP
+                                 backend is not wired in the Windows client (the Mac uses Supabase
+                                 phone OTP), so the 手机登录 button is HONEST and routes to email
+                                 rather than faking a code send / signed-in success. -->
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox
+                                    Grid.Column="0"
+                                    PlaceholderText="手机号码"
+                                    Style="{StaticResource GlassTextBoxStyle}" />
+                                <Button
+                                    Grid.Column="1"
+                                    Click="OnPhoneGetCode"
+                                    VerticalAlignment="Stretch"
+                                    MinWidth="112"
+                                    Style="{StaticResource PhoneButtonStyle}"
+                                    Content="获取验证码" />
+                            </Grid>
                             <TextBox
-                                PlaceholderText="手机号码"
+                                PlaceholderText="验证码"
                                 Style="{StaticResource GlassTextBoxStyle}" />
-                            <!-- Phone OTP is not wired in the Windows client; the Mac uses Supabase
-                                 phone OTP. Rather than fake a code send, route the user to email. -->
-                            <Border Style="{StaticResource GlassCard}" CornerRadius="12" Padding="12,8">
+                            <Border x:Name="PhoneHintCard" Style="{StaticResource GlassCard}" CornerRadius="12" Padding="12,8">
                                 <TextBlock
+                                    x:Name="PhoneHint"
                                     Text="手机号登录暂未在 Windows 端开放，请暂用邮箱登录。"
                                     FontSize="12"
                                     TextWrapping="Wrap"
@@ -419,33 +519,31 @@
                                 Click="OnSelectEmail"
                                 HorizontalAlignment="Stretch"
                                 Style="{StaticResource PhoneButtonStyle}"
-                                Height="48"
-                                MinHeight="48">
+                                Height="50"
+                                MinHeight="50">
                                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <FontIcon Glyph="&#xE715;" FontSize="16" Foreground="White" />
-                                    <TextBlock Text="暂用邮箱登录" FontWeight="SemiBold" Foreground="White" />
+                                    <TextBlock Text="手机登录（暂用邮箱登录）" FontWeight="SemiBold" Foreground="White" />
                                 </StackPanel>
                             </Button>
                         </StackPanel>
 
                         <!-- ===================== GUEST MODE ===================== -->
-                        <StackPanel Padding="28,24,28,0">
-                            <Button
-                                Click="OnGuestMode"
-                                HorizontalAlignment="Stretch"
-                                Style="{StaticResource GuestRowButtonStyle}">
-                                <Grid ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="20" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="游客模式体验" FontSize="15" FontWeight="Medium" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                    <FontIcon Grid.Column="2" Glyph="&#xE72A;" FontSize="18" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                </Grid>
-                            </Button>
-                        </StackPanel>
+                        <Button
+                            Click="OnGuestMode"
+                            HorizontalAlignment="Stretch"
+                            Style="{StaticResource GuestRowButtonStyle}">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="20" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="游客模式体验" FontSize="15" FontWeight="Medium" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <FontIcon Grid.Column="2" Glyph="&#xE72A;" FontSize="18" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
 
                     </StackPanel>
                 </Border>

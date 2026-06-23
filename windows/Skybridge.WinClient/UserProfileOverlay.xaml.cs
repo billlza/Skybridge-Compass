@@ -62,6 +62,18 @@ public sealed partial class UserProfileOverlay : UserControl
     private void OnBindHint(object sender, RoutedEventArgs e) =>
         ShowHint("绑定功能将在后续版本开放，当前请在 Mac/iOS 端绑定邮箱或手机号。");
 
+    // 退出登录 — clears the persisted session (coordinator SignOutAsync → SessionStore.Clear,
+    // IsSignedIn=false) and dismisses the overlay; the account block returns to "Sign in".
+    private void OnSignOut(object sender, RoutedEventArgs e)
+    {
+        var vm = ViewModel;
+        vm?.HideProfileOverlay();
+        if (vm?.SignOutCommand?.CanExecute(null) == true)
+        {
+            vm.SignOutCommand.Execute(null);
+        }
+    }
+
     private void ShowHint(string message)
     {
         ActionHint.Text = message;

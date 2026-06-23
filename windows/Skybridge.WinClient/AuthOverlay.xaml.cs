@@ -21,9 +21,12 @@ namespace Skybridge.WinClient;
 //  • EMAIL is fully functional: the 邮箱登录 button calls ViewModel.SignInWithEmailAsync,
 //    which runs the REAL Supabase email/password sign-in through the coordinator. The busy
 //    spinner + inline error mirror the VM's IsAuthBusy / AuthErrorMessage (subscribed below).
-//  • Apple / Nebula open the system browser to the Supabase OAuth authorize URL (the same
-//    GoTrue project + client-safe key the rest of the app uses); Phone routes to email
-//    (no Windows phone-OTP path) — none of these fake a signed-in success.
+//  • Microsoft is HONEST: Supabase's azure provider is not enabled on this project, so the
+//    button surfaces an inline "需先在 Supabase 启用 Azure 登录" hint — it does NOT fake a
+//    sign-in or open a broken OAuth flow.
+//  • Nebula opens the system browser to the Supabase OAuth authorize URL (the same GoTrue
+//    project + client-safe key the rest of the app uses); Phone routes to email (no Windows
+//    phone-OTP path) — none of these fake a signed-in success.
 //  • Guest mode just dismisses the overlay (the shell already runs signed-out).
 //
 //  The password is read ONLY from PasswordInput.Password (user input) — never defaulted.
@@ -33,7 +36,8 @@ public sealed partial class AuthOverlay : UserControl
 {
     // Supabase GoTrue project + client-safe publishable key (the SAME values the
     // SupabaseAuthClient bundles). Used only to build the browser OAuth authorize URL for the
-    // Apple / Nebula providers — no secret is involved (publishable/anon key only).
+    // Nebula provider + the password-recovery page — no secret is involved (publishable/anon
+    // key only).
     private const string SupabaseBaseUrl = "https://hloqytmhjludmuhwyyzb.supabase.co";
     private const string OAuthRedirect = "skybridge://auth/callback";
 
@@ -134,12 +138,12 @@ public sealed partial class AuthOverlay : UserControl
     {
         _selectedMethod = method;
 
-        PaintTab(AppleTab, method == "apple");
+        PaintTab(MicrosoftTab, method == "microsoft");
         PaintTab(NebulaTab, method == "nebula");
         PaintTab(PhoneTab, method == "phone");
         PaintTab(EmailTab, method == "email");
 
-        AppleForm.Visibility = method == "apple" ? Visibility.Visible : Visibility.Collapsed;
+        MicrosoftForm.Visibility = method == "microsoft" ? Visibility.Visible : Visibility.Collapsed;
         NebulaForm.Visibility = method == "nebula" ? Visibility.Visible : Visibility.Collapsed;
         PhoneForm.Visibility = method == "phone" ? Visibility.Visible : Visibility.Collapsed;
         EmailForm.Visibility = method == "email" ? Visibility.Visible : Visibility.Collapsed;
@@ -168,10 +172,35 @@ public sealed partial class AuthOverlay : UserControl
         await _viewModel.SignInWithEmailAsync(email, password);
     }
 
-    // ---- Apple / Nebula browser OAuth ----------------------------------------------
+    // ---- Microsoft (honest: Azure provider not enabled) -----------------------------
 
-    private void OnAppleContinue(object sender, RoutedEventArgs e) =>
-        OpenOAuthInBrowser("apple", AppleHint);
+    // Microsoft sign-in maps to Supabase's "azure" OAuth provider, which is NOT enabled on
+    // this GoTrue project yet. Rather than open a flow that would dead-end at GoTrue's
+    // "provider is not enabled" error, be explicit in the UI and don't fake success.
+    private void OnMicrosoftContinue(object sender, RoutedEventArgs e)
+    {
+        MicrosoftHint.Text = "需先在 Supabase 启用 Azure 登录后才能使用 Microsoft 账号。";
+    }
+
+    // ---- Email-form register hint (hosted; inert for now) ---------------------------
+
+    private void OnRegisterHint(object sender, RoutedEventArgs e)
+    {
+        // Registration is a hosted Supabase flow; surface it as a non-destructive hint in the
+        // inline error banner rather than faking an in-app sign-up.
+        ErrorBanner.Visibility = Visibility.Visible;
+        ErrorText.Text = "注册请使用网页端完成，随后可在此用邮箱密码登录。";
+    }
+
+    // ---- Phone OTP (honest: not wired on Windows) -----------------------------------
+
+    private void OnPhoneGetCode(object sender, RoutedEventArgs e)
+    {
+        // No Windows phone-OTP backend; don't pretend a code was sent.
+        PhoneHint.Text = "手机验证码登录暂未在 Windows 端开放，请暂用邮箱登录。";
+    }
+
+    // ---- Nebula browser OAuth -------------------------------------------------------
 
     private void OnNebulaBrowserLogin(object sender, RoutedEventArgs e) =>
         OpenOAuthInBrowser("nebula", null);
