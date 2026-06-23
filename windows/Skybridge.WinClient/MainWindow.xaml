@@ -51,6 +51,13 @@
         <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
         <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
         <vm:AvatarUrlToImageSourceConverter x:Key="AvatarUrlImageSourceConverter" />
+        <!-- USB Management converters (element-match the Mac USBDeviceManagementView
+             DeviceCard icons/tints + USBStatCard icons/tints + MFi-badge gate). -->
+        <vm:UsbDeviceTypeToGlyphConverter x:Key="UsbDeviceTypeGlyphConverter" />
+        <vm:UsbDeviceTypeToBrushConverter x:Key="UsbDeviceTypeBrushConverter" />
+        <vm:UsbMetricKeyToGlyphConverter x:Key="UsbMetricGlyphConverter" />
+        <vm:UsbMetricKeyToBrushConverter x:Key="UsbMetricAccentBrushConverter" />
+        <vm:BoolToVisibilityValueConverter x:Key="BoolVisibilityConverter" />
         <!-- Soft Remote-Desktop accent fill for the selected connection-mode segment
              (element-matches the Mac segmented control's selected pill =
              accentColor.opacity(0.2)). Indigo RD-nav hue (#6E7BF2) at ~33% alpha. -->
@@ -608,15 +615,21 @@
                                 FontWeight="SemiBold"
                                 VerticalAlignment="Center"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <!-- Trust badge (EB95 = Shield ~ SF "checkmark.shield.fill"),
-                                 only shown when the peer carries a trust summary. -->
+                            <!-- Identity badge (EB95 = Shield) — HONEST: a discovered DNS-SD
+                                 peer only advertises a public-key FINGERPRINT; it is NOT a
+                                 verified/paired "trusted" device on Windows (there is no
+                                 persisted trust store, and the candidate's TrustSummary
+                                 explicitly says "fingerprint only; pairing must provide the
+                                 peer public key"). So the badge is gated on the real signal —
+                                 PublicKeyFingerprint presence — and reads "Fingerprint" in a
+                                 neutral accent, never a fabricated green "Trusted" claim. -->
                             <Border
-                                Style="{StaticResource BadgeSuccess}"
+                                Style="{StaticResource Badge}"
                                 VerticalAlignment="Center"
-                                Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                                Visibility="{Binding PublicKeyFingerprint, Converter={StaticResource StringPresenceVisibilityConverter}}">
                                 <StackPanel Orientation="Horizontal" Spacing="4">
-                                    <FontIcon Glyph="&#xEB95;" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                    <TextBlock Text="Trusted" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <FontIcon Glyph="&#xEB95;" FontSize="11" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                    <TextBlock Text="Fingerprint" FontSize="11" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
                                 </StackPanel>
                             </Border>
                             <Ellipse
@@ -688,30 +701,132 @@
                 </Grid>
             </Border>
         </DataTemplate>
+        <!-- ===================================================================
+             UsbDeviceItemTemplate — element-matches the Mac DeviceCard
+             (USBDeviceManagementView.swift): a glass card with a 40px rounded
+             device-type icon tile (type-tinted glyph via UsbDeviceTypeGlyph/
+             BrushConverter), a name + type-description header with an MFi badge
+             (shown only when IsMfiCertified), then the Mac "deviceInfoRow" detail
+             block — Device ID / Vendor ID / Product ID / Serial Number /
+             Connection Interface, each a fixed-width label over a MONOSPACED value
+             (Mac .fontDesign(.monospaced)), and a final capabilities line. Each
+             optional row is presence-gated (StringPresenceVisibilityConverter) so
+             blank fields drop out instead of showing empty colons. Bound to the
+             REAL UsbDeviceItemView projected from UsbManagementWorkspaceClient
+             (live WinRT Windows.Devices.Usb / DeviceInformation enumeration);
+             carries NO inline button (gated button count unaffected).
+             Human-label parity: the Mac ships these row labels untranslated so
+             they render as literal keys ("usb.device.id:") — a Mac localization
+             gap; Windows shows the proper human labels per the spec.
+             =================================================================== -->
         <DataTemplate x:Key="UsbDeviceItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="180" />
-                    <ColumnDefinition Width="220" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Spacing="3">
-                    <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <TextBlock Text="{Binding DeviceType}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,8">
+                <StackPanel Spacing="12">
+                    <!-- Header: type-tinted icon tile + name/type + MFi badge -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border
+                            Width="40"
+                            Height="40"
+                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                            BorderThickness="1"
+                            VerticalAlignment="Top">
+                            <FontIcon
+                                Glyph="{Binding DeviceTypeKey, Converter={StaticResource UsbDeviceTypeGlyphConverter}}"
+                                FontSize="18"
+                                Foreground="{Binding DeviceTypeKey, Converter={StaticResource UsbDeviceTypeBrushConverter}}"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{Binding Name}"
+                                FontSize="15"
+                                FontWeight="SemiBold"
+                                TextTrimming="CharacterEllipsis"
+                                MaxLines="1"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock
+                                Text="{Binding DeviceType}"
+                                FontSize="13"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                        </StackPanel>
+                        <!-- MFi badge (Mac DeviceCard: checkmark.seal.fill + "MFi Certified",
+                             shown only when device.isMFiCertified). EC61 = CompletedSolid
+                             (sealed checkmark). -->
+                        <Border
+                            Grid.Column="2"
+                            Style="{StaticResource BadgeSuccess}"
+                            VerticalAlignment="Top"
+                            Visibility="{Binding IsMfiCertified, Converter={StaticResource BoolVisibilityConverter}}">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <FontIcon Glyph="&#xEC61;" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                <TextBlock Text="MFi Certified" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                    <!-- Detail block (Mac deviceInfoRow rhythm): fixed-width label +
+                         monospaced value. Each row drops out when its value is blank. -->
+                    <StackPanel Spacing="6">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Device ID" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding DeviceId}" FontSize="12" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        </Grid>
+                        <Grid ColumnSpacing="8" Visibility="{Binding VendorId, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Vendor ID" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding VendorId}" FontSize="12" FontFamily="Consolas" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        </Grid>
+                        <Grid ColumnSpacing="8" Visibility="{Binding ProductId, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Product ID" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding ProductId}" FontSize="12" FontFamily="Consolas" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        </Grid>
+                        <Grid ColumnSpacing="8" Visibility="{Binding SerialNumber, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Serial Number" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding SerialNumber}" FontSize="12" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        </Grid>
+                        <Grid ColumnSpacing="8" Visibility="{Binding ConnectionInterface, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Connection Interface" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding ConnectionInterface}" FontSize="12" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        </Grid>
+                        <!-- Capabilities (Mac "usb.device.capabilities" chip section, rendered
+                             here as a labeled wrapped line); only when present. -->
+                        <Grid ColumnSpacing="8" Visibility="{Binding Capabilities, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Capabilities" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Capabilities}" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                        </Grid>
+                    </StackPanel>
                 </StackPanel>
-                <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="Device ID" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                </StackPanel>
-                <StackPanel Grid.Column="2" Spacing="3">
-                    <TextBlock Text="Vendor / Product" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                </StackPanel>
-            </Grid>
+            </Border>
         </DataTemplate>
         <!-- ===================================================================
              FileTransferQueueItemTemplate — the active/queued transfer ROW for
@@ -1264,7 +1379,21 @@
                          appear in that order. The added network pills sit BEFORE the
                          connection pill (matching the Mac left→right: network pills,
                          then connection, then FPS, then actions), preserving the gate. -->
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <!-- Overflow safety: the compacted + MaxWidth-capped pills are the
+                         primary fit fix; this ScrollViewer is the belt-and-suspenders so a
+                         very narrow window degrades by scrolling/clipping the row toward the
+                         LEFT (keeping the rightmost connection/FPS/bell/theme actions
+                         reachable) instead of the pills disappearing past the right edge.
+                         Horizontal bar hidden (pills still scrollable via trackpad/wheel),
+                         vertical disabled. Right-aligned so the cluster hugs the right like
+                         the Mac. -->
+                    <ScrollViewer
+                        Grid.Column="1"
+                        HorizontalScrollBarVisibility="Hidden"
+                        VerticalScrollBarVisibility="Disabled"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                         <!-- Net speed (Mac pill 2): ↓↑ arrows, cyan. REAL now — bound to
                              TopBarNetworkSpeed, fed by the TopBarNetworkCoordinator (cumulative
                              interface byte counters → delta ÷ elapsed = bytes/sec, base-1000
@@ -1272,11 +1401,12 @@
                              "↓ — · ↑ —" placeholder until the first sample lands. -->
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
+                            MaxWidth="170"
                             AutomationProperties.AutomationId="Skybridge.TopBar.NetworkSpeed"
                             ToolTipService.ToolTip="Network throughput (down / up), sampled every ~2s">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xEC4A;" FontSize="12" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" />
-                                <TextBlock Text="{Binding TopBarNetworkSpeed}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon Glyph="&#xEC4A;" FontSize="13" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarNetworkSpeed}" FontSize="12" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- Latency (Mac pill 3): stopwatch, mint. REAL now — bound to
@@ -1287,9 +1417,9 @@
                             Style="{StaticResource TopBarGlassPill}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.NetworkLatency"
                             ToolTipService.ToolTip="Round-trip latency to the SkyBridge endpoint, refreshed every ~15s">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE916;" FontSize="12" Foreground="{StaticResource SkyBridgeWeatherWindBrush}" />
-                                <TextBlock Text="{Binding TopBarNetworkLatency}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon Glyph="&#xE916;" FontSize="13" Foreground="{StaticResource SkyBridgeWeatherWindBrush}" />
+                                <TextBlock Text="{Binding TopBarNetworkLatency}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- IP + proxy (Mac pill 1): globe icon, BLUE when direct / ORANGE when a
@@ -1300,11 +1430,12 @@
                              This pill was previously OMITTED; it is now wired to real data. -->
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
+                            MaxWidth="170"
                             AutomationProperties.AutomationId="Skybridge.TopBar.IpLocation"
                             ToolTipService.ToolTip="Public IP location and system-proxy state, refreshed every ~5min">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE774;" FontSize="12" Foreground="{Binding IsSystemProxyEnabled, Converter={StaticResource SystemProxyStateBrushConverter}}" />
-                                <TextBlock Text="{Binding TopBarIpLocation}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon Glyph="&#xE774;" FontSize="13" Foreground="{Binding IsSystemProxyEnabled, Converter={StaticResource SystemProxyStateBrushConverter}}" />
+                                <TextBlock Text="{Binding TopBarIpLocation}" FontSize="12" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- Connection status (Mac pill 4): REAL. Colored dot off the live
@@ -1313,12 +1444,12 @@
                              Wider H-pad (12,6) mirrors the Mac connection pill. -->
                         <Border
                             Style="{StaticResource TopBarGlassPill}"
-                            Padding="12,6"
+                            Padding="10,5"
                             AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
-                                <FontIcon Glyph="&#xE9F5;" FontSize="12" Foreground="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
-                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <FontIcon Glyph="&#xE9F5;" FontSize="13" Foreground="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
+                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- FPS / Diagnostics (Mac pill 5): speedometer, orange. This is the
@@ -1328,10 +1459,10 @@
                             Style="{StaticResource TopBarGlassPill}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
                             ToolTipService.ToolTip="FPS / Diagnostics">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE9D9;" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" />
-                                <TextBlock Text="FPS" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon Glyph="&#xE9D9;" FontSize="13" Foreground="{StaticResource SkyBridgeWarningBrush}" />
+                                <TextBlock Text="FPS" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- Bell + theme action cluster (Mac actions A/B): the existing
@@ -1345,6 +1476,7 @@
                             ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                             ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}" />
                     </StackPanel>
+                    </ScrollViewer>
                 </Grid>
             </Border>
 
@@ -1788,6 +1920,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
@@ -1804,8 +1937,50 @@
                                         ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
                                     <TextBlock Text="{Binding ExtendedSearchCountdown}" VerticalAlignment="Center" />
                                 </StackPanel>
-                                <TextBox
+                                <!-- ===================================================================
+                                     Labeled scan-toolbar legend — gives the icon-only scan buttons the
+                                     Mac's clear LABELED row (Mac scanToolbar: 扩展搜索 15s / 手动连接 /
+                                     停止扫描·开始扫描 / refresh, all carry visible text). The buttons
+                                     themselves are gate-locked to the compact icon-only
+                                     WorkspaceActionButtonTemplate (Scripts/verify-windows-ui-parity.ps1
+                                     pins DeviceDiscoveryScanActions to that shared template + the
+                                     HorizontalWorkspaceActionItemsPanel), and the template is shared by
+                                     ~19 other action surfaces that intentionally stay compact — so the
+                                     labels are surfaced here as a NON-INTERACTIVE legend (FontIcon +
+                                     TextBlock pairs, ZERO button elements) directly beneath the icons,
+                                     in the exact left-to-right order of DeviceDiscoveryScanActions
+                                     (Extended Search / Manual Connect / Start Scan / Stop Scan /
+                                     Refresh). Each glyph matches its button's glyph so the mapping is
+                                     unambiguous. Adds no button element; the gated button count is unchanged. -->
+                                <StackPanel
                                     Grid.Row="1"
+                                    Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    Spacing="14"
+                                    VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE7B3;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Extended Search" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE8D7;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Manual Connect" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE768;" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Start Scan" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Stop Scan" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE72C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Refresh" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+                                <TextBox
+                                    Grid.Row="2"
                                     Grid.ColumnSpan="2"
                                     Text="{Binding DiscoverySearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                     PlaceholderText="Search devices"
@@ -1950,6 +2125,106 @@
                             </Grid>
 
                             <!-- ===================================================================
+                                 我的设备 — "This device" card. Element-matches the Mac
+                                 EnhancedDeviceDiscoveryView "我的设备" section: a glass card with a
+                                 BLUE ring (Mac Color.blue.opacity(0.6) stroke), holding the local
+                                 machine as a device card (laptop icon + name + a "This device" pill
+                                 + an "Online" status). On the Mac the card is built from
+                                 LocalDevicePresentation.current() (hostname, isLocalDevice=true,
+                                 status=.online) and is ALWAYS shown regardless of scan results. The
+                                 Windows ground truth is the real OS host name + platform (read from
+                                 Environment.MachineName / Environment.OSVersion via the VM's
+                                 LocalDeviceName / LocalDevicePlatform — no DI client, no network, no
+                                 fabrication). Non-interactive (no connect button for the local
+                                 machine, same as the Mac no-op local card); adds no button element. -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeNavDashboardBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="My Device" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    <Grid ColumnSpacing="14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Status-tinted device icon chip (laptop, blue = local machine) -->
+                                        <Border
+                                            Width="44"
+                                            Height="44"
+                                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1"
+                                            VerticalAlignment="Top">
+                                            <FontIcon Glyph="&#xE977;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </Border>
+                                        <StackPanel Grid.Column="1" Spacing="6">
+                                            <!-- Name + "This device" pill (Mac discovery.device.thisDevice) -->
+                                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                                <TextBlock
+                                                    Text="{Binding LocalDeviceName}"
+                                                    FontSize="15"
+                                                    FontWeight="SemiBold"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                                <Border Style="{StaticResource BadgeAccent}" VerticalAlignment="Center">
+                                                    <TextBlock Text="This device" FontSize="11" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <!-- Platform secondary line -->
+                                            <TextBlock
+                                                Text="{Binding LocalDevicePlatform}"
+                                                FontSize="12"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        </StackPanel>
+                                        <!-- "Online" status capsule (Mac local card statusText = 在线) -->
+                                        <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="Online" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ===================================================================
+                                 已信任设备 / 最近连接 — HONEST OMISSION note. The Mac discovery
+                                 screen has dedicated "已信任设备" (trusted) and "最近连接" (recent)
+                                 sections, sourced on the Mac from TrustSyncService.activeTrustRecords
+                                 (a persisted PQC trust store) and a recent-connections history. The
+                                 Windows client has NEITHER yet: discovered peers carry only a
+                                 fingerprint (the candidate's TrustSummary literally says "fingerprint
+                                 only; pairing must provide the peer public key"), there is no
+                                 persisted trust store and no connection-history store in the
+                                 ViewModel/Services. Rather than fabricate a trusted/recent list, this
+                                 honest one-line note states why those sections are not shown — the
+                                 "omit honestly" path. (When a Windows trust/recent store lands, replace
+                                 this note with the real sections.) -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE946;" FontSize="20" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock Text="Trusted &amp; recent devices" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock Text="Devices appear here after you pair them. This build does not yet persist a trusted-device list or connection history, so no trusted or recently-connected devices are shown." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- ===================================================================
                                  Discovered-devices group — element-matches the Mac localScan
                                  discovered "online devices" section: a section header ("Discovered
                                  devices" + live count) over the rich peer list, framed with a faint
@@ -2051,10 +2326,48 @@
                                 ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
 
-                            <StackPanel Spacing="8">
-                                <TextBlock Text="Connected Devices" FontWeight="SemiBold" />
-                                <ListView ItemsSource="{Binding UsbDevices}" ItemTemplate="{StaticResource UsbDeviceItemTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsUsbManagementSelected}" />
-                                <TextBlock Text="No USB devices detected. Connect a device and refresh, or check the cable and port." TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <!-- Connected-devices group — element-matches the Mac
+                                 deviceListView + emptyStateView: a section header
+                                 ("Connected Devices" + live UsbDeviceCount badge) over the
+                                 rich DeviceCard rows, with an honest empty state shown only
+                                 when nothing is connected (CountToVisibilityConverter "Empty").
+                                 The ListView keeps its UsbDeviceItemTemplate binding; rows are
+                                 the Mac DeviceCard-style cards. UsbDeviceCount change-notifies
+                                 via WorkspaceCountNotifier so the badge + empty state update
+                                 live with the real WinRT enumeration. -->
+                            <StackPanel Spacing="12">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE88E;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="Connected Devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                    <Border Grid.Column="2" Style="{StaticResource BadgeAccent}" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding UsbDeviceCount}" FontSize="12" Foreground="{StaticResource SkyBridgeAccentBrush}" />
+                                    </Border>
+                                </Grid>
+                                <!-- Populated rich list (Visible when count > 0) -->
+                                <ListView
+                                    ItemsSource="{Binding UsbDevices}"
+                                    ItemTemplate="{StaticResource UsbDeviceItemTemplate}"
+                                    MinHeight="118"
+                                    SelectionMode="None"
+                                    IsEnabled="{Binding IsUsbManagementSelected}"
+                                    Visibility="{Binding UsbDeviceCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                <!-- Honest empty state (Visible when count == 0) — Mac
+                                     emptyStateView: large muted cable.connector icon + title +
+                                     guidance subtitle. E88E ~ cable.connector. -->
+                                <StackPanel
+                                    Spacing="8"
+                                    Padding="0,28"
+                                    HorizontalAlignment="Center"
+                                    Visibility="{Binding UsbDeviceCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                    <FontIcon Glyph="&#xE88E;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="No USB devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="Connect a device and refresh, or check the cable and port." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                </StackPanel>
                             </StackPanel>
                         </StackPanel>
                     </Border>

@@ -257,7 +257,9 @@ public sealed record UsbDeviceItemView(
     string ProductId,
     string SerialNumber,
     string ConnectionInterface,
-    string Capabilities)
+    string Capabilities,
+    string DeviceTypeKey,
+    bool IsMfiCertified)
 {
     public static UsbDeviceItemView FromItem(UsbDeviceItem item) =>
         new(
@@ -268,7 +270,9 @@ public sealed record UsbDeviceItemView(
             item.ProductId,
             item.SerialNumber,
             item.ConnectionInterface,
-            item.Capabilities);
+            item.Capabilities,
+            item.DeviceTypeKey,
+            item.IsMfiCertified);
 }
 
 public sealed record SystemMonitorMetricView(

@@ -712,6 +712,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // command bindings); fully read-only/fail-closed — no live transport is opened, no
         // session is started. The rows it loads are honest previews, not live sessions.
         RefreshRemoteDesktopCommand.Execute(null);
+        // Kick the first USB Management read-only snapshot on startup so the USB screen shows
+        // its 4 stat cards (MFi Certified / Android Devices / Storage Devices / Total Devices —
+        // populated at their real counts, even 0) and the Connected-Devices list immediately
+        // instead of empty cards + a stuck empty state. Previously UsbDeviceStats / UsbDevices
+        // stayed empty from launch until the user manually clicked "Refresh Devices" (selecting
+        // the USB screen only re-raised Is…Selected notifications, never refreshed the data).
+        // Mirrors the Weather/SystemMonitor/FileTransfer/Settings/RemoteDesktop kicks above.
+        // Uses the EXISTING RefreshUsbManagementCommand; read-only WinRT enumeration — no device
+        // is opened/written and no fake rows are fabricated (empty when nothing is connected).
+        RefreshUsbManagementCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -1167,6 +1177,55 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         get => _isSystemProxyEnabled;
         private set => SetField(ref _isSystemProxyEnabled, value);
+    }
+
+    // ---- Local "my device" identity (Device Discovery → 我的设备 / This device card) -------
+    // Honest, always-present local-machine facts read straight from the .NET runtime — NO
+    // network, NO DI client, NO fabricated peer. Mirrors the Mac EnhancedDeviceDiscoveryView
+    // "我的设备" card, which is built from LocalDevicePresentation.current() (hostname + this
+    // is the local machine) and is shown regardless of scan results. On Windows the
+    // equivalent ground truth is the OS host name + platform string. These are static for the
+    // process lifetime, so they are computed once (no change-notification needed).
+
+    /// <summary>
+    /// This Windows host's machine name (Environment.MachineName) — the local-device card's
+    /// title, mirroring the Mac "我的设备" card name (hostname). Falls back to "This PC" only
+    /// if the runtime returns an empty host name (never fabricated).
+    /// </summary>
+    public string LocalDeviceName { get; } = BuildLocalDeviceName();
+
+    /// <summary>
+    /// A short, honest platform descriptor for the local-device card subtitle, e.g.
+    /// "Windows · DESKTOP-XXXX" → here just the OS string ("Windows 10.0.26100"). Real
+    /// Environment.OSVersion data; no invented model/chip values.
+    /// </summary>
+    public string LocalDevicePlatform { get; } = BuildLocalDevicePlatform();
+
+    private static string BuildLocalDeviceName()
+    {
+        try
+        {
+            var name = Environment.MachineName;
+            return string.IsNullOrWhiteSpace(name) ? "This PC" : name;
+        }
+        catch (Exception)
+        {
+            return "This PC";
+        }
+    }
+
+    private static string BuildLocalDevicePlatform()
+    {
+        try
+        {
+            // Environment.OSVersion.VersionString is e.g. "Microsoft Windows NT 10.0.26100.0".
+            var version = Environment.OSVersion.Version;
+            return $"Windows {version.Major}.{version.Minor}.{version.Build}";
+        }
+        catch (Exception)
+        {
+            return "Windows";
+        }
     }
 
     public FeatureEntry SelectedFeature
