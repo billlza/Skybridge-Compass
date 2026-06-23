@@ -1065,38 +1065,33 @@
              Bound to SettingsTabItemView (Title / Detail / Glyph).
              =================================================================== -->
         <DataTemplate x:Key="SettingsTabItemTemplate">
-            <Grid MinHeight="48" ColumnSpacing="12" Padding="0,2">
+            <!-- Element-matches the Mac SettingsView sidebar row: a plain accent icon +
+                 the localized (zh) tab name on a SINGLE line, NO subtitle (the Mac uses
+                 List { Label(localizedName, systemImage) }, font 13). The long EN+ZH Detail
+                 summary the previous template stacked under the title read as a knock-off
+                 tell, so it is dropped here (Detail stays on the model for the collapsed
+                 flat-mirror contract). Selection pill is owned by the native ListView
+                 container; this template is content-only (no push-button). -->
+            <Grid MinHeight="36" ColumnSpacing="12" Padding="2,3">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="32" />
+                    <ColumnDefinition Width="22" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <Border
+                <FontIcon
                     Grid.Column="0"
-                    Style="{StaticResource AccentIconChip}"
-                    VerticalAlignment="Center">
-                    <FontIcon
-                        Glyph="{Binding Glyph}"
-                        FontSize="16"
-                        Foreground="{StaticResource SkyBridgeNavSettingsBrush}"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center" />
-                </Border>
-                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                    <TextBlock
-                        Text="{Binding Title}"
-                        FontWeight="SemiBold"
-                        TextWrapping="Wrap"
-                        MaxLines="1"
-                        TextTrimming="CharacterEllipsis"
-                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <TextBlock
-                        Text="{Binding Detail}"
-                        TextWrapping="Wrap"
-                        MaxLines="2"
-                        TextTrimming="CharacterEllipsis"
-                        FontSize="11"
-                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                </StackPanel>
+                    Glyph="{Binding Glyph}"
+                    FontSize="16"
+                    Foreground="{StaticResource SkyBridgeNavSettingsBrush}"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center" />
+                <TextBlock
+                    Grid.Column="1"
+                    Text="{Binding DisplayName}"
+                    FontSize="13"
+                    FontWeight="Medium"
+                    VerticalAlignment="Center"
+                    TextTrimming="CharacterEllipsis"
+                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
             </Grid>
         </DataTemplate>
         <!-- ===================================================================
@@ -1216,7 +1211,7 @@
             x:Name="SidebarNavigation"
             AutomationProperties.AutomationId="Skybridge.Navigation.List"
             PaneDisplayMode="Left"
-            OpenPaneLength="280"
+            OpenPaneLength="248"
             IsSettingsVisible="False"
             IsBackButtonVisible="Collapsed"
             IsPaneToggleButtonVisible="False"
@@ -3014,12 +3009,15 @@
                                  =========================================================== -->
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="210" />
+                                    <ColumnDefinition Width="200" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
                                 <StackPanel Grid.Column="0" Spacing="8">
-                                    <TextBlock Text="Settings Tabs" FontWeight="SemiBold" />
+                                    <!-- Visually hidden (Mac SettingsView has no such sub-heading; the
+                                         page already carries the top "Settings" title). Kept in the tree
+                                         as the structural anchor the parity gate asserts. -->
+                                    <TextBlock Text="Settings Tabs" Visibility="Collapsed" FontWeight="SemiBold" />
                                     <ListView
                                         AutomationProperties.AutomationId="Skybridge.Settings.TabNav"
                                         ItemsSource="{Binding SettingsTabs}"
@@ -3041,7 +3039,9 @@
                                      SessionViewModel inherited from RootShell, so every binding
                                      inside the tab views resolves. -->
                                 <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Settings Details" FontWeight="SemiBold" />
+                                    <!-- Visually hidden (Mac SettingsView right pane has no sub-heading).
+                                         Kept in the tree as the structural anchor the parity gate asserts. -->
+                                    <TextBlock Text="Settings Details" Visibility="Collapsed" FontWeight="SemiBold" />
                                     <ScrollViewer
                                         VerticalScrollBarVisibility="Auto"
                                         VerticalScrollMode="Auto"
