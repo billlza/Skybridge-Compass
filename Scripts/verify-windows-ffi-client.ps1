@@ -622,14 +622,12 @@ foreach ($uiVisualEvidenceSmokeSignal in @(
     "Get-ActionOrderMatrix",
     "docs/windows-ui-parity-matrix.md",
     "WorkspaceAction.TopBarActions.Notifications",
-    "WorkspaceAction.SidebarSession.Connect",
     "-MinimumWidth 32 -MinimumHeight 24",
     "Dashboard",
     "Device Discovery",
     "USB Management",
     "File Transfer",
     "Remote Desktop",
-    "Quantum",
     "System Monitor",
     "Settings"
 )) {
@@ -915,7 +913,7 @@ Assert-Contains -Text $dependencyFactory -Needle "new PairingMaterialClient()" -
 Assert-Contains -Text $dependencyFactory -Needle "new ConnectionPreflightClient(coreBridge)" -Message "Default dependency factory should wire ConnectionPreflightClient for explicit connection preflight."
 Assert-Contains -Text $dependencyFactory -Needle "new ConnectionWorkspaceStateClient()" -Message "Default dependency factory should wire ConnectionWorkspaceStateClient for explicit connection state gates."
 Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceErrorStatusClient()" -Message "Default dependency factory should wire WorkspaceErrorStatusClient for explicit workspace error routing."
-Assert-Contains -Text $dependencyFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Default dependency factory should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Default dependency factory should wire CoreDiagnosticsClient for explicit Core diagnostics."
 Assert-Contains -Text $dependencyFactory -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
 Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceActionCatalogClient()" -Message "Default dependency factory should wire WorkspaceActionCatalogClient for explicit workspace action order."
 Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
@@ -1595,7 +1593,6 @@ foreach ($signal in @(
     "BuildResolvedSnapshot",
     "ResolveEnabled",
     "ResolveDetail",
-    "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.SessionControls",
     "WorkspaceActionSurface.DeviceDiscoveryPrimary",
@@ -1609,7 +1606,6 @@ foreach ($signal in @(
     "WorkspaceActionSurface.FileTransfer",
     "WorkspaceActionSurface.RemoteDesktopHeader",
     "WorkspaceActionSurface.RemoteDesktop",
-    "WorkspaceActionSurface.QuantumDiagnosticsHeader",
     "WorkspaceActionSurface.SystemMonitorHeader",
     "WorkspaceActionSurface.SystemMonitorControls",
     "WorkspaceActionSurface.SettingsHeader",
@@ -1640,7 +1636,6 @@ foreach ($signal in @(
     "CommandId",
     "GateId",
     "DetailSlot",
-    "BuildSidebarSessionActions",
     "BuildTopBarActions",
     "BuildSessionControlActions",
     "Notifications",
@@ -1698,9 +1693,6 @@ foreach ($signal in @(
     "Full Screen",
     "DisconnectSession",
     "Disconnect Session",
-    "BuildQuantumDiagnosticsHeaderActions",
-    "RunDiagnostics",
-    "Run Diagnostics",
     "BuildSystemMonitorHeaderActions",
     "BuildSystemMonitorControlActions",
     "RefreshMetrics",
@@ -1941,7 +1933,6 @@ foreach ($signal in @(
     "FeatureEntryId.UsbManagement",
     "FeatureEntryId.FileTransfer",
     "FeatureEntryId.RemoteDesktop",
-    "FeatureEntryId.Quantum",
     "FeatureEntryId.SystemMonitor",
     "FeatureEntryId.Settings"
 )) {

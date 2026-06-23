@@ -46,8 +46,6 @@ internal sealed class WorkspaceShellStateSource
 
     public bool IsRemoteDesktopSelected => _viewModel.IsRemoteDesktopSelected;
 
-    public bool IsQuantumSelected => _viewModel.IsQuantumSelected;
-
     public bool IsSystemMonitorSelected => _viewModel.IsSystemMonitorSelected;
 
     public bool IsSettingsSelected => _viewModel.IsSettingsSelected;

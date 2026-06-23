@@ -388,7 +388,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => WeatherErrorMessage = value,
             value => StatusMessage = value);
         RefreshWeatherCommand = _weatherStateCoordinator.RefreshCommand;
-        SidebarSessionActions = collections.SidebarSessionActions;
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
         DiscoveredPeers = collections.DiscoveredPeers;
@@ -484,7 +483,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferActions = collections.FileTransferActions;
         RemoteDesktopHeaderActions = collections.RemoteDesktopHeaderActions;
         RemoteDesktopActions = collections.RemoteDesktopActions;
-        QuantumDiagnosticsHeaderActions = collections.QuantumDiagnosticsHeaderActions;
         SettingsHeaderActions = collections.SettingsHeaderActions;
         SettingsToolbarActions = collections.SettingsToolbarActions;
         SettingsMaintenanceActions = collections.SettingsMaintenanceActions;
@@ -671,8 +669,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<string> FramerateProfiles { get; }
 
-    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
-
     public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SessionControlActions { get; }
@@ -712,8 +708,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
-
-    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SettingsHeaderActions { get; }
 
@@ -915,9 +909,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public bool IsRemoteDesktopSelected =>
         IsFeatureSelected(FeatureEntryId.RemoteDesktop);
-
-    public bool IsQuantumSelected =>
-        IsFeatureSelected(FeatureEntryId.Quantum);
 
     public bool IsSystemMonitorSelected =>
         IsFeatureSelected(FeatureEntryId.SystemMonitor);

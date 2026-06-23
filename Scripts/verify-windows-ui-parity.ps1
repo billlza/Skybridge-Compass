@@ -387,7 +387,6 @@ foreach ($nativeRuntimeSmokeSignal in @(
 foreach ($commandGateSmokeSignal in @(
     "windows-command-gates: ok",
     "WorkspaceCommandAvailability",
-    "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.SessionControls",
     "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
     "WorkspaceActionCommandId.Connect",
@@ -495,7 +494,6 @@ foreach ($uiAutomationSmokeSignal in @(
     "WorkspaceAction.UsbManagementHeader.RefreshDevices",
     "WorkspaceAction.FileTransfer.GenerateQr",
     "WorkspaceAction.RemoteDesktop.RecommendedConnect",
-    "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics",
     "WorkspaceAction.SystemMonitorControls.Monitoring",
     "WorkspaceAction.SettingsToolbar.ExportSettings",
     "WorkspaceAction.SettingsMaintenance.ApplySettings",
@@ -534,7 +532,6 @@ $expectedEntries = @(
     "UsbManagement",
     "FileTransfer",
     "RemoteDesktop",
-    "Quantum",
     "SystemMonitor",
     "Settings"
 )
@@ -660,7 +657,6 @@ foreach ($observableCollectionsSignal in @(
     "DashboardQuickActions = new ObservableCollection<WorkspaceActionItemView>()",
     "BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles)",
     "FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles)",
-    "SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>()",
     "TopBarActions = new ObservableCollection<WorkspaceActionItemView>()",
     "SessionControlActions = new ObservableCollection<WorkspaceActionItemView>()",
     "DeviceDiscoveryManualConnectFinalActions = new ObservableCollection<WorkspaceActionItemView>()",
@@ -945,7 +941,6 @@ foreach ($binding in @(
     "DashboardQuickActions",
     "TopBarConnectionStatus",
     "TopBarDiagnosticsStatus",
-    "SidebarSessionActions",
     "TopBarActions",
     "SessionControlActions",
     "BitrateProfiles",
@@ -1013,11 +1008,7 @@ foreach ($binding in @(
     "SettingsToolbarActions",
     "SettingsMaintenanceActions",
     "SettingsDetails",
-    "IsSettingsSelected",
-    "CoreDiagnosticsStatus",
-    "QuantumDiagnosticsHeaderActions",
-    "CoreDiagnosticFacts",
-    "IsQuantumSelected"
+    "IsSettingsSelected"
 )) {
     Assert-Contains -Text $mainWindow -Needle $binding -Message "MainWindow.xaml missing binding: $binding"
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
@@ -1049,7 +1040,6 @@ foreach ($resourceSignal in @(
     'x:Key="HorizontalWorkspaceActionItemsPanel"',
     'x:Key="SessionWorkspaceActionItemsPanel"',
     'x:Key="NavigationItemTemplate"',
-    'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
     'x:Key="BoolToVisibilityConverter"',
@@ -1097,14 +1087,12 @@ foreach ($workspaceVisibilitySignal in @(
     'Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
     'Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
     'Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
-    'Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
     'Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
     'Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}"'
 )) {
     Assert-Contains -Text $mainWindow -Needle $workspaceVisibilitySignal -Message "MainWindow.xaml must gate each main workspace feature section through selected-feature Visibility: $workspaceVisibilitySignal"
 }
 
-Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "TopBarStatusActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "DeviceDiscoveryManualConnectFinalActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
@@ -1130,7 +1118,6 @@ foreach ($actionBinding in @(
     "FileTransferActions",
     "RemoteDesktopHeaderActions",
     "RemoteDesktopActions",
-    "QuantumDiagnosticsHeaderActions",
     "SystemMonitorHeaderActions",
     "SystemMonitorActions",
     "SettingsHeaderActions",
@@ -1145,7 +1132,6 @@ Assert-ActionItemsControlResources -Text $mainWindow -Binding "SessionControlAct
 foreach ($automationSignal in @(
     'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
     'AutomationProperties.AutomationId="{Binding Id}"',
-    'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
@@ -1168,7 +1154,6 @@ foreach ($factBinding in @(
     "ConnectionPreflightFacts",
     "FileTransferSecurityFacts",
     "RemoteDesktopControlFacts",
-    "CoreDiagnosticFacts",
     "SystemMonitorOverview",
     "SystemMonitorDetails"
 )) {
@@ -1198,7 +1183,6 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
     '<TextBlock Text="USB Management"',
     '<TextBlock Text="File Transfer"',
     '<TextBlock Text="Remote Desktop"',
-    '<TextBlock Text="Quantum / Core Diagnostics"',
     '<TextBlock Text="System Monitor"',
     '<TextBlock Text="Settings"',
     '<TextBlock Text="Session Controls"'
@@ -1214,19 +1198,6 @@ Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles
     '<TextBlock Text="FPS"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
     'ItemsSource="{Binding TopBarActions}"'
-)
-
-Assert-Ordered -Text $mainWindow -Context "Sidebar session action order" -Needles @(
-    'ItemsSource="{Binding NavigationItems}"',
-    'ItemsSource="{Binding SidebarSessionActions}"'
-)
-
-Assert-Ordered -Text $workspaceActionCatalog -Context "Sidebar session action catalog order" -Needles @(
-    'BuildSidebarSessionActions',
-    '"Connect"',
-    '"Connect"',
-    '"Disconnect"',
-    '"Disconnect"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Top bar action catalog order" -Needles @(
@@ -1389,10 +1360,8 @@ foreach ($topBarSignal in @(
     "TopBarDiagnosticsStatus",
     "TopBarNotificationsStatus",
     "TopBarThemeStatus",
-    "SidebarSessionActions",
     "TopBarActions",
     "SessionControlActions",
-    "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.SessionControls",
     "WorkspaceActionCommandId",
@@ -1612,7 +1581,6 @@ foreach ($shellNotificationCatalogSignal in @(
     "nameof(SessionViewModel.IsUsbManagementSelected)",
     "nameof(SessionViewModel.IsFileTransferSelected)",
     "nameof(SessionViewModel.IsRemoteDesktopSelected)",
-    "nameof(SessionViewModel.IsQuantumSelected)",
     "nameof(SessionViewModel.IsSystemMonitorSelected)",
     "nameof(SessionViewModel.IsSettingsSelected)",
     "public static string ConnectionStatusPropertyName",
@@ -1652,7 +1620,6 @@ foreach ($sessionViewModelDirectShellRefreshSignal in @(
     "nameof(IsUsbManagementSelected)",
     "nameof(IsFileTransferSelected)",
     "nameof(IsRemoteDesktopSelected)",
-    "nameof(IsQuantumSelected)",
     "nameof(IsSystemMonitorSelected)",
     "nameof(IsSettingsSelected)",
     "nameof(ConnectionStatus)",
@@ -2214,7 +2181,6 @@ foreach ($viewModelWorkspaceCommandGate in @(
     "!IsBusy && IsUsbManagementSelected",
     "!IsBusy && IsFileTransferSelected",
     "!IsBusy && IsRemoteDesktopSelected",
-    "!IsBusy && IsQuantumSelected",
     "!IsBusy && IsSystemMonitorSelected",
     "!IsBusy && IsSettingsSelected"
 )) {
@@ -2380,7 +2346,6 @@ foreach ($workspaceActionRoleSignal in @(
 foreach ($surfaceTargetsSignal in @(
     "public WorkspaceActionSurfaceTargets(WorkspaceObservableCollections collections)",
     "private WorkspaceActionSurfaceTargets(",
-    "collections.SidebarSessionActions",
     "collections.TopBarActions",
     "collections.SessionControlActions",
     "collections.DashboardQuickActions",
@@ -2389,7 +2354,6 @@ foreach ($surfaceTargetsSignal in @(
     "collections.CrossNetworkCodeConnectActions",
     "collections.SettingsToolbarActions",
     "collections.SettingsMaintenanceActions",
-    "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.DashboardQuickActions",
     "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
@@ -2399,7 +2363,7 @@ foreach ($surfaceTargetsSignal in @(
     Assert-Contains -Text $workspaceActionSurfaceTargets -Needle $surfaceTargetsSignal -Message "WorkspaceActionSurfaceTargets collection-entry contract missing: $surfaceTargetsSignal"
 }
 Assert-Contains -Text $sessionViewModelSource -Needle "new WorkspaceActionSurfaceTargets(collections)" -Message "SessionViewModel must create action surface targets from WorkspaceObservableCollections."
-Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new\s+WorkspaceActionSurfaceTargets\s*\(\s*SidebarSessionActions\s*,")) -Message "SessionViewModel must not hand-wire action surface target collection lists."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new\s+WorkspaceActionSurfaceTargets\s*\(\s*TopBarActions\s*,")) -Message "SessionViewModel must not hand-wire action surface target collection lists."
 
 foreach ($surfaceLoaderSignal in @(
     "internal sealed class WorkspaceActionSurfaceLoader",
@@ -2441,7 +2405,7 @@ Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionS
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.BuildInitialSurfaces()")) -Message "SessionViewModel must load initial action surfaces through WorkspaceActionSurfaceLoader."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.BuildDynamicRefreshSurfaces()")) -Message "SessionViewModel must refresh dynamic action surfaces through WorkspaceActionSurfaceLoader."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.BuildResolvedSnapshot(")) -Message "SessionViewModel must resolve action surfaces through WorkspaceActionSurfaceLoader."
-Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader,")) -Message "SessionViewModel must source the dynamic workspace action refresh plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "BuildResolvedSnapshot\(\s*new WorkspaceActionCatalogRequest\(surface\),\s*BuildWorkspaceActionGateSnapshot\(")) -Message "SessionViewModel must build workspace action gates once in WorkspaceActionRenderContext, not per surface."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "BuildResolvedSnapshot\(\s*new WorkspaceActionCatalogRequest\(surface\),[\s\S]{0,250}_topBarStatusClient\.BuildStatusUpdate\(")) -Message "SessionViewModel must build top-bar action details once in WorkspaceActionRenderContext, not per surface."
@@ -3713,18 +3677,6 @@ Assert-True -Condition (-not $sessionViewModel.Contains('StatusMessage = $"Frame
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value)")) -Message "SessionViewModel must update bitrate selection status through RemoteDesktopProfileSelectionCoordinator."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value)")) -Message "SessionViewModel must update framerate selection status through RemoteDesktopProfileSelectionCoordinator."
 
-Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
-    '<TextBlock Text="Quantum / Core Diagnostics"',
-    'ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"',
-    'ItemsSource="{Binding CoreDiagnosticFacts}"'
-)
-
-Assert-Ordered -Text $workspaceActionCatalog -Context "Quantum diagnostics header action catalog order" -Needles @(
-    'BuildQuantumDiagnosticsHeaderActions',
-    '"RunDiagnostics"',
-    '"Run Diagnostics"'
-)
-
 Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
     '<TextBlock Text="Settings" FontSize="18"',
     'ItemsSource="{Binding SettingsHeaderActions}"',
@@ -4108,12 +4060,11 @@ foreach ($remoteDesktopSignal in @(
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."
 
+# The standalone Quantum nav tab/page was removed for macOS parity, so the
+# Quantum surface (QuantumDiagnosticsHeader / RunDiagnostics) is gone. The Core
+# diagnostics DATA subsystem (CoreDiagnosticsClient + transport-binding digest +
+# channel-map + SBP2 codec) remains wired and is still pinned here.
 foreach ($diagnosticSignal in @(
-    "Quantum / Core Diagnostics",
-    "Run Diagnostics",
-    "QuantumDiagnosticsHeaderActions",
-    "WorkspaceActionSurface.QuantumDiagnosticsHeader",
-    "RunDiagnostics",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionItemView",
     "CoreDiagnosticFactView",
@@ -4128,10 +4079,8 @@ foreach ($diagnosticSignal in @(
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $coreDiagnostics + $workspaceActionCatalog) -Needle $diagnosticSignal -Message "Quantum diagnostics parity signal missing: $diagnosticSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $coreDiagnostics + $workspaceActionCatalog) -Needle $diagnosticSignal -Message "Core diagnostics parity signal missing: $diagnosticSignal"
 }
-
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
 
 Assert-Ordered -Text $mainWindow -Context "System Monitor action order" -Needles @(
     '<TextBlock Text="System Monitor" FontSize="18"',
@@ -4441,7 +4390,6 @@ foreach ($docSignal in @(
     "WorkspaceActionCatalogClient",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
-    "SidebarWorkspaceActionButtonTemplate",
     "DashboardQuickActionTemplate",
     "ItemsPanelTemplate",
     "WorkspaceActionRenderContext",
@@ -4463,7 +4411,6 @@ foreach ($docSignal in @(
     "FileTransferHeaderActions",
     "RemoteDesktopHeaderActions",
     "RemoteDesktopProfileCatalogClient",
-    "QuantumDiagnosticsHeaderActions",
     "SettingsHeaderActions",
     "BoolToVisibilityConverter",
     "selected-feature visibility gates",

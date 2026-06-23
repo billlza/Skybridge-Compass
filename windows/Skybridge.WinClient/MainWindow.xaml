@@ -81,57 +81,44 @@
         <ItemsPanelTemplate x:Key="SystemMonitorIndicatorPillItemsPanel">
             <ItemsWrapGrid Orientation="Horizontal" />
         </ItemsPanelTemplate>
-        <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
-            <Button
-                AutomationProperties.AutomationId="{Binding AutomationId}"
-                AutomationProperties.Name="{Binding Title}"
-                Command="{Binding Command}"
-                IsEnabled="{Binding IsEnabled}"
-                HorizontalAlignment="Stretch">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
-                    <TextBlock Text="{Binding Title}" />
-                </StackPanel>
-            </Button>
-        </DataTemplate>
-        <!-- NavigationView MenuItemTemplate: per-item content is a 32x32 accent
-             icon chip (per-feature accent via FeatureAccentBrushConverter) +
-             title (SemiBold) + status subtitle (12px secondary). The native
-             NavigationViewItem owns selection/hover/keyboard/accessibility, so
-             this template carries ONLY the content — no selection visuals. -->
+        <!-- NavigationView MenuItemTemplate: per-item content is icon + name on a
+             SINGLE line (element-matches the Mac sidebar rows, which carry NO
+             secondary/subtitle text). The icon is colored with the feature's own
+             accent (per-feature SkyBridgeNav*Brush via FeatureAccentBrushConverter),
+             so each section reads as its own destination — Dashboard blue, Device
+             Discovery green/cyan, USB teal, File Transfer green, Remote Desktop
+             indigo, System Monitor orange, Settings slate.
+             The FeatureEntry.Status field is intentionally NOT rendered here (it
+             stays on the model as a backend contract); the Mac shows no subtitle,
+             so binding it would be the biggest knock-off tell. The native
+             NavigationViewItemPresenter owns selection/hover/keyboard/a11y and the
+             filled selection pill (App.xaml theme overrides), so this template
+             carries ONLY the content — no selection visuals. Row height ~26px of
+             content + the presenter's own padding lands at the Mac's generous
+             ~52px row. -->
         <DataTemplate x:Key="NavigationItemTemplate">
             <Grid
-                MinHeight="48"
-                ColumnSpacing="12"
+                MinHeight="44"
+                ColumnSpacing="14"
                 AutomationProperties.AutomationId="{Binding Id}"
                 AutomationProperties.Name="{Binding Title}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="32" />
+                    <ColumnDefinition Width="24" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <Border
+                <FontIcon
                     Grid.Column="0"
-                    Width="32"
-                    Height="32"
-                    CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
-                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
-                    VerticalAlignment="Center">
-                    <FontIcon
-                        Glyph="{Binding Glyph}"
-                        FontSize="16"
-                        Foreground="{Binding Id, Converter={StaticResource FeatureAccentBrushConverter}}"
-                        VerticalAlignment="Center"
-                        HorizontalAlignment="Center" />
-                </Border>
-                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <TextBlock
-                        Text="{Binding Status}"
-                        TextWrapping="Wrap"
-                        MaxLines="2"
-                        FontSize="12"
-                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                </StackPanel>
+                    Glyph="{Binding Glyph}"
+                    FontSize="22"
+                    Foreground="{Binding Id, Converter={StaticResource FeatureAccentBrushConverter}}"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Center" />
+                <TextBlock
+                    Grid.Column="1"
+                    Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2"
+                    FontSize="15"
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
             </Grid>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceActionButtonTemplate">
@@ -1078,7 +1065,7 @@
                • MenuItemTemplate = NavigationItemTemplate  (was ItemTemplate)
                • SelectedItem    = SelectedFeature (TwoWay)  — unchanged binding
                • PaneHeader      = 44x44 brand block + name + ConnectionStatus
-               • PaneFooter      = Connect / Disconnect session actions
+               • PaneFooter      = account block (no sidebar session actions, Mac parity)
                • On-brand selected/hover surfaces come from the documented
                  NavigationView theme-resource overrides in App.xaml.
              =================================================================== -->
@@ -1098,46 +1085,92 @@
             BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
             BorderThickness="0,0,1,0">
 
-            <!-- Brand header block (44x44 accent icon + name + status subtitle) -->
+            <!-- ===========================================================
+                 Profile card (element-matches the Mac sidebar header):
+                 48x48 rounded app-icon square + app name "SkyBridge Compass"
+                 (bold ~17) + bilingual tagline (gray ~12), then a thin divider.
+                 The Mac header also shows a device line ("Lza's MacBook Pro ·
+                 Apple M1 Max"); there is no bindable local-device-name on the
+                 Windows ViewModel and the constraints forbid fabricating one, so
+                 the device line is intentionally OMITTED rather than faked (see
+                 the account block below for the live session state). This is a
+                 Border/Grid block built without any Button element, so the gated
+                 button count is unaffected. -->
             <NavigationView.PaneHeader>
-                <Grid Padding="16,20,16,8" ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Border
-                        Width="44"
-                        Height="44"
-                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
-                        Background="{StaticResource SkyBridgeAccentBrush}"
-                        VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE80F;" FontSize="22" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                        <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                        <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" MaxLines="1" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                    </StackPanel>
-                </Grid>
+                <StackPanel Padding="16,20,16,8" Spacing="14">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="48" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border
+                            Width="48"
+                            Height="48"
+                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                            Background="{StaticResource SkyBridgeAccentBrush}"
+                            VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE80F;" FontSize="24" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="17" FontWeight="Bold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Text="Next-gen cross-platform connectivity" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                    </Grid>
+                    <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                </StackPanel>
             </NavigationView.PaneHeader>
 
-            <!-- Bottom-pinned session controls (Connect / Disconnect) -->
+            <!-- ===========================================================
+                 Bottom-pinned account block.
+
+                 The Mac sidebar footer is an ACCOUNT block (avatar + username +
+                 ID + gear) on a slightly darker footer, and — like the Mac — it
+                 carries NO sidebar Connect / Disconnect actions. The sole connect
+                 affordance lives in the always-visible "Session Controls" panel
+                 (Connect / Heartbeat / Disconnect), so no user is stranded. The
+                 account block is glass chrome: a circular avatar + a session label
+                 + the live ConnectionStatus (honest session state, the only
+                 identity-like value the VM exposes) + a chevron + a gear glyph. It
+                 is built entirely from Border / Grid / Ellipse / FontIcon /
+                 TextBlock with no Button element. -->
             <NavigationView.PaneFooter>
-                <Grid Padding="16,8,16,16">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Border Height="1" Margin="0,0,0,12" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
-                    <ItemsControl
-                        Grid.Row="1"
-                        AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"
-                        ItemsSource="{Binding SidebarSessionActions}"
-                        ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"
-                        ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}" />
-                </Grid>
+                <StackPanel Padding="16,8,16,16" Spacing="12">
+                    <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                    <!-- Account block (Mac account footer): avatar + session label +
+                         live ConnectionStatus + chevron + gear. Display-only chrome. -->
+                    <Border
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Padding="12,10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <!-- Circular avatar (~36px) with a person glyph -->
+                            <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE77B;" FontSize="18" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <!-- Session label over the live connection status -->
+                            <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                                <TextBlock Text="Local Session" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                <TextBlock Text="{Binding ConnectionStatus}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                            </StackPanel>
+                            <!-- Chevron affordance (decorative) -->
+                            <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                            <!-- Settings gear glyph (decorative; the Settings nav item owns the page) -->
+                            <FontIcon Grid.Column="3" Glyph="&#xE713;" FontSize="16" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
             </NavigationView.PaneFooter>
 
-        <!-- NavigationView Content = top bar + the 8 feature workspace panels;
+        <!-- NavigationView Content = top bar + the 7 feature workspace panels;
              they switch via the IsXxxSelected Visibility bindings as the
              SelectedFeature changes. Content is unchanged from the prior shell. -->
         <Grid>
@@ -2408,29 +2441,6 @@
                                     <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                                 </StackPanel>
                             </Grid>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}">
-                        <StackPanel Spacing="14">
-                            <Grid ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="Quantum / Core Diagnostics" FontSize="18" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding CoreDiagnosticsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                                <ItemsControl
-                                    Grid.Column="1"
-                                    ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"
-                                    ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                    ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
-                                    VerticalAlignment="Center" />
-                            </Grid>
-
-                            <ListView ItemsSource="{Binding CoreDiagnosticFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsQuantumSelected}" />
                         </StackPanel>
                     </Border>
 

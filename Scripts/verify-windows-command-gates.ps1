@@ -130,14 +130,6 @@ AssertResolvedConnect(
     catalog,
     details,
     preflightOnlyGates,
-    WorkspaceActionSurface.SidebarSession,
-    "Connect",
-    false,
-    "preflight-only sidebar Connect");
-AssertResolvedConnect(
-    catalog,
-    details,
-    preflightOnlyGates,
     WorkspaceActionSurface.SessionControls,
     "Connect",
     false,
@@ -170,14 +162,6 @@ AssertResolvedConnect(
     catalog,
     details,
     liveGates,
-    WorkspaceActionSurface.SidebarSession,
-    "Connect",
-    true,
-    "live sidebar Connect");
-AssertResolvedConnect(
-    catalog,
-    details,
-    liveGates,
     WorkspaceActionSurface.SessionControls,
     "Connect",
     true,
@@ -200,26 +184,6 @@ var connectedGates = coordinator.BuildActionGateSnapshot(connectedState);
 AssertEqual(false, connectedGates.CanConnect, "connected action gate Connect");
 AssertEqual(true, connectedGates.CanDisconnect, "connected action gate Disconnect");
 AssertEqual(true, connectedGates.CanSendHeartbeat, "connected action gate Heartbeat");
-AssertResolvedAction(
-    catalog,
-    details,
-    connectedGates,
-    WorkspaceActionSurface.SidebarSession,
-    "Connect",
-    WorkspaceActionCommandId.Connect,
-    WorkspaceActionGateId.CanConnect,
-    false,
-    "connected sidebar Connect");
-AssertResolvedAction(
-    catalog,
-    details,
-    connectedGates,
-    WorkspaceActionSurface.SidebarSession,
-    "Disconnect",
-    WorkspaceActionCommandId.Disconnect,
-    WorkspaceActionGateId.CanDisconnect,
-    true,
-    "connected sidebar Disconnect");
 AssertResolvedAction(
     catalog,
     details,

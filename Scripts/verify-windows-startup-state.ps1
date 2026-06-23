@@ -144,7 +144,6 @@ AssertSequence(
         "UsbManagement",
         "FileTransfer",
         "RemoteDesktop",
-        "Quantum",
         "SystemMonitor",
         "Settings"
     });

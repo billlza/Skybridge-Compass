@@ -11,7 +11,6 @@ internal static class WorkspaceShellNotificationCatalog
         nameof(SessionViewModel.IsUsbManagementSelected),
         nameof(SessionViewModel.IsFileTransferSelected),
         nameof(SessionViewModel.IsRemoteDesktopSelected),
-        nameof(SessionViewModel.IsQuantumSelected),
         nameof(SessionViewModel.IsSystemMonitorSelected),
         nameof(SessionViewModel.IsSettingsSelected)
     };

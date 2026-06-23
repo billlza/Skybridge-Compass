@@ -316,8 +316,7 @@ $macBaselineSignals = @(
             "DashboardMetrics",
             "DeviceDiscoveryScan",
             "RemoteDesktopSessions",
-            "DashboardQuickActions",
-            "QuantumDiagnosticsHeader"
+            "DashboardQuickActions"
         )
     },
     [pscustomobject]@{
@@ -390,9 +389,8 @@ $featureRows = @(
     [pscustomobject]@{ Order = "3"; Id = "UsbManagement"; Title = "USB Management"; Gate = "IsUsbManagementSelected"; Heading = 'Text="USB Management"'; Surfaces = @("UsbManagementHeader"); Anchors = @("WorkspaceAction.UsbManagementHeader.RefreshDevices") },
     [pscustomobject]@{ Order = "4"; Id = "FileTransfer"; Title = "File Transfer"; Gate = "IsFileTransferSelected"; Heading = 'Text="File Transfer"'; Surfaces = @("FileTransferHeader", "FileTransfer"); Anchors = @("WorkspaceAction.FileTransfer.SelectFiles", "WorkspaceAction.FileTransfer.SelectFolder", "WorkspaceAction.FileTransfer.GenerateQr", "FileTransferShareQrPreview") },
     [pscustomobject]@{ Order = "5"; Id = "RemoteDesktop"; Title = "Remote Desktop"; Gate = "IsRemoteDesktopSelected"; Heading = 'Text="Remote Desktop"'; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop"); Anchors = @("WorkspaceAction.RemoteDesktop.RecommendedConnect", "WorkspaceAction.RemoteDesktop.AdvancedConnect", "WorkspaceAction.RemoteDesktop.DisconnectSession") },
-    [pscustomobject]@{ Order = "6"; Id = "Quantum"; Title = "Quantum / Core Diagnostics"; Gate = "IsQuantumSelected"; Heading = 'Text="Quantum / Core Diagnostics"'; Surfaces = @("QuantumDiagnosticsHeader"); Anchors = @("WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics") },
-    [pscustomobject]@{ Order = "7"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
-    [pscustomobject]@{ Order = "8"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
+    [pscustomobject]@{ Order = "6"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
+    [pscustomobject]@{ Order = "7"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
 )
 
 $navigationMatrixRows = Get-MarkdownTableRows `
@@ -437,7 +435,6 @@ Assert-Ordered -Text $featureCatalog -Context "FeatureCatalog mac navigation ord
     "FeatureEntryId.UsbManagement",
     "FeatureEntryId.FileTransfer",
     "FeatureEntryId.RemoteDesktop",
-    "FeatureEntryId.Quantum",
     "FeatureEntryId.SystemMonitor",
     "FeatureEntryId.Settings"
 )
@@ -448,7 +445,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow selected workspace visibil
     "Visibility=`"{Binding IsUsbManagementSelected",
     "Visibility=`"{Binding IsFileTransferSelected",
     "Visibility=`"{Binding IsRemoteDesktopSelected",
-    "Visibility=`"{Binding IsQuantumSelected",
     "Visibility=`"{Binding IsSystemMonitorSelected",
     "Visibility=`"{Binding IsSettingsSelected"
 )
@@ -456,8 +452,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow selected workspace visibil
 Assert-Ordered -Text $mainWindow -Context "MainWindow global shell anchor order" -Needles @(
     'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
     'ItemsSource="{Binding NavigationItems}"',
-    'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
-    'ItemsSource="{Binding SidebarSessionActions}"',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
@@ -479,7 +473,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
     'ItemsSource="{Binding FileTransferActions}"',
     'ItemsSource="{Binding RemoteDesktopHeaderActions}"',
     'ItemsSource="{Binding RemoteDesktopActions}"',
-    'ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"',
     'ItemsSource="{Binding SystemMonitorHeaderActions}"',
     'ItemsSource="{Binding SystemMonitorActions}"',
     'ItemsSource="{Binding SettingsHeaderActions}"',
@@ -489,7 +482,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
 )
 
 foreach ($templateSignal in @(
-    '<DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">',
     '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
@@ -503,17 +495,14 @@ foreach ($templateSignal in @(
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
 
-# 5 workspace-action buttons live inside the shared action templates (sidebar / topbar /
+# 4 workspace-action buttons live inside the shared action templates (topbar /
 # quick-action / detail / status). The weather hero card adds 2 card-local controls that are
 # NOT workspace actions and have no place in those templates: the header Refresh button and
-# the error-state Retry button. Those 2 are accounted for here (5 + 2 = 7); the shared-template
+# the error-state Retry button. Those 2 are accounted for here (4 + 2 = 6); the shared-template
 # usage itself is still enforced by the Assert-Ordered checks below.
-Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 7 -Message "MainWindow must render workspace-action buttons through the five shared action templates (plus the weather card's Refresh + Retry card-local buttons)."
+Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must render workspace-action buttons through the four shared action templates (plus the weather card's Refresh + Retry card-local buttons)."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
-    'ItemsSource="{Binding SidebarSessionActions}"',
-    'ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"',
-    'ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}"',
     'ItemsSource="{Binding TopBarActions}"',
     'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
     'ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}"',
@@ -531,7 +520,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usa
 foreach ($styleMatrixSignal in @(
     "Shared Style And Template Matrix",
     "Mac baseline commit",
-    "SidebarWorkspaceActionButtonTemplate",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
     "TopBarStatusActionButtonTemplate",
@@ -542,7 +530,6 @@ foreach ($styleMatrixSignal in @(
 }
 
 Assert-Ordered -Text $actionCatalog -Context "WorkspaceActionCatalog initial surface order" -Needles @(
-    "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.SessionControls",
     "WorkspaceActionSurface.DashboardQuickActions",
@@ -557,7 +544,6 @@ Assert-Ordered -Text $actionCatalog -Context "WorkspaceActionCatalog initial sur
     "WorkspaceActionSurface.FileTransfer",
     "WorkspaceActionSurface.RemoteDesktopHeader",
     "WorkspaceActionSurface.RemoteDesktop",
-    "WorkspaceActionSurface.QuantumDiagnosticsHeader",
     "WorkspaceActionSurface.SystemMonitorHeader",
     "WorkspaceActionSurface.SystemMonitorControls",
     "WorkspaceActionSurface.SettingsHeader",
@@ -566,7 +552,6 @@ Assert-Ordered -Text $actionCatalog -Context "WorkspaceActionCatalog initial sur
 )
 
 $surfaceActions = @(
-    [pscustomobject]@{ Surface = "SidebarSession"; Method = "BuildSidebarSessionActions"; Keys = @('"Connect"', '"Disconnect"') },
     [pscustomobject]@{ Surface = "TopBarActions"; Method = "BuildTopBarActions"; Keys = @('"Notifications"', '"Theme"') },
     [pscustomobject]@{ Surface = "SessionControls"; Method = "BuildSessionControlActions"; Keys = @('"Connect"', '"Heartbeat"', '"Disconnect"') },
     [pscustomobject]@{ Surface = "DashboardQuickActions"; Method = "BuildDashboardQuickActions"; Keys = @('"ScanDevices"', '"FileTransfer"', '"SystemMonitor"', '"Settings"') },
@@ -581,7 +566,6 @@ $surfaceActions = @(
     [pscustomobject]@{ Surface = "FileTransfer"; Method = "BuildFileTransferActions"; Keys = @('"SelectFiles"', '"SelectFolder"', '"GenerateQr"') },
     [pscustomobject]@{ Surface = "RemoteDesktopHeader"; Method = "BuildRemoteDesktopHeaderActions"; Keys = @('"RefreshSessions"') },
     [pscustomobject]@{ Surface = "RemoteDesktop"; Method = "BuildRemoteDesktopActions"; Keys = @('"RecommendedConnect"', '"AdvancedConnect"', '"PerformanceOverlay"', '"Quality"', '"Settings"', '"FullScreen"', '"DisconnectSession"') },
-    [pscustomobject]@{ Surface = "QuantumDiagnosticsHeader"; Method = "BuildQuantumDiagnosticsHeaderActions"; Keys = @('"RunDiagnostics"') },
     [pscustomobject]@{ Surface = "SystemMonitorHeader"; Method = "BuildSystemMonitorHeaderActions"; Keys = @('"RefreshMetrics"') },
     [pscustomobject]@{ Surface = "SystemMonitorControls"; Method = "BuildSystemMonitorControlActions"; Keys = @('"Monitoring"', '"StopMonitoring"', '"EnableAdvancedMonitoring"') },
     [pscustomobject]@{ Surface = "SettingsHeader"; Method = "BuildSettingsHeaderActions"; Keys = @('"RefreshStatus"') },
@@ -591,7 +575,6 @@ $surfaceActions = @(
 
 $expectedSurfaceNames = @($surfaceActions | ForEach-Object { $_.Surface })
 $expectedDynamicSurfaceNames = @(
-    "SidebarSession",
     "TopBarActions",
     "SessionControls",
     "DeviceDiscoveryPrimary",
@@ -605,7 +588,6 @@ $expectedDynamicSurfaceNames = @(
     "FileTransfer",
     "RemoteDesktopHeader",
     "RemoteDesktop",
-    "QuantumDiagnosticsHeader",
     "SystemMonitorHeader",
     "SystemMonitorControls",
     "SettingsHeader",
@@ -651,7 +633,6 @@ $styleRows = Get-MarkdownTableRows `
     -Heading "Shared Style And Template Matrix" `
     -Columns @("Region", "Required shared template", "Required panel/style ownership")
 $expectedStyleRows = @(
-    [pscustomobject]@{ Region = "Sidebar session actions"; Template = "SidebarWorkspaceActionButtonTemplate"; Panel = "VerticalWorkspaceActionItemsPanel" },
     [pscustomobject]@{ Region = "Top-bar actions"; Template = "TopBarStatusActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },
     [pscustomobject]@{ Region = "Dashboard quick actions"; Template = "DashboardQuickActionTemplate"; Panel = "DashboardQuickActionItemsPanel" },
     [pscustomobject]@{ Region = "Workspace action surfaces"; Template = "WorkspaceActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },

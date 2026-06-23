@@ -16,7 +16,6 @@ internal sealed class WorkspaceObservableCollections
         DashboardQuickActions = new ObservableCollection<WorkspaceActionItemView>();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
-        SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
         TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
         SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
@@ -37,7 +36,6 @@ internal sealed class WorkspaceObservableCollections
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
-        QuantumDiagnosticsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         SystemMonitorHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         SystemMonitorActions = new ObservableCollection<WorkspaceActionItemView>();
         SettingsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -69,8 +67,6 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<string> BitrateProfiles { get; }
 
     public ObservableCollection<string> FramerateProfiles { get; }
-
-    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
 
@@ -111,8 +107,6 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
-
-    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SystemMonitorHeaderActions { get; }
 

@@ -43,7 +43,6 @@ internal sealed class WorkspaceShellStateAccessor
             _stateSource.IsUsbManagementSelected,
             _stateSource.IsFileTransferSelected,
             _stateSource.IsRemoteDesktopSelected,
-            _stateSource.IsQuantumSelected,
             _stateSource.IsSystemMonitorSelected,
             _stateSource.IsSettingsSelected,
             _stateSource.ConnectionState,

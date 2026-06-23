@@ -21,7 +21,6 @@ public sealed class FeatureCatalogClient : IFeatureCatalogClient
             new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", true),
             new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true),
             new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true),
-            new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true),
             new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true),
             new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)
         }.AsReadOnly();
@@ -42,7 +41,6 @@ public enum FeatureEntryId
     UsbManagement,
     FileTransfer,
     RemoteDesktop,
-    Quantum,
     SystemMonitor,
     Settings
 }

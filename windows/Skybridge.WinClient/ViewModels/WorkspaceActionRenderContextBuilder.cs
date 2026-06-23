@@ -41,7 +41,6 @@ internal sealed record WorkspaceActionRenderState(
     bool IsUsbManagementSelected,
     bool IsFileTransferSelected,
     bool IsRemoteDesktopSelected,
-    bool IsQuantumSelected,
     bool IsSystemMonitorSelected,
     bool IsSettingsSelected,
     EngineConnectionState ConnectionState,

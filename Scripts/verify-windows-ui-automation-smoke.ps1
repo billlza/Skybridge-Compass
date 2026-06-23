@@ -506,11 +506,10 @@ try {
         @{ Title = "USB Management"; Heading = "USB Management"; Anchor = "WorkspaceAction.UsbManagementHeader.RefreshDevices"; Surfaces = @("UsbManagementHeader") },
         @{ Title = "File Transfer"; Heading = "File Transfer"; Anchor = "WorkspaceAction.FileTransfer.GenerateQr"; Surfaces = @("FileTransferHeader", "FileTransfer") },
         @{ Title = "Remote Desktop"; Heading = "Remote Desktop"; Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop") },
-        @{ Title = "Quantum"; Heading = "Quantum"; Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"; Surfaces = @("QuantumDiagnosticsHeader") },
         @{ Title = "System Monitor"; Heading = "System Monitor"; Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls") },
         @{ Title = "Settings"; Heading = "Settings"; Anchor = "WorkspaceAction.SettingsToolbar.ExportSettings"; EvidenceAnchors = @("WorkspaceAction.SettingsMaintenance.ApplySettings"); Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance") }
     )
-    $globalActionSurfaces = @("SidebarSession", "TopBarActions", "SessionControls")
+    $globalActionSurfaces = @("TopBarActions", "SessionControls")
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $exePath
@@ -553,7 +552,6 @@ try {
     foreach ($requiredAnchor in @(
         "Skybridge.Navigation.List",
         "Skybridge.Session.SelectedFeature.Title",
-        "WorkspaceAction.SidebarSession.Connect",
         "WorkspaceAction.TopBarActions.Notifications",
         "WorkspaceAction.TopBarActions.Theme"
     )) {
@@ -601,7 +599,6 @@ try {
                     "Skybridge.SelectedFeature.Title",
                     "WorkspaceAction.TopBarActions.Notifications",
                     "WorkspaceAction.TopBarActions.Theme",
-                    "WorkspaceAction.SidebarSession.Connect",
                     $feature.Anchor
                 )
                 if ($feature.ContainsKey("EvidenceAnchors")) {

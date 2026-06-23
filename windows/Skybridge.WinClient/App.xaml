@@ -23,13 +23,25 @@
                  so only ONE item highlights at a time (fixes the multi-pill bug).
                  =================================================================== -->
 
-            <!-- Left selection indicator bar -->
-            <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{StaticResource SkyBridgeAccentColor}" />
+            <!-- Left selection indicator bar — hidden (Transparent). The Mac sidebar
+                 marks the selected item with a FILLED rounded accent pill, NOT a
+                 left rail indicator; suppressing the rail makes the selected look
+                 read as the Mac's solid pill instead of "a flat blue bar with a
+                 left stripe". -->
+            <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="Transparent" />
 
-            <!-- Selected item background (the pill behind the selected row) -->
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#D12368E0" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#E62368E0" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#FF205ED6" />
+            <!-- Selected-item background = a soft neutral rounded highlight pill,
+                 painted by the STOCK NavigationViewItemPresenter (no custom
+                 ControlTemplate). The custom per-feature presenter was removed
+                 because its Selected state never painted; the stock presenter
+                 renders these theme brushes reliably. A neutral white-alpha fill
+                 (not a per-feature accent) keeps the selected row readable on the
+                 dark glass sidebar while the per-feature COLORED icon still comes
+                 from the NavigationItemTemplate DataTemplate. CornerRadius 12
+                 (below) rounds it into a pill. -->
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#2EFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#3DFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#42FFFFFF" />
 
             <!-- Unselected hover / press surfaces (subtle glass) -->
             <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#29FFFFFF" />
@@ -39,9 +51,9 @@
             <SolidColorBrush x:Key="NavigationViewItemForeground" Color="#FFF7FAFF" />
             <SolidColorBrush x:Key="NavigationViewItemForegroundPointerOver" Color="#FFF7FAFF" />
             <SolidColorBrush x:Key="NavigationViewItemForegroundPressed" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#FFFFFFFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#FFFFFFFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#FFF7FAFF" />
 
             <!-- Pane background = the Mac sidebar glass (NavigationView has no PaneBackground
                  property in WinUI 3; the pane chrome is driven by these theme resources). -->

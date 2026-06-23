@@ -76,7 +76,6 @@ AssertSequence(
         "UsbManagement",
         "FileTransfer",
         "RemoteDesktop",
-        "Quantum",
         "SystemMonitor",
         "Settings"
     });
@@ -90,7 +89,6 @@ AssertSequence(
         "USB Management",
         "File Transfer",
         "Remote Desktop",
-        "Quantum",
         "System Monitor",
         "Settings"
     });
@@ -100,7 +98,6 @@ AssertSequence(
     actionCatalog.BuildInitialSurfaces().Select(surface => surface.ToString()),
     new[]
     {
-        "SidebarSession",
         "TopBarActions",
         "SessionControls",
         "DashboardQuickActions",
@@ -115,7 +112,6 @@ AssertSequence(
         "FileTransfer",
         "RemoteDesktopHeader",
         "RemoteDesktop",
-        "QuantumDiagnosticsHeader",
         "SystemMonitorHeader",
         "SystemMonitorControls",
         "SettingsHeader",
@@ -127,7 +123,6 @@ AssertSequence(
     actionCatalog.BuildDynamicRefreshSurfaces().Select(surface => surface.ToString()),
     new[]
     {
-        "SidebarSession",
         "TopBarActions",
         "SessionControls",
         "DeviceDiscoveryPrimary",
@@ -141,7 +136,6 @@ AssertSequence(
         "FileTransfer",
         "RemoteDesktopHeader",
         "RemoteDesktop",
-        "QuantumDiagnosticsHeader",
         "SystemMonitorHeader",
         "SystemMonitorControls",
         "SettingsHeader",
@@ -149,7 +143,6 @@ AssertSequence(
         "SettingsMaintenance"
     });
 
-AssertActionSurface(actionCatalog, WorkspaceActionSurface.SidebarSession, new[] { "Connect", "Disconnect" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.TopBarActions, new[] { "Notifications", "Theme" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.SessionControls, new[] { "Connect", "Heartbeat", "Disconnect" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.DashboardQuickActions, new[] { "ScanDevices", "FileTransfer", "SystemMonitor", "Settings" });
@@ -164,7 +157,6 @@ AssertActionSurface(actionCatalog, WorkspaceActionSurface.FileTransferHeader, ne
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.FileTransfer, new[] { "SelectFiles", "SelectFolder", "GenerateQr" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.RemoteDesktopHeader, new[] { "RefreshSessions" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.RemoteDesktop, new[] { "RecommendedConnect", "AdvancedConnect", "PerformanceOverlay", "Quality", "Settings", "FullScreen", "DisconnectSession" });
-AssertActionSurface(actionCatalog, WorkspaceActionSurface.QuantumDiagnosticsHeader, new[] { "RunDiagnostics" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.SystemMonitorHeader, new[] { "RefreshMetrics" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.SystemMonitorControls, new[] { "Monitoring", "StopMonitoring", "EnableAdvancedMonitoring" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.SettingsHeader, new[] { "RefreshStatus" });

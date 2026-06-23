@@ -122,7 +122,7 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanOpenRemoteDesktopSettings,
             request.CanEnterRemoteDesktopFullScreen,
             request.CanDisconnectRemoteDesktopSession,
-            CanUseWorkspaceFeature(request.IsBusy, request.IsQuantumSelected),
+            request.CanRunCoreDiagnostics,
             CanUseWorkspaceFeature(request.IsBusy, request.IsSystemMonitorSelected),
             request.CanStartSystemMonitoring,
             request.CanStopSystemMonitoring,
@@ -143,7 +143,6 @@ public sealed record WorkspaceCommandGateRequest(
     bool IsUsbManagementSelected,
     bool IsFileTransferSelected,
     bool IsRemoteDesktopSelected,
-    bool IsQuantumSelected,
     bool IsSystemMonitorSelected,
     bool IsSettingsSelected,
     SessionCommandGateSnapshot SessionGates,
@@ -178,4 +177,5 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanOpenSystemPreferences,
     bool CanApplySettings,
     bool CanRestoreDefaults,
-    bool CanResetMonitorData);
+    bool CanResetMonitorData,
+    bool CanRunCoreDiagnostics);

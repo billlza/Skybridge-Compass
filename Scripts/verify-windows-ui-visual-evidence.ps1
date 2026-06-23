@@ -151,11 +151,6 @@ $expectedFeatures = [ordered]@{
         Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"
         Surfaces = @("RemoteDesktopHeader", "RemoteDesktop")
     }
-    "Quantum" = @{
-        Heading = "Quantum"
-        Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"
-        Surfaces = @("QuantumDiagnosticsHeader")
-    }
     "System Monitor" = @{
         Heading = "System Monitor"
         Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"
@@ -168,7 +163,7 @@ $expectedFeatures = [ordered]@{
     }
 }
 
-$globalSurfaces = @("SidebarSession", "TopBarActions", "SessionControls")
+$globalSurfaces = @("TopBarActions", "SessionControls")
 $expectedSizes = @(
     @{ Width = 1280; Height = 900 },
     @{ Width = 1366; Height = 768 }
@@ -204,7 +199,6 @@ foreach ($featureName in $expectedFeatures.Keys) {
             "Skybridge.SelectedFeature.Title",
             "WorkspaceAction.TopBarActions.Notifications",
             "WorkspaceAction.TopBarActions.Theme",
-            "WorkspaceAction.SidebarSession.Connect",
             $feature.Anchor
         )) {
             Assert-True -Condition ($anchorIds -contains $requiredAnchor) -Message "Evidence capture missing anchor $requiredAnchor for $featureName."

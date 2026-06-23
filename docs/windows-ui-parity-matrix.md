@@ -21,16 +21,15 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | 3 | UsbManagement | USB Management | `IsUsbManagementSelected` | `UsbManagementHeader` | `WorkspaceAction.UsbManagementHeader.RefreshDevices` |
 | 4 | FileTransfer | File Transfer | `IsFileTransferSelected` | `FileTransferHeader`; `FileTransfer` | `WorkspaceAction.FileTransfer.SelectFiles`; `WorkspaceAction.FileTransfer.SelectFolder`; `WorkspaceAction.FileTransfer.GenerateQr`; `FileTransferShareQrPreview` |
 | 5 | RemoteDesktop | Remote Desktop | `IsRemoteDesktopSelected` | `RemoteDesktopHeader`; `RemoteDesktop` | `WorkspaceAction.RemoteDesktop.RecommendedConnect`; `WorkspaceAction.RemoteDesktop.AdvancedConnect`; `WorkspaceAction.RemoteDesktop.DisconnectSession` |
-| 6 | Quantum | Quantum / Core Diagnostics | `IsQuantumSelected` | `QuantumDiagnosticsHeader` | `WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics` |
-| 7 | SystemMonitor | System Monitor | `IsSystemMonitorSelected` | `SystemMonitorHeader`; `SystemMonitorControls` | `WorkspaceAction.SystemMonitorControls.Monitoring`; `WorkspaceAction.SystemMonitorControls.StopMonitoring`; `WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring` |
-| 8 | Settings | Settings | `IsSettingsSelected` | `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` | `WorkspaceAction.SettingsToolbar.ExportSettings`; `WorkspaceAction.SettingsToolbar.OpenSystemPreferences`; `WorkspaceAction.SettingsMaintenance.ApplySettings` |
+| 6 | SystemMonitor | System Monitor | `IsSystemMonitorSelected` | `SystemMonitorHeader`; `SystemMonitorControls` | `WorkspaceAction.SystemMonitorControls.Monitoring`; `WorkspaceAction.SystemMonitorControls.StopMonitoring`; `WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring` |
+| 7 | Settings | Settings | `IsSettingsSelected` | `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` | `WorkspaceAction.SettingsToolbar.ExportSettings`; `WorkspaceAction.SettingsToolbar.OpenSystemPreferences`; `WorkspaceAction.SettingsMaintenance.ApplySettings` |
 
 ## Mac-To-Windows Baseline Signal Matrix
 
 | Mac source | Required ordered mac symbols | Windows parity anchor |
 | --- | --- | --- |
 | `NavigationItem.swift` | `case dashboard = "sidebar.dashboard"`; `case deviceManagement = "sidebar.deviceDiscovery"`; `case usbDeviceManagement = "sidebar.usbManagement"`; `case fileTransfer = "sidebar.fileTransfer"`; `case remoteDesktop = "sidebar.remoteDesktop"`; `case quantumCommunication = "quantum.title"`; `case systemMonitor = "sidebar.systemMonitor"`; `case settings = "sidebar.settings"` | `FeatureCatalogClient.Entries` |
-| `DashboardContentView.swift` | `topStatsRow`; `WeatherDashboardCard()`; `DeviceDiscoveryPanelView(`; `RemoteSessionsPanelView(selectedSession: $selectedSession)`; `QuickActionsPanelView(selectedNavigation: $selectedNavigation)`; `AppleSiliconInfoCardView()` | `DashboardMetrics`; `DeviceDiscoveryScan`; `RemoteDesktopSessions`; `DashboardQuickActions`; `QuantumDiagnosticsHeader` |
+| `DashboardContentView.swift` | `topStatsRow`; `WeatherDashboardCard()`; `DeviceDiscoveryPanelView(`; `RemoteSessionsPanelView(selectedSession: $selectedSession)`; `QuickActionsPanelView(selectedNavigation: $selectedNavigation)`; `AppleSiliconInfoCardView()` | `DashboardMetrics`; `DeviceDiscoveryScan`; `RemoteDesktopSessions`; `DashboardQuickActions` |
 | `QuickActionsPanelView.swift` | `action.scanDevices`; `appModel.triggerDiscoveryRefresh()`; `dashboard.fileTransfer`; `selectedNavigation = .fileTransfer`; `action.systemMonitor`; `selectedNavigation = .systemMonitor`; `action.settings`; `selectedNavigation = .settings` | `DashboardQuickActions` |
 | `TopNavigationBarView.swift` | `ipLocationIndicator`; `networkSpeedIndicator`; `networkLatencyIndicator`; `connectionStatusIndicator`; `fpsIndicator`; `NotificationBellView()`; `themeToggleButton`; `manualConnect.title`; `manualConnect.ipAddress`; `manualConnect.port`; `manualConnect.pairingCode`; `action.cancel`; `device.action.connect`; `appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)` | `TopBarStatusClient`; `TopBarStatusSlot`; `TopBarActions`; `DeviceDiscoveryScan`; `ManualConnectionClient`; `DeviceDiscoveryManualConnectFinal` |
 
@@ -38,7 +37,7 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 | Region | Mac position | Windows binding | Required order |
 | --- | --- | --- | --- |
-| Sidebar | Product name, navigation, session actions | `NavigationItems`; `SidebarSessionActions` | Navigation list before sidebar connect/disconnect |
+| Sidebar | Product name, navigation, account block | `NavigationItems` | Navigation list before the account footer block (no sidebar connect/disconnect, Mac parity) |
 | Top bar | Selected feature, Core/connection state, diagnostics, notifications, theme | `SelectedFeature`; `ConnectionStatus`; `TopBarConnectionStatus`; `PerformanceStatus`; `TopBarDiagnosticsStatus`; `TopBarActions` | selected feature, status message, connection status, diagnostics status, notifications/theme actions |
 | Session controls | Global connection controls | `SessionControlActions`; `BitrateProfiles`; `FramerateProfiles` | Connect, Heartbeat, Disconnect before bitrate/framerate selectors |
 
@@ -46,7 +45,6 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 | Surface | Required action key order |
 | --- | --- |
-| `SidebarSession` | `Connect`, `Disconnect` |
 | `TopBarActions` | `Notifications`, `Theme` |
 | `SessionControls` | `Connect`, `Heartbeat`, `Disconnect` |
 | `DashboardQuickActions` | `ScanDevices`, `FileTransfer`, `SystemMonitor`, `Settings` |
@@ -61,7 +59,6 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | `FileTransfer` | `SelectFiles`, `SelectFolder`, `GenerateQr` |
 | `RemoteDesktopHeader` | `RefreshSessions` |
 | `RemoteDesktop` | `RecommendedConnect`, `AdvancedConnect`, `PerformanceOverlay`, `Quality`, `Settings`, `FullScreen`, `DisconnectSession` |
-| `QuantumDiagnosticsHeader` | `RunDiagnostics` |
 | `SystemMonitorHeader` | `RefreshMetrics` |
 | `SystemMonitorControls` | `Monitoring`, `StopMonitoring`, `EnableAdvancedMonitoring` |
 | `SettingsHeader` | `RefreshStatus` |
@@ -72,13 +69,12 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 | Source | Required dynamic surface order |
 | --- | --- |
-| `WorkspaceActionCatalogClient.DynamicRefreshSurfaces` | `SidebarSession`; `TopBarActions`; `SessionControls`; `DeviceDiscoveryPrimary`; `DeviceDiscoveryScan`; `DeviceDiscoveryManualConnectFinal`; `CrossNetworkQr`; `CrossNetworkCodePrimary`; `CrossNetworkCodeConnect`; `UsbManagementHeader`; `FileTransferHeader`; `FileTransfer`; `RemoteDesktopHeader`; `RemoteDesktop`; `QuantumDiagnosticsHeader`; `SystemMonitorHeader`; `SystemMonitorControls`; `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` |
+| `WorkspaceActionCatalogClient.DynamicRefreshSurfaces` | `TopBarActions`; `SessionControls`; `DeviceDiscoveryPrimary`; `DeviceDiscoveryScan`; `DeviceDiscoveryManualConnectFinal`; `CrossNetworkQr`; `CrossNetworkCodePrimary`; `CrossNetworkCodeConnect`; `UsbManagementHeader`; `FileTransferHeader`; `FileTransfer`; `RemoteDesktopHeader`; `RemoteDesktop`; `SystemMonitorHeader`; `SystemMonitorControls`; `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` |
 
 ## Shared Style And Template Matrix
 
 | Region | Required shared template | Required panel/style ownership |
 | --- | --- | --- |
-| Sidebar session actions | `SidebarWorkspaceActionButtonTemplate` | `VerticalWorkspaceActionItemsPanel` |
 | Top-bar actions | `TopBarStatusActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
 | Dashboard quick actions | `DashboardQuickActionTemplate` | `DashboardQuickActionItemsPanel` |
 | Workspace action surfaces | `WorkspaceActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |

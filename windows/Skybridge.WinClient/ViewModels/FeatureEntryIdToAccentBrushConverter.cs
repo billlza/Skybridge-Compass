@@ -24,7 +24,6 @@ public sealed class FeatureEntryIdToAccentBrushConverter : IValueConverter
             FeatureEntryId.UsbManagement => "SkyBridgeNavUsbBrush",
             FeatureEntryId.FileTransfer => "SkyBridgeNavFileTransferBrush",
             FeatureEntryId.RemoteDesktop => "SkyBridgeNavRemoteDesktopBrush",
-            FeatureEntryId.Quantum => "SkyBridgeNavQuantumBrush",
             FeatureEntryId.SystemMonitor => "SkyBridgeNavMonitorBrush",
             FeatureEntryId.Settings => "SkyBridgeNavSettingsBrush",
             _ => "SkyBridgeAccentBrush"
