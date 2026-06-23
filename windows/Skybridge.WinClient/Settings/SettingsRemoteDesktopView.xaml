@@ -178,38 +178,48 @@
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                 </StackPanel>
 
-                <!-- Resolution cards → VideoResolution (RadioButtons, selectable group) -->
-                <StackPanel Spacing="6">
+                <!-- Resolution → VideoResolution (ComboBox; RadioButtons.SelectedValue/SelectedValuePath unsupported in WinUI 3) -->
+                <Grid ColumnSpacing="12" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
                     <TextBlock
                         Text="分辨率"
-                        FontWeight="SemiBold"
+                        VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <RadioButtons
-                        MaxColumns="2"
+                    <ComboBox
+                        Grid.Column="1"
+                        MinWidth="200"
                         SelectedValue="{Binding Settings.VideoResolution, Mode=TwoWay}"
                         SelectedValuePath="Tag">
-                        <RadioButton Tag="hd1080p" Content="1080P (Full HD)　1920×1080" />
-                        <RadioButton Tag="qhd2k" Content="2K (QHD)　2560×1440" />
-                        <RadioButton Tag="uhd4k" Content="4K (Ultra HD)　3840×2160" />
-                        <RadioButton Tag="apple5k" Content="5K (Apple Retina)　5120×2880" />
-                    </RadioButtons>
-                </StackPanel>
+                        <ComboBoxItem Tag="hd1080p" Content="1080P (Full HD)　1920×1080" />
+                        <ComboBoxItem Tag="qhd2k" Content="2K (QHD)　2560×1440" />
+                        <ComboBoxItem Tag="uhd4k" Content="4K (Ultra HD)　3840×2160" />
+                        <ComboBoxItem Tag="apple5k" Content="5K (Apple Retina)　5120×2880" />
+                    </ComboBox>
+                </Grid>
 
-                <!-- Frame-rate cards → VideoFrameRate (RadioButtons) -->
-                <StackPanel Spacing="6">
+                <!-- Frame rate → VideoFrameRate (ComboBox) -->
+                <Grid ColumnSpacing="12" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
                     <TextBlock
                         Text="帧率"
-                        FontWeight="SemiBold"
+                        VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                    <RadioButtons
-                        MaxColumns="3"
+                    <ComboBox
+                        Grid.Column="1"
+                        MinWidth="160"
                         SelectedValue="{Binding Settings.VideoFrameRate, Mode=TwoWay}"
                         SelectedValuePath="Tag">
-                        <RadioButton Tag="fps30" Content="30 fps" />
-                        <RadioButton Tag="fps60" Content="60 fps" />
-                        <RadioButton Tag="fps120" Content="120 fps" />
-                    </RadioButtons>
-                </StackPanel>
+                        <ComboBoxItem Tag="fps30" Content="30 fps" />
+                        <ComboBoxItem Tag="fps60" Content="60 fps" />
+                        <ComboBoxItem Tag="fps120" Content="120 fps" />
+                    </ComboBox>
+                </Grid>
 
                 <!-- 压缩质量 dropdown → VideoCompressionQuality -->
                 <Grid ColumnSpacing="12" VerticalAlignment="Center">

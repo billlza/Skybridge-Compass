@@ -380,7 +380,7 @@
                 </Grid>
 
                 <!-- 温度阈值 (60…95 step 5, °C) — disabled unless temp monitoring on -->
-                <Grid ColumnSpacing="12" IsEnabled="{Binding Settings.EnableTemperatureMonitoring, Mode=OneWay}">
+                <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="220" />
@@ -393,6 +393,7 @@
                         Maximum="95"
                         StepFrequency="5"
                         VerticalAlignment="Center"
+                        IsEnabled="{Binding Settings.EnableTemperatureMonitoring, Mode=OneWay}"
                         Value="{Binding Settings.TemperatureThreshold, Mode=TwoWay}" />
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
                         <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="40" Text="{Binding Settings.TemperatureThreshold, Mode=OneWay}" />
@@ -414,7 +415,7 @@
                 </Grid>
 
                 <!-- 风扇转速阈值 (2000…8000 step 200, RPM) — disabled unless fan monitoring on -->
-                <Grid ColumnSpacing="12" IsEnabled="{Binding Settings.EnableFanSpeedMonitoring, Mode=OneWay}">
+                <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="220" />
@@ -427,6 +428,7 @@
                         Maximum="8000"
                         StepFrequency="200"
                         VerticalAlignment="Center"
+                        IsEnabled="{Binding Settings.EnableFanSpeedMonitoring, Mode=OneWay}"
                         Value="{Binding Settings.FanSpeedThreshold, Mode=TwoWay}" />
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="1">
                         <TextBlock Style="{StaticResource SettingsRowValue}" MinWidth="48" Text="{Binding Settings.FanSpeedThreshold, Mode=OneWay}" />
