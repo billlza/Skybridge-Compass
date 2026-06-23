@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Windows.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -29,6 +32,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
     private readonly IDashboardMetricsClient _dashboardMetricsClient;
+    private readonly IWeatherClient _weatherClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private readonly ISessionStatusClient _sessionStatusClient;
@@ -55,6 +59,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
+    private readonly WeatherStateCoordinator _weatherStateCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
@@ -92,6 +97,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _systemMonitorStatus = "";
     private string _usbManagementStatus = "";
     private string _settingsStatus = "";
+    private string _weatherPhase = WeatherStateCoordinator.PhaseLoading;
+    private string _weatherLocation = "";
+    private string _weatherTemperature = "";
+    private string _weatherCondition = "";
+    private string _weatherConditionKey = "";
+    private string _weatherSource = "";
+    private string _weatherUpdatedRelative = "";
+    private string _weatherErrorMessage = "";
     private int _onlineDeviceCount;
     private int _activeSessionCount;
     private int _transferTaskCount;
@@ -102,8 +115,23 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarThemeStatus = "";
     private string _selectedBitrate = "";
     private string _selectedFramerate = "";
+    private string _remoteDesktopSearchText = "";
+    // Unfiltered master snapshot of the Remote Desktop session rows. The read-only
+    // snapshot applier (single writer) replaces RemoteDesktopSessions; we mirror that
+    // here so the left-pane search box can re-project the visible rows without inventing
+    // any data. Mirrors the SettingsTabs/SettingsDetails CollectionChanged re-derive
+    // pattern used a few lines below in the ctor.
+    private readonly List<RemoteDesktopSessionItemView> _remoteDesktopSessionMaster = new();
+    // Re-entrancy guard: true while ApplyRemoteDesktopSessionFilter is mutating
+    // RemoteDesktopSessions, so the CollectionChanged mirror does not treat the
+    // filter's own Clear/Add churn as a fresh snapshot.
+    private bool _isFilteringRemoteDesktopSessions;
+    // Coalesce guard: at most one deferred re-filter is queued on the UI sync context per
+    // applier burst, so a multi-event Clear+Add snapshot schedules a single re-filter.
+    private bool _remoteDesktopFilterReapplyQueued;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
+    private SettingsTabItemView? _selectedSettingsTab;
     private bool _isDiscoveryScanning;
     private bool _isDiscoveryCompatibilityModeEnabled;
     private int _extendedSearchCountdown;
@@ -126,6 +154,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
         IDashboardMetricsClient? dashboardMetricsClient = null,
+        IWeatherClient? weatherClient = null,
         ITopBarStatusClient? topBarStatusClient = null,
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
@@ -151,6 +180,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             usbManagementClient,
             settingsClient,
             dashboardMetricsClient,
+            weatherClient,
             topBarStatusClient,
             connectionWorkspaceStateClient,
             workspaceActionCatalogClient,
@@ -182,6 +212,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _usbManagementClient = dependencies.UsbManagementClient;
         _settingsClient = dependencies.SettingsClient;
         _dashboardMetricsClient = dependencies.DashboardMetricsClient;
+        _weatherClient = dependencies.WeatherClient;
         _connectionWorkspaceStateClient = dependencies.ConnectionWorkspaceStateClient;
         _workspaceActionCatalogClient = dependencies.WorkspaceActionCatalogClient;
         _sessionStatusClient = dependencies.SessionStatusClient;
@@ -287,6 +318,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         NavigationItems = collections.NavigationItems;
         _selectedFeature = startupState.SelectedFeature;
         DashboardMetrics = collections.DashboardMetrics;
+        WeatherMetrics = collections.WeatherMetrics;
         DashboardQuickActions = collections.DashboardQuickActions;
         BitrateProfiles = collections.BitrateProfiles;
         FramerateProfiles = collections.FramerateProfiles;
@@ -343,7 +375,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => ActiveSessionCount = value,
             value => TransferTaskCount = value,
             value => PerformanceStatus = value);
-        SidebarSessionActions = collections.SidebarSessionActions;
+        _weatherStateCoordinator = new WeatherStateCoordinator(
+            _weatherClient,
+            WeatherMetrics,
+            value => WeatherPhase = value,
+            value => WeatherLocation = value,
+            value => WeatherTemperature = value,
+            value => WeatherCondition = value,
+            value => WeatherConditionKey = value,
+            value => WeatherSource = value,
+            value => WeatherUpdatedRelative = value,
+            value => WeatherErrorMessage = value,
+            value => StatusMessage = value);
+        RefreshWeatherCommand = _weatherStateCoordinator.RefreshCommand;
         TopBarActions = collections.TopBarActions;
         SessionControlActions = collections.SessionControlActions;
         DiscoveredPeers = collections.DiscoveredPeers;
@@ -439,7 +483,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferActions = collections.FileTransferActions;
         RemoteDesktopHeaderActions = collections.RemoteDesktopHeaderActions;
         RemoteDesktopActions = collections.RemoteDesktopActions;
-        QuantumDiagnosticsHeaderActions = collections.QuantumDiagnosticsHeaderActions;
         SettingsHeaderActions = collections.SettingsHeaderActions;
         SettingsToolbarActions = collections.SettingsToolbarActions;
         SettingsMaintenanceActions = collections.SettingsMaintenanceActions;
@@ -459,6 +502,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsTabs = collections.SettingsTabs;
         SettingsActions = collections.SettingsActions;
         SettingsDetails = collections.SettingsDetails;
+        // Drive the Settings two-pane: when a snapshot replaces the tab/detail collections,
+        // keep a valid left-pane selection and re-derive the right-pane (selected-tab) slice.
+        SettingsTabs.CollectionChanged += OnSettingsTabsChanged;
+        SettingsDetails.CollectionChanged += OnSettingsDetailsChanged;
+        // Drive the Remote Desktop left-pane search: when the read-only snapshot applier
+        // replaces RemoteDesktopSessions, re-capture the unfiltered master and re-apply the
+        // current search text so the visible rows stay in sync. Mirrors the Settings hooks
+        // directly above. The filter is the only re-projector of RemoteDesktopSessions; a
+        // re-entrancy guard keeps it from reacting to its own Clear/Add churn.
+        RemoteDesktopSessions.CollectionChanged += OnRemoteDesktopSessionsChanged;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
         var workspaceShellStateSource = new WorkspaceShellStateSource(this);
@@ -566,6 +619,40 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceShellRefreshCoordinator.LoadWorkspaceActions();
         _workspaceShellRefreshCoordinator.RefreshDashboardMetrics();
         _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
+        // Kick the first weather fetch on startup (the dashboard is the default feature),
+        // mirroring the Mac auto-load on dashboard show. Fire-and-forget via the command's
+        // async-void Execute is consistent with the house style; the card shows the
+        // Loading state until the real snapshot lands (never fake numbers).
+        RefreshWeatherCommand.Execute(null);
+        // Kick the first System Monitor read-only snapshot on startup so the dashboard
+        // System-Performance panel AND the System Monitor screen show real Memory/Disk/
+        // Network/Health telemetry immediately, instead of empty sections. This is a
+        // one-shot sample (no "start monitoring" needed); honest values, never faked.
+        RefreshSystemMonitorCommand.Execute(null);
+        // Kick the first File Transfer read-only snapshot on startup so the File Transfer
+        // screen shows the real transport/channel plan, queue, history, and security
+        // facts immediately instead of empty Queue/History/Security sections (the screen
+        // was previously empty until a manual refresh or navigation). Mirrors the Mac
+        // auto-load on file-transfer show; fire-and-forget via the command's async-void
+        // Execute, consistent with the Weather/SystemMonitor kicks above. Read-only
+        // snapshot — no picker is opened and no local files are read.
+        RefreshFileTransferCommand.Execute(null);
+        // Kick the first Settings read-only snapshot on startup so the Settings two-pane
+        // shows its 8 tabs + grouped section cards immediately instead of an empty screen
+        // (the screen was previously empty until a manual Refresh Status). The
+        // CollectionChanged hooks above auto-select the first tab once the tabs land, so the
+        // right pane is populated without any user interaction. Uses the EXISTING command
+        // (routed through the action catalog / command bindings); read-only snapshot — no
+        // preference, file, permission, or runtime setting is touched.
+        RefreshSettingsCommand.Execute(null);
+        // Kick the first Remote Desktop read-only snapshot on startup so the Remote Desktop
+        // two-pane shows its session preview rows + control facts immediately instead of an
+        // empty Active Sessions list and empty facts (the screen was previously empty until a
+        // manual "Refresh Sessions"). Mirrors the Weather/SystemMonitor/FileTransfer/Settings
+        // kicks above. Uses the EXISTING RefreshRemoteDesktopCommand (routed through the
+        // command bindings); fully read-only/fail-closed — no live transport is opened, no
+        // session is started. The rows it loads are honest previews, not live sessions.
+        RefreshRemoteDesktopCommand.Execute(null);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -574,13 +661,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
 
+    public ObservableCollection<WeatherMetricView> WeatherMetrics { get; }
+
     public ObservableCollection<WorkspaceActionItemView> DashboardQuickActions { get; }
 
     public ObservableCollection<string> BitrateProfiles { get; }
 
     public ObservableCollection<string> FramerateProfiles { get; }
-
-    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
 
@@ -622,8 +709,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
 
-    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
-
     public ObservableCollection<WorkspaceActionItemView> SettingsHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SettingsToolbarActions { get; }
@@ -659,6 +744,80 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<SettingsActionItemView> SettingsActions { get; }
 
     public ObservableCollection<SettingsDetailItemView> SettingsDetails { get; }
+
+    // Right-pane rows for the Settings two-pane layout: the subset of SettingsDetails whose
+    // Section matches the currently SelectedSettingsTab. Re-derived whenever the selection
+    // changes OR the backing SettingsDetails / SettingsTabs collections are replaced by a
+    // snapshot refresh.
+    public ObservableCollection<SettingsDetailItemView> SelectedSettingsTabDetails { get; } = new();
+
+    // The same selected-tab rows grouped into section cards (by CardName), in backend order.
+    // This is what the right pane binds to: each group renders a gray card title + a glass
+    // card of control rows, element-matching the Mac SettingsView section cards.
+    public ObservableCollection<SettingsCardGroupView> SelectedSettingsTabCards { get; } = new();
+
+    // ---- Weather hero card surface (element-matches the Mac WeatherDashboardCard) ----
+    // Phase drives the three state layers via WeatherPhaseToVisibilityConverter; the
+    // scalar strings/collection are mutated by WeatherStateCoordinator on the UI context.
+
+    public string WeatherPhase
+    {
+        get => _weatherPhase;
+        private set
+        {
+            if (SetField(ref _weatherPhase, value))
+            {
+                OnPropertyChanged(nameof(IsWeatherLoading));
+            }
+        }
+    }
+
+    // Convenience flag for the loading spinner's IsActive (avoids a converter on a bool).
+    public bool IsWeatherLoading =>
+        string.Equals(WeatherPhase, WeatherStateCoordinator.PhaseLoading, StringComparison.Ordinal);
+
+    public string WeatherLocation
+    {
+        get => _weatherLocation;
+        private set => SetField(ref _weatherLocation, value);
+    }
+
+    public string WeatherTemperature
+    {
+        get => _weatherTemperature;
+        private set => SetField(ref _weatherTemperature, value);
+    }
+
+    public string WeatherCondition
+    {
+        get => _weatherCondition;
+        private set => SetField(ref _weatherCondition, value);
+    }
+
+    // The enum name (Clear/Cloudy/...) the glyph + accent converters key off.
+    public string WeatherConditionKey
+    {
+        get => _weatherConditionKey;
+        private set => SetField(ref _weatherConditionKey, value);
+    }
+
+    public string WeatherSource
+    {
+        get => _weatherSource;
+        private set => SetField(ref _weatherSource, value);
+    }
+
+    public string WeatherUpdatedRelative
+    {
+        get => _weatherUpdatedRelative;
+        private set => SetField(ref _weatherUpdatedRelative, value);
+    }
+
+    public string WeatherErrorMessage
+    {
+        get => _weatherErrorMessage;
+        private set => SetField(ref _weatherErrorMessage, value);
+    }
 
     public int OnlineDeviceCount
     {
@@ -720,6 +879,22 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    // Sub-nav selection for the Settings two-pane layout (left tab list ⇄ right section
+    // cards). TwoWay-bound to the tab ListView's SelectedItem; changing it re-filters the
+    // right pane to that tab's rows. Nullable because the tab list is empty until the first
+    // settings snapshot lands (then the ctor's CollectionChanged hook auto-selects tab 0).
+    public SettingsTabItemView? SelectedSettingsTab
+    {
+        get => _selectedSettingsTab;
+        set
+        {
+            if (SetField(ref _selectedSettingsTab, value))
+            {
+                RefreshSelectedSettingsTabDetails();
+            }
+        }
+    }
+
     public bool IsDashboardSelected =>
         IsFeatureSelected(FeatureEntryId.Dashboard);
 
@@ -734,9 +909,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public bool IsRemoteDesktopSelected =>
         IsFeatureSelected(FeatureEntryId.RemoteDesktop);
-
-    public bool IsQuantumSelected =>
-        IsFeatureSelected(FeatureEntryId.Quantum);
 
     public bool IsSystemMonitorSelected =>
         IsFeatureSelected(FeatureEntryId.SystemMonitor);
@@ -1067,6 +1239,88 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Free-text filter for the Remote Desktop left-pane session list, element-matching
+    /// the Mac RemoteDesktopView search field (filters the active/recent session rows by
+    /// target name). Purely a view-state filter over the existing
+    /// <see cref="RemoteDesktopSessions"/> rows projected by the read-only snapshot — it
+    /// never fabricates rows and never reaches the engine.
+    /// </summary>
+    public string RemoteDesktopSearchText
+    {
+        get => _remoteDesktopSearchText;
+        set
+        {
+            if (SetField(ref _remoteDesktopSearchText, value ?? ""))
+            {
+                ApplyRemoteDesktopSessionFilter();
+            }
+        }
+    }
+
+    // Mirror the unfiltered master from the snapshot applier's replace. The applier does a
+    // Clear() + per-item Add() burst (WorkspaceCollectionProjector.Replace), so this fires
+    // several times per snapshot; each fire just re-captures the current rows, leaving the
+    // master complete after the final Add. We deliberately do NOT mutate RemoteDesktopSessions
+    // from inside this handler (the applier is still appending to it), which would corrupt the
+    // list / re-enter. Instead, when a search is active we re-apply the filter on the captured
+    // UI synchronization context — i.e. AFTER the applier's synchronous burst settles — matching
+    // the codebase's captured-context style (no DispatcherQueue). Changes the filter itself
+    // makes are skipped via the guard.
+    private void OnRemoteDesktopSessionsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (_isFilteringRemoteDesktopSessions)
+        {
+            return;
+        }
+
+        _remoteDesktopSessionMaster.Clear();
+        _remoteDesktopSessionMaster.AddRange(RemoteDesktopSessions);
+
+        if (_remoteDesktopSearchText.Length > 0 && !_remoteDesktopFilterReapplyQueued)
+        {
+            // Defer the re-filter until the current synchronous Clear+Add burst completes so we
+            // never mutate the collection the applier is mid-way through populating.
+            var context = SynchronizationContext.Current;
+            if (context is not null)
+            {
+                _remoteDesktopFilterReapplyQueued = true;
+                context.Post(_ =>
+                {
+                    _remoteDesktopFilterReapplyQueued = false;
+                    ApplyRemoteDesktopSessionFilter();
+                }, null);
+            }
+        }
+    }
+
+    // Re-project RemoteDesktopSessions from the unfiltered master, keeping only rows whose
+    // target name contains the search text (case-insensitive). When the search is empty the
+    // full master is restored. This is the only re-projector of RemoteDesktopSessions outside
+    // the snapshot applier; the guard prevents the CollectionChanged mirror from looping.
+    private void ApplyRemoteDesktopSessionFilter()
+    {
+        _isFilteringRemoteDesktopSessions = true;
+        try
+        {
+            RemoteDesktopSessions.Clear();
+            foreach (var session in _remoteDesktopSessionMaster)
+            {
+                if (_remoteDesktopSearchText.Length == 0 ||
+                    (session.TargetName?.Contains(_remoteDesktopSearchText, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    RemoteDesktopSessions.Add(session);
+                }
+            }
+        }
+        finally
+        {
+            _isFilteringRemoteDesktopSessions = false;
+        }
+
+        _workspaceCountNotifier.RemoteDesktopSessionsChanged();
+    }
+
     public ICommand ConnectCommand { get; }
 
     public ICommand DisconnectCommand { get; }
@@ -1108,6 +1362,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand PrepareConnectionCommand { get; }
 
     public ICommand RunCoreDiagnosticsCommand { get; }
+
+    // Refresh button on the weather hero card (the only nav control on the Mac card).
+    public ICommand RefreshWeatherCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
 
@@ -1192,6 +1449,86 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
         _sessionEngineStateProjector.Apply(newState);
+    }
+
+    // Re-derives the right pane for the SelectedSettingsTab: the flat row slice
+    // (SelectedSettingsTabDetails = SettingsDetails where Section == tab Title) and the
+    // grouped-by-card projection (SelectedSettingsTabCards) the pane actually renders.
+    // Both are replaced in place, preserving the backend's row order within each card.
+    private void RefreshSelectedSettingsTabDetails()
+    {
+        SelectedSettingsTabDetails.Clear();
+        SelectedSettingsTabCards.Clear();
+
+        var section = _selectedSettingsTab?.Title;
+        if (string.IsNullOrEmpty(section))
+        {
+            return;
+        }
+
+        var cardOrder = new List<string>();
+        var cardRows = new Dictionary<string, List<SettingsDetailItemView>>(StringComparer.Ordinal);
+
+        foreach (var row in SettingsDetails)
+        {
+            if (!string.Equals(row.Section, section, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            SelectedSettingsTabDetails.Add(row);
+
+            var card = row.CardName;
+            if (!cardRows.TryGetValue(card, out var rows))
+            {
+                rows = new List<SettingsDetailItemView>();
+                cardRows[card] = rows;
+                cardOrder.Add(card);
+            }
+
+            rows.Add(row);
+        }
+
+        foreach (var card in cardOrder)
+        {
+            SelectedSettingsTabCards.Add(new SettingsCardGroupView(card, cardRows[card]));
+        }
+    }
+
+    // When a settings snapshot replaces the tab list, keep a valid selection: if nothing is
+    // selected yet (first load), or the previously-selected tab is gone, select the first
+    // tab. Otherwise preserve the user's current tab (re-resolved to the new instance so the
+    // ListView selection and the right-pane filter both stay correct).
+    private void OnSettingsTabsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (SettingsTabs.Count == 0)
+        {
+            SelectedSettingsTab = null;
+            return;
+        }
+
+        var currentTitle = _selectedSettingsTab?.Title;
+        SettingsTabItemView? resolved = null;
+        if (!string.IsNullOrEmpty(currentTitle))
+        {
+            foreach (var tab in SettingsTabs)
+            {
+                if (string.Equals(tab.Title, currentTitle, StringComparison.Ordinal))
+                {
+                    resolved = tab;
+                    break;
+                }
+            }
+        }
+
+        SelectedSettingsTab = resolved ?? SettingsTabs[0];
+    }
+
+    // When a settings snapshot replaces the detail rows, re-derive the right-pane slice for
+    // the currently selected tab (the row instances changed even if the tab did not).
+    private void OnSettingsDetailsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        RefreshSelectedSettingsTabDetails();
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

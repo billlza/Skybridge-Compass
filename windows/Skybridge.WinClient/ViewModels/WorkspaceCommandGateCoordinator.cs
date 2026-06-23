@@ -126,8 +126,11 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshUsbManagement(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.UsbManagement);
 
+    // Core diagnostics no longer has a dedicated nav page (the standalone Quantum
+    // tab was removed for macOS parity), so the command is not surfaced in the UI.
+    // The command/binding remain wired; the gate is fail-closed while busy.
     public bool CanRunCoreDiagnostics(WorkspaceCommandGateState state) =>
-        CanUseSelectedWorkspaceFeature(state, FeatureEntryId.Quantum);
+        _workspaceCommandStateClient.CanUseTopBarAction(state.IsBusy, true);
 
     public bool CanRefreshFileTransfer(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.FileTransfer);
@@ -263,7 +266,6 @@ internal sealed class WorkspaceCommandGateCoordinator
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.UsbManagement),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.RemoteDesktop),
-                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Quantum),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Settings),
                 launchAwareSessionGates,
@@ -298,7 +300,8 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanOpenSystemPreferences(state),
                 CanApplySettings(state),
                 CanRestoreDefaults(state),
-                CanResetMonitorData(state)));
+                CanResetMonitorData(state),
+                CanRunCoreDiagnostics(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(

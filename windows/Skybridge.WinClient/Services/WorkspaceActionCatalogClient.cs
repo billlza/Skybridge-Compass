@@ -31,7 +31,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 {
     private static readonly WorkspaceActionSurface[] InitialSurfaces =
     {
-        WorkspaceActionSurface.SidebarSession,
         WorkspaceActionSurface.TopBarActions,
         WorkspaceActionSurface.SessionControls,
         WorkspaceActionSurface.DashboardQuickActions,
@@ -46,7 +45,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.FileTransfer,
         WorkspaceActionSurface.RemoteDesktopHeader,
         WorkspaceActionSurface.RemoteDesktop,
-        WorkspaceActionSurface.QuantumDiagnosticsHeader,
         WorkspaceActionSurface.SystemMonitorHeader,
         WorkspaceActionSurface.SystemMonitorControls,
         WorkspaceActionSurface.SettingsHeader,
@@ -56,7 +54,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 
     private static readonly WorkspaceActionSurface[] DynamicRefreshSurfaces =
     {
-        WorkspaceActionSurface.SidebarSession,
         WorkspaceActionSurface.TopBarActions,
         WorkspaceActionSurface.SessionControls,
         WorkspaceActionSurface.DeviceDiscoveryPrimary,
@@ -70,7 +67,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.FileTransfer,
         WorkspaceActionSurface.RemoteDesktopHeader,
         WorkspaceActionSurface.RemoteDesktop,
-        WorkspaceActionSurface.QuantumDiagnosticsHeader,
         WorkspaceActionSurface.SystemMonitorHeader,
         WorkspaceActionSurface.SystemMonitorControls,
         WorkspaceActionSurface.SettingsHeader,
@@ -88,7 +84,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             request.Surface,
             request.Surface switch
             {
-                WorkspaceActionSurface.SidebarSession => BuildSidebarSessionActions(),
                 WorkspaceActionSurface.TopBarActions => BuildTopBarActions(),
                 WorkspaceActionSurface.SessionControls => BuildSessionControlActions(),
                 WorkspaceActionSurface.DashboardQuickActions => BuildDashboardQuickActions(),
@@ -103,7 +98,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
                 WorkspaceActionSurface.RemoteDesktopHeader => BuildRemoteDesktopHeaderActions(),
                 WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
-                WorkspaceActionSurface.QuantumDiagnosticsHeader => BuildQuantumDiagnosticsHeaderActions(),
                 WorkspaceActionSurface.SystemMonitorHeader => BuildSystemMonitorHeaderActions(),
                 WorkspaceActionSurface.SystemMonitorControls => BuildSystemMonitorControlActions(),
                 WorkspaceActionSurface.SettingsHeader => BuildSettingsHeaderActions(),
@@ -193,27 +187,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             _ => fallback
         };
 
-    private static IReadOnlyList<WorkspaceActionItem> BuildSidebarSessionActions() =>
-        new List<WorkspaceActionItem>
-        {
-            new(
-                "Connect",
-                "Connect",
-                "\uE768",
-                true,
-                "Global session action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.Connect,
-                GateId: WorkspaceActionGateId.CanConnect),
-            new(
-                "Disconnect",
-                "Disconnect",
-                "\uE711",
-                true,
-                "Global session action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.Disconnect,
-                GateId: WorkspaceActionGateId.CanDisconnect)
-        };
-
     private static IReadOnlyList<WorkspaceActionItem> BuildTopBarActions() =>
         new List<WorkspaceActionItem>
         {
@@ -277,9 +250,11 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Device Discovery",
                 CommandId: WorkspaceActionCommandId.OpenDeviceDiscovery),
             new(
+                // Folder glyph (E8B7) to element-match the Mac QuickActionsPanelView
+                // "File Transfer" action, which uses SF "folder".
                 "FileTransfer",
                 "File Transfer",
-                "\uE8E5",
+                "\uE8B7",
                 true,
                 "Queue and history",
                 CommandId: WorkspaceActionCommandId.OpenFileTransfer),
@@ -586,19 +561,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 GateId: WorkspaceActionGateId.CanDisconnectRemoteDesktopSession)
         };
 
-    private static IReadOnlyList<WorkspaceActionItem> BuildQuantumDiagnosticsHeaderActions() =>
-        new List<WorkspaceActionItem>
-        {
-            new(
-                "RunDiagnostics",
-                "Run Diagnostics",
-                "\uE9D9",
-                true,
-                "Mac-parity Quantum/Core diagnostics header action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.RunCoreDiagnostics,
-                GateId: WorkspaceActionGateId.CanRunCoreDiagnostics)
-        };
-
     private static IReadOnlyList<WorkspaceActionItem> BuildSystemMonitorHeaderActions() =>
         new List<WorkspaceActionItem>
         {
@@ -731,7 +693,6 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 
 public enum WorkspaceActionSurface
 {
-    SidebarSession,
     TopBarActions,
     SessionControls,
     DashboardQuickActions,
@@ -746,7 +707,6 @@ public enum WorkspaceActionSurface
     FileTransfer,
     RemoteDesktopHeader,
     RemoteDesktop,
-    QuantumDiagnosticsHeader,
     SystemMonitorHeader,
     SystemMonitorControls,
     SettingsHeader,

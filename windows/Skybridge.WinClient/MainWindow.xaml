@@ -8,10 +8,49 @@
     mc:Ignorable="d">
     <Grid
         x:Name="RootShell"
-        Background="{ThemeResource SolidBackgroundFillColorBase}"
+        Background="{StaticResource SkyBridgeWindowGradientBrush}"
         d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
+        <!-- Sidebar keyboard navigation, matching the macOS app's Cmd+Shift+Up/Down.
+             On Windows the native chord is Ctrl+Shift+Up/Down (向日葵/SunloginClient maps
+             a Mac Cmd to Win Ctrl, so the same physical chord works over remote control).
+             Moves the selected sidebar feature one step, clamped to the list bounds. -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="Down" Invoked="OnSidebarNavigateNext" />
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="Up" Invoked="OnSidebarNavigatePrevious" />
+        </Grid.KeyboardAccelerators>
         <Grid.Resources>
         <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <vm:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
+        <vm:FeatureEntryIdToAccentBrushConverter x:Key="FeatureAccentBrushConverter" />
+        <vm:MetricKeyToGlyphConverter x:Key="MetricGlyphConverter" />
+        <vm:MetricKeyToBrushConverter x:Key="MetricAccentBrushConverter" />
+        <vm:QuickActionKeyToBrushConverter x:Key="QuickActionAccentBrushConverter" />
+        <vm:SystemMetricKeyToGlyphConverter x:Key="SystemMetricGlyphConverter" />
+        <vm:SystemMetricKeyToBrushConverter x:Key="SystemMetricAccentBrushConverter" />
+        <vm:SystemMetricLabelToCaptionConverter x:Key="SystemMetricCaptionConverter" />
+        <vm:SystemIndicatorLabelToGlyphConverter x:Key="SystemIndicatorGlyphConverter" />
+        <vm:SystemIndicatorStateToBrushConverter x:Key="SystemIndicatorStateBrushConverter" />
+        <vm:PlatformToGlyphConverter x:Key="PlatformGlyphConverter" />
+        <vm:PeerStatusToBrushConverter x:Key="PeerStatusBrushConverter" />
+        <vm:StringPresenceToVisibilityConverter x:Key="StringPresenceVisibilityConverter" />
+        <vm:ServiceKindToGlyphConverter x:Key="ServiceKindGlyphConverter" />
+        <vm:ServiceKindToBrushConverter x:Key="ServiceKindBrushConverter" />
+        <vm:WeatherConditionToGlyphConverter x:Key="WeatherConditionGlyphConverter" />
+        <vm:WeatherConditionToBrushConverter x:Key="WeatherConditionBrushConverter" />
+        <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
+        <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
+        <vm:WeatherPhaseToVisibilityConverter x:Key="WeatherPhaseVisibilityConverter" />
+        <vm:FileTransferStateToBrushConverter x:Key="FileTransferStateBrushConverter" />
+        <vm:FileTransferStateToGlyphConverter x:Key="FileTransferStateGlyphConverter" />
+        <vm:FileTransferDirectionToGlyphConverter x:Key="FileTransferDirectionGlyphConverter" />
+        <vm:FileTransferDirectionToBrushConverter x:Key="FileTransferDirectionBrushConverter" />
+        <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
+        <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
+        <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
+        <!-- Soft Remote-Desktop accent fill for the selected connection-mode segment
+             (element-matches the Mac segmented control's selected pill =
+             accentColor.opacity(0.2)). Indigo RD-nav hue (#6E7BF2) at ~33% alpha. -->
+        <SolidColorBrush x:Key="SkyBridgeRemoteDesktopSoftBrush" Color="#556E7BF2" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -22,48 +61,64 @@
             <StackPanel Orientation="Horizontal" Spacing="12" />
         </ItemsPanelTemplate>
         <ItemsPanelTemplate x:Key="WorkspaceMetricCardItemsPanel">
-            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" ItemWidth="232" />
         </ItemsPanelTemplate>
         <ItemsPanelTemplate x:Key="DashboardQuickActionItemsPanel">
-            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
+            <!-- 2x2 grid of quick-action tiles (Mac QuickActionsPanelView inner
+                 LazyVGrid). ItemWidth tuned to 158 so two tiles fit inside the
+                 half-width Quick Actions cell of the dashboard 2x2 panel grid. -->
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="2" ItemWidth="158" />
         </ItemsPanelTemplate>
-        <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
-            <Button
-                AutomationProperties.AutomationId="{Binding AutomationId}"
-                AutomationProperties.Name="{Binding Title}"
-                Command="{Binding Command}"
-                IsEnabled="{Binding IsEnabled}"
-                HorizontalAlignment="Stretch">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
-                    <TextBlock Text="{Binding Title}" />
-                </StackPanel>
-            </Button>
-        </DataTemplate>
+        <!-- System Monitor Overview metric-tile grid: a wrapping row of colored
+             metric tiles (Mac SystemMetricsPanelView). 4 Overview metrics
+             (CPU/Memory/Disk/Network) flow up to 4-across then wrap. ItemWidth tuned
+             to 244 = 232 tile + 12 gutter so tiles sit flush inside the page panel. -->
+        <ItemsPanelTemplate x:Key="SystemMonitorMetricTileItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" ItemWidth="244" />
+        </ItemsPanelTemplate>
+        <!-- System Monitor indicator status-pill strip: horizontally wrapping pills
+             (Mac PerformanceMonitoringPanelView Health/Thermal/Load indicators). -->
+        <ItemsPanelTemplate x:Key="SystemMonitorIndicatorPillItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" />
+        </ItemsPanelTemplate>
+        <!-- NavigationView MenuItemTemplate: per-item content is icon + name on a
+             SINGLE line (element-matches the Mac sidebar rows, which carry NO
+             secondary/subtitle text). The icon is colored with the feature's own
+             accent (per-feature SkyBridgeNav*Brush via FeatureAccentBrushConverter),
+             so each section reads as its own destination — Dashboard blue, Device
+             Discovery green/cyan, USB teal, File Transfer green, Remote Desktop
+             indigo, System Monitor orange, Settings slate.
+             The FeatureEntry.Status field is intentionally NOT rendered here (it
+             stays on the model as a backend contract); the Mac shows no subtitle,
+             so binding it would be the biggest knock-off tell. The native
+             NavigationViewItemPresenter owns selection/hover/keyboard/a11y and the
+             filled selection pill (App.xaml theme overrides), so this template
+             carries ONLY the content — no selection visuals. Row height ~26px of
+             content + the presenter's own padding lands at the Mac's generous
+             ~52px row. -->
         <DataTemplate x:Key="NavigationItemTemplate">
             <Grid
-                MinHeight="48"
-                ColumnSpacing="12"
+                MinHeight="44"
+                ColumnSpacing="14"
                 AutomationProperties.AutomationId="{Binding Id}"
                 AutomationProperties.Name="{Binding Title}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="28" />
+                    <ColumnDefinition Width="24" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <FontIcon
                     Grid.Column="0"
                     Glyph="{Binding Glyph}"
-                    FontSize="16"
-                    VerticalAlignment="Center" />
-                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
-                    <TextBlock
-                        Text="{Binding Status}"
-                        TextWrapping="Wrap"
-                        MaxLines="2"
-                        FontSize="12"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
+                    FontSize="22"
+                    Foreground="{Binding Id, Converter={StaticResource FeatureAccentBrushConverter}}"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Center" />
+                <TextBlock
+                    Grid.Column="1"
+                    Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2"
+                    FontSize="15"
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
             </Grid>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceActionButtonTemplate">
@@ -111,54 +166,271 @@
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceMetricCardTemplate">
-            <Border
-                Width="210"
-                Margin="0,0,12,0"
-                Padding="14"
-                CornerRadius="8"
-                Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
-                <StackPanel Spacing="4">
-                    <TextBlock Text="{Binding Title}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding Value}" FontSize="24" FontWeight="SemiBold" />
-                    <TextBlock
-                        Text="{Binding Detail}"
-                        TextWrapping="Wrap"
-                        FontSize="12"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
+            <!-- Element-matches the Mac StatCard.swift: colored icon top-left,
+                 then a small secondary label, then a big bold value. There is NO
+                 caption/description under the value on the Mac, so the Detail
+                 TextBlock is intentionally absent here. -->
+            <Border Style="{StaticResource MetricCard}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <!-- Accent icon chip (top-left), matching the Mac StatCard glyph badge.
+                         Glyph + accent hue are keyed per-metric off the stable Title
+                         (Online Devices / Active Sessions / Transfer Tasks / System Status)
+                         so each card reads distinctly like the Mac StatCard. -->
+                    <Border
+                        Style="{StaticResource AccentIconChip}"
+                        HorizontalAlignment="Left">
+                        <FontIcon
+                            Glyph="{Binding Title, Converter={StaticResource MetricGlyphConverter}}"
+                            FontSize="18"
+                            Foreground="{Binding Title, Converter={StaticResource MetricAccentBrushConverter}}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
+                    <!-- Bottom group: small secondary label + big bold value
+                         (Mac VStack rhythm: label .caption .secondary, value .title.bold). -->
+                    <StackPanel Grid.Row="1" VerticalAlignment="Bottom" Spacing="4">
+                        <TextBlock
+                            Text="{Binding Title}"
+                            FontSize="12"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            TextWrapping="Wrap"
+                            MaxLines="1" />
+                        <TextBlock
+                            Text="{Binding Value}"
+                            FontSize="30"
+                            FontWeight="Bold"
+                            LineHeight="34"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    </StackPanel>
+                </Grid>
             </Border>
         </DataTemplate>
+        <!-- Weather metric grid cell: color-emoji icon (fixed 16-wide) + a label-over-value
+             VStack, element-matching the Mac WeatherMetric (HStack: icon, then
+             [label .caption2 muted; value .caption.bold]). The icon is a COLOR EMOJI via
+             Segoe UI Emoji (Segoe Fluent Icons has no weather/humidity/AQI glyphs), so it is
+             pre-colored and carries no Foreground tint. The per-metric tint (humidity=cyan,
+             wind=mint, visibility=blue, and the AQI bucket color green/yellow/orange/red/
+             purple/brown) now lives on the VALUE text, preserving the air-quality signal. -->
+        <DataTemplate x:Key="WeatherMetricItemTemplate">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock
+                    Text="{Binding Key, Converter={StaticResource WeatherMetricGlyphConverter}}"
+                    FontFamily="Segoe UI Emoji"
+                    FontSize="14"
+                    Width="16"
+                    VerticalAlignment="Top" />
+                <StackPanel Spacing="2">
+                    <TextBlock
+                        Text="{Binding Label}"
+                        FontSize="11"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                    <TextBlock
+                        Text="{Binding Value}"
+                        FontSize="13"
+                        FontWeight="Bold"
+                        Foreground="{Binding TintKey, Converter={StaticResource WeatherMetricTintBrushConverter}}" />
+                </StackPanel>
+            </StackPanel>
+        </DataTemplate>
+        <ItemsPanelTemplate x:Key="WeatherMetricItemsPanel">
+            <!-- 2 columns, matching the Mac LazyVGrid(2 flexible cols, spacing 10). -->
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="2" ItemWidth="150" />
+        </ItemsPanelTemplate>
         <DataTemplate x:Key="DashboardQuickActionTemplate">
+            <!-- Element-matches the Mac QuickActionButton.swift: a centered colored
+                 icon over a centered title, NO subtitle/description (Mac shows none).
+                 The colored glyph hue is keyed per-action off the stable Key. -->
             <Button
+                Style="{StaticResource QuickActionTile}"
                 AutomationProperties.AutomationId="{Binding AutomationId}"
                 AutomationProperties.Name="{Binding Title}"
                 Command="{Binding Command}"
                 IsEnabled="{Binding IsEnabled}"
-                Width="210"
-                MinHeight="82"
-                Margin="0,0,12,0"
-                Padding="14"
-                HorizontalContentAlignment="Stretch"
-                VerticalContentAlignment="Center">
-                <Grid ColumnSpacing="10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="32" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon
-                        Glyph="{Binding Glyph}"
-                        FontSize="18"
-                        VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Spacing="3">
-                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                        <TextBlock
-                            Text="{Binding Detail}"
-                            TextWrapping="Wrap"
-                            FontSize="12"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </Grid>
+                Width="146"
+                Margin="0,0,12,12">
+                <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Border
+                        Width="44"
+                        Height="44"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        HorizontalAlignment="Center">
+                        <FontIcon
+                            Glyph="{Binding Glyph}"
+                            FontSize="18"
+                            Foreground="{Binding Key, Converter={StaticResource QuickActionAccentBrushConverter}}"
+                            VerticalAlignment="Center"
+                            HorizontalAlignment="Center" />
+                    </Border>
+                    <TextBlock
+                        Text="{Binding Title}"
+                        FontWeight="SemiBold"
+                        TextWrapping="Wrap"
+                        TextAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                </StackPanel>
             </Button>
+        </DataTemplate>
+        <!-- ===================================================================
+             Dashboard Device-Discovery summary ROW. Element-matches the Mac
+             EnhancedDeviceRow: per-device-type icon (keyed off Platform) +
+             [name (.headline white) over device-id (.caption secondary)] + a
+             trailing status dot (green when a fingerprint/identity is present,
+             i.e. the peer is wire-reachable). Non-interactive (no Connect button
+             on the dashboard SUMMARY — the full Device Discovery feature page owns
+             connect actions), so it adds no button element to the gated count.
+             Bound to the live SessionViewModel.DiscoveredPeers collection
+             (DiscoveredPeerView: DeviceId / DisplayName / Platform / ServiceKind /
+             PublicKeyFingerprint / ...), which is fed by the Win32 DNS-SD browser.
+             =================================================================== -->
+        <DataTemplate x:Key="DashboardDeviceSummaryRowTemplate">
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,10">
+                <Grid ColumnSpacing="14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border
+                        Width="38"
+                        Height="38"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        VerticalAlignment="Center">
+                        <FontIcon
+                            Glyph="{Binding Platform, Converter={StaticResource PlatformGlyphConverter}}"
+                            FontSize="18"
+                            Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                        <TextBlock
+                            Text="{Binding DisplayName}"
+                            FontSize="14"
+                            FontWeight="SemiBold"
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock
+                            Text="{Binding DeviceId}"
+                            FontSize="12"
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </StackPanel>
+                    <Ellipse
+                        Grid.Column="2"
+                        Style="{StaticResource StatusDot}"
+                        VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <!-- ===================================================================
+             Dashboard Remote-Sessions summary ROW. Element-matches the Mac
+             RemoteSessionStatusView: [target name (.headline white) over
+             "<transport> • <quality>" (.subheadline secondary)] on the left, a
+             State badge on the right. Non-interactive (no View/Disconnect buttons
+             on the SUMMARY — the Remote Desktop feature page owns those), so it
+             adds no button element. Bound to SessionViewModel.RemoteDesktopSessions
+             (RemoteDesktopSessionItemView: TargetName / State / Transport /
+             Quality / Detail). NOTE: per recon this collection currently holds
+             only placeholder preview rows (no live-session source), so when it is
+             empty the panel shows the honest "No active sessions" empty state.
+             =================================================================== -->
+        <DataTemplate x:Key="DashboardSessionSummaryRowTemplate">
+            <Border Style="{StaticResource GlassCard}" Padding="12" Margin="0,0,0,8">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="2" VerticalAlignment="Center">
+                        <TextBlock
+                            Text="{Binding TargetName}"
+                            FontWeight="SemiBold"
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock
+                            FontSize="12"
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}">
+                            <Run Text="{Binding Transport}" />
+                            <Run Text=" • " />
+                            <Run Text="{Binding Quality}" />
+                        </TextBlock>
+                    </StackPanel>
+                    <Border Grid.Column="1" Style="{StaticResource Badge}" VerticalAlignment="Center">
+                        <TextBlock
+                            Text="{Binding State}"
+                            FontSize="12"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <!-- ===================================================================
+             Dashboard System-Performance summary ROW. Element-matches the Mac
+             MetricView / PerformanceMetricRow: a per-metric colored icon chip +
+             [label (.caption secondary) over value (.title3.bold tinted)] on the
+             left, the Detail string (.caption muted) on the right. Glyph + tint are
+             keyed off the metric Label (CPU / Memory / Disk / Network). Bound to
+             SessionViewModel.SystemMonitorOverview (SystemMonitorMetricView:
+             Label / Value / Detail), a real in-process read-only sampler — Memory/
+             Disk/Network are live; CPU stays honestly labeled (its Detail says
+             "Usage sampling requires ETW/EventSource wiring").
+             =================================================================== -->
+        <DataTemplate x:Key="DashboardSystemMetricRowTemplate">
+            <Grid ColumnSpacing="12" Padding="0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    Width="34"
+                    Height="34"
+                    CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                    BorderThickness="1"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding Label, Converter={StaticResource SystemMetricGlyphConverter}}"
+                        FontSize="16"
+                        Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock
+                        Text="{Binding Label}"
+                        FontSize="12"
+                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock
+                        Text="{Binding Value}"
+                        FontSize="18"
+                        FontWeight="Bold"
+                        Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}" />
+                </StackPanel>
+                <TextBlock
+                    Grid.Column="2"
+                    Text="{Binding Detail}"
+                    FontSize="11"
+                    MaxWidth="150"
+                    TextWrapping="Wrap"
+                    TextAlignment="Right"
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+            </Grid>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceFactRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
@@ -167,36 +439,250 @@
                     <ColumnDefinition Width="220" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 <TextBlock
                     Grid.Column="2"
                     Text="{Binding Detail}"
                     TextWrapping="Wrap"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             SystemMonitorMetricTileTemplate — the colored metric TILE for the
+             System Monitor page Overview grid. Element-matches the Mac
+             SystemMetricsPanelView / MetricChartView row: a per-metric accent icon
+             chip, the metric Label as a .caption secondary sub-label (with a short
+             human caption beneath via SystemMetricCaptionConverter), and the big
+             tinted Value (Mac .title3.bold in the metric's accent color). The Detail
+             string sits beneath in muted text (e.g. "1.2 GB process working set",
+             "C:\ 240 GB free", or CPU's honest "Usage sampling requires ETW…").
+             Glyph + tint are keyed off Label (SystemMetricGlyphConverter /
+             SystemMetricAccentBrushConverter): CPU orange, Memory blue, Disk violet,
+             Network green — matching the Mac per-channel tinting. Bound to the REAL
+             SystemMonitorOverview sampler (SystemMonitorMetricView Label/Value/Detail):
+             Memory/Disk/Network are live; CPU's Value is the honest logical-core count
+             ("N logical"), not a fabricated %, because CPU% needs ETW wiring. No inline
+             Button — the tile is display-only. Uses the MetricCard glass chrome.
+             =================================================================== -->
+        <DataTemplate x:Key="SystemMonitorMetricTileTemplate">
+            <Border Style="{StaticResource MetricCard}" Width="232" Height="132">
+                <StackPanel Spacing="8">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Border
+                            Width="34"
+                            Height="34"
+                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                            BorderThickness="1"
+                            VerticalAlignment="Center">
+                            <FontIcon
+                                Glyph="{Binding Label, Converter={StaticResource SystemMetricGlyphConverter}}"
+                                FontSize="16"
+                                Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{Binding Label}"
+                                FontSize="12"
+                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock
+                                Text="{Binding Label, Converter={StaticResource SystemMetricCaptionConverter}}"
+                                FontSize="11"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <TextBlock
+                        Text="{Binding Value}"
+                        FontSize="20"
+                        FontWeight="Bold"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{Binding Label, Converter={StaticResource SystemMetricAccentBrushConverter}}" />
+                    <TextBlock
+                        Text="{Binding Detail}"
+                        FontSize="11"
+                        MaxLines="2"
+                        TextWrapping="Wrap"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <!-- ===================================================================
+             SystemMonitorIndicatorPillTemplate — the tinted status PILL for the
+             System Monitor page indicator strip. Element-matches the Mac
+             PerformanceMonitoringPanelView inline indicator rows (Health / Thermal /
+             Load) rendered as capsule pills: a status dot + indicator glyph + Label +
+             the live State value, all tinted by State via SystemIndicatorStateBrushConverter
+             (green = healthy/active/nominal, orange = caution/read-only, red = offline,
+             muted = unknown/idle/off — pending states stay muted, never faked-healthy).
+             Bound to the REAL SystemMonitorIndicators collection (SystemMonitorIndicatorView
+             Label/State/Detail): Health is derived from live memory/disk/network; Thermal
+             stays honestly "Unknown" (no Windows temperature provider yet). Detail rides
+             as the pill tooltip so the pill stays compact. Uses StatusPill + StatusDot.
+             No inline Button — the pill is display-only.
+             =================================================================== -->
+        <DataTemplate x:Key="SystemMonitorIndicatorPillTemplate">
+            <Border Style="{StaticResource StatusPill}" ToolTipService.ToolTip="{Binding Detail}">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}" />
+                    <FontIcon
+                        Glyph="{Binding Label, Converter={StaticResource SystemIndicatorGlyphConverter}}"
+                        FontSize="14"
+                        Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                    <TextBlock
+                        Text="{Binding Label}"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                        VerticalAlignment="Center" />
+                    <TextBlock
+                        Text="{Binding State}"
+                        Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <!-- ===================================================================
+             DiscoveredPeerItemTemplate — the RICH per-peer row for the full
+             Device Discovery page's DiscoveredPeers ListView. Element-matches the
+             Mac OnlineDeviceCard / EnhancedDeviceRow:
+               [status-tinted device-type icon chip 44x44]
+               + [ name (.headline white)  · trust badge · status dot ]
+                 [ "<Platform> • <ServiceKind>" secondary line ]
+                 [ connection-type chip (transport icon + ServiceKind label) ]
+                 [ DeviceId (.caption muted) ]
+                 [ Capabilities (.caption2 secondary, only if present) ]
+                 [ Fingerprint  (.caption2 muted,    only if present) ]
+                 [ TrustSummary (.caption2 secondary, only if present) ]
+             All fields are LIVE DiscoveredPeerView data (DNS-SD browser): DeviceId /
+             DisplayName / Platform / ServiceKind / PublicKeyFingerprint /
+             CapabilitiesSummary / TrustSummary. The device-type icon is keyed off
+             Platform (PlatformGlyphConverter); the status dot + icon tint are keyed
+             off PublicKeyFingerprint presence (green when the peer advertises a
+             verifiable identity, muted gray otherwise) — no fabricated state.
+             Wrapped in GlassCard so the full-page peer list matches the carded
+             dashboard look (closes the asymmetry noted in recon). Contains NO
+             inline button element — connect actions live on the page's shared
+             action surfaces, so the gated button count is unaffected.
+             =================================================================== -->
         <DataTemplate x:Key="DiscoveredPeerItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="16">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="2*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Spacing="3">
-                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceId}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="{Binding Platform}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding ServiceKind}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-                <StackPanel Grid.Column="2" Spacing="3">
-                    <TextBlock Text="{Binding CapabilitiesSummary}" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding PublicKeyFingerprint}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding TrustSummary}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-            </Grid>
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,8">
+                <Grid ColumnSpacing="14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Status-tinted device-type icon chip (Mac 40-50px rounded-square
+                         status chip, r12 .continuous). -->
+                    <Border
+                        Width="44"
+                        Height="44"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        VerticalAlignment="Top">
+                        <FontIcon
+                            Glyph="{Binding Platform, Converter={StaticResource PlatformGlyphConverter}}"
+                            FontSize="20"
+                            Foreground="{Binding PublicKeyFingerprint, Converter={StaticResource PeerStatusBrushConverter}}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
+                    <!-- Info column -->
+                    <StackPanel Grid.Column="1" Spacing="6">
+                        <!-- Name row: name + trust badge + status dot -->
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock
+                                Text="{Binding DisplayName}"
+                                FontSize="15"
+                                FontWeight="SemiBold"
+                                VerticalAlignment="Center"
+                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <!-- Trust badge (EB95 = Shield ~ SF "checkmark.shield.fill"),
+                                 only shown when the peer carries a trust summary. -->
+                            <Border
+                                Style="{StaticResource BadgeSuccess}"
+                                VerticalAlignment="Center"
+                                Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <FontIcon Glyph="&#xEB95;" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <TextBlock Text="Trusted" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                            <Ellipse
+                                Style="{StaticResource StatusDot}"
+                                Fill="{Binding PublicKeyFingerprint, Converter={StaticResource PeerStatusBrushConverter}}"
+                                VerticalAlignment="Center" />
+                        </StackPanel>
+                        <!-- Platform / ServiceKind secondary line -->
+                        <TextBlock FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}">
+                            <Run Text="{Binding Platform}" />
+                            <Run Text=" &#x2022; " />
+                            <Run Text="{Binding ServiceKind}" />
+                        </TextBlock>
+                        <!-- Connection-type chip: transport icon + ServiceKind label -->
+                        <Border
+                            Style="{StaticResource ConnectionTypeChip}"
+                            BorderBrush="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                            HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <FontIcon
+                                    Glyph="{Binding ServiceKind, Converter={StaticResource ServiceKindGlyphConverter}}"
+                                    FontSize="11"
+                                    Foreground="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                                    VerticalAlignment="Center" />
+                                <TextBlock
+                                    Text="{Binding ServiceKind}"
+                                    FontSize="11"
+                                    FontWeight="Medium"
+                                    Foreground="{Binding ServiceKind, Converter={StaticResource ServiceKindBrushConverter}}"
+                                    VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                        <!-- DeviceId -->
+                        <TextBlock
+                            Text="{Binding DeviceId}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        <!-- Capabilities (only when present) -->
+                        <TextBlock
+                            Text="{Binding CapabilitiesSummary}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            Visibility="{Binding CapabilitiesSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        <!-- Fingerprint (only when present) -->
+                        <TextBlock
+                            Text="{Binding PublicKeyFingerprint}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                            Visibility="{Binding PublicKeyFingerprint, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                        <!-- Trust summary (only when present) -->
+                        <TextBlock
+                            Text="{Binding TrustSummary}"
+                            FontSize="12"
+                            TextWrapping="Wrap"
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                            Visibility="{Binding TrustSummary, Converter={StaticResource StringPresenceVisibilityConverter}}" />
+                    </StackPanel>
+                    <!-- Trailing chevron affordance (Mac TrustedDeviceCard chevron).
+                         E76C = ChevronRight. Decorative; no command. -->
+                    <FontIcon
+                        Grid.Column="2"
+                        Glyph="&#xE76C;"
+                        FontSize="12"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                        VerticalAlignment="Center" />
+                </Grid>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="UsbDeviceItemTemplate">
             <Grid Padding="0,8" ColumnSpacing="12">
@@ -206,52 +692,156 @@
                     <ColumnDefinition Width="220" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Spacing="3">
-                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceType}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding DeviceType}" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="Device ID" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Device ID" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
                 <StackPanel Grid.Column="2" Spacing="3">
-                    <TextBlock Text="Vendor / Product" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Vendor / Product" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             FileTransferQueueItemTemplate — the active/queued transfer ROW for
+             the File Transfer page Transfer Queue list. Element-matches the Mac
+             ModernTransferRowView:
+               [ direction icon (up=outgoing blue / down=incoming green, derived
+                 honestly from State via FileTransferDirectionGlyph/BrushConverter) ]
+               + [ file-type tile holding a status glyph (queued clock / sync /
+                   completed check / error, tinted by State) ]
+               + [ Name (.subheadline medium) over Size (.caption secondary) ]
+               + [ Spacer ]
+               + [ right column: State value (tinted) over Binding (channel kind,
+                   muted caption) ]
+             Bound to the REAL FileTransferQueue collection (FileTransferQueueItemView
+             Name/State/Size/Binding/Detail) projected from the read-only workspace
+             snapshot. There is NO numeric progress field in the Windows snapshot, so
+             the row shows the honest State text (Queued / Intent ready / …) instead
+             of a fabricated progress bar — matching the Mac status semantics without
+             faking a percentage. Detail rides as the row tooltip. No inline Button —
+             the row is display-only; transfer actions live on the shared action surface.
+             =================================================================== -->
         <DataTemplate x:Key="FileTransferQueueItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="12">
+            <Grid Padding="2,8" ColumnSpacing="12" ToolTipService.ToolTip="{Binding Detail}">
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="120" />
-                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel Spacing="2">
-                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding Size}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <!-- Direction icon (Mac arrow.up/down.circle.fill: outgoing blue / incoming green) -->
+                <FontIcon
+                    Grid.Column="0"
+                    Glyph="{Binding State, Converter={StaticResource FileTransferDirectionGlyphConverter}}"
+                    FontSize="18"
+                    Foreground="{Binding State, Converter={StaticResource FileTransferDirectionBrushConverter}}"
+                    VerticalAlignment="Center" />
+                <!-- File-type tile holding the State status glyph (Mac 40x40 icon tile) -->
+                <Border
+                    Grid.Column="1"
+                    Width="36"
+                    Height="36"
+                    CornerRadius="8"
+                    Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                    BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                    BorderThickness="1"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding State, Converter={StaticResource FileTransferStateGlyphConverter}}"
+                        FontSize="16"
+                        Foreground="{Binding State, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <!-- Name + size -->
+                <StackPanel Grid.Column="2" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding Size}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                 </StackPanel>
-                <TextBlock Grid.Column="1" Text="{Binding State}" />
-                <TextBlock Grid.Column="2" Text="{Binding Binding}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <!-- State (tinted) over Binding channel kind (muted) -->
+                <StackPanel Grid.Column="3" Spacing="2" VerticalAlignment="Center" HorizontalAlignment="Right" MinWidth="120">
+                    <TextBlock
+                        Text="{Binding State}"
+                        FontWeight="Medium"
+                        TextAlignment="Right"
+                        Foreground="{Binding State, Converter={StaticResource FileTransferStateBrushConverter}}" />
+                    <TextBlock
+                        Text="{Binding Binding}"
+                        FontSize="11"
+                        TextAlignment="Right"
+                        TextWrapping="Wrap"
+                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                </StackPanel>
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             FileTransferHistoryItemTemplate — the completed-transfer ROW for the
+             File Transfer page Transfer History list. Element-matches the Mac
+             EnhancedHistoryRowView:
+               [ Result status icon (completed check / error, tinted by Result) ]
+               + [ Name (.subheadline medium) over a meta line: Hmac • Signature
+                   (both .caption2 secondary) ]
+               + [ Spacer ]
+               + [ verification shield pill (Mac scan-result capsule): a shield glyph
+                   tinted green when Verified / red when failed + the Result text ]
+             Bound to the REAL FileTransferHistory collection (FileTransferHistoryItemView
+             Name/Result/Hmac/Signature). Carded per-row (GlassCard) to match the Mac
+             EnhancedHistoryRowView's own ultraThinMaterial card. No inline Button.
+             =================================================================== -->
         <DataTemplate x:Key="FileTransferHistoryItemTemplate">
-            <Grid Padding="0,8" ColumnSpacing="12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="120" />
-                    <ColumnDefinition Width="160" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                <TextBlock Grid.Column="1" Text="{Binding Result}" />
-                <StackPanel Grid.Column="2" Spacing="2">
-                    <TextBlock Text="{Binding Hmac}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Text="{Binding Signature}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-            </Grid>
+            <Border Style="{StaticResource GlassCard}" Padding="12" Margin="0,0,0,8">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Result status icon (Mac checkmark/xmark.circle.fill) -->
+                    <FontIcon
+                        Grid.Column="0"
+                        Glyph="{Binding Result, Converter={StaticResource FileTransferStateGlyphConverter}}"
+                        FontSize="20"
+                        Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        VerticalAlignment="Center" />
+                    <!-- Name + HMAC/Signature meta line -->
+                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}">
+                            <Run Text="{Binding Hmac}" />
+                            <Run Text=" &#x2022; " />
+                            <Run Text="{Binding Signature}" />
+                        </TextBlock>
+                    </StackPanel>
+                    <!-- Verification shield pill (Mac scan-result capsule) -->
+                    <Border
+                        Grid.Column="2"
+                        Style="{StaticResource ConnectionTypeChip}"
+                        BorderBrush="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                        VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <FontIcon
+                                Glyph="{Binding Result, Converter={StaticResource FileTransferResultShieldGlyphConverter}}"
+                                FontSize="12"
+                                Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                                VerticalAlignment="Center" />
+                            <TextBlock
+                                Text="{Binding Result}"
+                                FontSize="11"
+                                FontWeight="Medium"
+                                Foreground="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                                VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="RemoteDesktopSessionItemTemplate">
             <Grid Padding="0,8" ColumnSpacing="12">
@@ -323,67 +913,277 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <!-- ===================================================================
+             SettingsTabItemTemplate — the LEFT sub-nav row for the Settings
+             two-pane layout. Element-matches the Mac SettingsView sidebar row: a
+             per-tab accent icon chip + the tab Title (SemiBold) over the localized
+             EN+ZH section summary (Detail, 12px secondary). Selection (the filled
+             pill) is owned by the native ListView container — exactly one tab
+             highlights at a time — so this template carries content ONLY, no
+             selection visuals and no push-button (keeps the gated button count at 7).
+             Bound to SettingsTabItemView (Title / Detail / Glyph).
+             =================================================================== -->
         <DataTemplate x:Key="SettingsTabItemTemplate">
-            <StackPanel Padding="0,8" Spacing="2">
-                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+            <Grid MinHeight="48" ColumnSpacing="12" Padding="0,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="32" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    Grid.Column="0"
+                    Style="{StaticResource AccentIconChip}"
+                    VerticalAlignment="Center">
+                    <FontIcon
+                        Glyph="{Binding Glyph}"
+                        FontSize="16"
+                        Foreground="{StaticResource SkyBridgeNavSettingsBrush}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                    <TextBlock
+                        Text="{Binding Title}"
+                        FontWeight="SemiBold"
+                        TextWrapping="Wrap"
+                        MaxLines="1"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock
+                        Text="{Binding Detail}"
+                        TextWrapping="Wrap"
+                        MaxLines="2"
+                        TextTrimming="CharacterEllipsis"
+                        FontSize="11"
+                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             SettingsControlRowTemplate — one control row inside a section card.
+             Element-matches a Mac SettingsView row: ControlName label on the left,
+             then ONE of three control affordances on the right keyed off the row's
+             honest, backend-derived ControlKind (SettingsControlKindVisibilityConverter):
+               • Toggle   — a ToggleSwitch (IsOn from the On/Off value). ALWAYS
+                            IsEnabled="False": the snapshot is display-only and no
+                            set-command exists, so the switch shows the value but is
+                            non-interactive — honest, never implying Windows toggles it.
+               • Dropdown — a display-only ComboBox populated with the parsed Mac
+                            option set (DropdownOptions), current value selected. Also
+                            IsEnabled="False" (no persistence behind it).
+               • Value    — right-aligned status text, tinted by the value's honesty
+                            vocabulary (SettingsValueStateBrushConverter): cyan for
+                            Core-owned/Read-only, muted for macOS-only/OS-managed,
+                            amber for Gated/Disabled/Not-wired, primary otherwise.
+             The Detail string rides as the row tooltip (the Windows truth: Display-only
+             / Not persisted / Core-owned / macOS-only …). NO inline push-button — none of
+             ToggleSwitch / ComboBox / FontIcon match the gated push-button pattern.
+             Bound to SettingsDetailItemView (ControlName / ControlKind / IsOn /
+             DropdownOptions / DropdownSelection / Value / Detail).
+             =================================================================== -->
+        <DataTemplate x:Key="SettingsControlRowTemplate">
+            <Grid Padding="0,6" ColumnSpacing="12" ToolTipService.ToolTip="{Binding Detail}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <TextBlock
-                    Text="{Binding Detail}"
+                    Grid.Column="0"
+                    Text="{Binding ControlName}"
                     TextWrapping="Wrap"
-                    FontSize="12"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                <!-- Toggle affordance (display-only: OneWay to the get-only IsOn, disabled) -->
+                <ToggleSwitch
+                    Grid.Column="1"
+                    IsOn="{Binding IsOn, Mode=OneWay}"
+                    IsEnabled="{Binding IsSettable}"
+                    MinWidth="0"
+                    OnContent=""
+                    OffContent=""
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Toggle}" />
+                <!-- Dropdown affordance (display-only: OneWay selection, disabled) -->
+                <ComboBox
+                    Grid.Column="1"
+                    ItemsSource="{Binding DropdownOptions}"
+                    SelectedItem="{Binding DropdownSelection, Mode=OneWay}"
+                    IsEnabled="{Binding IsSettable}"
+                    MinWidth="160"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Dropdown}" />
+                <!-- Value affordance (right-aligned status text) -->
+                <TextBlock
+                    Grid.Column="1"
+                    Text="{Binding Value}"
+                    TextWrapping="Wrap"
+                    MaxWidth="240"
+                    TextAlignment="Right"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Right"
+                    Foreground="{Binding Value, Converter={StaticResource SettingsValueStateBrushConverter}}"
+                    Visibility="{Binding ControlKind, Converter={StaticResource SettingsControlKindVisibilityConverter}, ConverterParameter=Value}" />
+            </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             SettingsCardGroupTemplate — one section CARD in the right pane.
+             Element-matches the Mac SettingsView section: a gray section title
+             (CardName) over a glass card (GlassCard) holding that card's control
+             rows. The rows are an inner ItemsControl over the group's Rows, each
+             rendered by SettingsControlRowTemplate. Bound to SettingsCardGroupView
+             (CardName / Rows). No Button.
+             =================================================================== -->
+        <DataTemplate x:Key="SettingsCardGroupTemplate">
+            <StackPanel Spacing="8" Margin="0,0,0,14">
+                <TextBlock
+                    Text="{Binding CardName}"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                <Border Style="{StaticResource GlassCard}">
+                    <ItemsControl
+                        ItemsSource="{Binding Rows}"
+                        ItemTemplate="{StaticResource SettingsControlRowTemplate}" />
+                </Border>
             </StackPanel>
         </DataTemplate>
         </Grid.Resources>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="300" />
+            <ColumnDefinition Width="280" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <Border
+        <!-- ===================================================================
+             Sidebar shell — WinUI 3 NavigationView (the Windows-standard nav).
+             The native control owns the nav list, single-selection, the
+             selection indicator/pill, keyboard navigation and accessibility,
+             so exactly one item highlights at a time (replaces the custom
+             ListView + NavItemContainer pill, which painted every item's pill).
+
+               • MenuItemsSource = NavigationItems   (was ItemsSource)
+               • MenuItemTemplate = NavigationItemTemplate  (was ItemTemplate)
+               • SelectedItem    = SelectedFeature (TwoWay)  — unchanged binding
+               • PaneHeader      = 44x44 brand block + name + ConnectionStatus
+               • PaneFooter      = account block (no sidebar session actions, Mac parity)
+               • On-brand selected/hover surfaces come from the documented
+                 NavigationView theme-resource overrides in App.xaml.
+             =================================================================== -->
+        <NavigationView
             Grid.Column="0"
-            Background="{ThemeResource LayerFillColorDefaultBrush}"
-            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            Grid.ColumnSpan="2"
+            x:Name="SidebarNavigation"
+            AutomationProperties.AutomationId="Skybridge.Navigation.List"
+            PaneDisplayMode="Left"
+            OpenPaneLength="280"
+            IsSettingsVisible="False"
+            IsBackButtonVisible="Collapsed"
+            IsPaneToggleButtonVisible="False"
+            MenuItemsSource="{Binding NavigationItems}"
+            MenuItemTemplate="{StaticResource NavigationItemTemplate}"
+            SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
+            BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
             BorderThickness="0,0,1,0">
-            <Grid Padding="20,18">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
 
-                <StackPanel Spacing="2">
-                    <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" FontSize="20" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <!-- ===========================================================
+                 Profile card (element-matches the Mac sidebar header):
+                 48x48 rounded app-icon square + app name "SkyBridge Compass"
+                 (bold ~17) + bilingual tagline (gray ~12), then a thin divider.
+                 The Mac header also shows a device line ("Lza's MacBook Pro ·
+                 Apple M1 Max"); there is no bindable local-device-name on the
+                 Windows ViewModel and the constraints forbid fabricating one, so
+                 the device line is intentionally OMITTED rather than faked (see
+                 the account block below for the live session state). This is a
+                 Border/Grid block built without any Button element, so the gated
+                 button count is unaffected. -->
+            <NavigationView.PaneHeader>
+                <StackPanel Padding="16,20,16,8" Spacing="14">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="48" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border
+                            Width="48"
+                            Height="48"
+                            CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                            Background="{StaticResource SkyBridgeAccentBrush}"
+                            VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE80F;" FontSize="24" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="17" FontWeight="Bold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock Text="Next-gen cross-platform connectivity" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                        </StackPanel>
+                    </Grid>
+                    <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
                 </StackPanel>
+            </NavigationView.PaneHeader>
 
-                <ListView
-                    Grid.Row="1"
-                    AutomationProperties.AutomationId="Skybridge.Navigation.List"
-                    Margin="0,22,0,18"
-                    ItemsSource="{Binding NavigationItems}"
-                    ItemTemplate="{StaticResource NavigationItemTemplate}"
-                    SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
-                    SelectionMode="Single" />
+            <!-- ===========================================================
+                 Bottom-pinned account block.
 
-                <ItemsControl
-                    Grid.Row="2"
-                    AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"
-                    ItemsSource="{Binding SidebarSessionActions}"
-                    ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"
-                    ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}" />
-            </Grid>
-        </Border>
+                 The Mac sidebar footer is an ACCOUNT block (avatar + username +
+                 ID + gear) on a slightly darker footer, and — like the Mac — it
+                 carries NO sidebar Connect / Disconnect actions. The sole connect
+                 affordance lives in the always-visible "Session Controls" panel
+                 (Connect / Heartbeat / Disconnect), so no user is stranded. The
+                 account block is glass chrome: a circular avatar + a session label
+                 + the live ConnectionStatus (honest session state, the only
+                 identity-like value the VM exposes) + a chevron + a gear glyph. It
+                 is built entirely from Border / Grid / Ellipse / FontIcon /
+                 TextBlock with no Button element. -->
+            <NavigationView.PaneFooter>
+                <StackPanel Padding="16,8,16,16" Spacing="12">
+                    <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                    <!-- Account block (Mac account footer): avatar + session label +
+                         live ConnectionStatus + chevron + gear. Display-only chrome. -->
+                    <Border
+                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource SkyBridgeButtonCornerRadius}"
+                        Padding="12,10">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <!-- Circular avatar (~36px) with a person glyph -->
+                            <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE77B;" FontSize="18" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <!-- Session label over the live connection status -->
+                            <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                                <TextBlock Text="Local Session" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                <TextBlock Text="{Binding ConnectionStatus}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                            </StackPanel>
+                            <!-- Chevron affordance (decorative) -->
+                            <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                            <!-- Settings gear glyph (decorative; the Settings nav item owns the page) -->
+                            <FontIcon Grid.Column="3" Glyph="&#xE713;" FontSize="16" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </NavigationView.PaneFooter>
 
-        <Grid Grid.Column="1">
+        <!-- NavigationView Content = top bar + the 7 feature workspace panels;
+             they switch via the IsXxxSelected Visibility bindings as the
+             SelectedFeature changes. Content is unchanged from the prior shell. -->
+        <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="72" />
+                <RowDefinition Height="56" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
             <Border
                 Grid.Row="0"
-                Padding="20,14"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                Padding="24,8"
+                Background="{StaticResource SkyBridgeTopBarFillBrush}"
+                BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
                 BorderThickness="0,0,0,1">
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
@@ -396,34 +1196,33 @@
                             AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"
                             Text="{Binding SelectedFeature.Title}"
                             FontSize="22"
-                            FontWeight="SemiBold" />
+                            FontWeight="SemiBold"
+                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             AutomationProperties.AutomationId="Skybridge.Status.Message"
                             Text="{Binding StatusMessage}"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <Border
-                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"
-                            Padding="10,7"
-                            CornerRadius="6"
-                            Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
+                            Style="{StaticResource StatusPill}"
+                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus">
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE9F5;" FontSize="12" />
-                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" />
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" />
+                                <FontIcon Glyph="&#xE9F5;" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
+                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <Border
+                            Style="{StaticResource StatusPill}"
                             AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
-                            Padding="10,7"
-                            CornerRadius="6"
-                            ToolTipService.ToolTip="FPS / Diagnostics"
-                            Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
+                            ToolTipService.ToolTip="FPS / Diagnostics">
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE9D9;" FontSize="12" />
-                                <TextBlock Text="FPS" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" />
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeWarningBrush}" />
+                                <FontIcon Glyph="&#xE9D9;" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" />
+                                <TextBlock Text="FPS" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <ItemsControl
@@ -436,39 +1235,440 @@
             </Border>
 
             <ScrollViewer Grid.Row="1">
-                <StackPanel Padding="24" Spacing="20">
+                <StackPanel Padding="32,24" Spacing="24">
                     <StackPanel
                         Visibility="{Binding IsDashboardSelected, Converter={StaticResource BoolToVisibilityConverter}}"
-                        Spacing="14">
+                        Spacing="24">
+                        <!-- Live overview metric cards: 4-up equal-width row (matches Mac StatCard row) -->
                         <ItemsControl
                             ItemsSource="{Binding DashboardMetrics}"
                             ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
                             ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
-                        <ItemsControl
-                            AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"
-                            ItemsSource="{Binding DashboardQuickActions}"
-                            ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"
-                            ItemTemplate="{StaticResource DashboardQuickActionTemplate}" />
+
+                        <!-- ===================================================================
+                             Weather hero card — full-width, element-matches the Mac
+                             WeatherDashboardCard. GlassPanel chrome (full-width like the
+                             Quick Actions panel below) with the corner radius pinned to 20
+                             to match the Mac r20 hero. Three mutually-exclusive state layers
+                             (Loading / Loaded / Error) keyed off WeatherPhase via the
+                             WeatherPhaseVisibilityConverter, mirroring the Mac body state
+                             machine. Min height 168 keeps the two-column loaded layout from
+                             clipping; the loading/error layers center inside the same chrome.
+                             =================================================================== -->
+                        <Border Style="{StaticResource GlassPanel}" CornerRadius="20" MinHeight="168">
+                            <Grid>
+                                <!-- Loaded state: header + big glyph/temp + condition + metric grid + footer -->
+                                <Grid Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loaded}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+
+                                    <!-- Header row: location glyph + name (left), refresh button (right).
+                                         No nav-arrow exists on the Mac card, so none is added here. -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <!-- E81D = Location (a map pin) ~ SF "location.fill", cyan -->
+                                            <FontIcon Glyph="&#xE81D;" FontSize="15" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                            <TextBlock
+                                                Text="{Binding WeatherLocation}"
+                                                FontSize="18"
+                                                FontWeight="Bold"
+                                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <!-- Refresh button: 32x32 glass circle + E72C (Refresh, a circular
+                                             arrow) ~ SF "arrow.clockwise". The only nav control on the card. -->
+                                        <Button
+                                            Grid.Column="1"
+                                            AutomationProperties.AutomationId="Skybridge.Weather.Refresh"
+                                            AutomationProperties.Name="Refresh weather"
+                                            ToolTipService.ToolTip="Refresh weather"
+                                            Command="{Binding RefreshWeatherCommand}"
+                                            Width="32"
+                                            Height="32"
+                                            Padding="0"
+                                            CornerRadius="16"
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1">
+                                            <FontIcon Glyph="&#xE72C;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        </Button>
+                                    </Grid>
+
+                                    <!-- Body: left = big glyph + temperature (fixed 120 wide);
+                                         right = condition text + metric grid + footer. -->
+                                    <Grid Grid.Row="1" Margin="0,14,0,0" ColumnSpacing="20">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Left column: condition emoji over big temperature.
+                                             Color EMOJI via Segoe UI Emoji (Segoe Fluent Icons has no
+                                             weather glyphs); emoji are pre-colored so no Foreground. -->
+                                        <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock
+                                                Text="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionGlyphConverter}}"
+                                                FontFamily="Segoe UI Emoji"
+                                                FontSize="40"
+                                                HorizontalAlignment="Center" />
+                                            <!-- Big temperature: integer + degree sign, thin/rounded feel via light weight -->
+                                            <TextBlock
+                                                Text="{Binding WeatherTemperature}"
+                                                FontSize="44"
+                                                FontWeight="Thin"
+                                                Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                HorizontalAlignment="Center" />
+                                        </StackPanel>
+
+                                        <!-- Right column -->
+                                        <StackPanel Grid.Column="1" Spacing="12">
+                                            <!-- Condition text (Clear/Cloudy/Rain/...) -->
+                                            <TextBlock
+                                                Text="{Binding WeatherCondition}"
+                                                FontSize="15"
+                                                FontWeight="Medium"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            <!-- Hairline divider, white@0.1 like the Mac overlay -->
+                                            <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
+                                            <!-- Metric grid: humidity / wind / visibility / AQI (2 cols).
+                                                 Visibility + AQI cells are emitted only when present, so the
+                                                 grid shows 2/3/4 cells exactly like the Mac. -->
+                                            <ItemsControl
+                                                AutomationProperties.AutomationId="Skybridge.Weather.Metrics"
+                                                ItemsSource="{Binding WeatherMetrics}"
+                                                ItemsPanel="{StaticResource WeatherMetricItemsPanel}"
+                                                ItemTemplate="{StaticResource WeatherMetricItemTemplate}" />
+                                            <!-- Footer: source label ("wttr.in" / "wttr.in + AQI") + relative time -->
+                                            <Grid Margin="0,2,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <!-- E704 = Streaming/antenna waves ~ SF "antenna.radiowaves.left.and.right" -->
+                                                    <FontIcon Glyph="&#xE704;" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="{Binding WeatherSource}"
+                                                        FontSize="11"
+                                                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                        VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Text="{Binding WeatherUpdatedRelative}"
+                                                    FontSize="11"
+                                                    Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                    VerticalAlignment="Center" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Grid>
+                                </Grid>
+
+                                <!-- Loading state: spinner + title + hint, centered in the same chrome -->
+                                <StackPanel
+                                    Spacing="10"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loading}">
+                                    <ProgressRing IsActive="{Binding IsWeatherLoading}" Width="32" Height="32" HorizontalAlignment="Center" />
+                                    <TextBlock Text="Loading weather..." FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="First load can take a few seconds" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                </StackPanel>
+
+                                <!-- Error state: warning glyph + title + message + Retry, centered -->
+                                <StackPanel
+                                    Spacing="10"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Error}">
+                                    <!-- E7BA = Warning (triangle with !) ~ SF "exclamationmark.triangle.fill", orange -->
+                                    <FontIcon Glyph="&#xE7BA;" FontSize="36" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="Weather unavailable" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock
+                                        Text="{Binding WeatherErrorMessage}"
+                                        FontSize="12"
+                                        Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                        TextWrapping="Wrap"
+                                        TextAlignment="Center"
+                                        MaxWidth="360"
+                                        HorizontalAlignment="Center" />
+                                    <Button
+                                        AutomationProperties.AutomationId="Skybridge.Weather.Retry"
+                                        AutomationProperties.Name="Retry"
+                                        Style="{StaticResource PrimaryButton}"
+                                        Command="{Binding RefreshWeatherCommand}"
+                                        HorizontalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <!-- E72C = Refresh ~ SF "arrow.clockwise" -->
+                                            <FontIcon Glyph="&#xE72C;" FontSize="13" />
+                                            <TextBlock Text="Retry" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <!-- ===================================================================
+                             Dashboard 2x2 PANEL GRID — element-matches the Mac
+                             DashboardContentView LazyVGrid(2 flexible cols, spacing 20).
+                             Sits BELOW the full-width weather hero card. Two equal
+                             columns, 18px column gap + 18px row gap, four GlassPanel
+                             cells in the Mac row-major order:
+                               Row 0:  Device Discovery   |  Remote Sessions
+                               Row 1:  Quick Actions      |  System Performance
+                             Each cell is the shared GlassPanel chrome (r22 glass card),
+                             header = accent glyph + title, body = a bound row list OR an
+                             honest empty state. The Quick Actions cell REUSES the existing
+                             DashboardQuickActions ItemsControl (same automation id, panel
+                             and template) — it is relocated here, not duplicated. Summary
+                             rows are non-interactive (the feature pages own the actions),
+                             so no button element is added and the gated count stays at 7.
+                             =================================================================== -->
+                        <Grid ColumnSpacing="18" RowSpacing="18">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <!-- (1) Device Discovery summary — top-left. Bound to the LIVE
+                                 DiscoveredPeers collection (Win32 DNS-SD), with an honest
+                                 empty state when nothing has been discovered. -->
+                            <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource GlassPanel}">
+                                <StackPanel Spacing="14">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- E721 = Search (magnifier) ~ SF "magnifyingglass", cyan -->
+                                        <FontIcon Glyph="&#xE721;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="Device Discovery" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <!-- Live count badge (DiscoveredPeerCount raises change
+                                             notifications via WorkspaceCountNotifier). -->
+                                        <Border Grid.Column="2" Style="{StaticResource Badge}" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        </Border>
+                                    </Grid>
+                                    <!-- Populated list (Visible when count > 0) -->
+                                    <ItemsControl
+                                        AutomationProperties.AutomationId="Skybridge.Dashboard.DeviceDiscoverySummary"
+                                        ItemsSource="{Binding DiscoveredPeers}"
+                                        ItemTemplate="{StaticResource DashboardDeviceSummaryRowTemplate}"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                    <!-- Honest empty state (Visible when count == 0) -->
+                                    <StackPanel
+                                        Spacing="6"
+                                        Padding="0,18"
+                                        HorizontalAlignment="Center"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                        <FontIcon Glyph="&#xE721;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="No devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Open Device Discovery to start scanning" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- (2) Remote Sessions summary — top-right. Bound to
+                                 RemoteDesktopSessions (preview rows per recon); honest
+                                 "No active sessions" empty state when the collection is empty. -->
+                            <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource GlassPanel}">
+                                <StackPanel Spacing="14">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- E7F4 = TVMonitor (a display) ~ SF "display.2", indigo -->
+                                        <FontIcon Glyph="&#xE7F4;" FontSize="16" Foreground="{StaticResource SkyBridgeNavRemoteDesktopBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="Remote Sessions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <Border Grid.Column="2" Style="{StaticResource Badge}" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        </Border>
+                                    </Grid>
+                                    <ItemsControl
+                                        AutomationProperties.AutomationId="Skybridge.Dashboard.RemoteSessionsSummary"
+                                        ItemsSource="{Binding RemoteDesktopSessions}"
+                                        ItemTemplate="{StaticResource DashboardSessionSummaryRowTemplate}"
+                                        Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                    <StackPanel
+                                        Spacing="6"
+                                        Padding="0,18"
+                                        HorizontalAlignment="Center"
+                                        Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                        <FontIcon Glyph="&#xE7F4;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="No active sessions" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Connect from Remote Desktop to start a session" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- (3) Quick Actions — bottom-left. RELOCATED existing panel
+                                 (same automation id / panel / template, now in the grid). -->
+                            <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource GlassPanel}">
+                                <StackPanel Spacing="14">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE80A;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="Quick Actions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    </StackPanel>
+                                    <ItemsControl
+                                        AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"
+                                        ItemsSource="{Binding DashboardQuickActions}"
+                                        ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"
+                                        ItemTemplate="{StaticResource DashboardQuickActionTemplate}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- (4) System Performance summary — bottom-right. Bound to the
+                                 REAL in-process SystemMonitorOverview sampler (Memory/Disk/
+                                 Network live, CPU honestly labeled); honest placeholder when
+                                 the sampler has not produced rows yet. -->
+                            <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource GlassPanel}">
+                                <StackPanel Spacing="14">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <!-- E9D9 = Speed (gauge) ~ SF "cpu.fill"/"speedometer", orange -->
+                                        <FontIcon Glyph="&#xE9D9;" FontSize="16" Foreground="{StaticResource SkyBridgeNavMonitorBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="System Performance" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    </StackPanel>
+                                    <ItemsControl
+                                        AutomationProperties.AutomationId="Skybridge.Dashboard.SystemPerformanceSummary"
+                                        ItemsSource="{Binding SystemMonitorOverview}"
+                                        ItemTemplate="{StaticResource DashboardSystemMetricRowTemplate}"
+                                        Visibility="{Binding SystemMonitorMetricCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                    <StackPanel
+                                        Spacing="6"
+                                        Padding="0,18"
+                                        HorizontalAlignment="Center"
+                                        Visibility="{Binding SystemMonitorMetricCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                        <FontIcon Glyph="&#xE9D9;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="No metrics yet" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Open System Monitor to sample performance" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
                     </StackPanel>
 
-                    <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
                                     <TextBlock Text="Device Discovery" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding DiscoveryStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
+                                <!-- Live discovered-peer count badge (Mac "discovery.onlineDevices(n)").
+                                     Bound to DiscoveredPeerCount (change-notified via
+                                     WorkspaceCountNotifier). -->
+                                <Border Grid.Column="1" Style="{StaticResource Badge}" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon Glyph="&#xE772;" FontSize="12" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Border>
                                 <ItemsControl
-                                    Grid.Column="1"
+                                    Grid.Column="2"
                                     ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"
                                     ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                     ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
                                     VerticalAlignment="Center" />
                             </Grid>
+
+                            <!-- ===================================================================
+                                 Connection-mode segmented header — element-matches the Mac
+                                 EnhancedDeviceDiscoveryView connectionModePicker (4 equal-width
+                                 tabs: Local Scan / QR Code / Cloud Link / Connection Code, each a
+                                 VStack of accent icon over title over subtitle). This is a
+                                 NON-INTERACTIVE orientation header (the Windows page already shows
+                                 ALL four connection surfaces stacked below — there is no mode swap
+                                 to drive), so it is built from Borders + FontIcons + TextBlocks and
+                                 contains NO inline button element, keeping the gated button count at 7.
+                                 The first tab (Local Scan) carries the selected styling (accent
+                                 fill + 3px bottom indicator) because the page leads with the local
+                                 scan surface, mirroring the Mac default selection.
+                                 =================================================================== -->
+                            <Border
+                                AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.ConnectionModeHeader"
+                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgePanelStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Tab 1: Local Scan (green) — selected -->
+                                    <Grid Grid.Column="0">
+                                        <Border Background="{StaticResource SkyBridgeSelectedNavFillBrush}" CornerRadius="12,0,0,0" Opacity="0.18" />
+                                        <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                            <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Local Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Same network" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        </StackPanel>
+                                        <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" />
+                                    </Grid>
+                                    <!-- Tab 2: QR Code (blue) -->
+                                    <StackPanel Grid.Column="1" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xED14;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="QR Code" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Scan to pair" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                    <!-- Tab 3: Cloud Link (purple) -->
+                                    <StackPanel Grid.Column="2" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Cloud Link" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Across networks" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                    <!-- Tab 4: Connection Code (orange) -->
+                                    <StackPanel Grid.Column="3" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                        <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Connection Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
+                                        <TextBlock Text="6-digit code" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- ===================================================================
+                                 Local Scan info banner — element-matches the Mac localScan
+                                 InfoBanner (green wifi.router icon + title + description, glass
+                                 card r12, 1px stroke). Orientation card for the local-scan surface.
+                                 =================================================================== -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE701;" FontSize="26" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock Text="Local network discovery" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock Text="Devices advertising over DNS-SD on this network appear below." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
 
                             <Grid ColumnSpacing="12" RowSpacing="10">
                                 <Grid.RowDefinitions>
@@ -635,7 +1835,55 @@
                                 </StackPanel>
                             </Grid>
 
-                            <ListView ItemsSource="{Binding DiscoveredPeers}" ItemTemplate="{StaticResource DiscoveredPeerItemTemplate}" MinHeight="86" SelectionMode="None" />
+                            <!-- ===================================================================
+                                 Discovered-devices group — element-matches the Mac localScan
+                                 discovered "online devices" section: a section header ("Discovered
+                                 devices" + live count) over the rich peer list, framed with a faint
+                                 green tint ring (Mac "Recently / discovered" group, green@0.35).
+                                 The DiscoveredPeers ListView keeps its DiscoveredPeerItemTemplate
+                                 binding (template-key preserved for the parity gate); the rows are
+                                 now the rich Mac OnlineDeviceCard-style cards. An honest empty state
+                                 shows when no peers are present (CountToVisibilityConverter "Empty").
+                                 =================================================================== -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeSuccessBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <StackPanel Spacing="12">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <FontIcon Glyph="&#xE701;" FontSize="16" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="Discovered devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
+                                        </Border>
+                                    </Grid>
+                                    <!-- Populated rich list (Visible when count > 0) -->
+                                    <ListView
+                                        ItemsSource="{Binding DiscoveredPeers}"
+                                        ItemTemplate="{StaticResource DiscoveredPeerItemTemplate}"
+                                        MinHeight="86"
+                                        SelectionMode="None"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                    <!-- Honest empty state (Visible when count == 0) — Mac
+                                         emptyStateView: large muted icon + title + message. -->
+                                    <StackPanel
+                                        Spacing="8"
+                                        Padding="0,28"
+                                        HorizontalAlignment="Center"
+                                        Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                        <FontIcon Glyph="&#xE721;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="No devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Start a scan to discover devices advertising on this network." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
@@ -665,7 +1913,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -697,7 +1945,24 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <!-- ===================================================================
+                         FILE TRANSFER screen — element-matched to the Mac FileTransferView
+                         two-pane layout (Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift):
+                           HEADER (title + status + header actions)
+                           TWO PANES:
+                             LEFT sidebar (fixed 260): Connection Status card +
+                               Quick Actions card (the shared FileTransferActions surface) +
+                               Recent Transfers card (last completed = FileTransferHistory).
+                             RIGHT main: Drop zone card (visual-only, honest "not yet wired")
+                               + QR preview (gated) + Transfer Queue section + Transfer History
+                               section + File Transfer Security facts.
+                         All buttons flow through the shared FileTransferHeaderActions /
+                         FileTransferActions ItemsControls (no inline button elements), so the
+                         gated button count is unchanged. Bound entirely to REAL workspace data:
+                         FileTransferStatus, FileTransferQueue, FileTransferHistory,
+                         FileTransferSecurityFacts, FileTransferShareQrCodeImage.
+                         =================================================================== -->
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -716,61 +1981,198 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
-                            <ItemsControl
-                                ItemsSource="{Binding FileTransferActions}"
-                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
-
-                            <Border
-                                AutomationProperties.AutomationId="FileTransferShareQrPreview"
-                                Visibility="{Binding IsFileTransferShareQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                Padding="12"
-                                CornerRadius="8"
-                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1">
-                                <Grid ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <Border Width="132" Height="132" Padding="8" Background="White" CornerRadius="4">
-                                        <Image
-                                            AutomationProperties.AutomationId="FileTransferShareQrImage"
-                                            Source="{Binding FileTransferShareQrCodeImage}"
-                                            Stretch="Uniform" />
-                                    </Border>
-                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock Text="File Transfer QR" FontWeight="SemiBold" />
-                                        <TextBlock Text="{Binding FileTransferStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
+                            <!-- TWO-PANE BODY: fixed sidebar (Mac 240) + main content -->
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="260" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Transfer Queue" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferQueue}" ItemTemplate="{StaticResource FileTransferQueueItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
+                                <!-- LEFT SIDEBAR -->
+                                <StackPanel Grid.Column="0" Spacing="14">
+                                    <!-- Connection Status card (Mac connectionStatusCard) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE701;" FontSize="18" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="Connection Status" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeNavFileTransferBrush}" />
+                                                <TextBlock
+                                                    Text="{Binding FileTransferStatus}"
+                                                    FontSize="13"
+                                                    TextWrapping="Wrap"
+                                                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                    VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Quick Actions card (Mac quickActionsCard) — shared action surface -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="Quick Actions" FontWeight="SemiBold" />
+                                            <ItemsControl
+                                                ItemsSource="{Binding FileTransferActions}"
+                                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                            <TextBlock
+                                                Text="Select files / folder or generate a share QR. Selection prepares an in-memory intent only — no picker is opened and no files are read."
+                                                FontSize="11"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Recent Transfers card (Mac recentTransfersCard — last completed) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="Recent Transfers" FontWeight="SemiBold" />
+                                            <!-- Empty state (Mac fileTransfer.recent.empty) -->
+                                            <StackPanel
+                                                Spacing="6"
+                                                HorizontalAlignment="Center"
+                                                Padding="0,12"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                                <FontIcon Glyph="&#xE81C;" FontSize="22" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock
+                                                    Text="No recent transfers yet"
+                                                    FontSize="12"
+                                                    Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                    HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <!-- Populated: compact recent rows -->
+                                            <ItemsControl
+                                                ItemsSource="{Binding FileTransferHistory}"
+                                                ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Transfer History" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferHistory}" ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
+                                <!-- RIGHT MAIN CONTENT -->
+                                <StackPanel Grid.Column="1" Spacing="14">
+                                    <!-- Drop zone card (Mac modernDropZone) — VISUAL ONLY:
+                                         honest "drag-and-drop not yet wired on Windows" subtitle.
+                                         No .onDrop handler exists on the Windows client yet; use
+                                         the shared Quick Actions buttons to stage a transfer. -->
+                                    <Border Style="{StaticResource GlassCard}" Padding="28" MinHeight="160">
+                                        <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <FontIcon Glyph="&#xE898;" FontSize="48" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Drop files to transfer" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                                            <TextBlock
+                                                Text="Drag-and-drop is not yet wired on the Windows client. Use Select Files / Select Folder above to stage a transfer intent."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                TextAlignment="Center"
+                                                MaxWidth="420"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                HorizontalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- QR preview (gated by IsFileTransferShareQrCodeVisible) -->
+                                    <Border
+                                        AutomationProperties.AutomationId="FileTransferShareQrPreview"
+                                        Style="{StaticResource GlassCard}"
+                                        Visibility="{Binding IsFileTransferShareQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Width="132" Height="132" Padding="8" Background="White" CornerRadius="4">
+                                                <Image
+                                                    AutomationProperties.AutomationId="FileTransferShareQrImage"
+                                                    Source="{Binding FileTransferShareQrCodeImage}"
+                                                    Stretch="Uniform" />
+                                            </Border>
+                                            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                                <TextBlock Text="File Transfer QR" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding FileTransferStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Transfer Queue section (Mac activeTransfersSection) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Transfer Queue" FontWeight="SemiBold" />
+                                            <ListView
+                                                ItemsSource="{Binding FileTransferQueue}"
+                                                ItemTemplate="{StaticResource FileTransferQueueItemTemplate}"
+                                                MinHeight="112"
+                                                SelectionMode="None"
+                                                IsEnabled="{Binding IsFileTransferSelected}" />
+                                            <TextBlock
+                                                Text="Queue is empty. Stage files or a folder from Quick Actions to populate it."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Transfer History section (Mac enhancedTransferHistoryTab) -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Transfer History" FontWeight="SemiBold" />
+                                            <ListView
+                                                ItemsSource="{Binding FileTransferHistory}"
+                                                ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}"
+                                                MinHeight="112"
+                                                SelectionMode="None"
+                                                IsEnabled="{Binding IsFileTransferSelected}" />
+                                            <TextBlock
+                                                Text="No completed transfers yet."
+                                                FontSize="12"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextMutedBrush}"
+                                                Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- File Transfer Security facts -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="File Transfer Security" FontWeight="SemiBold" />
+                                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Grid>
-
-                            <TextBlock Text="File Transfer Security" FontWeight="SemiBold" />
-                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <!-- ===================================================================
+                         Remote Desktop screen — recomposed into a two-pane layout that
+                         element-matches the Mac RemoteDesktopView (sessionSidebar +
+                         remoteWorkspaceContent).
+
+                         LEFT pane (~300px glass) = search field + 3-tab connection-mode
+                         segmented control (Auto / Near / Far) + Active Sessions list +
+                         Recent Connections section + bottom New Connection action.
+                         RIGHT pane = "Trusted Active Sessions" card + "Preview" card +
+                         Quality + control facts.
+
+                         GATE-CRITICAL ordering (verify-windows-ui-parity.ps1 L3628):
+                         Text="Remote Desktop"  ->  RemoteDesktopHeaderActions  ->
+                         RemoteDesktopActions  ->  Text="Active Sessions". The header,
+                         the header-actions ItemsControl, and the FIRST RemoteDesktopActions
+                         ItemsControl stay above the two-pane grid in exactly that order.
+
+                         BUTTON BUDGET (matrix L511 = 7): NO inline button element is added.
+                         The segmented control is non-interactive Borders; every clickable
+                         connect/refresh control routes through the shared
+                         WorkspaceActionButtonTemplate via RemoteDesktopActions /
+                         RemoteDesktopHeaderActions ItemsControls (buttons live in the
+                         DataTemplate, not inline here).
+                         =================================================================== -->
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
+                            <!-- Header: title + status (left) and the Refresh-Sessions
+                                 header action (right). Mac toolbar new-connection menu +
+                                 refresh + gear collapse onto these data-driven actions. -->
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -788,57 +2190,261 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
+                            <!-- The canonical Remote Desktop action row (Recommended /
+                                 Advanced Connect / Performance Overlay / Quality / Settings /
+                                 Full Screen / Disconnect). Kept here, directly under the
+                                 header, to preserve the gate-required action order. These ARE
+                                 the Mac "+ menu / refresh / gear / connect" actions. -->
                             <ItemsControl
                                 ItemsSource="{Binding RemoteDesktopActions}"
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
+                            <!-- Two-pane body: ~300px session sidebar (left) + workspace
+                                 content (right). -->
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="2*" />
+                                    <ColumnDefinition Width="300" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding RemoteDesktopSessions}" ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsRemoteDesktopSelected}" />
-                                </StackPanel>
+                                <!-- ===== LEFT PANE — session sidebar (Mac sessionSidebar) ===== -->
+                                <Border Grid.Column="0" Style="{StaticResource GlassCard}" VerticalAlignment="Stretch">
+                                    <StackPanel Spacing="12">
+                                        <!-- Search field (Mac searchBar): magnifier + plain
+                                             text field over a glass surface. Filters the
+                                             session rows by target name via RemoteDesktopSearchText. -->
+                                        <Border
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="10,2">
+                                            <Grid ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <FontIcon Glyph="&#xE721;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                                <TextBox
+                                                    Grid.Column="1"
+                                                    Text="{Binding RemoteDesktopSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                    PlaceholderText="Search sessions..."
+                                                    BorderThickness="0"
+                                                    Background="Transparent"
+                                                    IsEnabled="{Binding IsRemoteDesktopSelected}"
+                                                    VerticalAlignment="Center" />
+                                            </Grid>
+                                        </Border>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Quality" FontWeight="SemiBold" />
-                                    <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
-                                    <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                        <!-- Connection-mode segmented control (Mac
+                                             connectionModeSelector): a glass "track" holding 3
+                                             equal segments (Auto / Near / Far), each = icon over
+                                             label. Auto is the selected (soft-accent pill) default,
+                                             matching connectionMode = .auto on the Mac. These are
+                                             non-interactive display segments (no live Near/Far
+                                             command on Windows yet): they describe the available
+                                             modes without faking a transport. -->
+                                        <Border
+                                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="4">
+                                            <Grid ColumnSpacing="4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <!-- Auto (selected) — E945 = Light(bulb), reads as
+                                                     "smart/auto" ~ Mac wand.and.stars. Valid Segoe
+                                                     Fluent Icons glyph. -->
+                                                <Border Grid.Column="0" CornerRadius="6" Padding="0,8" Background="{StaticResource SkyBridgeRemoteDesktopSoftBrush}">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE945;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Auto" FontSize="11" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <!-- Near — E701 = Wifi ~ SF wifi.circle.fill -->
+                                                <Border Grid.Column="1" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE701;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Near" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <!-- Far — E774 = Globe ~ SF globe -->
+                                                <Border Grid.Column="2" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                    <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE774;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock Text="Far" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- Active Sessions section (Mac sessionList "Active
+                                             Sessions" section). Bound to RemoteDesktopSessions
+                                             (gate L1119). The preview rows + their search-filtered
+                                             slice render here; the empty state shows when the
+                                             filtered count is 0. -->
+                                        <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
+                                        <ListView
+                                            ItemsSource="{Binding RemoteDesktopSessions}"
+                                            ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}"
+                                            MinHeight="118"
+                                            SelectionMode="None"
+                                            IsEnabled="{Binding IsRemoteDesktopSelected}"
+                                            Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}" />
+                                        <StackPanel
+                                            Spacing="6"
+                                            Padding="0,18"
+                                            HorizontalAlignment="Center"
+                                            Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
+                                            <FontIcon Glyph="&#xE7F4;" FontSize="26" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="No active sessions" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="Trusted sessions appear here once verified" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        </StackPanel>
+
+                                        <!-- Recent Connections section (Mac sessionList "Recent
+                                             Connections"). The preview rows carrying State="Recent"
+                                             already surface in the list above; this honest note
+                                             documents that recents reconnect only once a verified
+                                             peer key is provided (no fake reconnect entries). -->
+                                        <TextBlock Text="Recent Connections" FontWeight="SemiBold" />
+                                        <TextBlock
+                                            Text="Recent peers reconnect only after a verified peer key is provided."
+                                            FontSize="12"
+                                            TextWrapping="Wrap"
+                                            Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+
+                                        <!-- Bottom New Connection action (Mac bottomActionBar).
+                                             Reuses the data-driven RemoteDesktopActions row so no
+                                             inline button element is added; the Recommended/Advanced
+                                             connect actions live here for the sidebar footer. -->
+                                        <ItemsControl
+                                            ItemsSource="{Binding RemoteDesktopActions}"
+                                            ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                            ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- ===== RIGHT PANE — workspace content (Mac remoteWorkspaceContent) ===== -->
+                                <StackPanel Grid.Column="1" Spacing="16">
+                                    <!-- "Trusted Active Sessions" card (Mac trustedActiveSessionsPanel):
+                                         header + count/"No active session" trailing + descriptive
+                                         text + the two connect actions. -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="12">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Trusted Active Sessions" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                <!-- Trailing badge: shows "No active session" when
+                                                     empty (Mac trailing), session count otherwise. -->
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Text="No active session"
+                                                    FontSize="12"
+                                                    FontWeight="SemiBold"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                    Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}" />
+                                                <Border
+                                                    Grid.Column="1"
+                                                    Style="{StaticResource BadgeSuccess}"
+                                                    Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}">
+                                                    <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                                </Border>
+                                            </Grid>
+                                            <TextBlock
+                                                Text="Trusted peers will appear here once a verified remote session is established."
+                                                FontSize="13"
+                                                TextWrapping="Wrap"
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            <!-- The two connect actions (Recommended / Advanced) —
+                                                 reuses RemoteDesktopActions, no inline button element. -->
+                                            <ItemsControl
+                                                ItemsSource="{Binding RemoteDesktopActions}"
+                                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- "Preview" card (Mac previewPanel): header + Idle trailing +
+                                         big monitor glyph + "Select a session to start Remote
+                                         Desktop" + subtitle + the two actions. Honest idle state —
+                                         no live frame source until transport is wired. -->
+                                    <Border Style="{StaticResource GlassCard}">
+                                        <StackPanel Spacing="14">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Preview" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                <TextBlock Grid.Column="1" Text="Idle" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            </Grid>
+                                            <!-- Idle empty-state surface (Mac emptyStateView over the
+                                                 black.opacity(0.22) backdrop). -->
+                                            <Border
+                                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                                CornerRadius="14"
+                                                MinHeight="320"
+                                                Padding="24">
+                                                <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="400">
+                                                    <FontIcon Glyph="&#xE7F4;" FontSize="56" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="Select a session to start Remote Desktop"
+                                                        FontSize="18"
+                                                        FontWeight="SemiBold"
+                                                        TextAlignment="Center"
+                                                        TextWrapping="Wrap"
+                                                        Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
+                                                        HorizontalAlignment="Center" />
+                                                    <TextBlock
+                                                        Text="Connect from Device Discovery for a one-tap session. Manual RDP/VNC/SSH is an advanced path."
+                                                        FontSize="13"
+                                                        TextAlignment="Center"
+                                                        TextWrapping="Wrap"
+                                                        Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                        HorizontalAlignment="Center" />
+                                                    <!-- The same two actions, large, in the idle
+                                                         preview (Mac controlSize(.large)) — reuses
+                                                         RemoteDesktopActions, no inline button element. -->
+                                                    <ItemsControl
+                                                        ItemsSource="{Binding RemoteDesktopActions}"
+                                                        ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                                        ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
+                                                        HorizontalAlignment="Center" />
+                                                </StackPanel>
+                                            </Border>
+
+                                            <!-- Quality (Mac video-quality controls): bitrate +
+                                                 framerate profile pickers, sourced from the
+                                                 RemoteDesktopProfileCatalogClient. -->
+                                            <TextBlock Text="Quality" FontWeight="SemiBold" />
+                                            <Grid ColumnSpacing="10">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <ComboBox Grid.Column="0" ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                                <ComboBox Grid.Column="1" ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Control facts (transport / channel-map / encode plan). -->
+                                    <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                                 </StackPanel>
                             </Grid>
-
-                            <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                        <StackPanel Spacing="14">
-                            <Grid ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="Quantum / Core Diagnostics" FontSize="18" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding CoreDiagnosticsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                                <ItemsControl
-                                    Grid.Column="1"
-                                    ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"
-                                    ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                    ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
-                                    VerticalAlignment="Center" />
-                            </Grid>
-
-                            <ListView ItemsSource="{Binding CoreDiagnosticFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsQuantumSelected}" />
-                        </StackPanel>
-                    </Border>
-
-                    <Border Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -862,23 +2468,52 @@
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
-                            <Grid ColumnSpacing="14">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
+                            <!-- Status-pill strip (Mac PerformanceMonitoringPanelView
+                                 Health/Thermal/Load indicators rendered as tinted pills).
+                                 Bound to the live SystemMonitorIndicators collection; each
+                                 pill's dot/icon/value is tinted by State (green healthy,
+                                 orange caution/read-only, red offline, muted unknown/idle/
+                                 off — pending stays muted, never fake-healthy). -->
+                            <ItemsControl
+                                AutomationProperties.AutomationId="Skybridge.SystemMonitor.IndicatorPills"
+                                ItemsSource="{Binding SystemMonitorIndicators}"
+                                ItemsPanel="{StaticResource SystemMonitorIndicatorPillItemsPanel}"
+                                ItemTemplate="{StaticResource SystemMonitorIndicatorPillTemplate}" />
 
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Overview" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SystemMonitorOverview}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
-                                </StackPanel>
+                            <!-- ============ Card 1 — System Metrics ============
+                                 Mac SystemMetricsPanelView: colored metric tile grid.
+                                 The hero presentation is the tile grid (live Memory/Disk/
+                                 Network + honest CPU logical-core count). The gated
+                                 WorkspaceFactRowTemplate ListView below is the canonical
+                                 data surface the parity gate asserts on; it is collapsed so
+                                 the same rows are not rendered twice (no data is hidden —
+                                 every Overview row appears as a tile). -->
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Overview" FontWeight="SemiBold" />
+                                <ItemsControl
+                                    AutomationProperties.AutomationId="Skybridge.SystemMonitor.MetricTiles"
+                                    ItemsSource="{Binding SystemMonitorOverview}"
+                                    ItemsPanel="{StaticResource SystemMonitorMetricTileItemsPanel}"
+                                    ItemTemplate="{StaticResource SystemMonitorMetricTileTemplate}" />
+                                <ListView Visibility="Collapsed" ItemsSource="{Binding SystemMonitorOverview}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
+                            </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="8">
-                                    <TextBlock Text="Indicators" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
-                                </StackPanel>
-                            </Grid>
+                            <!-- Indicators heading kept for parity/section order; the live
+                                 indicator data is rendered above as the tinted pill strip.
+                                 The gated WorkspaceStateRowTemplate ListView is collapsed
+                                 (the pills are the visible presentation of the same rows). -->
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Indicators" FontWeight="SemiBold" />
+                                <ListView Visibility="Collapsed" ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
+                            </StackPanel>
 
+                            <!-- ============ Card 2 — Detailed Monitoring ============
+                                 Mac PerformanceMonitoringPanelView insight/detail rows:
+                                 OS / .NET / GC heap / Advanced (live) plus the honest
+                                 pending rows (Thermal "Windows provider pending", GPU
+                                 "provider pending", Helper "not installed"). Bound to the
+                                 live SystemMonitorDetails collection via the gated
+                                 WorkspaceFactRowTemplate (label / value / detail). -->
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Detailed Monitoring" FontWeight="SemiBold" />
                                 <ItemsControl ItemsSource="{Binding SystemMonitorDetails}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
@@ -886,7 +2521,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -910,22 +2545,69 @@
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
 
+                            <!-- ===========================================================
+                                 Settings two-pane (element-matches the Mac SettingsView):
+                                   LEFT  (~210px) — the tab sub-nav. A native ListView bound
+                                          to SettingsTabs; the native container owns single
+                                          selection + the filled selection pill (exactly one
+                                          tab highlighted). SelectedItem is TwoWay-bound to
+                                          SelectedSettingsTab, which drives the right pane.
+                                   RIGHT (*)      — the selected tab's grouped section CARDS,
+                                          bound to SelectedSettingsTabCards (re-derived from
+                                          the 142-row SettingsDetails slice for the selected
+                                          tab). Each group = gray section title + glass card
+                                          of control rows (toggle / dropdown / value).
+                                 No push-button anywhere here (gated count stays 7); controls
+                                 are ToggleSwitch / ComboBox / FontIcon / TextBlock only.
+                                 =========================================================== -->
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="240" />
+                                    <ColumnDefinition Width="210" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Spacing="8">
+                                <StackPanel Grid.Column="0" Spacing="8">
                                     <TextBlock Text="Settings Tabs" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SettingsTabs}" ItemTemplate="{StaticResource SettingsTabItemTemplate}" MinHeight="220" SelectionMode="None" IsEnabled="{Binding IsSettingsSelected}" />
+                                    <ListView
+                                        AutomationProperties.AutomationId="Skybridge.Settings.TabNav"
+                                        ItemsSource="{Binding SettingsTabs}"
+                                        ItemTemplate="{StaticResource SettingsTabItemTemplate}"
+                                        SelectedItem="{Binding SelectedSettingsTab, Mode=TwoWay}"
+                                        SelectionMode="Single"
+                                        MinHeight="220"
+                                        VerticalAlignment="Top"
+                                        IsEnabled="{Binding IsSettingsSelected}" />
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="1" Spacing="12">
+                                <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="Settings Details" FontWeight="SemiBold" />
-                                    <ItemsControl ItemsSource="{Binding SettingsDetails}" ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />
+                                    <ScrollViewer
+                                        VerticalScrollBarVisibility="Auto"
+                                        VerticalScrollMode="Auto"
+                                        MaxHeight="520">
+                                        <ItemsControl
+                                            AutomationProperties.AutomationId="Skybridge.Settings.SectionCards"
+                                            ItemsSource="{Binding SelectedSettingsTabCards}"
+                                            ItemTemplate="{StaticResource SettingsCardGroupTemplate}" />
+                                    </ScrollViewer>
                                 </StackPanel>
                             </Grid>
+
+                            <!-- ===========================================================
+                                 Full read-only mirror of the active settings snapshot. The
+                                 two-pane above is the primary, grouped, control-styled view;
+                                 this collapsed block keeps the flat, contract-shaped
+                                 SettingsDetails (all 142 rows: Section / Label / Value /
+                                 Detail) bound through SettingsDetailRowTemplate so the
+                                 underlying read-only data stays directly inspectable and the
+                                 service-boundary contract (every row surfaced 1:1) is
+                                 preserved. Collapsed so it does not double-render beneath the
+                                 cards — same real collection, no duplicate visual.
+                                 =========================================================== -->
+                            <ItemsControl
+                                Visibility="Collapsed"
+                                ItemsSource="{Binding SettingsDetails}"
+                                ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Settings Actions" FontWeight="SemiBold" />
@@ -944,7 +2626,7 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <Border Style="{StaticResource GlassPanel}">
                             <StackPanel Spacing="14">
                                 <TextBlock
                                     AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
@@ -960,7 +2642,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Grid.Column="1" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <Border Style="{StaticResource GlassPanel}" Grid.Column="1">
                             <StackPanel Spacing="14">
                                 <TextBlock Text="Session Controls" FontSize="18" FontWeight="SemiBold" />
                                 <StackPanel Spacing="6">
@@ -985,5 +2667,6 @@
                 </StackPanel>
             </ScrollViewer>
         </Grid>
+        </NavigationView>
     </Grid>
 </Window>

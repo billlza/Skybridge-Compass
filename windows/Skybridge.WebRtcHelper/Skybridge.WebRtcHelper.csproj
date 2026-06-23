@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    SkyBridge WebRTC DataChannel helper.
+
+    The "verified WebRTC helper handoff" the canonical architecture stops one
+    component short of (docs/windows-architecture.md:104, docs/windows-webrtc-proof-schema.md):
+    it completes signaling -> ICE -> DTLS -> SCTP -> DataChannel-open, sends a
+    Core SBF1 frame, verifies the echo, and writes the proof JSON that
+    core/skybridge-core/src/webrtc_proof.rs validates and
+    Services/WindowsTransportAdapterClient.cs (VerifiedWebRtcDataChannelTransportAdapterClient)
+    consumes. SkyBridge Core remains the authority (identity/pairing/framing/suite);
+    the helper does plumbing only and emits the proof as its sole contract surface.
+
+    Plain net10.0 (NOT net10.0-windows) on purpose: SIPSorcery is cross-platform,
+    so this builds, runs, and self-tests on macOS/Linux/Windows alike. Builds the
+    SBF1 frame in-process (no native skybridge_core.dll dependency).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>skybridge-webrtc-helper</AssemblyName>
+    <RootNamespace>Skybridge.WebRtcHelper</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SIPSorcery" Version="10.0.9" />
+  </ItemGroup>
+</Project>

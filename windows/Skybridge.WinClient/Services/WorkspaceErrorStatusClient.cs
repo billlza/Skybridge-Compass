@@ -37,6 +37,9 @@ public sealed class WorkspaceErrorStatusClient : IWorkspaceErrorStatusClient
             WorkspaceErrorScope.Settings => new(
                 StatusMessage: message,
                 SettingsStatus: message),
+            WorkspaceErrorScope.Weather => new(
+                StatusMessage: message,
+                WeatherStatus: message),
             _ => new(StatusMessage: message)
         };
 }
@@ -51,7 +54,8 @@ public enum WorkspaceErrorScope
     FileTransfer,
     RemoteDesktop,
     SystemMonitor,
-    Settings
+    Settings,
+    Weather
 }
 
 public sealed record WorkspaceErrorStatusPatch(
@@ -62,4 +66,5 @@ public sealed record WorkspaceErrorStatusPatch(
     string? FileTransferStatus = null,
     string? RemoteDesktopStatus = null,
     string? SystemMonitorStatus = null,
-    string? SettingsStatus = null);
+    string? SettingsStatus = null,
+    string? WeatherStatus = null);

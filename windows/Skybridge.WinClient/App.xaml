@@ -2,12 +2,68 @@
     x:Class="Skybridge.WinClient.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:Skybridge.WinClient">
+    xmlns:local="using:Skybridge.WinClient"
+    RequestedTheme="Dark">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeControls.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- ===================================================================
+                 NavigationView on-brand theme-resource overrides.
+                 These are the documented WinUI keys the NavigationViewItemPresenter
+                 reads for its selection indicator + selected/pointer-over surfaces.
+                 Overriding them here (App-level, theme-keyed) keeps the standard
+                 NavigationView control template intact — NO custom container hack —
+                 while making the selected item read on the dark glass sidebar.
+                 The selection pill / indicator now comes from the native control,
+                 so only ONE item highlights at a time (fixes the multi-pill bug).
+                 =================================================================== -->
+
+            <!-- Left selection indicator bar — hidden (Transparent). The Mac sidebar
+                 marks the selected item with a FILLED rounded accent pill, NOT a
+                 left rail indicator; suppressing the rail makes the selected look
+                 read as the Mac's solid pill instead of "a flat blue bar with a
+                 left stripe". -->
+            <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="Transparent" />
+
+            <!-- Selected-item background = a soft neutral rounded highlight pill,
+                 painted by the STOCK NavigationViewItemPresenter (no custom
+                 ControlTemplate). The custom per-feature presenter was removed
+                 because its Selected state never painted; the stock presenter
+                 renders these theme brushes reliably. A neutral white-alpha fill
+                 (not a per-feature accent) keeps the selected row readable on the
+                 dark glass sidebar while the per-feature COLORED icon still comes
+                 from the NavigationItemTemplate DataTemplate. CornerRadius 12
+                 (below) rounds it into a pill. -->
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#2EFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#3DFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#42FFFFFF" />
+
+            <!-- Unselected hover / press surfaces (subtle glass) -->
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#29FFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPressed" Color="#33FFFFFF" />
+
+            <!-- Foreground (text + glyph) across states -->
+            <SolidColorBrush x:Key="NavigationViewItemForeground" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundPointerOver" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundPressed" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#FFF7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#FFF7FAFF" />
+
+            <!-- Pane background = the Mac sidebar glass (NavigationView has no PaneBackground
+                 property in WinUI 3; the pane chrome is driven by these theme resources). -->
+            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="#E62E3857" />
+            <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="#E62E3857" />
+            <SolidColorBrush x:Key="NavigationViewContentBackground" Color="Transparent" />
+            <Thickness x:Key="NavigationViewContentGridBorderThickness">0</Thickness>
+
+            <!-- Widen the selected-item pill so it fills the 280px pane nicely -->
+            <CornerRadius x:Key="NavigationViewItemPresenterCornerRadius">12</CornerRadius>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
