@@ -22,7 +22,10 @@ public sealed class DashboardMetricsClient : IDashboardMetricsClient
         // DashboardContentView "系统状态 / System Status" card, which never shows a
         // caption under the value.
         var performanceStatus = request.IsBusy ? "Busy" : "Nominal";
-        var systemStatusValue = request.IsBusy ? "Good" : "Excellent";
+        // zh health label shown in the StatCard value, mirroring the Mac 系统状态 card
+        // (极佳/良好). PerformanceStatus (Nominal/Busy) above stays the English scalar the
+        // top bar + gate key off — only this human-facing card value is localized.
+        var systemStatusValue = request.IsBusy ? "良好" : "极佳";
 
         // Mac StatCard has NO caption/description under the value (see StatCard.swift):
         // icon → small secondary label → big bold value. The Windows

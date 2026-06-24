@@ -211,7 +211,7 @@
                          (Mac VStack rhythm: label .caption .secondary, value .title.bold). -->
                     <StackPanel Grid.Row="1" VerticalAlignment="Bottom" Spacing="4">
                         <TextBlock
-                            Text="{Binding Title}"
+                            Text="{Binding DisplayTitle}"
                             FontSize="12"
                             Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
                             TextWrapping="Wrap"

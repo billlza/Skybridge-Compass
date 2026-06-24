@@ -62,8 +62,23 @@ public sealed record DashboardMetricView(
     string Value,
     string Detail)
 {
+    // The zh StatCard caption shown in the card (mirrors the Mac DashboardContentView
+    // 在线设备/活跃会话/传输任务/系统状态). Title stays the stable English key — the
+    // MetricGlyphConverter/MetricAccentBrushConverter key off it for the per-card icon +
+    // accent, and the parity gate asserts DashboardMetricsClient carries the English labels.
+    public string DisplayTitle => ResolveDisplayTitle(Title);
+
     public static DashboardMetricView FromMetric(DashboardMetric metric) =>
         new(metric.Label, metric.Value, metric.Detail);
+
+    private static string ResolveDisplayTitle(string title) => title switch
+    {
+        "Online Devices" => "在线设备",
+        "Active Sessions" => "活跃会话",
+        "Transfer Tasks" => "传输任务",
+        "System Status" => "系统状态",
+        _ => title
+    };
 }
 
 // Weather metric grid cell (Humidity / Wind speed / Visibility / AQI). Key drives the
@@ -265,8 +280,22 @@ public sealed record UsbDeviceStatView(
     string Value,
     string Detail)
 {
+    // zh caption for the USB stat card (mirrors the Mac USB 管理 stat cards). Title stays the
+    // English key — the MetricGlyphConverter/MetricAccentBrushConverter key off it and the
+    // parity gate asserts the English labels in UsbManagementWorkspaceClient.
+    public string DisplayTitle => ResolveDisplayTitle(Title);
+
     public static UsbDeviceStatView FromStat(UsbDeviceStat stat) =>
         new(stat.Title, stat.Value, stat.Detail);
+
+    private static string ResolveDisplayTitle(string title) => title switch
+    {
+        "MFi Certified" => "MFi 认证",
+        "Android Devices" => "Android 设备",
+        "Storage Devices" => "存储设备",
+        "Total Devices" => "设备总数",
+        _ => title
+    };
 }
 
 public sealed record UsbDeviceItemView(

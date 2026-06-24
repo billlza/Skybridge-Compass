@@ -406,15 +406,15 @@ public sealed record WeatherSnapshot(
         var metrics = new List<WeatherMetricSnapshot>
         {
             // Glyph E9CA = a raindrop/humidity mark ~ SF "humidity.fill" (cyan).
-            new("Humidity", "Humidity", humidityText, "", WeatherMetricTint.Humidity),
+            new("Humidity", "湿度", humidityText, "", WeatherMetricTint.Humidity),
             // Glyph E9CB = wind/breeze lines ~ SF "wind" (mint/green).
-            new("Wind speed", "Wind speed", windText, "", WeatherMetricTint.Wind)
+            new("Wind speed", "风速", windText, "", WeatherMetricTint.Wind)
         };
 
         if (visibilityText is not null)
         {
             // Glyph E7B3 = an eye ~ SF "eye.fill" (blue).
-            metrics.Add(new("Visibility", "Visibility", visibilityText, "", WeatherMetricTint.Visibility));
+            metrics.Add(new("Visibility", "能见度", visibilityText, "", WeatherMetricTint.Visibility));
         }
 
         if (aqi is { } aqiValue)
@@ -426,7 +426,7 @@ public sealed record WeatherSnapshot(
 
         return new WeatherSnapshot(
             DateTimeOffset.UtcNow,
-            string.IsNullOrWhiteSpace(location) ? "Current Location" : location,
+            string.IsNullOrWhiteSpace(location) ? "当前位置" : location,
             temperature,
             WeatherConditionResolver.DisplayName(condition),
             condition.ToString(),
@@ -479,14 +479,14 @@ internal static class WeatherConditionResolver
     public static string DisplayName(WeatherCondition condition) =>
         condition switch
         {
-            WeatherCondition.Clear => "Clear",
-            WeatherCondition.Cloudy => "Cloudy",
-            WeatherCondition.Rainy => "Rain",
-            WeatherCondition.Snowy => "Snow",
-            WeatherCondition.Foggy => "Fog",
-            WeatherCondition.Haze => "Haze",
-            WeatherCondition.Stormy => "Storm",
-            _ => "Unknown"
+            WeatherCondition.Clear => "晴",
+            WeatherCondition.Cloudy => "多云",
+            WeatherCondition.Rainy => "雨天",
+            WeatherCondition.Snowy => "雪",
+            WeatherCondition.Foggy => "雾",
+            WeatherCondition.Haze => "霾",
+            WeatherCondition.Stormy => "暴雨",
+            _ => "未知"
         };
 
     // parseWeatherCondition(code, description): description text wins, then wttr.in
