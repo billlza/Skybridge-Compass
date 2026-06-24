@@ -416,4 +416,92 @@
     <value>Capabilities</value>
     <comment>USB device-card detail row label. Mac usb.device.capabilities.</comment>
   </data>
+
+  <!-- ============================ Device Discovery — connection-mode header ============================ -->
+  <data name="DiscoveryModeLocalScanTitle.Text" xml:space="preserve">
+    <value>Near Scan</value>
+    <comment>Connection-mode header tab 1 title. Mac discovery.localScan.title. (iCloud tab title stays inline brand "iCloud".)</comment>
+  </data>
+  <data name="DiscoveryModeLocalScanSubtitle.Text" xml:space="preserve">
+    <value>Same Network</value>
+    <comment>Connection-mode header tab 1 subtitle (same-LAN hint).</comment>
+  </data>
+  <data name="DiscoveryModeQrTitle.Text" xml:space="preserve">
+    <value>Scan QR</value>
+    <comment>Connection-mode header tab 2 title (scan a QR code to connect).</comment>
+  </data>
+  <data name="DiscoveryModeQrSubtitle.Text" xml:space="preserve">
+    <value>Scan</value>
+    <comment>Connection-mode header tab 2 subtitle.</comment>
+  </data>
+  <data name="DiscoveryModeCloudSubtitle.Text" xml:space="preserve">
+    <value>Zero-Config</value>
+    <comment>Connection-mode header tab 3 subtitle (iCloud zero-configuration).</comment>
+  </data>
+  <data name="DiscoveryModeSmartCodeTitle.Text" xml:space="preserve">
+    <value>Smart Code</value>
+    <comment>Connection-mode header tab 4 title. Mac connection.smartCode.title.</comment>
+  </data>
+  <data name="DiscoveryModeSmartCodeSubtitle.Text" xml:space="preserve">
+    <value>Short-Lived Code</value>
+    <comment>Connection-mode header tab 4 subtitle (short-lived connection code).</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — local-scan banner ============================ -->
+  <data name="DiscoveryLocalScanBannerTitle.Text" xml:space="preserve">
+    <value>LAN Device Discovery</value>
+    <comment>Local-scan info banner title.</comment>
+  </data>
+  <data name="DiscoveryLocalScanBannerBody.Text" xml:space="preserve">
+    <value>Devices broadcasting via DNS-SD on the same network appear below.</value>
+    <comment>Local-scan info banner body.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — scan-toolbar legend ============================ -->
+  <data name="DiscoveryScanLegendExtendedSearch.Text" xml:space="preserve">
+    <value>Extended Search</value>
+    <comment>Scan-toolbar legend label. Mac discovery.extendedSearch.default.</comment>
+  </data>
+  <data name="DiscoveryScanLegendManualConnect.Text" xml:space="preserve">
+    <value>Manual Connect</value>
+    <comment>Scan-toolbar legend label. Mac discovery.manualConnect.</comment>
+  </data>
+  <data name="DiscoveryScanLegendStartScan.Text" xml:space="preserve">
+    <value>Start Scan</value>
+    <comment>Scan-toolbar legend label. Mac discovery.startScan.</comment>
+  </data>
+  <data name="DiscoveryScanLegendStopScan.Text" xml:space="preserve">
+    <value>Stop Scan</value>
+    <comment>Scan-toolbar legend label. Mac discovery.stopScan.</comment>
+  </data>
+  <data name="DiscoveryScanLegendRefresh.Text" xml:space="preserve">
+    <value>Refresh</value>
+    <comment>Scan-toolbar legend label. Mac action.refresh.</comment>
+  </data>
+
+  <!-- ============================ Per-page status (Status.* — localized at the binding layer by StatusKeyToLocalizedConverter) ============================ -->
+  <data name="Status.Ready" xml:space="preserve">
+    <value>Ready</value>
+    <comment>Canonical per-page status "Ready". Backing field/source literal stays "Ready" (gate-asserted); only the displayed text is localized via StatusKeyToLocalizedConverter. Mac status.ready.</comment>
+  </data>
+  <data name="Status.Idle" xml:space="preserve">
+    <value>Idle</value>
+    <comment>Canonical status "Idle" (session/preview). Mac status.idle.</comment>
+  </data>
+  <data name="Status.PreviewReady" xml:space="preserve">
+    <value>Preview ready</value>
+    <comment>Canonical status "Preview ready" (settings export preview).</comment>
+  </data>
+  <data name="Status.IntentReady" xml:space="preserve">
+    <value>Intent ready</value>
+    <comment>Canonical status "Intent ready" (staged action intent).</comment>
+  </data>
+  <data name="Status.NoCoreValidatedPeers" xml:space="preserve">
+    <value>No Core-validated peers</value>
+    <comment>Canonical discovery-browser status "No Core-validated peers" (zero discovered peers).</comment>
+  </data>
+  <data name="Status.DiscoveryStopped" xml:space="preserve">
+    <value>Discovery stopped</value>
+    <comment>Canonical discovery status "Discovery stopped".</comment>
+  </data>
 </root>

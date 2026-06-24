@@ -408,4 +408,92 @@
     <value>功能</value>
     <comment>USB device-card detail row label. Mac usb.device.capabilities.</comment>
   </data>
+
+  <!-- ============================ Device Discovery — connection-mode header ============================ -->
+  <data name="DiscoveryModeLocalScanTitle.Text" xml:space="preserve">
+    <value>近距扫描</value>
+    <comment>Connection-mode header tab 1 title. Mac discovery.localScan.title. (iCloud tab title stays inline brand "iCloud".)</comment>
+  </data>
+  <data name="DiscoveryModeLocalScanSubtitle.Text" xml:space="preserve">
+    <value>同网络</value>
+    <comment>Connection-mode header tab 1 subtitle (same-LAN hint).</comment>
+  </data>
+  <data name="DiscoveryModeQrTitle.Text" xml:space="preserve">
+    <value>扫码连接</value>
+    <comment>Connection-mode header tab 2 title (scan a QR code to connect).</comment>
+  </data>
+  <data name="DiscoveryModeQrSubtitle.Text" xml:space="preserve">
+    <value>扫一扫</value>
+    <comment>Connection-mode header tab 2 subtitle.</comment>
+  </data>
+  <data name="DiscoveryModeCloudSubtitle.Text" xml:space="preserve">
+    <value>零配置</value>
+    <comment>Connection-mode header tab 3 subtitle (iCloud zero-configuration).</comment>
+  </data>
+  <data name="DiscoveryModeSmartCodeTitle.Text" xml:space="preserve">
+    <value>智能连接码</value>
+    <comment>Connection-mode header tab 4 title. Mac connection.smartCode.title.</comment>
+  </data>
+  <data name="DiscoveryModeSmartCodeSubtitle.Text" xml:space="preserve">
+    <value>短期连接码</value>
+    <comment>Connection-mode header tab 4 subtitle (short-lived connection code).</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — local-scan banner ============================ -->
+  <data name="DiscoveryLocalScanBannerTitle.Text" xml:space="preserve">
+    <value>局域网设备发现</value>
+    <comment>Local-scan info banner title.</comment>
+  </data>
+  <data name="DiscoveryLocalScanBannerBody.Text" xml:space="preserve">
+    <value>同一网络下通过 DNS-SD 广播的设备会显示在下方。</value>
+    <comment>Local-scan info banner body.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — scan-toolbar legend ============================ -->
+  <data name="DiscoveryScanLegendExtendedSearch.Text" xml:space="preserve">
+    <value>扩展搜索</value>
+    <comment>Scan-toolbar legend label. Mac discovery.extendedSearch.default.</comment>
+  </data>
+  <data name="DiscoveryScanLegendManualConnect.Text" xml:space="preserve">
+    <value>手动连接</value>
+    <comment>Scan-toolbar legend label. Mac discovery.manualConnect.</comment>
+  </data>
+  <data name="DiscoveryScanLegendStartScan.Text" xml:space="preserve">
+    <value>开始扫描</value>
+    <comment>Scan-toolbar legend label. Mac discovery.startScan.</comment>
+  </data>
+  <data name="DiscoveryScanLegendStopScan.Text" xml:space="preserve">
+    <value>停止扫描</value>
+    <comment>Scan-toolbar legend label. Mac discovery.stopScan.</comment>
+  </data>
+  <data name="DiscoveryScanLegendRefresh.Text" xml:space="preserve">
+    <value>刷新</value>
+    <comment>Scan-toolbar legend label. Mac action.refresh.</comment>
+  </data>
+
+  <!-- ============================ Per-page status (Status.* — localized at the binding layer by StatusKeyToLocalizedConverter) ============================ -->
+  <data name="Status.Ready" xml:space="preserve">
+    <value>就绪</value>
+    <comment>Canonical per-page status "Ready". Backing field/source literal stays "Ready" (gate-asserted); only the displayed text is localized via StatusKeyToLocalizedConverter. Mac status.ready.</comment>
+  </data>
+  <data name="Status.Idle" xml:space="preserve">
+    <value>空闲</value>
+    <comment>Canonical status "Idle" (session/preview). Mac status.idle.</comment>
+  </data>
+  <data name="Status.PreviewReady" xml:space="preserve">
+    <value>预览就绪</value>
+    <comment>Canonical status "Preview ready" (settings export preview).</comment>
+  </data>
+  <data name="Status.IntentReady" xml:space="preserve">
+    <value>操作就绪</value>
+    <comment>Canonical status "Intent ready" (staged action intent).</comment>
+  </data>
+  <data name="Status.NoCoreValidatedPeers" xml:space="preserve">
+    <value>未发现经核心校验的设备</value>
+    <comment>Canonical discovery-browser status "No Core-validated peers" (zero discovered peers).</comment>
+  </data>
+  <data name="Status.DiscoveryStopped" xml:space="preserve">
+    <value>已停止发现</value>
+    <comment>Canonical discovery status "Discovery stopped".</comment>
+  </data>
 </root>
