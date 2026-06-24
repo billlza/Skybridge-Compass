@@ -1335,6 +1335,13 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
+            <!-- Animated weather backdrop (GPU rain streaks + twinkling stars), the
+                 bottom-most child so it sits behind the top bar + every feature panel.
+                 The half-transparent glass surfaces read AS lit glass over the moving
+                 particles — the depth the flat static gradient was missing (Mac parity:
+                 its dashboard runs a Metal weather particle system over .starryNight). -->
+            <local:WeatherBackdrop Grid.Row="0" Grid.RowSpan="2" />
+
             <Border
                 Grid.Row="0"
                 Padding="24,8"
