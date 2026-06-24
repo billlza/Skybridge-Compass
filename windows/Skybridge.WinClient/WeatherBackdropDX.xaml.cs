@@ -1371,7 +1371,7 @@ float rainLayer(float2 uv, float scale, float speed, float slant, float thicknes
     float2 cell = floor(p);
     float2 f = frac(p);
     float r = hash21(cell + seed);
-    if (r < 0.5) return 0.0;                              // sparse columns
+    if (r < 0.82) return 0.0;                             // sparse columns (raised 0.5->0.82: far fewer streaks)
     float colJ = hash21(cell.yx + seed) - 0.5;
     float xline = smoothstep(thickness, 0.0, abs(f.x - 0.5 + colJ * 0.3));
     // vertical streak with a brighter head on the top 30%
@@ -1381,13 +1381,16 @@ float rainLayer(float2 uv, float scale, float speed, float slant, float thicknes
 
 float3 rainComposite(float2 uv, float density, float slant)
 {
-    // streak color gradient white->cyan->blue->white-ish (Mac advanced streak)
-    float far  = rainLayer(uv, float2(80.0, 26.0) * density, 0.9 + density, slant * 0.6, 0.10, 11.0) * 0.6;
-    float mid  = rainLayer(uv, float2(60.0, 22.0) * density, 1.2 + density, slant * 0.8, 0.12, 23.0) * 0.65;
-    float near = rainLayer(uv, float2(40.0, 18.0) * density, 1.6 + density, slant,       0.16, 37.0) * 0.8;
+    // BACKDROP rain: sparse, fine, semi-transparent streaks over the dark storm sky -- the UI
+    // must stay readable, so streaks are thin (lower thickness), faint (low per-layer weight) and
+    // tinted cool-blue (NOT near-white). 3-layer parallax kept but far quieter than before.
+    float far  = rainLayer(uv, float2(80.0, 26.0) * density, 0.9 + density, slant * 0.6, 0.045, 11.0) * 0.22;
+    float mid  = rainLayer(uv, float2(60.0, 22.0) * density, 1.2 + density, slant * 0.8, 0.055, 23.0) * 0.26;
+    float near = rainLayer(uv, float2(40.0, 18.0) * density, 1.6 + density, slant,       0.075, 37.0) * 0.34;
     float s = saturate(far + mid + near);
-    float3 streakCol = lerp(float3(0.7, 0.9, 1.0), float3(1.0, 1.0, 1.0), near);
-    return streakCol * s;
+    // cool blue-grey streak, only the nearest hint goes toward pale -- never full white
+    float3 streakCol = lerp(float3(0.55, 0.68, 0.82), float3(0.78, 0.86, 0.95), near);
+    return streakCol * s * 0.55;                          // overall composite opacity/brightness cut
 }
 
 // ============================ parallax snow ============================
@@ -1402,24 +1405,26 @@ float snowLayer(float2 uv, float scale, float fall, float sway, float size, floa
     float2 f = frac(p);
     float2 rnd = hash22(cell + seed);
     glow = 0.0;
-    if (rnd.x < 0.45) return 0.0;
+    if (rnd.x < 0.78) return 0.0;                         // sparse flakes (raised 0.45->0.78: far fewer)
     float2 c = rnd - 0.5;
     float d = length(f - 0.5 - c * 0.6);
     float flake = smoothstep(size, 0.0, d);
-    glow = smoothstep(size * 2.5, 0.0, d) * 0.25;
+    glow = smoothstep(size * 2.0, 0.0, d) * 0.10;         // tighter, dimmer halo (2.5->2.0, 0.25->0.10)
     return flake;
 }
 
 float3 snowComposite(float2 uv)
 {
     float g0, g1, g2;
-    // far bokeh (soft, small), mid, near (large crystals) - sizes/speeds per Mac tables
-    float far  = snowLayer(uv, 18.0, 0.10, 0.010, 0.45, 3.0, g0) * 0.4;
-    float mid  = snowLayer(uv, 12.0, 0.16, 0.018, 0.32, 9.0, g1) * 0.7;
-    float near = snowLayer(uv,  7.0, 0.22, 0.026, 0.26, 19.0, g2) * 0.95;
+    // BACKDROP snow: small drifting flakes over the dark cold sky -- the far layer is no longer a
+    // huge out-of-focus bokeh wall (size 0.45->0.10), all layers are smaller, sparser (threshold in
+    // snowLayer) and dimmer so the UI stays readable. Sizes are in cell units (smaller = tinier flake).
+    float far  = snowLayer(uv, 18.0, 0.10, 0.010, 0.10, 3.0, g0) * 0.22;
+    float mid  = snowLayer(uv, 12.0, 0.16, 0.018, 0.12, 9.0, g1) * 0.35;
+    float near = snowLayer(uv,  7.0, 0.22, 0.026, 0.14, 19.0, g2) * 0.5;
     float s = saturate(far + mid + near);
     float glow = (g0 + g1 + g2);
-    float3 col = float3(1.0, 1.0, 1.0) * s + float3(0.9, 0.95, 1.0) * glow;
+    float3 col = (float3(0.9, 0.93, 0.98) * s + float3(0.85, 0.9, 1.0) * glow) * 0.6;  // opacity/glow cut
     return col;
 }
 
@@ -1611,9 +1616,9 @@ float4 PSMain(VSOut input) : SV_TARGET
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.2, 0.2, 0.26), float3(0.6, 0.6, 0.7));
         col = lerp(col, clouds.rgb * 0.5, clouds.a * densMul);
         col += wispComposite(uv, aspect, clouds.a, 0.30);    // dim scatterable cloud motes (rain is dark)
-        col += rainComposite(dispUV, 1.0, 0.18) * densMul;   // rain parts + thins under the wave
-        // bottom atmospheric fog
-        col = lerp(col, float3(0.5, 0.5, 0.55), smoothstep(0.7, 1.0, ty) * 0.25);
+        col += rainComposite(dispUV, 0.8, 0.18) * densMul;   // rain parts + thins under the wave (lower density)
+        // keep the lower/card region DARK so UI text stays readable (subtle, dark fog -- not a grey wall)
+        col = lerp(col, float3(0.14, 0.14, 0.17), smoothstep(0.78, 1.0, ty) * 0.18);
     }
     else if (condition == 3)            // ---- Stormy ----
     {
@@ -1622,8 +1627,9 @@ float4 PSMain(VSOut input) : SV_TARGET
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.15, 0.15, 0.2), float3(0.5, 0.5, 0.6));
         col = lerp(col, clouds.rgb * 0.4, clouds.a * densMul);
         col += wispComposite(uv, aspect, clouds.a, 0.28);    // dim scatterable cloud motes (storm is dark)
-        col += rainComposite(dispUV, 1.5, 0.4) * densMul;    // x1.5 density, steeper slant; parts under the wave
-        col = lerp(col, float3(0.45, 0.45, 0.5), smoothstep(0.65, 1.0, ty) * 0.3);
+        col += rainComposite(dispUV, 1.1, 0.4) * densMul;    // a bit denser than Rainy, steeper slant; parts under the wave
+        // keep the lower/card region DARK so UI text stays readable (subtle, dark fog -- not a grey wall)
+        col = lerp(col, float3(0.11, 0.11, 0.14), smoothstep(0.74, 1.0, ty) * 0.20);
         // lightning: randomized flash, full-screen white
         float flashSeed = floor(time / 8.0);
         float flashT = frac(time / 8.0);
@@ -1642,6 +1648,8 @@ float4 PSMain(VSOut input) : SV_TARGET
         col += snowComposite(dispUV) * densMul;             // snow parts + thins under the wave
         // cold color grade
         col = lerp(col, col * float3(0.85, 0.90, 1.0), 0.15);
+        // keep the lower/card region DARK so UI text stays readable (snow has no grey wall, just darken)
+        col = lerp(col, float3(0.10, 0.12, 0.18), smoothstep(0.74, 1.0, ty) * 0.22);
     }
     else if (condition == 5)            // ---- Foggy ----
     {
