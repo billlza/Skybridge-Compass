@@ -41,6 +41,7 @@
         <vm:ServiceKindToBrushConverter x:Key="ServiceKindBrushConverter" />
         <vm:WeatherConditionToGlyphConverter x:Key="WeatherConditionGlyphConverter" />
         <vm:WeatherConditionToRainConverter x:Key="WeatherConditionRainConverter" />
+        <vm:WeatherConditionToPathConverter x:Key="WeatherConditionPathConverter" />
         <vm:WeatherConditionToBrushConverter x:Key="WeatherConditionBrushConverter" />
         <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
         <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
@@ -1585,14 +1586,17 @@
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
 
-                                        <!-- Left column: condition emoji over big temperature.
-                                             Color EMOJI via Segoe UI Emoji (Segoe Fluent Icons has no
-                                             weather glyphs); emoji are pre-colored so no Foreground. -->
+                                        <!-- Left column: VECTOR condition glyph (Path) over big
+                                             temperature. Replaces the color emoji that read cheap next
+                                             to the Mac's SF Symbol icons; tinted per-condition via the
+                                             brush converter, scaled by Stretch=Uniform. -->
                                         <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                            <TextBlock
-                                                Text="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionGlyphConverter}}"
-                                                FontFamily="Segoe UI Emoji"
-                                                FontSize="40"
+                                            <Path
+                                                Data="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionPathConverter}}"
+                                                Fill="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionBrushConverter}}"
+                                                Stretch="Uniform"
+                                                Width="46"
+                                                Height="46"
                                                 HorizontalAlignment="Center" />
                                             <!-- Big temperature: integer + degree sign, thin/rounded feel via light weight -->
                                             <TextBlock

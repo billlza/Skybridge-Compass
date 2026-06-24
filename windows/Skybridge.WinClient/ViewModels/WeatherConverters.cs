@@ -1,6 +1,7 @@
 using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 
 namespace Skybridge.WinClient.ViewModels;
@@ -61,6 +62,39 @@ public sealed class WeatherConditionToRainConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, string language) =>
         (value as string) is "Rainy" or "Stormy";
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>
+/// Condition enum name -> a VECTOR weather glyph (Geometry) for a Path, replacing the color
+/// emoji that read as cheap next to the Mac's SF Symbol vector icons. Clear → a sun (rays +
+/// disc); every cloud-bearing condition → a filled cloud (rain/snow/fog/haze/storm are told
+/// apart by colour via WeatherConditionToBrushConverter + the animated backdrop, mirroring the
+/// Mac which also leans on colour + the effect layer). Material-style 24-unit paths, scaled by
+/// the Path's Stretch=Uniform. Tune/extend (dedicated rain/snow glyphs) on device.
+/// </summary>
+public sealed class WeatherConditionToPathConverter : IValueConverter
+{
+    // Material wb_sunny (24-unit): disc + 8 rays.
+    private const string SunPath =
+        "M6.76 4.84l-1.8-1.79-1.41 1.41 1.79 1.79 1.42-1.41zM4 10.5H1v2h3v-2zm9-9.95h-2V3.5h2V.55z" +
+        "m7.45 3.91l-1.41-1.41-1.79 1.79 1.41 1.41 1.79-1.79zm-3.21 13.7l1.79 1.8 1.41-1.41-1.8-1.79-1.4 1.4z" +
+        "M20 10.5v2h3v-2h-3zm-8-5c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm-1 16.95h2V19.5h-2v2.95z" +
+        "m-7.45-3.91l1.41 1.41 1.79-1.8-1.41-1.41-1.79 1.8z";
+
+    // Material cloud (24-unit): a filled cloud silhouette.
+    private const string CloudPath =
+        "M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14" +
+        "c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z";
+
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        var key = value as string ?? string.Empty;
+        var data = key == "Clear" ? SunPath : CloudPath;
+        return (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), data);
+    }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language) =>
         throw new NotSupportedException();
