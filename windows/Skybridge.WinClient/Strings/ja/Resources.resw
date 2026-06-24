@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <!--
+    SkyBridge Compass — 日本語 (ja) UI 文字列。
+    Strings/en-US/Resources.resw のキー集合と 1:1 で対応させること。
+    PILOT 範囲: USB 管理ページ。Mac の ja.lproj/Localizable.strings には USB キーが無いため、
+    全て本端で翻訳 (action.refresh="更新", sidebar.usbManagement="USB管理" は Mac core ja を参照)。
+  -->
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- Mac core ja: sidebar.usbManagement = "USB管理" -->
+  <data name="UsbManagementTitle.Text" xml:space="preserve">
+    <value>USB 管理</value>
+    <comment>USB page header title. Mac key: usb.management.title.</comment>
+  </data>
+
+  <!-- "Connected Devices" — 本端翻訳 -->
+  <data name="UsbConnectedDevices.Text" xml:space="preserve">
+    <value>接続済みデバイス</value>
+    <comment>Section header over the connected-USB-device list.</comment>
+  </data>
+
+  <!-- Mac en: usb.empty.title = "No USB Devices Found" — 本端翻訳 -->
+  <data name="UsbEmptyTitle.Text" xml:space="preserve">
+    <value>USB デバイスが見つかりません</value>
+    <comment>Shown when zero USB devices are enumerated. Mac key: usb.empty.title.</comment>
+  </data>
+
+  <!-- Mac en: usb.empty.subtitle — 本端翻訳 -->
+  <data name="UsbEmptySubtitle.Text" xml:space="preserve">
+    <value>デバイスを接続して更新するか、ケーブルとポートを確認してください。</value>
+    <comment>Guidance under the empty-state title. Mac key: usb.empty.subtitle.</comment>
+  </data>
+</root>

@@ -22,6 +22,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- ===== Trilingual localization (en-US / zh-Hans / ja) =====
+         Default/fallback UI language. The Resource Management System resolves the actual UI
+         language from the SYSTEM DISPLAY LANGUAGE for unpackaged apps (NOT the user's preferred-
+         language list), falling back to this default when no per-language .resw matches. Strings
+         live in Strings/<lang>/Resources.resw and are referenced from XAML via x:Uid. The .resw
+         are declared as <PRIResource> below so MSBuild/MakePri index them into resources.pri.
+         Runtime override (for the in-app language switch + the C:\sb\force-lang.txt test hook) is
+         Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride — see App.xaml.cs. -->
+    <DefaultLanguage>en-US</DefaultLanguage>
   </PropertyGroup>
 
   <!-- ===== Single-project MSIX (Microsoft best practice: package identity, so location /
@@ -65,5 +75,22 @@
     <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
          (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+  </ItemGroup>
+
+  <!-- ===== Localization resources =====
+       Take explicit control of the PRIResource item set so the per-language Resources.resw are
+       deterministically indexed into resources.pri (MakePri runs as part of the WinAppSDK build
+       targets and produces resources.pri in the output dir for BOTH packaged and unpackaged —
+       unpackaged resolves it via the auto-initializer / "Application" root namespace). Turning
+       off the default glob and declaring the three files explicitly avoids any double-include and
+       documents exactly which strings ship. Add new Strings/<lang>/Resources.resw here as the
+       rollout proceeds. -->
+  <PropertyGroup>
+    <EnableDefaultPriItems>false</EnableDefaultPriItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PRIResource Include="Strings\en-US\Resources.resw" />
+    <PRIResource Include="Strings\zh-Hans\Resources.resw" />
+    <PRIResource Include="Strings\ja\Resources.resw" />
   </ItemGroup>
 </Project>

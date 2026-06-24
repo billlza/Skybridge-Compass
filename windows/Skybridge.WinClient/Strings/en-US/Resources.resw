@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <!--
+    SkyBridge Compass — English (en-US) UI strings.
+    Default/fallback language (see <DefaultLanguage>en-US</DefaultLanguage> in the .csproj).
+
+    PILOT SCOPE: USB Management page only. This is the trilingual (en-US / zh-Hans / ja)
+    infrastructure pilot — keep every key that exists here mirrored in
+    Strings/zh-Hans/Resources.resw and Strings/ja/Resources.resw so the resource sets stay
+    1:1 across languages (a missing key falls back to en-US, never to an empty string).
+
+    Property-identifier convention: "<Uid>.<Property>" sets that property on the XAML element
+    carrying x:Uid="<Uid>". For a TextBlock the property is "Text". The standard WinUI/UWP
+    resw schema below (resheader block + <data name="..."><value>...</value></data>) is what
+    MakePri/MSBuild indexes into the app's resources.pri for both packaged AND unpackaged.
+  -->
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- USB Management page title (Mac: usb.management.title) -->
+  <data name="UsbManagementTitle.Text" xml:space="preserve">
+    <value>USB Management</value>
+    <comment>USB page header title. Mac key: usb.management.title.</comment>
+  </data>
+
+  <!-- "Connected Devices" section header above the device list.
+       Not in the Mac Localizable.strings; authored here for all 3 languages. -->
+  <data name="UsbConnectedDevices.Text" xml:space="preserve">
+    <value>Connected Devices</value>
+    <comment>Section header over the connected-USB-device list.</comment>
+  </data>
+
+  <!-- Empty-state title (Mac: usb.empty.title) -->
+  <data name="UsbEmptyTitle.Text" xml:space="preserve">
+    <value>No USB Devices Found</value>
+    <comment>Shown when zero USB devices are enumerated. Mac key: usb.empty.title.</comment>
+  </data>
+
+  <!-- Empty-state guidance subtitle (Mac: usb.empty.subtitle) -->
+  <data name="UsbEmptySubtitle.Text" xml:space="preserve">
+    <value>Connect a device and refresh, or check cables and ports.</value>
+    <comment>Guidance under the empty-state title. Mac key: usb.empty.subtitle.</comment>
+  </data>
+</root>

@@ -1252,7 +1252,7 @@
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="17" FontWeight="Bold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                            <TextBlock Text="Next-gen cross-platform connectivity" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                            <TextBlock Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         </StackPanel>
                     </Grid>
                     <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
@@ -1658,8 +1658,8 @@
                                     VerticalAlignment="Center"
                                     Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loading}">
                                     <ProgressRing IsActive="{Binding IsWeatherLoading}" Width="32" Height="32" HorizontalAlignment="Center" />
-                                    <TextBlock Text="Loading weather..." FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock Text="First load can take a few seconds" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="正在获取天气信息..." FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="首次加载可能需要几秒钟" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                 </StackPanel>
 
                                 <!-- Error state: warning glyph + title + message + Retry, centered -->
@@ -1670,7 +1670,7 @@
                                     Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Error}">
                                     <!-- E7BA = Warning (triangle with !) ~ SF "exclamationmark.triangle.fill", orange -->
                                     <FontIcon Glyph="&#xE7BA;" FontSize="36" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock Text="Weather unavailable" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="天气数据获取失败" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
                                     <TextBlock
                                         Text="{Binding WeatherErrorMessage}"
                                         FontSize="12"
@@ -1688,7 +1688,7 @@
                                         <StackPanel Orientation="Horizontal" Spacing="6">
                                             <!-- E72C = Refresh ~ SF "arrow.clockwise" -->
                                             <FontIcon Glyph="&#xE72C;" FontSize="13" />
-                                            <TextBlock Text="Retry" />
+                                            <TextBlock Text="重试" />
                                         </StackPanel>
                                     </Button>
                                 </StackPanel>
@@ -1754,8 +1754,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE721;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="No devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Open Device Discovery to start scanning" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock Text="未发现设备" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="打开「设备发现」开始扫描" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1773,7 +1773,7 @@
                                         </Grid.ColumnDefinitions>
                                         <!-- E7F4 = TVMonitor (a display) ~ SF "display.2", indigo -->
                                         <FontIcon Glyph="&#xE7F4;" FontSize="16" Foreground="{StaticResource SkyBridgeNavRemoteDesktopBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="1" Text="Remote Sessions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="远程会话" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
                                         <Border Grid.Column="2" Style="{StaticResource Badge}" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                         </Border>
@@ -1789,8 +1789,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE7F4;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="No active sessions" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Connect from Remote Desktop to start a session" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock Text="无活跃会话" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="从「远程桌面」连接以开始会话" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1801,7 +1801,7 @@
                                 <StackPanel Spacing="14">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE80A;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Quick Actions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock Text="快捷操作" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     </StackPanel>
                                     <ItemsControl
                                         AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"
@@ -1820,7 +1820,7 @@
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <!-- E9D9 = Speed (gauge) ~ SF "cpu.fill"/"speedometer", orange -->
                                         <FontIcon Glyph="&#xE9D9;" FontSize="16" Foreground="{StaticResource SkyBridgeNavMonitorBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="System Performance" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock Text="系统性能" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     </StackPanel>
                                     <ItemsControl
                                         AutomationProperties.AutomationId="Skybridge.Dashboard.SystemPerformanceSummary"
@@ -1833,8 +1833,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding SystemMonitorMetricCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE9D9;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="No metrics yet" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Open System Monitor to sample performance" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock Text="暂无数据" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="打开「系统监控」以采集性能数据" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1901,28 +1901,28 @@
                                         <Border Background="{StaticResource SkyBridgeSelectedNavFillBrush}" CornerRadius="12,0,0,0" Opacity="0.18" />
                                         <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                             <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
-                                            <TextBlock Text="Local Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
-                                            <TextBlock Text="Same network" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="近距扫描" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                            <TextBlock Text="同网络" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                         </StackPanel>
                                         <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" />
                                     </Grid>
                                     <!-- Tab 2: QR Code (blue) -->
                                     <StackPanel Grid.Column="1" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                         <FontIcon Glyph="&#xED14;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="QR Code" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Scan to pair" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="扫码连接" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="扫一扫" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                     </StackPanel>
                                     <!-- Tab 3: Cloud Link (purple) -->
                                     <StackPanel Grid.Column="2" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                         <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Cloud Link" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Across networks" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="iCloud" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="零配置" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                     </StackPanel>
                                     <!-- Tab 4: Connection Code (orange) -->
                                     <StackPanel Grid.Column="3" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                         <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Connection Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
-                                        <TextBlock Text="6-digit code" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="智能连接码" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
+                                        <TextBlock Text="短期连接码" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -1945,8 +1945,8 @@
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE701;" FontSize="26" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock Text="Local network discovery" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                                        <TextBlock Text="Devices advertising over DNS-SD on this network appear below." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
+                                        <TextBlock Text="局域网设备发现" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock Text="同一网络下通过 DNS-SD 广播的设备会显示在下方。" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -1995,23 +1995,23 @@
                                     VerticalAlignment="Center">
                                     <StackPanel Orientation="Horizontal" Spacing="5">
                                         <FontIcon Glyph="&#xE7B3;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Extended Search" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="扩展搜索" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" Spacing="5">
                                         <FontIcon Glyph="&#xE8D7;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Manual Connect" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="手动连接" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" Spacing="5">
                                         <FontIcon Glyph="&#xE768;" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Start Scan" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="开始扫描" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" Spacing="5">
                                         <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Stop Scan" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="停止扫描" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" Spacing="5">
                                         <FontIcon Glyph="&#xE72C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Text="Refresh" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="刷新" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" VerticalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                                 <TextBox
@@ -2179,7 +2179,7 @@
                                 CornerRadius="12"
                                 Padding="16">
                                 <StackPanel Spacing="12">
-                                    <TextBlock Text="My Device" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    <TextBlock Text="我的设备" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     <Grid ColumnSpacing="14">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -2207,7 +2207,7 @@
                                                     VerticalAlignment="Center"
                                                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                                 <Border Style="{StaticResource BadgeAccent}" VerticalAlignment="Center">
-                                                    <TextBlock Text="This device" FontSize="11" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" />
+                                                    <TextBlock Text="本机" FontSize="11" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" />
                                                 </Border>
                                             </StackPanel>
                                             <!-- Platform secondary line -->
@@ -2220,7 +2220,7 @@
                                         <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
                                             <StackPanel Orientation="Horizontal" Spacing="5">
                                                 <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                                <TextBlock Text="Online" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="在线" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
                                             </StackPanel>
                                         </Border>
                                     </Grid>
@@ -2253,8 +2253,8 @@
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE946;" FontSize="20" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock Text="Trusted &amp; recent devices" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                        <TextBlock Text="Devices appear here after you pair them. This build does not yet persist a trusted-device list or connection history, so no trusted or recently-connected devices are shown." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
+                                        <TextBlock Text="已信任设备与最近连接" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock Text="配对后的设备会显示在这里。当前版本尚未持久化已信任设备列表或连接历史，因此暂不显示已信任或最近连接的设备。" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -2283,7 +2283,7 @@
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <FontIcon Glyph="&#xE701;" FontSize="16" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="1" Text="Discovered devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="已发现设备" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
                                         <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
                                         </Border>
@@ -2303,8 +2303,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE721;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="No devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="Start a scan to discover devices advertising on this network." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                        <TextBlock Text="未发现设备" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="开始扫描以发现在此网络中广播的设备。" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -2345,7 +2345,9 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
-                                    <TextBlock Text="USB Management" FontSize="18" FontWeight="SemiBold" />
+                                    <!-- Localized via Strings/<lang>/Resources.resw (key UsbManagementTitle.Text).
+                                         The inline Text is the design-time/fallback value; x:Uid overrides it at runtime. -->
+                                    <TextBlock x:Uid="UsbManagementTitle" Text="USB Management" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding UsbManagementStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
                                 <ItemsControl
@@ -2378,7 +2380,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE88E;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="Connected Devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="UsbConnectedDevices" Grid.Column="1" Text="Connected Devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
                                     <Border Grid.Column="2" Style="{StaticResource BadgeAccent}" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding UsbDeviceCount}" FontSize="12" Foreground="{StaticResource SkyBridgeAccentBrush}" />
                                     </Border>
@@ -2400,8 +2402,8 @@
                                     HorizontalAlignment="Center"
                                     Visibility="{Binding UsbDeviceCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                     <FontIcon Glyph="&#xE88E;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock Text="No USB devices found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock Text="Connect a device and refresh, or check the cable and port." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                    <TextBlock x:Uid="UsbEmptyTitle" Text="No USB Devices Found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock x:Uid="UsbEmptySubtitle" Text="Connect a device and refresh, or check cables and ports." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
                                 </StackPanel>
                             </StackPanel>
                         </StackPanel>
