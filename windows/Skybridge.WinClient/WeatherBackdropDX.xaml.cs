@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using SharpGen.Runtime;
+using Vortice;                  // RawRect (full-surface scissor)
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
@@ -187,14 +188,23 @@ public sealed partial class WeatherBackdropDX : UserControl
             _height = 1;
         }
 
-        // 1. Optional debug layer (must run BEFORE device/factory creation). Debug builds only.
+        // 1. Debug layer (must run BEFORE device/factory creation). Debug builds only:
+        //    if the D3D12 SDK debug layers are not installed, D3D12GetDebugInterface simply
+        //    fails and we fall back to a non-validated device.
         bool validation = false;
 #if DEBUG
-        if (D3D12GetDebugInterface(out ID3D12Debug? debug).Success && debug is not null)
+        try
         {
-            debug.EnableDebugLayer();
-            debug.Dispose();
-            validation = true;
+            if (D3D12GetDebugInterface(out ID3D12Debug? debug).Success && debug is not null)
+            {
+                debug.EnableDebugLayer();
+                debug.Dispose();
+                validation = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[WeatherBackdropDX] debug-layer enable failed (continuing without validation): {ex.Message}");
         }
 #endif
 
@@ -483,7 +493,10 @@ public sealed partial class WeatherBackdropDX : UserControl
         }
 
         allocator.Reset();
-        _commandList.Reset(allocator, null);
+        // Reset with the weather PSO as the initial pipeline state when it is live (matches the
+        // upstream HelloDirect3D12 sample, which passes the PSO to Reset). SetPipelineState below
+        // still re-binds it; passing it here just guarantees a valid initial state object.
+        _commandList.Reset(allocator, _shaderReady ? _pipelineState : null);
 
         // Present -> RenderTarget.
         _commandList.ResourceBarrierTransition(backBuffer, ResourceStates.Present, ResourceStates.RenderTarget);
@@ -507,8 +520,17 @@ public sealed partial class WeatherBackdropDX : UserControl
             _commandList.SetGraphicsRootSignature(_rootSignature);
             _commandList.SetPipelineState(_pipelineState);
             _commandList.SetGraphicsRootConstantBufferView(0, _constantBuffer.GPUVirtualAddress);
-            _commandList.RSSetViewport(0f, 0f, _width, _height);
-            _commandList.RSSetScissorRect((int)_width, (int)_height); // full-surface rect from (0,0)
+
+            // Explicit full-surface viewport (MinDepth=0, MaxDepth=1 — the VS emits z=0, so a
+            // MaxDepth of 0 would depth-clip the whole triangle) and scissor. Built from explicit
+            // Viewport/RawRect values so the rasterizer always covers the entire back buffer and is
+            // never left degenerate by an ambiguous helper overload.
+            var viewport = new Viewport(0f, 0f, _width, _height, 0f, 1f);
+            _commandList.RSSetViewport(viewport);
+
+            var scissor = new RawRect(0, 0, (int)_width, (int)_height); // left, top, right, bottom
+            _commandList.RSSetScissorRect(scissor);
+
             _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
             _commandList.DrawInstanced(3, 1, 0, 0);
         }
@@ -831,7 +853,7 @@ float vnoise2(float2 p)
     return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
 }
 
-// value noise (3D) — used for the cloud / fog density field
+// value noise (3D) - used for the cloud / fog density field
 float vnoise3(float3 p)
 {
     float3 i = floor(p);
@@ -847,7 +869,7 @@ float vnoise3(float3 p)
 
 static const float2x2 ROT = float2x2(0.80, 0.60, -0.60, 0.80);
 
-// FBM over 3D value-noise; octaves chosen per quality (we use 6 — the macOS top tier).
+// FBM over 3D value-noise; octaves chosen per quality (we use 6 - the macOS top tier).
 float fbm3(float3 p, int octaves)
 {
     float a = 0.5;
@@ -1094,7 +1116,7 @@ float snowLayer(float2 uv, float scale, float fall, float sway, float size, floa
 float3 snowComposite(float2 uv)
 {
     float g0, g1, g2;
-    // far bokeh (soft, small), mid, near (large crystals) — sizes/speeds per Mac tables
+    // far bokeh (soft, small), mid, near (large crystals) - sizes/speeds per Mac tables
     float far  = snowLayer(uv, 18.0, 0.10, 0.010, 0.45, 3.0, g0) * 0.4;
     float mid  = snowLayer(uv, 12.0, 0.16, 0.018, 0.32, 9.0, g1) * 0.7;
     float near = snowLayer(uv,  7.0, 0.22, 0.026, 0.26, 19.0, g2) * 0.95;
@@ -1223,12 +1245,12 @@ float4 PSMain(VSOut input) : SV_TARGET
     // ---- night starfield base shows through on the clear night theme (low-light scenes) ----
     // (already added to Clear; leave others as-is so the weather reads clearly)
 
-    // ---- finish: Reinhard tonemap + gamma + vignette ----
-    col = col / (col + 1.0);                                // Reinhard
-    col = pow(saturate(col), 1.0 / 2.2);                    // gamma
+    // ---- finish: gamma + gentle vignette (NO Reinhard - the scene is already LDR 0..1, so
+    //      Reinhard would just crush every sky color to ~half brightness). ----
+    col = pow(saturate(col), 1.0 / 2.2);                    // sRGB encode for the UNORM target
     float2 vd = uv - 0.5;
-    float vig = smoothstep(0.95, 0.35, length(vd) * 1.25);
-    col *= lerp(0.78, 1.0, vig);
+    float vig = smoothstep(1.05, 0.45, length(vd) * 1.25);
+    col *= lerp(0.92, 1.0, vig);                            // very light vignette
 
     return float4(col, 1.0);
 }
