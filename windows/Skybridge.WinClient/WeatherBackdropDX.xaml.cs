@@ -1169,7 +1169,7 @@ float4 PSMain(VSOut input) : SV_TARGET
 
     if (condition == 0)                 // ---- Clear ----
     {
-        col = clearSky(ty);
+        col = lerp(nightSky(ty), clearSky(ty), 0.55);   // translucent blue veil over the dark starry theme (Mac parity)
         // sun glow upper-left + caustic light spots
         float2 sun = float2(0.28, 0.18);
         float sd = length((uv - sun) * float2(aspect, 1.0));
@@ -1181,7 +1181,8 @@ float4 PSMain(VSOut input) : SV_TARGET
     }
     else if (condition == 1)            // ---- Cloudy ----
     {
-        float3 baseSky = lerp(float3(0.55, 0.62, 0.74), float3(0.78, 0.82, 0.88), ty);
+        float3 baseSky = nightSky(ty);                  // dark starry theme shows through (Mac cloudy lays no grey sky)
+        baseSky += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.5;
         float coverage = 0.72;
         float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
         col = lerp(baseSky, clouds.rgb, clouds.a);
@@ -1209,17 +1210,18 @@ float4 PSMain(VSOut input) : SV_TARGET
         float flashT = frac(time / 8.0);
         float trigger = step(0.85, hash11(flashSeed));     // ~15% of windows fire
         float flash = trigger * exp(-flashT * 14.0) * (0.6 + 0.4 * hash11(flashSeed + 7.0));
-        col += float3(1.0, 1.0, 1.0) * flash * 0.8;
+        col += (float3(1.0, 1.0, 1.0) * 0.6 + float3(0.5, 0.8, 1.0) * 0.4) * flash * 0.8; // white core + cyan glow (Mac)
     }
     else if (condition == 4)            // ---- Snowy ----
     {
-        col = snowSky(ty);
-        // soft sun-through-cloud halo at (0.3w, 0.15h)
+        col = lerp(nightSky(ty), float3(0.20, 0.24, 0.34), 0.4);  // dim cold base so white flakes pop (Mac parity)
+        col += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.4;
+        // soft moon/halo glow at (0.3w, 0.15h)
         float2 halo = float2(0.3, 0.15);
         float hd = length((uv - halo) * float2(aspect, 1.0));
-        col += float3(1.0, 0.98, 0.95) * smoothstep(0.35, 0.0, hd) * 0.18;
+        col += float3(0.8, 0.85, 0.95) * smoothstep(0.35, 0.0, hd) * 0.18;
         col += snowComposite(uv);
-        // cold color grade + faint vignette
+        // cold color grade
         col = lerp(col, col * float3(0.85, 0.90, 1.0), 0.15);
     }
     else if (condition == 5)            // ---- Foggy ----
