@@ -1279,7 +1279,10 @@ float cloudDensity(float3 p, float coverage)
     float h = (p.y - SLAB_LO) / (SLAB_HI - SLAB_LO);
     float shape = smoothstep(0.0, 0.25, h) * smoothstep(1.0, 0.55, h);
     float d = base * shape;
-    d = saturate((d - (1.0 - coverage)) * 1.7);   // coverage threshold + remap
+    // Discrete clumps: only the densest fbm peaks survive. The threshold is raised
+    // (1.0 - coverage*0.85) and the remap sharpened (x2.6) so the dark starry sky shows
+    // clearly between clumps instead of a continuous overcast sheet.
+    d = saturate((d - (1.0 - coverage * 0.85)) * 2.6);   // coverage threshold + sharper remap
     return d;
 }
 
@@ -1303,12 +1306,21 @@ float4 raymarchClouds(float3 ro, float3 rd, float coverage, float3 skyTint, floa
 {
     // upper-left key light (matches Mac (0.28w,0.12h) light source)
     float3 sunDir = normalize(float3(-0.55, 0.65, 0.25));
+    // Horizon falloff: near-horizontal rays (small rd.y) graze a very long path through the
+    // slab and pile up density into an opaque white wall across the lower/horizon band. Weight
+    // density by the ray's upward angle so the horizon region reads as mostly-clear dark sky and
+    // clouds concentrate in the UPPER (steeper-ray) portion of the view. Below the cutoff the
+    // contribution is zero -> no white horizon wall.
+    float horizonWeight = smoothstep(0.10, 0.42, rd.y);   // 0 at/below horizon, 1 looking up
+    if (rd.y <= 0.001 || horizonWeight <= 0.0) return float4(0,0,0,0);
     // intersect the view ray with the slab to bound the march
     float tEnter = (SLAB_LO - ro.y) / max(rd.y, 0.001);
     float tExit  = (SLAB_HI - ro.y) / max(rd.y, 0.001);
-    if (rd.y <= 0.001) return float4(0,0,0,0);
     tEnter = max(tEnter, 0.0);
     if (tExit <= tEnter) return float4(0,0,0,0);
+    // Cap the march length so grazing rays can't accumulate an unbounded slab traversal.
+    float maxMarch = 9.0;
+    tExit = min(tExit, tEnter + maxMarch);
 
     float steps = 40.0;
     float dt = (tExit - tEnter) / steps;
@@ -1323,6 +1335,8 @@ float4 raymarchClouds(float3 ro, float3 rd, float coverage, float3 skyTint, floa
         if (transmittance < 0.02) break;   // early-out
         float3 p = ro + rd * t;
         float d = cloudDensity(p, coverage);
+        // distance extinction: far samples thin out so distant clouds don't stack into a wall
+        d *= exp(-(t - tEnter) * 0.12) * horizonWeight;
         if (d > 0.001)
         {
             float lit = cloudLight(p, sunDir, coverage);
