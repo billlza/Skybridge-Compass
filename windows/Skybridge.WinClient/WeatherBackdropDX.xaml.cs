@@ -1423,6 +1423,115 @@ float3 snowComposite(float2 uv)
     return col;
 }
 
+// ============================ scatterable wisp / mote particles ============================
+// A faint, drifting layer of soft white cloud 'wisps' that the pointer SCATTERS apart, ported
+// in feel from the macOS InteractiveWeatherParticleSystem: discrete cloud motes (Mac type 2:
+// ~1000 particles, size 3..6, color (0.8,0.8,0.8,0.4), slow random drift) that get pushed away
+// from the cursor (Mac repelForce 50 over influenceRadius 100, dispersionRadius 150) and then
+// drift back as the repel relaxes (Mac velocity damping 0.95..0.98 -> smooth recover). Here it is
+// procedural: one wisp per grid cell (hash22), O(9) per pixel like snowLayer/rainLayer -- NO global
+// N-particle loop. At rest the layer is very faint (reads as a haze sparkle within the cloud), and
+// each wisp's REST position is displaced AWAY from the pointer (squared falloff * pointerStrength,
+// + a wake along pointerVelocity) so a wave scatters the motes apart, revealing the dark starry sky;
+// as pointerStrength decays the displacement shrinks and the wisps FLOW BACK to their drift spots.
+// ASCII ONLY (a non-ASCII char previously broke FXC).
+//
+//   scale     : grid frequency (bigger -> smaller, denser cells)
+//   drift     : vertical drift speed (slow upward-ish flow of the cloud field)
+//   sway      : per-cell horizontal sway amplitude (gives the layer life at rest)
+//   size      : wisp soft-sprite radius (in cell units)
+//   seed      : layer decorrelation seed
+//   aspect    : x/y aspect so scatter displacement and sprites stay round
+//   out streak: 0..1 elongation hint along the scatter direction (motion blur feel)
+float wispLayer(float2 uv, float scale, float drift, float sway, float size, float seed,
+                float aspect, out float streak)
+{
+    streak = 0.0;
+    // Slow global scroll of the whole wisp field (the cloud drifts even at rest).
+    float2 p = uv;
+    p.x += time * 0.012 + sin(time * 0.05 + seed) * 0.01;   // gentle horizontal flow + breathing
+    p.y -= time * drift;                                     // slow vertical drift
+    p *= scale;
+    float2 cell = floor(p);
+    float2 f = frac(p);
+
+    float acc = 0.0;
+    [unroll]
+    for (int oy = -1; oy <= 1; oy++)
+    [unroll]
+    for (int ox = -1; ox <= 1; ox++)
+    {
+        float2 o = float2(ox, oy);
+        float2 rnd = hash22(cell + o + seed);
+        if (rnd.x < 0.42) continue;                         // sparse population (faint haze)
+
+        // Rest position of this wisp inside its cell (jittered) + a small per-cell sway so the
+        // layer is alive even with no pointer (Mac cloud motes have a small random base velocity).
+        float2 jitter = (rnd - 0.5) * 0.7;
+        float swayPhase = rnd.y * 6.2831853 + seed;
+        jitter.x += sin(time * 0.6 + swayPhase) * sway;
+        jitter.y += cos(time * 0.5 + swayPhase) * sway * 0.7;
+        float2 wispCell = o + 0.5 + jitter;                 // wisp center in this cell's frac space
+
+        // World-UV position of this wisp center (undo the grid scale) so we can scatter it against
+        // the pointer in the SAME UV space the pointer lives in.
+        float2 wispUV = (cell + wispCell) / scale;
+        wispUV.x -= time * 0.012 + sin(time * 0.05 + seed) * 0.01;  // remove the scroll for UV match
+        wispUV.y += time * drift;
+
+        // ---- pointer scatter: push the wisp AWAY from the cursor (squared falloff, Mac parity) ----
+        float2 toW = wispUV - pointerUV;
+        float2 toWa = float2(toW.x * aspect, toW.y);
+        float dist = length(toWa);
+        float radius = max(pointerRadius, 1e-4);
+        float falloff = saturate(1.0 - dist / radius);
+        falloff = falloff * falloff;                        // squared edge gradient (Mac)
+        float fs = falloff * pointerStrength;               // shrinks to 0 as strength decays -> flow back
+        float2 dir = (dist > 1e-4) ? (toW / max(length(toW), 1e-4)) : float2(0.0, 0.0);
+        // displacement = normalize(away) * falloff * strength * scatterAmount  (Mac dispersionRadius feel)
+        float2 scatter = dir * fs * radius * 1.8;
+        scatter += pointerVelocity * fs * 0.06;             // wake along pointer motion (Mac velocity repel)
+
+        // Apply the scatter in grid (frac) space (scale UV displacement back into cell units).
+        wispCell += scatter * scale;
+        streak = max(streak, fs);                           // hint: elongate harder when shoved
+
+        // Soft sprite: smoothstep distance to the (possibly scattered) wisp center. When scattered,
+        // squash along the scatter direction so it reads as a streaking mote (liveliness).
+        float2 d = f - wispCell;
+        float2 sdir = (fs > 1e-3) ? normalize(scatter + 1e-5) : float2(0.0, 1.0);
+        float along = dot(d, sdir);
+        float perp  = dot(d, float2(-sdir.y, sdir.x));
+        // elongate along the scatter dir (stretch) by up to ~1.7x at full shove
+        float stretch = 1.0 + fs * 1.7;
+        float dd = length(float2(along / stretch, perp));
+        float bright = lerp(0.6, 1.0, rnd.y);               // per-wisp brightness variation
+        acc += smoothstep(size, 0.0, dd) * bright;
+    }
+    return acc;
+}
+
+// Composite the wisp layers into an additive white glow. `cloudPresence` (the local cloud alpha,
+// or a coarse fbm) modulates opacity so the motes concentrate where there ARE clouds -- you scatter
+// the CLOUD, not sparkle the clear sky. `baseOpacity` keeps it faint at rest (UI readable); the
+// scatter streak adds a touch more glow where the pointer is actively shoving wisps apart.
+float3 wispComposite(float2 uv, float aspect, float cloudPresence, float baseOpacity)
+{
+    float s0, s1, s2;
+    // two-to-three layers (far faint motes, mid, near larger wisps) -- sizes/speeds echo Mac motes.
+    float far  = wispLayer(uv, 16.0, 0.010, 0.010, 0.42, 5.0,  aspect, s0) * 0.45;
+    float mid  = wispLayer(uv, 10.0, 0.016, 0.016, 0.34, 13.0, aspect, s1) * 0.70;
+    float near = wispLayer(uv,  6.0, 0.022, 0.022, 0.28, 27.0, aspect, s2) * 0.90;
+    float m = far + mid + near;
+    float streak = max(max(s0, s1), s2);
+
+    // Concentrate where clouds exist; keep faint at rest so the UI stays readable. The active-scatter
+    // streak brightens the motes a little so a wave reads as the cloud breaking into drifting wisps.
+    float opacity = baseOpacity * saturate(0.35 + cloudPresence) * (1.0 + streak * 0.8);
+    float3 col = float3(0.92, 0.95, 1.0) * saturate(m) * opacity;
+    return col;
+}
+
 // ============================ raymarched height fog (Perlin FBM) ============================
 // True ray-march: step through the volume, accumulate FBM density, depth-fade + scatter.
 float3 fogComposite(float2 uv, float intensity, out float fogAlpha)
@@ -1491,6 +1600,9 @@ float4 PSMain(VSOut input) : SV_TARGET
         float coverage = 0.55;                          // lower so the dark starry sky shows between cloud clumps (Mac)
         float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
         col = lerp(baseSky, clouds.rgb, clouds.a * densMul);  // wave thins the cloud -> starry sky shows
+        // scatterable wisp motes ON TOP of the cloud field: faint at rest, scatter apart on a wave
+        // (revealing the starry sky) then drift back -- the discrete-particle liveliness from Mac.
+        col += wispComposite(uv, aspect, clouds.a, 0.45);
     }
     else if (condition == 2)            // ---- Rainy ----
     {
@@ -1498,6 +1610,7 @@ float4 PSMain(VSOut input) : SV_TARGET
         float coverage = 0.85;
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.2, 0.2, 0.26), float3(0.6, 0.6, 0.7));
         col = lerp(col, clouds.rgb * 0.5, clouds.a * densMul);
+        col += wispComposite(uv, aspect, clouds.a, 0.30);    // dim scatterable cloud motes (rain is dark)
         col += rainComposite(dispUV, 1.0, 0.18) * densMul;   // rain parts + thins under the wave
         // bottom atmospheric fog
         col = lerp(col, float3(0.5, 0.5, 0.55), smoothstep(0.7, 1.0, ty) * 0.25);
@@ -1508,6 +1621,7 @@ float4 PSMain(VSOut input) : SV_TARGET
         float coverage = 0.92;
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.15, 0.15, 0.2), float3(0.5, 0.5, 0.6));
         col = lerp(col, clouds.rgb * 0.4, clouds.a * densMul);
+        col += wispComposite(uv, aspect, clouds.a, 0.28);    // dim scatterable cloud motes (storm is dark)
         col += rainComposite(dispUV, 1.5, 0.4) * densMul;    // x1.5 density, steeper slant; parts under the wave
         col = lerp(col, float3(0.45, 0.45, 0.5), smoothstep(0.65, 1.0, ty) * 0.3);
         // lightning: randomized flash, full-screen white
