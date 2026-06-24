@@ -57,6 +57,15 @@ public sealed partial class WeatherBackdropDX : UserControl
     private const int BufferCount = 2;
     private static readonly Format BackBufferFormat = Format.B8G8R8A8_UNorm;
 
+    // Internal render scale for the heavy volumetric raymarch. The fullscreen pixel shader
+    // (40-step cloud view march + 6-step light march + 64-step fog march, 5-6 octave fbm) is
+    // run once per back-buffer pixel every frame, so its cost is quadratic in the render
+    // resolution. Rendering the back buffer at a FRACTION of the panel's physical pixels and
+    // letting the composition swap chain stretch it up to fill the panel cuts pixel-shader cost
+    // by ~1/(scale^2) (0.6 -> ~2.8x cheaper) while a slowly moving cloudy backdrop tolerates the
+    // slight softness. The shader's visual complexity is unchanged (no fewer steps / octaves).
+    private const float RenderScale = 0.6f;
+
     // ── DX12 objects (null until a successful Initialize; _ready gates the render path). ──
     private ID3D12Device2? _device;
     private ID3D12CommandQueue? _queue;
@@ -102,6 +111,7 @@ public sealed partial class WeatherBackdropDX : UserControl
     // ── State flags. ──
     private bool _ready;            // DX initialized + RTVs valid -> render path armed
     private bool _renderingHooked;  // CompositionTarget.Rendering subscription active
+    private bool _initializedUnsized; // init ran before layout (1x1 buffer) -> force first resize
 
     // ── Animation clock (Stopwatch, NOT DateTime). ──
     private readonly Stopwatch _clock = new();
@@ -166,12 +176,18 @@ public sealed partial class WeatherBackdropDX : UserControl
 
     private void OnPanelSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        TryResize();
+        // Use the event's NewSize: it is the authoritative just-laid-out DIP size, whereas
+        // Panel.ActualWidth/Height can still report the PREVIOUS layout pass when this handler
+        // runs (the root cause of the swap chain getting stuck at an early, too-small size and
+        // only covering part of the content area).
+        TryResize(e.NewSize.Width, e.NewSize.Height);
     }
 
     private void OnCompositionScaleChanged(SwapChainPanel sender, object args)
     {
-        TryResize();
+        // No size in the args; the live ActualWidth/Height are valid by the time a scale change
+        // is delivered, so let TryResize read them.
+        TryResize(Panel.ActualWidth, Panel.ActualHeight);
     }
 
     // -------------------------------------------------------------------------------------
@@ -186,6 +202,7 @@ public sealed partial class WeatherBackdropDX : UserControl
             // Panel not measured yet: create at 1x1, the first SizeChanged will ResizeBuffers.
             _width = 1;
             _height = 1;
+            _initializedUnsized = true;
         }
 
         // 1. Debug layer (must run BEFORE device/factory creation). Debug builds only:
@@ -627,20 +644,20 @@ public sealed partial class WeatherBackdropDX : UserControl
     //  Resize / DPI
     // -------------------------------------------------------------------------------------
 
-    private void TryResize()
+    private void TryResize(double dipWidth, double dipHeight)
     {
         if (!_ready || _swapChain is null)
         {
             return;
         }
 
-        ComputeBackBufferSize(out uint newWidth, out uint newHeight);
+        ComputeBackBufferSize(dipWidth, dipHeight, out uint newWidth, out uint newHeight);
         if (newWidth == 0 || newHeight == 0)
         {
             return; // guard against zero size (collapsed / not measured)
         }
 
-        if (newWidth == _width && newHeight == _height)
+        if (newWidth == _width && newHeight == _height && !_initializedUnsized)
         {
             // Size unchanged — the scale may still have changed; refresh the transform.
             ApplyDpiTransform();
@@ -650,6 +667,7 @@ public sealed partial class WeatherBackdropDX : UserControl
         try
         {
             ResizeSwapChain(newWidth, newHeight);
+            _initializedUnsized = false; // first real size has now been applied
         }
         catch (Exception ex)
         {
@@ -678,8 +696,14 @@ public sealed partial class WeatherBackdropDX : UserControl
         ApplyDpiTransform();
     }
 
-    // Counter the composition scale: render at native pixels, display 1:1. Scale+translation
-    // only (SetMatrixTransform rejects skew/rotation).
+    // Map the reduced-resolution back buffer onto the FULL panel DIP rect. The composition swap
+    // chain's surface is (dipW * scaleX * RenderScale) physical pixels wide; it must end up
+    // covering dipW DIP. The SwapChainPanel applies the inverse of this matrix in DIP space, so
+    // the surface fills the panel when the X factor is 1/(scaleX * RenderScale) (and Y likewise):
+    //   surfacePx * (1/(scaleX*RenderScale)) = dipW*scaleX*RenderScale / (scaleX*RenderScale) = dipW.
+    // This single factor does BOTH jobs at once: it counters the composition DPI scale (the old
+    // 1/scale) AND stretches the RenderScale-reduced buffer back up to full size. Scale-only
+    // (SetMatrixTransform rejects skew/rotation), no translation.
     private void ApplyDpiTransform()
     {
         if (_swapChain2 is null)
@@ -689,22 +713,40 @@ public sealed partial class WeatherBackdropDX : UserControl
 
         float sx = _scaleX <= 0f ? 1f : _scaleX;
         float sy = _scaleY <= 0f ? 1f : _scaleY;
-        var inverse = new Matrix3x2(1f / sx, 0f, 0f, 1f / sy, 0f, 0f);
+        float fx = 1f / (sx * RenderScale);
+        float fy = 1f / (sy * RenderScale);
+        var transform = new Matrix3x2(fx, 0f, 0f, fy, 0f, 0f);
         // Vortice maps the DXGI Get/SetMatrixTransform pair to a property.
-        _swapChain2.MatrixTransform = inverse;
+        _swapChain2.MatrixTransform = transform;
     }
 
-    // Back-buffer pixel size = DIP size * composition scale, rounded, clamped to >= 0.
+    // Back-buffer pixel size = DIP size * composition scale * RenderScale, rounded, clamped to
+    // >= 1 when the panel has a real size. The DIP size is read from an explicit argument so the
+    // SizeChanged path can feed the authoritative SizeChangedEventArgs.NewSize (which is set
+    // before ActualWidth/ActualHeight are guaranteed to reflect the new layout pass), and the
+    // Loaded/scale paths fall back to the live ActualWidth/ActualHeight. The buffer aspect equals
+    // (dipW*scaleX*RenderScale) / (dipH*scaleY*RenderScale) = the panel's physical aspect, so the
+    // shader's `aspect = resolution.x/resolution.y` stays correct at any render scale.
     private void ComputeBackBufferSize(out uint width, out uint height)
+    {
+        ComputeBackBufferSize(Panel.ActualWidth, Panel.ActualHeight, out width, out height);
+    }
+
+    private void ComputeBackBufferSize(double dipWidth, double dipHeight, out uint width, out uint height)
     {
         _scaleX = Panel.CompositionScaleX <= 0f ? 1f : Panel.CompositionScaleX;
         _scaleY = Panel.CompositionScaleY <= 0f ? 1f : Panel.CompositionScaleY;
 
-        double w = Panel.ActualWidth * _scaleX;
-        double h = Panel.ActualHeight * _scaleY;
+        // Physical pixels covering the FULL panel, then reduced by RenderScale. The composition
+        // swap chain (Scaling.Stretch) + MatrixTransform stretches this smaller buffer back over
+        // the full panel DIP rect (see ApplyDpiTransform).
+        double w = dipWidth * _scaleX * RenderScale;
+        double h = dipHeight * _scaleY * RenderScale;
 
-        width = w >= 1.0 ? (uint)(w + 0.5) : 0u;
-        height = h >= 1.0 ? (uint)(h + 0.5) : 0u;
+        // Clamp to >= 1 so a valid (>0 DIP) panel never produces a 0-size buffer after the
+        // RenderScale multiply rounds a thin sliver down; 0 only when the panel is truly unsized.
+        width = w >= 0.5 ? (uint)Math.Max(1.0, w + 0.5) : 0u;
+        height = h >= 0.5 ? (uint)Math.Max(1.0, h + 0.5) : 0u;
     }
 
     // -------------------------------------------------------------------------------------
