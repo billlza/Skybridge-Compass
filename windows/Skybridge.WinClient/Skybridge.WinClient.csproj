@@ -54,6 +54,10 @@
          CanvasAnimatedControl (the animation-loop control) is unsupported in WinUI 3.
          Requires the win-x64 RID set above (DX12 native). -->
     <PackageReference Include="ComputeSharp.WinUI" Version="3.2.0" />
+    <!-- Direct ref so the ComputeSharp Roslyn source generator ([GeneratedComputeShaderDescriptor])
+         actually runs and emits IComputeShaderDescriptor<T> (transitive analyzer flow is unreliable;
+         without this the ShaderRunner<T> constraint fails to compile — CS0315). -->
+    <PackageReference Include="ComputeSharp" Version="3.2.0" />
     <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
          (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
