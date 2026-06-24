@@ -627,4 +627,38 @@
     <value>Start scanning to discover devices broadcasting on this network.</value>
     <comment>Discovered-devices empty-state subtitle (DD page). Pairs with reused DashboardDeviceDiscoveryEmptyTitle ("No Devices Found").</comment>
   </data>
+
+  <!-- ============================ Settings ▸ General ▸ UI Language ============================ -->
+  <data name="SettingsGeneralLanguageSectionHeader.Text" xml:space="preserve">
+    <value>Language</value>
+    <comment>Settings ▸ General "语言" section header. Mac SettingsView 语言 section.</comment>
+  </data>
+  <data name="SettingsGeneralLanguageRowLabel.Text" xml:space="preserve">
+    <value>UI Language</value>
+    <comment>Settings ▸ General language-row label (left of the dropdown). Mac 界面语言.</comment>
+  </data>
+  <data name="SettingsGeneralLanguageOptionSystem.Content" xml:space="preserve">
+    <value>Follow System</value>
+    <comment>Language dropdown option: follow the system display language (no override).</comment>
+  </data>
+  <data name="SettingsGeneralLanguageOptionZhHans.Content" xml:space="preserve">
+    <value>简体中文</value>
+    <comment>Language dropdown option: Simplified Chinese (endonym, conventionally not translated).</comment>
+  </data>
+  <data name="SettingsGeneralLanguageOptionJa.Content" xml:space="preserve">
+    <value>日本語</value>
+    <comment>Language dropdown option: Japanese (endonym, conventionally not translated).</comment>
+  </data>
+  <data name="SettingsGeneralLanguageOptionEn.Content" xml:space="preserve">
+    <value>English</value>
+    <comment>Language dropdown option: English (endonym, conventionally not translated).</comment>
+  </data>
+  <data name="SettingsGeneralLanguageHint.Text" xml:space="preserve">
+    <value>Choose the app's display language.</value>
+    <comment>Helper text under the language dropdown. Mac 选择应用的显示语言.</comment>
+  </data>
+  <data name="SettingsGeneralLanguageRestartNote.Text" xml:space="preserve">
+    <value>Restart to apply.</value>
+    <comment>Shown after the user changes the language: the new language takes full effect on next launch.</comment>
+  </data>
 </root>

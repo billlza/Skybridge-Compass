@@ -38,10 +38,23 @@
     <StackPanel Spacing="14" Margin="0,0,0,14">
 
         <!-- =====================================================================
-             语言  (Language)
+             语言  (UI Language) — Mac parity: Settings ▸ General 界面语言 dropdown.
+
+             The ComboBox two-way binds Settings.Language (→ SettingsCoordinator → SettingsService →
+             %LOCALAPPDATA%\SkyBridge\settings.json). App.OnLaunched reads that same file via
+             LanguageSettings and applies PrimaryLanguageOverride before the MainWindow XAML loads, so
+             the choice takes full effect on next launch. On change, the code-behind ALSO sets
+             PrimaryLanguageOverride immediately (so a relaunch reflects it without waiting for the
+             debounced save) and reveals the localized "需要重启生效" note. Tags are BCP-47 (the values
+             LanguageSettings persists/maps): "system" / "zh-Hans" / "ja" / "en-US".
+
+             GATE-SAFE: this row is a localized label + ComboBox + TextBlocks only — NO <Button> (the
+             action-surface push-button counts asserted by verify-windows-ui-action-order.ps1 stay
+             frozen), and it touches no Services action catalog / SessionViewModel command list.
              ===================================================================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsGeneralLanguageSectionHeader"
                 Text="语言"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -54,28 +67,43 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralLanguageRowLabel"
                             Grid.Column="0"
-                            Text="语言"
+                            Text="界面语言"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                        <!-- Settings.Language : string ("system" / "zh-Hans" / "en") -->
+                        <!-- Settings.Language : string ("system" / "zh-Hans" / "ja" / "en-US") -->
                         <ComboBox
+                            x:Name="LanguageComboBox"
                             Grid.Column="1"
                             MinWidth="180"
                             HorizontalAlignment="Right"
                             VerticalAlignment="Center"
                             SelectedValuePath="Tag"
-                            SelectedValue="{Binding Settings.Language, Mode=TwoWay}">
-                            <ComboBoxItem Content="跟随系统" Tag="system" />
-                            <ComboBoxItem Content="简体中文" Tag="zh-Hans" />
-                            <ComboBoxItem Content="English" Tag="en" />
+                            SelectedValue="{Binding Settings.Language, Mode=TwoWay}"
+                            SelectionChanged="OnLanguageSelectionChanged">
+                            <ComboBoxItem x:Uid="SettingsGeneralLanguageOptionSystem" Content="跟随系统" Tag="system" />
+                            <ComboBoxItem x:Uid="SettingsGeneralLanguageOptionZhHans" Content="简体中文" Tag="zh-Hans" />
+                            <ComboBoxItem x:Uid="SettingsGeneralLanguageOptionJa" Content="日本語" Tag="ja" />
+                            <ComboBoxItem x:Uid="SettingsGeneralLanguageOptionEn" Content="English" Tag="en-US" />
                         </ComboBox>
                     </Grid>
                     <TextBlock
+                        x:Uid="SettingsGeneralLanguageHint"
                         Text="选择应用的显示语言"
                         TextWrapping="Wrap"
                         FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                    <!-- Localized "restart to apply" note — collapsed until the user changes the
+                         language (revealed by OnLanguageSelectionChanged in code-behind). -->
+                    <TextBlock
+                        x:Name="LanguageRestartNote"
+                        x:Uid="SettingsGeneralLanguageRestartNote"
+                        Text="需要重启生效"
+                        Visibility="Collapsed"
+                        TextWrapping="Wrap"
+                        FontSize="12"
+                        Foreground="{StaticResource SkyBridgeAccentBrush}" />
                 </StackPanel>
             </Border>
         </StackPanel>

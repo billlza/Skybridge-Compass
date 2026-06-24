@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Skybridge.WinClient.Services;
 
 namespace Skybridge.WinClient.Settings;
 
@@ -27,6 +28,12 @@ namespace Skybridge.WinClient.Settings;
 // =====================================================================================
 public sealed partial class SettingsGeneralView : UserControl
 {
+    // Suppresses the restart-note + override re-apply for the FIRST SelectionChanged, which fires when
+    // the two-way SelectedValue binding seeds the ComboBox from the persisted Settings.Language on
+    // load (that is not a user edit). Flips true after the first SelectionChanged so every subsequent
+    // change is treated as a genuine user choice.
+    private bool _languageSelectionInitialized;
+
     public SettingsGeneralView()
     {
         InitializeComponent();
@@ -36,6 +43,49 @@ public sealed partial class SettingsGeneralView : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         await RefreshCacheSizeAsync().ConfigureAwait(false);
+    }
+
+    // ---- 界面语言 (UI Language) -----------------------------------------------------------
+    //
+    // The ComboBox.SelectedValue two-way binds Settings.Language, so the persistence (→
+    // SettingsService → %LOCALAPPDATA%\SkyBridge\settings.json) is already handled by the binding —
+    // exactly like every other dropdown on this tab. This handler adds the two language-specific
+    // behaviors on a genuine user change:
+    //   1. Apply PrimaryLanguageOverride IMMEDIATELY (mapped from the chosen stored value via
+    //      LanguageSettings) so a relaunch reflects the choice without waiting for the debounced save.
+    //   2. Reveal the localized "需要重启生效 / Restart to apply / 再起動して適用" note (x:Uid strings
+    //      re-resolve to the new language only on the next launch, the Mac-acceptable behavior).
+    //
+    // The FIRST SelectionChanged (the binding seeding the control from persisted state on load) is
+    // suppressed so the note does not appear before any user interaction.
+    private void OnLanguageSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_languageSelectionInitialized)
+        {
+            _languageSelectionInitialized = true;
+            return;
+        }
+
+        try
+        {
+            // The selected Tag is the stored value ("system" / "zh-Hans" / "ja" / "en-US"). Map it to
+            // a BCP-47 override (null == follow the system display language).
+            var storedValue = LanguageComboBox?.SelectedValue as string;
+            var bcp47 = LanguageSettings.MapStoredValueToBcp47(storedValue);
+
+            Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride =
+                string.IsNullOrWhiteSpace(bcp47) ? string.Empty : bcp47!.Trim();
+        }
+        catch (Exception)
+        {
+            // Never let an override-setup failure crash the Settings surface; the persisted value
+            // (saved by the binding) still applies on the next launch via App.ApplyLanguageOverride.
+        }
+
+        if (LanguageRestartNote is not null)
+        {
+            LanguageRestartNote.Visibility = Visibility.Visible;
+        }
     }
 
     // ---- 清除缓存 -------------------------------------------------------------------------
