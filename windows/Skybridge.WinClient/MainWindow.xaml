@@ -1344,7 +1344,7 @@
             <local:WeatherBackdrop
                 Grid.Row="0"
                 Grid.RowSpan="2"
-                RainEnabled="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionRainConverter}}" />
+                Condition="{Binding WeatherConditionKey}" />
 
             <Border
                 Grid.Row="0"
