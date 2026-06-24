@@ -1206,13 +1206,13 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
 
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
     'Text="{Binding SelectedFeature.Title}"',
-    'Text="{Binding StatusMessage}"',
+    'Text="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
-    '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
+    '<TextBlock Text="{Binding TopBarConnectionStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'ToolTipService.ToolTip="FPS / Diagnostics"',
-    '<TextBlock Text="FPS"',
-    '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
+    'x:Uid="TopBarDiagnosticsFpsLabel" Text="FPS"',
+    '<TextBlock Text="{Binding TopBarDiagnosticsStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'ItemsSource="{Binding TopBarActions}"'
 )
 

@@ -60,6 +60,26 @@ public sealed class StatusKeyToLocalizedConverter : IValueConverter
             // "Disabled" state shown for Open System Preferences / Clear History Data. The
             // canonical English State stays the model value; only the displayed text localizes.
             ["Disabled"] = "Status.Disabled",
+            // Top-bar CONNECTION pill (TopBarConnectionStatus = EngineConnectionState.ToString(),
+            // see IEngineClient.EngineConnectionState). The enum name stays the canonical backing
+            // value the gate + state machine key off (verify-windows-startup-state asserts
+            // EngineConnectionState.Disconnected; native-runtime-profile feeds "Disconnected"
+            // through BuildStatusUpdate). Only the displayed pill text localizes here.
+            ["Disconnected"] = "Status.Disconnected",
+            ["Connecting"] = "Status.Connecting",
+            ["Connected"] = "Status.Connected",
+            ["Reconnecting"] = "Status.Reconnecting",
+            ["ShuttingDown"] = "Status.ShuttingDown",
+            // Top-bar DIAGNOSTICS / FPS pill (TopBarDiagnosticsStatus = PerformanceStatus, the
+            // honest coarse health scalar from DashboardMetricsClient: "Nominal"/"Busy"). The
+            // English scalar stays the backing value the top bar + gate key off; only the
+            // displayed pill text localizes.
+            ["Nominal"] = "Status.Nominal",
+            ["Busy"] = "Status.Busy",
+            // Page status line (StatusMessage). The session/engine status machine emits these
+            // canonical completed messages; dynamic / ellipsis ("Connecting...") variants are NOT
+            // mapped and pass through verbatim so live messages survive. "Idle" already maps above.
+            ["Heartbeat acknowledged"] = "Status.HeartbeatAcknowledged",
         };
 
     // In-code trilingual fallback, keyed by resource key then language fold ("en"/"zh"/"ja").
@@ -74,6 +94,14 @@ public sealed class StatusKeyToLocalizedConverter : IValueConverter
             ["Status.NoCoreValidatedPeers"] = new() { ["en"] = "No Core-validated peers", ["zh"] = "未发现经核心校验的设备", ["ja"] = "コア検証済みのピアがありません" },
             ["Status.DiscoveryStopped"] = new() { ["en"] = "Discovery stopped", ["zh"] = "已停止发现", ["ja"] = "検出を停止しました" },
             ["Status.Disabled"] = new() { ["en"] = "Disabled", ["zh"] = "已禁用", ["ja"] = "無効" },
+            ["Status.Disconnected"] = new() { ["en"] = "Disconnected", ["zh"] = "未连接", ["ja"] = "未接続" },
+            ["Status.Connecting"] = new() { ["en"] = "Connecting", ["zh"] = "连接中", ["ja"] = "接続中" },
+            ["Status.Connected"] = new() { ["en"] = "Connected", ["zh"] = "已连接", ["ja"] = "接続済み" },
+            ["Status.Reconnecting"] = new() { ["en"] = "Reconnecting", ["zh"] = "重新连接中", ["ja"] = "再接続中" },
+            ["Status.ShuttingDown"] = new() { ["en"] = "Shutting down", ["zh"] = "正在关闭", ["ja"] = "シャットダウン中" },
+            ["Status.Nominal"] = new() { ["en"] = "Nominal", ["zh"] = "正常", ["ja"] = "正常" },
+            ["Status.Busy"] = new() { ["en"] = "Busy", ["zh"] = "繁忙", ["ja"] = "ビジー" },
+            ["Status.HeartbeatAcknowledged"] = new() { ["en"] = "Heartbeat acknowledged", ["zh"] = "心跳已确认", ["ja"] = "ハートビート確認済み" },
         };
 
     // Lazily-created MRT Core manager (shared; cheap to reuse). null if construction fails

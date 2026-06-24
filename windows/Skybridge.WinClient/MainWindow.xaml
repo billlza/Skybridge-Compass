@@ -1398,7 +1398,7 @@
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             AutomationProperties.AutomationId="Skybridge.Status.Message"
-                            Text="{Binding StatusMessage}"
+                            Text="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"
                             Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     </StackPanel>
 
@@ -1514,7 +1514,7 @@
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
                                 <FontIcon Glyph="&#xE9F5;" FontSize="13" Foreground="{Binding ConnectionStatus, Converter={StaticResource ConnectionStatusDotBrushConverter}}" />
-                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarConnectionStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- FPS / Diagnostics (Mac pill 5): speedometer, orange. This is the
@@ -1528,7 +1528,7 @@
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <FontIcon Glyph="&#xE9D9;" FontSize="13" Foreground="{StaticResource SkyBridgeWarningBrush}" />
                                 <TextBlock x:Uid="TopBarDiagnosticsFpsLabel" Text="FPS" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                <TextBlock Text="{Binding TopBarDiagnosticsStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <!-- Bell + theme action cluster (Mac actions A/B): the existing

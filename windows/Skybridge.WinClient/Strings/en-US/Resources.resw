@@ -597,6 +597,38 @@
     <value>Discovery stopped</value>
     <comment>Canonical discovery status "Discovery stopped".</comment>
   </data>
+  <data name="Status.Disconnected" xml:space="preserve">
+    <value>Disconnected</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Disconnected.ToString() (gate-asserted); only displayed text localizes via StatusKeyToLocalizedConverter. Mac connection.disconnected.</comment>
+  </data>
+  <data name="Status.Connecting" xml:space="preserve">
+    <value>Connecting</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Connecting.ToString().</comment>
+  </data>
+  <data name="Status.Connected" xml:space="preserve">
+    <value>Connected</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Connected.ToString().</comment>
+  </data>
+  <data name="Status.Reconnecting" xml:space="preserve">
+    <value>Reconnecting</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Reconnecting.ToString().</comment>
+  </data>
+  <data name="Status.ShuttingDown" xml:space="preserve">
+    <value>Shutting down</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.ShuttingDown.ToString().</comment>
+  </data>
+  <data name="Status.Nominal" xml:space="preserve">
+    <value>Nominal</value>
+    <comment>Top-bar FPS/diagnostics pill (PerformanceStatus health scalar). Backing value stays "Nominal" (gate-asserted); only displayed text localizes.</comment>
+  </data>
+  <data name="Status.Busy" xml:space="preserve">
+    <value>Busy</value>
+    <comment>Top-bar FPS/diagnostics pill (PerformanceStatus health scalar). Backing value stays "Busy".</comment>
+  </data>
+  <data name="Status.HeartbeatAcknowledged" xml:space="preserve">
+    <value>Heartbeat acknowledged</value>
+    <comment>Page status line completed message. Backing value stays "Heartbeat acknowledged" (SessionStatusClient); only displayed text localizes.</comment>
+  </data>
 
   <!-- ============================ Device Discovery — my-devices / discovered subsections ============================ -->
   <data name="DiscoveryMyDevicesHeader.Text" xml:space="preserve">

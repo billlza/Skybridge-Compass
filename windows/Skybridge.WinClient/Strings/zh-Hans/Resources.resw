@@ -589,6 +589,38 @@
     <value>已停止发现</value>
     <comment>Canonical discovery status "Discovery stopped".</comment>
   </data>
+  <data name="Status.Disconnected" xml:space="preserve">
+    <value>未连接</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Disconnected.ToString() (gate-asserted); only displayed text localizes via StatusKeyToLocalizedConverter. Mac connection.disconnected.</comment>
+  </data>
+  <data name="Status.Connecting" xml:space="preserve">
+    <value>连接中</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Connecting.ToString().</comment>
+  </data>
+  <data name="Status.Connected" xml:space="preserve">
+    <value>已连接</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Connected.ToString().</comment>
+  </data>
+  <data name="Status.Reconnecting" xml:space="preserve">
+    <value>重新连接中</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.Reconnecting.ToString().</comment>
+  </data>
+  <data name="Status.ShuttingDown" xml:space="preserve">
+    <value>正在关闭</value>
+    <comment>Top-bar connection pill. Backing value stays EngineConnectionState.ShuttingDown.ToString().</comment>
+  </data>
+  <data name="Status.Nominal" xml:space="preserve">
+    <value>正常</value>
+    <comment>Top-bar FPS/diagnostics pill (PerformanceStatus health scalar). Backing value stays "Nominal" (gate-asserted); only displayed text localizes.</comment>
+  </data>
+  <data name="Status.Busy" xml:space="preserve">
+    <value>繁忙</value>
+    <comment>Top-bar FPS/diagnostics pill (PerformanceStatus health scalar). Backing value stays "Busy".</comment>
+  </data>
+  <data name="Status.HeartbeatAcknowledged" xml:space="preserve">
+    <value>心跳已确认</value>
+    <comment>Page status line completed message. Backing value stays "Heartbeat acknowledged" (SessionStatusClient); only displayed text localizes.</comment>
+  </data>
 
   <!-- ============================ Device Discovery — my-devices / discovered subsections ============================ -->
   <data name="DiscoveryMyDevicesHeader.Text" xml:space="preserve">
