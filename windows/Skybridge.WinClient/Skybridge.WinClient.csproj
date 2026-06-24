@@ -46,9 +46,11 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <!-- Win2D: GPU 2D canvas with real Gaussian blur + effects, used for the metaball weather
-         clouds (the Composition layer can't do blur+alphaThreshold). -->
-    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
+    <!-- ComputeSharp.WinUI: C#->DX12 GPU compute shaders (the Windows equivalent of Mac's Metal),
+         for the procedural cinematic weather backdrop. Win2D was a dead end here —
+         CanvasAnimatedControl (the animation-loop control) is unsupported in WinUI 3.
+         Requires the win-x64 RID set above (DX12 native). -->
+    <PackageReference Include="ComputeSharp.WinUI" Version="3.2.0" />
     <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
          (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
