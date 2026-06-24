@@ -135,3 +135,8 @@ core/skybridge-core/target
 !core/skybridge-core/src/bin/
 !core/skybridge-core/src/bin/*.rs
 
+
+# MSIX dev signing artifacts (generated on the box by tools/Setup-Msix.ps1 — never commit)
+*.pfx
+*.cer
+windows/Skybridge.WinClient/Assets/
