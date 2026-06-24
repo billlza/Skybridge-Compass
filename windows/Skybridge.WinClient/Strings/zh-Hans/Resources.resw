@@ -275,6 +275,99 @@
     <comment>Card 2 section heading.</comment>
   </data>
 
+  <!-- ===== System Monitor — data-bound indicator/metric Labels, States & captions =====
+       Localized at the BINDING layer by LabelKeyToLocalizedConverter; the canonical English
+       literals stay in SystemMonitorWorkspaceClient (gate-asserted). No ".Text" suffix: these
+       are looked up by raw key from the converter (same convention as Status.*). -->
+  <data name="SysMonLabel.Health" xml:space="preserve">
+    <value>健康</value>
+    <comment>Indicator pill label "Health".</comment>
+  </data>
+  <data name="SysMonLabel.Monitoring" xml:space="preserve">
+    <value>监控</value>
+    <comment>Indicator pill label "Monitoring".</comment>
+  </data>
+  <data name="SysMonLabel.Advanced" xml:space="preserve">
+    <value>高级</value>
+    <comment>Indicator pill label "Advanced".</comment>
+  </data>
+  <data name="SysMonLabel.Thermal" xml:space="preserve">
+    <value>热量</value>
+    <comment>Indicator pill label "Thermal".</comment>
+  </data>
+  <data name="SysMonLabel.Load" xml:space="preserve">
+    <value>负载</value>
+    <comment>Indicator pill label "Load".</comment>
+  </data>
+  <data name="SysMonLabel.CPU" xml:space="preserve">
+    <value>处理器</value>
+    <comment>Metric tile label "CPU".</comment>
+  </data>
+  <data name="SysMonLabel.Memory" xml:space="preserve">
+    <value>内存</value>
+    <comment>Metric tile label "Memory".</comment>
+  </data>
+  <data name="SysMonLabel.Disk" xml:space="preserve">
+    <value>磁盘</value>
+    <comment>Metric tile label "Disk".</comment>
+  </data>
+  <data name="SysMonLabel.Network" xml:space="preserve">
+    <value>网络</value>
+    <comment>Metric tile label "Network".</comment>
+  </data>
+  <data name="SysMonState.Healthy" xml:space="preserve">
+    <value>良好</value>
+    <comment>Indicator state "Healthy".</comment>
+  </data>
+  <data name="SysMonState.Caution" xml:space="preserve">
+    <value>注意</value>
+    <comment>Indicator state "Caution".</comment>
+  </data>
+  <data name="SysMonState.NetworkOffline" xml:space="preserve">
+    <value>网络离线</value>
+    <comment>Indicator state "Network offline".</comment>
+  </data>
+  <data name="SysMonState.Active" xml:space="preserve">
+    <value>活动中</value>
+    <comment>Indicator state "Active" (monitoring running).</comment>
+  </data>
+  <data name="SysMonState.Idle" xml:space="preserve">
+    <value>空闲</value>
+    <comment>Indicator state "Idle" (monitoring stopped).</comment>
+  </data>
+  <data name="SysMonState.ReadOnly" xml:space="preserve">
+    <value>只读</value>
+    <comment>Indicator state "Read-only" (advanced diagnostics enabled).</comment>
+  </data>
+  <data name="SysMonState.Off" xml:space="preserve">
+    <value>关闭</value>
+    <comment>Indicator state "Off" (advanced diagnostics disabled).</comment>
+  </data>
+  <data name="SysMonState.Unknown" xml:space="preserve">
+    <value>未知</value>
+    <comment>Indicator state "Unknown" (thermal — no Windows provider yet).</comment>
+  </data>
+  <data name="SysMonState.Nominal" xml:space="preserve">
+    <value>正常</value>
+    <comment>Indicator state "Nominal" (load).</comment>
+  </data>
+  <data name="SysMonCaption.Processor" xml:space="preserve">
+    <value>处理器</value>
+    <comment>CPU metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.WorkingSet" xml:space="preserve">
+    <value>工作集</value>
+    <comment>Memory metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.Storage" xml:space="preserve">
+    <value>存储</value>
+    <comment>Disk metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.Adapters" xml:space="preserve">
+    <value>适配器</value>
+    <comment>Network metric-tile sub-caption.</comment>
+  </data>
+
   <!-- ============================ Top bar — status-pill tooltips ============================ -->
   <data name="TopBarNetworkSpeedPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>网络吞吐量（下行 / 上行），每约 2 秒采样一次</value>

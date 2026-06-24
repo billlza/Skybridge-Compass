@@ -275,6 +275,99 @@
     <comment>Card 2 section heading.</comment>
   </data>
 
+  <!-- ===== System Monitor — data-bound indicator/metric Labels, States & captions =====
+       Localized at the BINDING layer by LabelKeyToLocalizedConverter; the canonical English
+       literals stay in SystemMonitorWorkspaceClient (gate-asserted). No ".Text" suffix: these
+       are looked up by raw key from the converter (same convention as Status.*). -->
+  <data name="SysMonLabel.Health" xml:space="preserve">
+    <value>ヘルス</value>
+    <comment>Indicator pill label "Health".</comment>
+  </data>
+  <data name="SysMonLabel.Monitoring" xml:space="preserve">
+    <value>監視</value>
+    <comment>Indicator pill label "Monitoring".</comment>
+  </data>
+  <data name="SysMonLabel.Advanced" xml:space="preserve">
+    <value>詳細</value>
+    <comment>Indicator pill label "Advanced".</comment>
+  </data>
+  <data name="SysMonLabel.Thermal" xml:space="preserve">
+    <value>温度</value>
+    <comment>Indicator pill label "Thermal".</comment>
+  </data>
+  <data name="SysMonLabel.Load" xml:space="preserve">
+    <value>負荷</value>
+    <comment>Indicator pill label "Load".</comment>
+  </data>
+  <data name="SysMonLabel.CPU" xml:space="preserve">
+    <value>CPU</value>
+    <comment>Metric tile label "CPU".</comment>
+  </data>
+  <data name="SysMonLabel.Memory" xml:space="preserve">
+    <value>メモリ</value>
+    <comment>Metric tile label "Memory".</comment>
+  </data>
+  <data name="SysMonLabel.Disk" xml:space="preserve">
+    <value>ディスク</value>
+    <comment>Metric tile label "Disk".</comment>
+  </data>
+  <data name="SysMonLabel.Network" xml:space="preserve">
+    <value>ネットワーク</value>
+    <comment>Metric tile label "Network".</comment>
+  </data>
+  <data name="SysMonState.Healthy" xml:space="preserve">
+    <value>正常</value>
+    <comment>Indicator state "Healthy".</comment>
+  </data>
+  <data name="SysMonState.Caution" xml:space="preserve">
+    <value>注意</value>
+    <comment>Indicator state "Caution".</comment>
+  </data>
+  <data name="SysMonState.NetworkOffline" xml:space="preserve">
+    <value>ネットワークオフライン</value>
+    <comment>Indicator state "Network offline".</comment>
+  </data>
+  <data name="SysMonState.Active" xml:space="preserve">
+    <value>稼働中</value>
+    <comment>Indicator state "Active" (monitoring running).</comment>
+  </data>
+  <data name="SysMonState.Idle" xml:space="preserve">
+    <value>アイドル</value>
+    <comment>Indicator state "Idle" (monitoring stopped).</comment>
+  </data>
+  <data name="SysMonState.ReadOnly" xml:space="preserve">
+    <value>読み取り専用</value>
+    <comment>Indicator state "Read-only" (advanced diagnostics enabled).</comment>
+  </data>
+  <data name="SysMonState.Off" xml:space="preserve">
+    <value>オフ</value>
+    <comment>Indicator state "Off" (advanced diagnostics disabled).</comment>
+  </data>
+  <data name="SysMonState.Unknown" xml:space="preserve">
+    <value>不明</value>
+    <comment>Indicator state "Unknown" (thermal — no Windows provider yet).</comment>
+  </data>
+  <data name="SysMonState.Nominal" xml:space="preserve">
+    <value>正常</value>
+    <comment>Indicator state "Nominal" (load).</comment>
+  </data>
+  <data name="SysMonCaption.Processor" xml:space="preserve">
+    <value>プロセッサ</value>
+    <comment>CPU metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.WorkingSet" xml:space="preserve">
+    <value>ワーキングセット</value>
+    <comment>Memory metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.Storage" xml:space="preserve">
+    <value>ストレージ</value>
+    <comment>Disk metric-tile sub-caption.</comment>
+  </data>
+  <data name="SysMonCaption.Adapters" xml:space="preserve">
+    <value>アダプター</value>
+    <comment>Network metric-tile sub-caption.</comment>
+  </data>
+
   <!-- ============================ Top bar — status-pill tooltips ============================ -->
   <data name="TopBarNetworkSpeedPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>ネットワークスループット（下り / 上り）、約2秒ごとにサンプリング</value>

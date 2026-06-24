@@ -29,6 +29,10 @@
              literal is UNCHANGED so Scripts/verify-windows-startup-state.ps1 and
              Scripts/verify-windows-ui-parity.ps1 (which assert the "Ready" literal) stay green. -->
         <conv:StatusKeyToLocalizedConverter x:Key="StatusKeyToLocalizedConverter" />
+        <!-- Localizes the System Monitor data-bound Label/State/Caption strings at the binding
+             layer only; the canonical English literals stay in SystemMonitorWorkspaceClient
+             (gate-asserted), unknown/dynamic values pass through. -->
+        <conv:LabelKeyToLocalizedConverter x:Key="LabelKeyToLocalizedConverter" />
         <vm:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
         <vm:FeatureEntryIdToAccentBrushConverter x:Key="FeatureAccentBrushConverter" />
         <vm:MetricKeyToGlyphConverter x:Key="MetricGlyphConverter" />
@@ -516,10 +520,16 @@
                                 VerticalAlignment="Center" />
                         </Border>
                         <StackPanel VerticalAlignment="Center">
+                            <!-- Label localized at the binding layer (CPU/Memory/Disk/Network ->
+                                 zh/ja); the canonical English Label stays on the model. -->
                             <TextBlock
-                                Text="{Binding Label}"
+                                Text="{Binding Label, Converter={StaticResource LabelKeyToLocalizedConverter}}"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <!-- Caption: SystemMetricCaptionConverter derives the caption from
+                                 the Label (Processor/Working set/Storage/Adapters) and localizes
+                                 it for zh/ja via the shared LabelKeyToLocalizedConverter table;
+                                 the canonical English Label stays on the model. -->
                             <TextBlock
                                 Text="{Binding Label, Converter={StaticResource SystemMetricCaptionConverter}}"
                                 FontSize="11"
@@ -565,13 +575,17 @@
                         FontSize="14"
                         Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
                         VerticalAlignment="Center" />
+                    <!-- Label/State display text localized at the binding layer (Health/
+                         Monitoring/Thermal/Load + Healthy/Active/Idle/... -> zh/ja). The glyph
+                         + tint converters above still read the canonical English Label/State,
+                         and the model values stay English (gate-asserted). -->
                     <TextBlock
-                        Text="{Binding Label}"
+                        Text="{Binding Label, Converter={StaticResource LabelKeyToLocalizedConverter}}"
                         FontWeight="SemiBold"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
                         VerticalAlignment="Center" />
                     <TextBlock
-                        Text="{Binding State}"
+                        Text="{Binding State, Converter={StaticResource LabelKeyToLocalizedConverter}}"
                         Foreground="{Binding State, Converter={StaticResource SystemIndicatorStateBrushConverter}}"
                         VerticalAlignment="Center" />
                 </StackPanel>
@@ -1258,8 +1272,8 @@
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                             <TextBlock x:Uid="AppSidebarBrandName" Text="Skybridge Compass" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="17" FontWeight="Bold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock x:Uid="AppSidebarBrandTagline" Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                            <TextBlock x:Uid="AppSidebarBrandTaglineMuted" Text="下一代跨平台连接体验" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                            <TextBlock x:Uid="AppSidebarBrandTagline" Text="Next-generation cross-platform connectivity" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock x:Uid="AppSidebarBrandTaglineMuted" Text="Next-generation cross-platform connectivity" TextWrapping="Wrap" MaxLines="1" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         </StackPanel>
                     </Grid>
                     <Border Height="1" Background="{StaticResource SkyBridgePanelStrokeBrush}" />
@@ -1670,8 +1684,8 @@
                                     VerticalAlignment="Center"
                                     Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Loading}">
                                     <ProgressRing IsActive="{Binding IsWeatherLoading}" Width="32" Height="32" HorizontalAlignment="Center" />
-                                    <TextBlock x:Uid="DashboardWeatherLoadingTitle" Text="正在获取天气信息..." FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock x:Uid="DashboardWeatherLoadingHint" Text="首次加载可能需要几秒钟" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock x:Uid="DashboardWeatherLoadingTitle" Text="Fetching weather…" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock x:Uid="DashboardWeatherLoadingHint" Text="First load may take a few seconds" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                 </StackPanel>
 
                                 <!-- Error state: warning glyph + title + message + Retry, centered -->
@@ -1682,7 +1696,7 @@
                                     Visibility="{Binding WeatherPhase, Converter={StaticResource WeatherPhaseVisibilityConverter}, ConverterParameter=Error}">
                                     <!-- E7BA = Warning (triangle with !) ~ SF "exclamationmark.triangle.fill", orange -->
                                     <FontIcon Glyph="&#xE7BA;" FontSize="36" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock x:Uid="DashboardWeatherErrorTitle" Text="天气数据获取失败" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
+                                    <TextBlock x:Uid="DashboardWeatherErrorTitle" Text="Failed to load weather" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
                                     <TextBlock
                                         Text="{Binding WeatherErrorMessage}"
                                         FontSize="12"
@@ -1701,7 +1715,7 @@
                                         <StackPanel Orientation="Horizontal" Spacing="6">
                                             <!-- E72C = Refresh ~ SF "arrow.clockwise" -->
                                             <FontIcon Glyph="&#xE72C;" FontSize="13" />
-                                            <TextBlock x:Uid="DashboardWeatherRetryButton" Text="重试" />
+                                            <TextBlock x:Uid="DashboardWeatherRetryButton" Text="Retry" />
                                         </StackPanel>
                                     </Button>
                                 </StackPanel>
@@ -1767,8 +1781,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE721;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardDeviceDiscoveryEmptyTitle" Text="未发现设备" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardDeviceDiscoveryEmptySubtitle" Text="打开「设备发现」开始扫描" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardDeviceDiscoveryEmptyTitle" Text="No Devices Found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardDeviceDiscoveryEmptySubtitle" Text="Open Device Discovery to start scanning" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1786,7 +1800,7 @@
                                         </Grid.ColumnDefinitions>
                                         <!-- E7F4 = TVMonitor (a display) ~ SF "display.2", indigo -->
                                         <FontIcon Glyph="&#xE7F4;" FontSize="16" Foreground="{StaticResource SkyBridgeNavRemoteDesktopBrush}" VerticalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardRemoteSessionsPanelTitle" Grid.Column="1" Text="远程会话" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardRemoteSessionsPanelTitle" Grid.Column="1" Text="Remote Sessions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
                                         <Border Grid.Column="2" Style="{StaticResource Badge}" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                         </Border>
@@ -1802,8 +1816,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE7F4;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardRemoteSessionsEmptyTitle" Text="无活跃会话" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardRemoteSessionsEmptySubtitle" Text="从「远程桌面」连接以开始会话" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardRemoteSessionsEmptyTitle" Text="No Active Sessions" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardRemoteSessionsEmptySubtitle" Text="Connect from Remote Desktop to start a session" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1814,7 +1828,7 @@
                                 <StackPanel Spacing="14">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE80A;" FontSize="16" Foreground="{StaticResource SkyBridgeAccentBrush}" VerticalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardQuickActionsPanelTitle" Text="快捷操作" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock x:Uid="DashboardQuickActionsPanelTitle" Text="Quick Actions" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     </StackPanel>
                                     <ItemsControl
                                         AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"
@@ -1833,7 +1847,7 @@
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <!-- E9D9 = Speed (gauge) ~ SF "cpu.fill"/"speedometer", orange -->
                                         <FontIcon Glyph="&#xE9D9;" FontSize="16" Foreground="{StaticResource SkyBridgeNavMonitorBrush}" VerticalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardSystemPerformancePanelTitle" Text="系统性能" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock x:Uid="DashboardSystemPerformancePanelTitle" Text="System Performance" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     </StackPanel>
                                     <ItemsControl
                                         AutomationProperties.AutomationId="Skybridge.Dashboard.SystemPerformanceSummary"
@@ -1846,8 +1860,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding SystemMonitorMetricCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE9D9;" FontSize="28" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardSystemPerformanceEmptyTitle" Text="暂无数据" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DashboardSystemPerformanceEmptySubtitle" Text="打开「系统监控」以采集性能数据" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardSystemPerformanceEmptyTitle" Text="No Data" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DashboardSystemPerformanceEmptySubtitle" Text="Open System Monitor to collect performance data" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>

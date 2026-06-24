@@ -322,7 +322,10 @@ public sealed class SystemMetricLabelToCaptionConverter : IValueConverter
     public object Convert(object value, Type targetType, object parameter, string language)
     {
         var label = value as string ?? string.Empty;
-        return label switch
+        // Canonical English caption per metric (the source-of-truth caption). Then localize
+        // it at the binding layer via the shared converter table (zh/ja), passing unknown
+        // metrics through. XAML can't chain two converters, so we localize inline here.
+        var caption = label switch
         {
             "CPU" => "Processor",
             "Memory" => "Working set",
@@ -330,6 +333,8 @@ public sealed class SystemMetricLabelToCaptionConverter : IValueConverter
             "Network" => "Adapters",
             _ => label
         };
+
+        return Skybridge.WinClient.Converters.LabelKeyToLocalizedConverter.Localize(caption);
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)
