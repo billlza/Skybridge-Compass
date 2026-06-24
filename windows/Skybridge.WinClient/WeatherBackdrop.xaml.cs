@@ -837,9 +837,11 @@ public sealed partial class WeatherBackdrop : UserControl
     {
         var minDim = Math.Min(w, h);
         // Cirrus (far/high/thin), Main-far, Main-near.
-        BuildCloudLayer(w, h, Math.Clamp((int)(w / 60f), 8, 26), 0.02f, 0.18f, minDim * 0.025f, 0.30f, 34f, 0.55f, true, false);
-        BuildCloudLayer(w, h, Math.Clamp((int)(w / 90f), 6, 22), 0.08f, 0.28f, minDim * 0.075f, 0.50f, 14f, 0.65f, false, false);
-        BuildCloudLayer(w, h, Math.Clamp((int)(w / 70f), 8, 34), 0.16f, 0.42f, minDim * 0.065f, 0.70f, 24f, 0.85f, false, true);
+        // Tuned on-device: clouds are an ATMOSPHERE behind the glass cards, not a wall — far
+        // fewer + much lower opacity than the workflow's first pass (which buried the StatCards).
+        BuildCloudLayer(w, h, Math.Clamp((int)(w / 120f), 4, 12), 0.02f, 0.15f, minDim * 0.025f, 0.22f, 34f, 0.55f, true, false);
+        BuildCloudLayer(w, h, Math.Clamp((int)(w / 175f), 3, 9), 0.05f, 0.20f, minDim * 0.075f, 0.22f, 14f, 0.65f, false, false);
+        BuildCloudLayer(w, h, Math.Clamp((int)(w / 145f), 3, 10), 0.09f, 0.28f, minDim * 0.060f, 0.26f, 24f, 0.85f, false, true);
     }
 
     private void BuildCloudLayer(float w, float h, int count, float yMin, float yMax, float baseR,
@@ -850,7 +852,7 @@ public sealed partial class WeatherBackdrop : UserControl
             var cw = cirrus ? baseR * Rand(6f, 11f) : baseR * Rand(2.6f, 4.2f);
             var ch = cirrus ? baseR * Rand(0.5f, 1.0f) : baseR * Rand(1.4f, 2.4f);
             var y = Rand(yMin, yMax) * h;
-            var op = Math.Clamp(opacity * depthFade * 1.4f, 0f, 1f);
+            var op = Math.Clamp(opacity * depthFade * 0.6f, 0f, 1f);
 
             var cloud = _compositor!.CreateContainerVisual();
             cloud.Size = new Vector2(cw, ch);
