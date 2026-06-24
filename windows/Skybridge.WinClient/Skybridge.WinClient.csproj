@@ -10,6 +10,12 @@
     <WindowsPackageType Condition="'$(EnableMsixTooling)'!='true'">None</WindowsPackageType>
     <WindowsPackageType Condition="'$(EnableMsixTooling)'=='true'">MSIX</WindowsPackageType>
 
+    <!-- Win2D ships native dlls and cannot be referenced under AnyCPU (WIN2D0001). Pin the
+         unpackaged build to win-x64, framework-dependent (the box has the WindowsAppSDK runtime).
+         The MSIX build sets its own RuntimeIdentifiers above. -->
+    <RuntimeIdentifier Condition="'$(EnableMsixTooling)'!='true'">win-x64</RuntimeIdentifier>
+    <SelfContained Condition="'$(EnableMsixTooling)'!='true'">false</SelfContained>
+
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
