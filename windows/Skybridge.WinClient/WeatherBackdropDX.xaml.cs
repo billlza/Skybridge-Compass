@@ -229,7 +229,8 @@ public sealed partial class WeatherBackdropDX : UserControl
         _backBufferIndex = _swapChain.CurrentBackBufferIndex;
 
         // Wire the swap chain into the SwapChainPanel (UI thread — we are in Panel.Loaded).
-        using (var native = new ISwapChainPanelNative(Panel))
+        // Vortice.DXGI also defines ISwapChainPanelNative; we want the WinUI one for SwapChainPanel.
+        using (var native = new Vortice.WinUI.ISwapChainPanelNative(Panel))
         {
             native.SetSwapChain(_swapChain).CheckError();
         }
@@ -490,7 +491,8 @@ public sealed partial class WeatherBackdropDX : UserControl
         float sx = _scaleX <= 0f ? 1f : _scaleX;
         float sy = _scaleY <= 0f ? 1f : _scaleY;
         var inverse = new Matrix3x2(1f / sx, 0f, 0f, 1f / sy, 0f, 0f);
-        _swapChain2.SetMatrixTransform(inverse);
+        // Vortice maps the DXGI Get/SetMatrixTransform pair to a property.
+        _swapChain2.MatrixTransform = inverse;
     }
 
     // Back-buffer pixel size = DIP size * composition scale, rounded, clamped to >= 0.
