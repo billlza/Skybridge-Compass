@@ -2196,7 +2196,7 @@
                                 CornerRadius="12"
                                 Padding="16">
                                 <StackPanel Spacing="12">
-                                    <TextBlock Text="我的设备" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                    <TextBlock x:Uid="DiscoveryMyDevicesHeader" Text="My Devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                     <Grid ColumnSpacing="14">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -2224,7 +2224,7 @@
                                                     VerticalAlignment="Center"
                                                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                                 <Border Style="{StaticResource BadgeAccent}" VerticalAlignment="Center">
-                                                    <TextBlock Text="本机" FontSize="11" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" />
+                                                    <TextBlock x:Uid="DiscoveryThisDeviceBadge" Text="This Device" FontSize="11" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" />
                                                 </Border>
                                             </StackPanel>
                                             <!-- Platform secondary line -->
@@ -2237,7 +2237,7 @@
                                         <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
                                             <StackPanel Orientation="Horizontal" Spacing="5">
                                                 <Ellipse Style="{StaticResource StatusDot}" Fill="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                                <TextBlock Text="在线" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryDeviceStatusOnline" Text="Online" FontSize="11" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
                                             </StackPanel>
                                         </Border>
                                     </Grid>
@@ -2270,8 +2270,8 @@
                                     </Grid.ColumnDefinitions>
                                     <FontIcon Glyph="&#xE946;" FontSize="20" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock Text="已信任设备与最近连接" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                        <TextBlock Text="配对后的设备会显示在这里。当前版本尚未持久化已信任设备列表或连接历史，因此暂不显示已信任或最近连接的设备。" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
+                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteTitle" Text="Trusted Devices &amp; Recent Connections" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteBody" Text="Paired devices will appear here. This version does not yet persist a trusted-device list or connection history, so trusted and recent devices are not shown yet." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -2300,7 +2300,7 @@
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <FontIcon Glyph="&#xE701;" FontSize="16" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="1" Text="已发现设备" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock x:Uid="DiscoveryDiscoveredDevicesHeader" Grid.Column="1" Text="Discovered Devices" FontWeight="SemiBold" FontSize="15" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
                                         <Border Grid.Column="2" Style="{StaticResource BadgeSuccess}" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding DiscoveredPeerCount}" FontSize="12" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
                                         </Border>
@@ -2320,8 +2320,8 @@
                                         HorizontalAlignment="Center"
                                         Visibility="{Binding DiscoveredPeerCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}">
                                         <FontIcon Glyph="&#xE721;" FontSize="40" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="未发现设备" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="开始扫描以发现在此网络中广播的设备。" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
+                                        <TextBlock x:Uid="DashboardDeviceDiscoveryEmptyTitle" Text="No Devices Found" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock x:Uid="DiscoveryDiscoveredEmptySubtitle" Text="Start scanning to discover devices broadcasting on this network." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextAlignment="Center" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="320" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>

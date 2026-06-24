@@ -504,4 +504,34 @@
     <value>Discovery stopped</value>
     <comment>Canonical discovery status "Discovery stopped".</comment>
   </data>
+
+  <!-- ============================ Device Discovery — my-devices / discovered subsections ============================ -->
+  <data name="DiscoveryMyDevicesHeader.Text" xml:space="preserve">
+    <value>My Devices</value>
+    <comment>Device Discovery "My Devices" card header (this-device section). Mac EnhancedDeviceDiscoveryView 我的设备 section.</comment>
+  </data>
+  <data name="DiscoveryThisDeviceBadge.Text" xml:space="preserve">
+    <value>This Device</value>
+    <comment>Local-machine "This device" pill in the My Devices card. Mac discovery.device.thisDevice / device.local.</comment>
+  </data>
+  <data name="DiscoveryDeviceStatusOnline.Text" xml:space="preserve">
+    <value>Online</value>
+    <comment>Local-machine online status capsule. Mac discovery.device.status.online.</comment>
+  </data>
+  <data name="DiscoveryTrustedRecentNoteTitle.Text" xml:space="preserve">
+    <value>Trusted Devices &amp; Recent Connections</value>
+    <comment>Honest-omission note title (no persisted trust/recent store on Windows yet). Mac 已信任设备 / 最近连接 sections.</comment>
+  </data>
+  <data name="DiscoveryTrustedRecentNoteBody.Text" xml:space="preserve">
+    <value>Paired devices will appear here. This version does not yet persist a trusted-device list or connection history, so trusted and recent devices are not shown yet.</value>
+    <comment>Honest-omission note body explaining why trusted/recent sections are not shown.</comment>
+  </data>
+  <data name="DiscoveryDiscoveredDevicesHeader.Text" xml:space="preserve">
+    <value>Discovered Devices</value>
+    <comment>Discovered-devices group section header. Mac discovery.diagnostics.discoveredDevices / dashboard.discoveredDevices.</comment>
+  </data>
+  <data name="DiscoveryDiscoveredEmptySubtitle.Text" xml:space="preserve">
+    <value>Start scanning to discover devices broadcasting on this network.</value>
+    <comment>Discovered-devices empty-state subtitle (DD page). Pairs with reused DashboardDeviceDiscoveryEmptyTitle ("No Devices Found").</comment>
+  </data>
 </root>

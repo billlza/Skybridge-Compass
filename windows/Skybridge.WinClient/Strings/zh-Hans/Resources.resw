@@ -496,4 +496,34 @@
     <value>已停止发现</value>
     <comment>Canonical discovery status "Discovery stopped".</comment>
   </data>
+
+  <!-- ============================ Device Discovery — my-devices / discovered subsections ============================ -->
+  <data name="DiscoveryMyDevicesHeader.Text" xml:space="preserve">
+    <value>我的设备</value>
+    <comment>Device Discovery "My Devices" card header (this-device section). Mac EnhancedDeviceDiscoveryView 我的设备 section.</comment>
+  </data>
+  <data name="DiscoveryThisDeviceBadge.Text" xml:space="preserve">
+    <value>本机</value>
+    <comment>Local-machine "This device" pill in the My Devices card. Mac discovery.device.thisDevice / device.local.</comment>
+  </data>
+  <data name="DiscoveryDeviceStatusOnline.Text" xml:space="preserve">
+    <value>在线</value>
+    <comment>Local-machine online status capsule. Mac discovery.device.status.online.</comment>
+  </data>
+  <data name="DiscoveryTrustedRecentNoteTitle.Text" xml:space="preserve">
+    <value>已信任设备与最近连接</value>
+    <comment>Honest-omission note title (no persisted trust/recent store on Windows yet). Mac 已信任设备 / 最近连接 sections.</comment>
+  </data>
+  <data name="DiscoveryTrustedRecentNoteBody.Text" xml:space="preserve">
+    <value>配对后的设备会显示在这里。当前版本尚未持久化已信任设备列表或连接历史，因此暂不显示已信任或最近连接的设备。</value>
+    <comment>Honest-omission note body explaining why trusted/recent sections are not shown.</comment>
+  </data>
+  <data name="DiscoveryDiscoveredDevicesHeader.Text" xml:space="preserve">
+    <value>已发现设备</value>
+    <comment>Discovered-devices group section header. Mac discovery.diagnostics.discoveredDevices / dashboard.discoveredDevices.</comment>
+  </data>
+  <data name="DiscoveryDiscoveredEmptySubtitle.Text" xml:space="preserve">
+    <value>开始扫描以发现在此网络中广播的设备。</value>
+    <comment>Discovered-devices empty-state subtitle (DD page). Pairs with reused DashboardDeviceDiscoveryEmptyTitle ("No Devices Found").</comment>
+  </data>
 </root>
