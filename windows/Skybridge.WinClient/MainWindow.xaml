@@ -1342,7 +1342,7 @@
                  The half-transparent glass surfaces read AS lit glass over the moving
                  particles — the depth the flat static gradient was missing (Mac parity:
                  its dashboard runs a Metal weather particle system over .starryNight). -->
-            <local:WeatherBackdropCS
+            <local:WeatherBackdropDX
                 Grid.Row="0"
                 Grid.RowSpan="2"
                 Condition="{Binding WeatherConditionKey}" />

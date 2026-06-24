@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- Platform SDK bumped 19041->22621: ComputeSharp.WinUI 3.2.0 compiles only against the
-         22621 SDK. TargetPlatformMinVersion stays 19041 so the app still RUNS on Windows 10 2004+. -->
+    <!-- Platform SDK 22621 (TargetPlatformMinVersion stays 19041 so the app still RUNS on Win10 2004+).
+         Vortice.WinUI's TFM wants a recent platform; 22621 is safe and the box already has the SDK. -->
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <UseWinUI>true</UseWinUI>
@@ -49,24 +49,17 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <!-- ComputeSharp.WinUI: C#->DX12 GPU compute shaders (the Windows equivalent of Mac's Metal),
-         for the procedural cinematic weather backdrop. Win2D was a dead end here —
-         CanvasAnimatedControl (the animation-loop control) is unsupported in WinUI 3.
-         Requires the win-x64 RID set above (DX12 native). -->
-    <PackageReference Include="ComputeSharp.WinUI" Version="3.2.0" />
-    <!-- Direct ref + GeneratePathProperty so we can FORCE-load the source generator below. Its dll
-         ships in analyzers/dotnet/cs/ (unversioned) and was NOT being passed to csc as an /analyzer
-         on this net10/Roslyn 5.3 toolchain, so IComputeShaderDescriptor<T> was never emitted (CS0315). -->
-    <PackageReference Include="ComputeSharp" Version="3.2.0" GeneratePathProperty="true" />
+    <!-- Vortice.Windows: native DirectX 12 + DXGI + WinUI SwapChainPanel interop — the Windows
+         equivalent of Mac's Metal. The cinematic weather backdrop is a hand-written HLSL raymarch
+         shader rendered into a SwapChainPanel. Chosen over ComputeSharp: ComputeSharp's source
+         generator is hard-pinned to Roslyn 4.9 and silently fails on net10's Roslyn 5.3; this native
+         D3D12/HLSL path has ZERO Roslyn-generator dependency, so an SDK bump cannot break it.
+         Vortice 3.8.x explicitly targets net10. Needs the win-x64 RID set above. -->
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.WinUI" Version="3.8.3" />
     <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
          (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
-  </ItemGroup>
-
-  <!-- Force-load the ComputeSharp source generator: NuGet didn't pass it to csc on net10/Roslyn 5.3
-       (see note on the ComputeSharp PackageReference). Decisive test for whether ComputeSharp 3.2.0
-       can work on this toolchain at all. -->
-  <ItemGroup>
-    <Analyzer Include="$(PkgComputeSharp)\analyzers\dotnet\cs\ComputeSharp.SourceGenerators.dll" />
   </ItemGroup>
 </Project>

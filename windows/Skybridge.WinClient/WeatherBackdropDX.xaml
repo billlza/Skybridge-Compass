@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WeatherBackdropDX — Direct3D 12 SwapChainPanel FEASIBILITY PROBE.
+
+  This is the native-DX12 counterpart of the Composition-based WeatherBackdrop. Its sole
+  purpose at this stage is to prove the full DX12 pipeline (device + direct queue + DXGI
+  composition swap-chain + RTV heap + command list + fence) builds against Vortice.Windows
+  on net10.0-windows10.0.22621 / win-x64 and RUNS at runtime, with ZERO Roslyn dependency,
+  by rendering an animated clear color into the panel each frame. NO HLSL shader yet.
+
+  The control exposes the SAME Condition dependency property (string, default "Clear") as
+  WeatherBackdrop so MainWindow's existing Condition="{Binding WeatherConditionKey}" binding
+  is satisfied; the probe currently ignores the value (clear-color only).
+
+  Hosts a single built-in Microsoft.UI.Xaml.Controls.SwapChainPanel. The control is
+  hit-test-invisible so it never intercepts input. On any DX initialization failure the panel
+  simply stays transparent (graceful degradation) instead of crashing the app.
+-->
+<UserControl
+    x:Class="Skybridge.WinClient.WeatherBackdropDX"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    IsHitTestVisible="False">
+
+    <!-- SwapChainPanel is a built-in WinUI control; no extra xmlns required. The DX12 swap
+         chain is bound to it via ISwapChainPanelNative.SetSwapChain in code-behind. -->
+    <SwapChainPanel x:Name="Panel" />
+</UserControl>
