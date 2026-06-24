@@ -83,15 +83,27 @@ public sealed partial class WeatherBackdropDX : UserControl
     private ID3D12Resource? _constantBuffer;          // Upload heap, 256-byte CB, mapped per-frame
     private bool _shaderReady;                        // true once PSO/root-sig/CB are valid
 
-    // CPU-side mirror of the cbuffer { float time; float2 resolution; int condition; }. HLSL packs
-    // float+float2 into one 16-byte row; int lands at offset 12. 16 bytes used; CB padded to 256.
+    // CPU-side mirror of the HLSL cbuffer. Layout MUST match `cbuffer WeatherCB` in WeatherHlsl
+    // EXACTLY (HLSL packs into 16-byte rows; a field never straddles a 16-byte boundary). Row map:
+    //   row 0 (off 0):  float  time(0)  + float2 resolution(4,8) + int condition(12)
+    //   row 1 (off 16): float2 pointerUV(16,20) + float pointerStrength(24) + float pointerRadius(28)
+    //   row 2 (off 32): float2 pointerVelocity(32,36) + 8 bytes pad to fill the row
+    // 40 bytes used; CB stays padded to 256 (well within the D3D12 256-byte CBV requirement).
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct WeatherConstants
     {
-        public float Time;          // offset 0
-        public float ResolutionX;   // offset 4
-        public float ResolutionY;   // offset 8
-        public int Condition;       // offset 12
+        public float Time;             // offset 0
+        public float ResolutionX;      // offset 4
+        public float ResolutionY;      // offset 8
+        public int Condition;          // offset 12
+        public float PointerU;         // offset 16  (pointerUV.x)
+        public float PointerV;         // offset 20  (pointerUV.y)
+        public float PointerStrength;  // offset 24  (0..1 disperse strength)
+        public float PointerRadius;    // offset 28  (influence radius in UV)
+        public float PointerVelX;      // offset 32  (pointerVelocity.x, UV/sec)
+        public float PointerVelY;      // offset 36  (pointerVelocity.y, UV/sec)
+        public float Pad0;             // offset 40  (pad to keep the row aligned; unused)
+        public float Pad1;             // offset 44  (pad; unused)
     }
 
     private const uint ConstantBufferSize = 256; // 256-byte aligned (D3D12 CBV requirement)
@@ -115,6 +127,40 @@ public sealed partial class WeatherBackdropDX : UserControl
 
     // ── Animation clock (Stopwatch, NOT DateTime). ──
     private readonly Stopwatch _clock = new();
+
+    // ── Wave-to-disperse pointer interaction (port of the macOS InteractiveClearSystem /
+    //    GlobalHaze hover-disperse). The pointer is captured at the window-root level (this
+    //    UserControl is IsHitTestVisible=False and never sees its own pointer events), normalized
+    //    to 0..1 panel UV, and fed to the shader so clouds part / thin where the pointer waves and
+    //    re-fill after it stops. All state is touched only on the UI thread (pointer events +
+    //    CompositionTarget.Rendering both fire there), so no locking is needed. ──
+    private UIElement? _pointerHost;          // window-root element we listen on (handledEventsToo)
+    private bool _pointerHandlersHooked;
+    // Cache the delegate instances so AddHandler/RemoveHandler use the SAME reference (RemoveHandler
+    // matches by delegate identity; a freshly-constructed wrapper would NOT detach the subscription).
+    private Microsoft.UI.Xaml.Input.PointerEventHandler? _pointerMovedHandler;
+    private Microsoft.UI.Xaml.Input.PointerEventHandler? _pointerExitedHandler;
+    private Vector2 _pointerUV = new(0.5f, 0.5f);     // last normalized pointer position (0..1)
+    private Vector2 _pointerVelocityUV = Vector2.Zero; // smoothed UV/sec velocity (for trailing wake)
+    private float _pointerStrength;            // 0..1 disperse strength, ramps up on move, decays after
+    private float _pointerRadius = DefaultPointerRadiusUV; // current influence radius in UV
+    private bool _pointerInside;               // pointer currently over the panel area
+    private double _lastPointerSeconds;        // _clock timestamp of the last pointer-move sample
+    private Vector2 _lastPointerUV = new(0.5f, 0.5f);
+
+    // Disperse tuning — ported from the macOS InteractiveClearSystem numbers, re-expressed in
+    // UV space (Mac works in pixels: baseRadius 100px, strength 0.3..1.0). On a ~1200px-wide
+    // panel, 100px ~= 0.085 UV, so the base radius below matches Mac's resting influence; fast
+    // waving widens it toward DefaultPointerRadiusUV*~1.9 just like Mac's velocity multiplier.
+    private const float DefaultPointerRadiusUV = 0.16f;  // resting influence radius in UV (~120-190px)
+    private const float MaxPointerRadiusUV = 0.30f;      // velocity-widened cap (Mac min(2.5x) growth)
+    private const float PointerStrengthRise = 8.0f;      // strength ramp-up rate (per sec) while moving
+    private const float PointerStrengthDecay = 2.2f;     // strength fade rate (per sec) after stop/leave
+                                                         //  ~0.45s to fully re-fill, mirrors Mac's
+                                                         //  opacityResponseRate=0.9 smooth re-fill feel
+    private const double PointerIdleSeconds = 0.18;      // no move within this -> treat as stopped
+                                                         //  (Mac uses 0.25s isMouseActive timeout)
+    private const float VelocitySmoothing = 0.25f;       // EMA on pointer velocity (Mac alpha 0.20)
 
     public WeatherBackdropDX()
     {
@@ -161,6 +207,11 @@ public sealed partial class WeatherBackdropDX : UserControl
         }
 
         _clock.Restart();
+        _lastFrameSeconds = 0.0;
+
+        // Subscribe to window-root pointer events for the wave-to-disperse interaction. Safe to
+        // call once XamlRoot is available (Loaded guarantees we are in the live visual tree).
+        HookPointerHost();
 
         if (!_renderingHooked)
         {
@@ -425,17 +476,153 @@ public sealed partial class WeatherBackdropDX : UserControl
             return;
         }
 
+        double now = _clock.Elapsed.TotalSeconds;
+        AdvancePointerState(now);
+
         var data = new WeatherConstants
         {
-            Time = (float)_clock.Elapsed.TotalSeconds,
+            Time = (float)now,
             ResolutionX = _width,
             ResolutionY = _height,
             Condition = MapCondition(Condition),
+            PointerU = _pointerUV.X,
+            PointerV = _pointerUV.Y,
+            PointerStrength = _pointerStrength,
+            PointerRadius = _pointerRadius,
+            PointerVelX = _pointerVelocityUV.X,
+            PointerVelY = _pointerVelocityUV.Y,
         };
 
         Span<WeatherConstants> cb = _constantBuffer.Map<WeatherConstants>(0, 1);
         cb[0] = data;
         _constantBuffer.Unmap(0);
+    }
+
+    // -------------------------------------------------------------------------------------
+    //  Wave-to-disperse pointer interaction (UI thread only)
+    // -------------------------------------------------------------------------------------
+
+    // Per-frame strength/velocity state machine, mirroring the macOS InteractiveClearSystem:
+    //  - while the pointer is moving over the panel, strength ramps toward 1 and the radius
+    //    widens with pointer speed (Mac: radius = base + base*velocityMultiplier);
+    //  - once the pointer stops (no move within PointerIdleSeconds) or leaves, strength decays so
+    //    the clouds smoothly re-fill (Mac: globalOpacity eased back, ~0.9 response rate).
+    private void AdvancePointerState(double now)
+    {
+        // Frame delta (clamped so a stall doesn't snap the effect).
+        float dt = (float)Math.Clamp(now - _lastFrameSeconds, 0.0, 0.1);
+        _lastFrameSeconds = now;
+
+        bool moving = _pointerInside && (now - _lastPointerSeconds) <= PointerIdleSeconds;
+
+        if (moving)
+        {
+            // Ramp strength up toward 1 (exponential approach, frame-rate independent).
+            _pointerStrength += (1.0f - _pointerStrength) * (1.0f - (float)Math.Exp(-PointerStrengthRise * dt));
+        }
+        else
+        {
+            // Decay strength toward 0 so the clouds re-fill; also relax velocity so the
+            // trailing wake fades out.
+            _pointerStrength *= (float)Math.Exp(-PointerStrengthDecay * dt);
+            if (_pointerStrength < 0.001f)
+            {
+                _pointerStrength = 0f;
+            }
+            _pointerVelocityUV *= (float)Math.Exp(-PointerStrengthDecay * dt);
+        }
+    }
+
+    private double _lastFrameSeconds;
+
+    // Hook pointer-move / -exit on the window root so we observe the pointer even though this
+    // UserControl is IsHitTestVisible=False. handledEventsToo:true means we still see moves that
+    // the cards/buttons above us mark handled — and because we only READ the position (never set
+    // e.Handled), clicks and hovers on the UI are completely unaffected.
+    private void HookPointerHost()
+    {
+        if (_pointerHandlersHooked)
+        {
+            return;
+        }
+
+        // XamlRoot.Content is the top-level UIElement of the window's visual tree; it always
+        // sees pointer moves regardless of which child consumes them.
+        _pointerHost = XamlRoot?.Content as UIElement;
+        if (_pointerHost is null)
+        {
+            return; // not in the tree yet; OnPanelLoaded retries, and SizeChanged can re-try too
+        }
+
+        _pointerMovedHandler = new Microsoft.UI.Xaml.Input.PointerEventHandler(OnHostPointerMoved);
+        _pointerExitedHandler = new Microsoft.UI.Xaml.Input.PointerEventHandler(OnHostPointerExited);
+        _pointerHost.AddHandler(UIElement.PointerMovedEvent, _pointerMovedHandler, handledEventsToo: true);
+        _pointerHost.AddHandler(UIElement.PointerExitedEvent, _pointerExitedHandler, handledEventsToo: true);
+        _pointerHandlersHooked = true;
+    }
+
+    private void UnhookPointerHost()
+    {
+        if (!_pointerHandlersHooked || _pointerHost is null)
+        {
+            return;
+        }
+
+        if (_pointerMovedHandler is not null)
+        {
+            _pointerHost.RemoveHandler(UIElement.PointerMovedEvent, _pointerMovedHandler);
+        }
+        if (_pointerExitedHandler is not null)
+        {
+            _pointerHost.RemoveHandler(UIElement.PointerExitedEvent, _pointerExitedHandler);
+        }
+        _pointerMovedHandler = null;
+        _pointerExitedHandler = null;
+        _pointerHandlersHooked = false;
+        _pointerHost = null;
+    }
+
+    private void OnHostPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        // Position relative to THIS panel (so 0..1 maps to the backdrop, which spans the window).
+        Windows.Foundation.Point pt = e.GetCurrentPoint(Panel).Position;
+        double w = Panel.ActualWidth;
+        double h = Panel.ActualHeight;
+        if (w <= 0 || h <= 0)
+        {
+            return;
+        }
+
+        float u = (float)Math.Clamp(pt.X / w, 0.0, 1.0);
+        float v = (float)Math.Clamp(pt.Y / h, 0.0, 1.0);
+        bool inside = pt.X >= 0 && pt.X <= w && pt.Y >= 0 && pt.Y <= h;
+
+        double now = _clock.Elapsed.TotalSeconds;
+        double dt = now - _lastPointerSeconds;
+
+        if (inside && dt > 0.0)
+        {
+            // Instantaneous UV velocity, EMA-smoothed (Mac: smoothedVelocity, alpha 0.20).
+            var instVel = new Vector2((u - _lastPointerUV.X) / (float)dt, (v - _lastPointerUV.Y) / (float)dt);
+            _pointerVelocityUV = Vector2.Lerp(_pointerVelocityUV, instVel, VelocitySmoothing);
+
+            // Widen the influence radius with pointer speed, mirroring Mac's
+            // radius = base + base*min(cap, velocity/k). speed here is in UV/sec.
+            float speed = _pointerVelocityUV.Length();
+            float velMul = Math.Min(1.0f, speed / 1.6f); // ~1.6 UV/sec saturates the growth
+            _pointerRadius = DefaultPointerRadiusUV + (MaxPointerRadiusUV - DefaultPointerRadiusUV) * velMul;
+        }
+
+        _lastPointerUV = new Vector2(u, v);
+        _pointerUV = new Vector2(u, v);
+        _pointerInside = inside;
+        _lastPointerSeconds = now;
+    }
+
+    private void OnHostPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        // Pointer left the window -> let the disperse decay (handled in AdvancePointerState).
+        _pointerInside = false;
     }
 
     // Maps the WeatherBackdrop Condition string to the shader's integer condition selector.
@@ -651,6 +838,14 @@ public sealed partial class WeatherBackdropDX : UserControl
             return;
         }
 
+        // Lazily hook the window-root pointer host if it wasn't available at Loaded time
+        // (XamlRoot can be null on the very first Loaded in some hosting paths). Layout passes
+        // run after XamlRoot is populated, so this is a reliable late retry. No-op once hooked.
+        if (!_pointerHandlersHooked)
+        {
+            HookPointerHost();
+        }
+
         ComputeBackBufferSize(dipWidth, dipHeight, out uint newWidth, out uint newHeight);
         if (newWidth == 0 || newHeight == 0)
         {
@@ -758,6 +953,9 @@ public sealed partial class WeatherBackdropDX : UserControl
         _ready = false;
         _shaderReady = false;
 
+        // Detach the window-root pointer handlers (no-op if never hooked).
+        UnhookPointerHost();
+
         if (_renderingHooked)
         {
             CompositionTarget.Rendering -= OnRendering;
@@ -834,9 +1032,14 @@ public sealed partial class WeatherBackdropDX : UserControl
     private const string WeatherHlsl = @"
 cbuffer WeatherCB : register(b0)
 {
-    float  time;
-    float2 resolution;
-    int    condition;
+    float  time;             // row0: 0
+    float2 resolution;       // row0: 4,8
+    int    condition;        // row0: 12
+    float2 pointerUV;        // row1: 16,20  pointer position in 0..1 panel UV
+    float  pointerStrength;  // row1: 24     0..1 wave-to-disperse strength (decays after stop)
+    float  pointerRadius;    // row1: 28     influence radius in UV (widens with pointer speed)
+    float2 pointerVelocity;  // row2: 32,36  pointer velocity in UV/sec (trailing wake direction)
+    float2 _pointerPad;      // row2: 40,44  padding to match the C# struct (unused)
 };
 
 // ----- fullscreen triangle (SV_VertexID) -----
@@ -939,6 +1142,44 @@ float fbm2(float2 p, int octaves)
         a *= 0.5;
     }
     return sum;
+}
+
+// ============================ wave-to-disperse force field ============================
+// Port of the macOS hover-disperse (InteractiveClearSystem / GlobalHaze): within pointerRadius
+// of the pointer, push cloud sample positions radially AWAY from the pointer (so the cloud parts
+// and reveals the dark starry sky behind) and report a thinning factor that reduces cloud density.
+// ASCII ONLY (a non-ASCII char previously broke FXC). Cheap: a couple of distance calcs, no loops.
+//
+//   falloff = pow( saturate(1 - dist/radius), 2 ) * strength   (Mac uses squared falloff)
+// The push is offset along pointerVelocity for a trailing wake, exactly like Mac feeding mouse
+// velocity into the repel. `aspect` corrects the UV distance so the disperse region is circular.
+//
+// Returns: x = density multiplier in [1-strength .. 1] (1 = untouched, lower = thinned/parted),
+//          yz = UV-space warp vector to add to the sampled screen position (push-away + wake).
+float3 pointerDisperse(float2 uv, float aspect)
+{
+    if (pointerStrength <= 0.001) return float3(1.0, 0.0, 0.0);
+
+    float2 toP = uv - pointerUV;
+    float2 toPa = float2(toP.x * aspect, toP.y);     // aspect-correct so the region is round
+    float dist = length(toPa);
+    float radius = max(pointerRadius, 1e-4);
+
+    float falloff = saturate(1.0 - dist / radius);
+    falloff = falloff * falloff;                      // squared edge gradient (Mac parity)
+    float fs = falloff * pointerStrength;
+
+    // density multiplier: clouds thin/part toward the pointer center.
+    float densMul = 1.0 - fs;
+
+    // radial push AWAY from the pointer (normalize in plain UV so warp stays in UV units),
+    // plus a trailing wake offset along the pointer velocity. Magnitude scaled by fs and radius
+    // so a wider/stronger wave shoves the cloud further aside.
+    float2 dir = (dist > 1e-4) ? (toP / max(length(toP), 1e-4)) : float2(0.0, 0.0);
+    float2 warp = dir * fs * radius * 1.4;
+    warp += pointerVelocity * fs * 0.05;             // wake trail in the direction of motion
+
+    return float3(densMul, warp.x, warp.y);
 }
 
 // ============================ sky gradients (Mac params) ============================
@@ -1203,9 +1444,17 @@ float4 PSMain(VSOut input) : SV_TARGET
     float ty = uv.y;                    // vertical gradient param
     float aspect = resolution.x / max(resolution.y, 1.0);
 
-    // view ray for the cloud raymarch (camera pitched up slightly; vertical squash)
+    // wave-to-disperse: density multiplier (.x) + UV warp (.yz). dispUV is the screen position
+    // shifted AWAY from the pointer, so the cloud/precip sampled at this pixel is pushed aside and
+    // the dark starry sky behind shows through where you wave; densMul thins what remains.
+    float3 disp = pointerDisperse(uv, aspect);
+    float densMul = disp.x;
+    float2 dispUV = uv + disp.yz;
+
+    // view ray for the cloud raymarch (camera pitched up slightly; vertical squash). Built from
+    // the WARPED uv so clouds visibly part around the pointer.
     float3 ro = float3(0.0, 0.0, 0.0);
-    float3 rd = normalize(float3((uv.x - 0.5) * aspect, (0.62 - uv.y) * 0.9 + 0.18, 1.0));
+    float3 rd = normalize(float3((dispUV.x - 0.5) * aspect, (0.62 - dispUV.y) * 0.9 + 0.18, 1.0));
 
     float3 col;
 
@@ -1227,15 +1476,15 @@ float4 PSMain(VSOut input) : SV_TARGET
         baseSky += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.5;
         float coverage = 0.55;                          // lower so the dark starry sky shows between cloud clumps (Mac)
         float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
-        col = lerp(baseSky, clouds.rgb, clouds.a);
+        col = lerp(baseSky, clouds.rgb, clouds.a * densMul);  // wave thins the cloud -> starry sky shows
     }
     else if (condition == 2)            // ---- Rainy ----
     {
         col = stormSky(ty);
         float coverage = 0.85;
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.2, 0.2, 0.26), float3(0.6, 0.6, 0.7));
-        col = lerp(col, clouds.rgb * 0.5, clouds.a);
-        col += rainComposite(uv, 1.0, 0.18);
+        col = lerp(col, clouds.rgb * 0.5, clouds.a * densMul);
+        col += rainComposite(dispUV, 1.0, 0.18) * densMul;   // rain parts + thins under the wave
         // bottom atmospheric fog
         col = lerp(col, float3(0.5, 0.5, 0.55), smoothstep(0.7, 1.0, ty) * 0.25);
     }
@@ -1244,8 +1493,8 @@ float4 PSMain(VSOut input) : SV_TARGET
         col = stormSky(ty) * 0.85;
         float coverage = 0.92;
         float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.15, 0.15, 0.2), float3(0.5, 0.5, 0.6));
-        col = lerp(col, clouds.rgb * 0.4, clouds.a);
-        col += rainComposite(uv, 1.5, 0.4);    // x1.5 density, steeper slant
+        col = lerp(col, clouds.rgb * 0.4, clouds.a * densMul);
+        col += rainComposite(dispUV, 1.5, 0.4) * densMul;    // x1.5 density, steeper slant; parts under the wave
         col = lerp(col, float3(0.45, 0.45, 0.5), smoothstep(0.65, 1.0, ty) * 0.3);
         // lightning: randomized flash, full-screen white
         float flashSeed = floor(time / 8.0);
@@ -1262,7 +1511,7 @@ float4 PSMain(VSOut input) : SV_TARGET
         float2 halo = float2(0.3, 0.15);
         float hd = length((uv - halo) * float2(aspect, 1.0));
         col += float3(0.8, 0.85, 0.95) * smoothstep(0.35, 0.0, hd) * 0.18;
-        col += snowComposite(uv);
+        col += snowComposite(dispUV) * densMul;             // snow parts + thins under the wave
         // cold color grade
         col = lerp(col, col * float3(0.85, 0.90, 1.0), 0.15);
     }
@@ -1271,7 +1520,7 @@ float4 PSMain(VSOut input) : SV_TARGET
         float3 baseSky = lerp(float3(0.55, 0.57, 0.6), float3(0.78, 0.80, 0.82), ty);
         float fogAlpha;
         float3 fog = fogComposite(uv, 0.6, fogAlpha);
-        col = lerp(baseSky, fog, saturate(fogAlpha * 1.4));
+        col = lerp(baseSky, fog, saturate(fogAlpha * 1.4) * densMul);  // wave clears the fog (Mac haze parity)
     }
     else                                // ---- Haze (6) ----
     {
@@ -1282,7 +1531,7 @@ float4 PSMain(VSOut input) : SV_TARGET
         float h2 = fbm2(uv * 8.0 + float2(time * 0.01, time * 0.005), 3);
         float haze = saturate(h0 * 0.5 + h1 * 0.3 + h2 * 0.2);
         float3 hazeCol = float3(0.80, 0.74, 0.62);          // warm-grey particulate
-        col = lerp(baseSky, hazeCol, haze * 0.55);
+        col = lerp(baseSky, hazeCol, haze * 0.55 * densMul); // wave disperses the haze (Mac parity)
         col = lerp(col, float3(0.78, 0.75, 0.68), 0.15);    // contrast reduction
     }
 
