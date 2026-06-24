@@ -1183,7 +1183,7 @@ float4 PSMain(VSOut input) : SV_TARGET
     {
         float3 baseSky = nightSky(ty);                  // dark starry theme shows through (Mac cloudy lays no grey sky)
         baseSky += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.5;
-        float coverage = 0.72;
+        float coverage = 0.55;                          // lower so the dark starry sky shows between cloud clumps (Mac)
         float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
         col = lerp(baseSky, clouds.rgb, clouds.a);
     }
