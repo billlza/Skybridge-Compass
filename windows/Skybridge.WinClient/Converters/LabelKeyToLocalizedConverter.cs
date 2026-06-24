@@ -87,6 +87,34 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             // via LocalizeByResourceKey (see SettingsTabResourceKey + the SettingsTab.* fallback
             // rows below). "Dashboard"/"File Transfer"/"Remote Desktop"/"System Monitor"/"Settings"
             // are unambiguous and shared with the Nav.* keys (identical text).
+            // ---- Settings Actions row Titles (SettingsActionItem.Title; the VISIBLE "Settings
+            // Actions" list rendered by MainWindow's SettingsActionRowTemplate). The canonical
+            // English Title stays the model value (the SettingsWorkspaceClient source + gate read
+            // the Key/action ids, NOT these display Titles); only the displayed text is localized.
+            ["Export settings"] = "SettingsAction.ExportSettings",
+            ["Import settings"] = "SettingsAction.ImportSettings",
+            ["Reset settings"] = "SettingsAction.ResetSettings",
+            ["Refresh Status"] = "SettingsAction.RefreshStatus",
+            ["Request Permission"] = "SettingsAction.RequestPermission",
+            ["Open System Preferences"] = "SettingsAction.OpenSystemPreferences",
+            ["Apply file transfer settings"] = "SettingsAction.ApplyFileTransferSettings",
+            ["Apply remote desktop settings"] = "SettingsAction.ApplyRemoteDesktopSettings",
+            ["Restore Defaults"] = "SettingsAction.RestoreDefaults",
+            ["Reset Monitor Data"] = "SettingsAction.ResetMonitorData",
+            ["Clear History Data"] = "SettingsAction.ClearHistoryData",
+            // ---- Settings detail Section names (SettingsDetailItem.Section; the flat read-only
+            // mirror rendered by SettingsDetailRowTemplate). Section text mirrors the SettingsTab.*
+            // / Nav.* tab names; map them so the Section column localizes too. The canonical English
+            // Section stays the model value (it is also the SettingsTabKeyVisibilityConverter group
+            // key). "Devices"/"File Transfer"/"Remote Desktop"/"System Monitor" reuse Nav.* / tab keys.
+            ["General"] = "SettingsTab.General",
+            ["Devices"] = "SettingsTab.Devices",
+            ["Permissions"] = "SettingsTab.Permissions",
+            // NOTE: "Network"/"Advanced" Section names intentionally NOT added here -- they collide
+            // with the SysMon indicator/metric labels above that want a different translation. The
+            // collapsed flat-mirror detail rows are not user-visible, so leaving those two Sections
+            // English in that hidden block is harmless; the visible tab nav localizes via
+            // LocalizeSettingsTab (SettingsTab.* keys) which already handles them correctly.
         };
 
     // Settings left sub-nav tab Title (stable English key) -> SettingsTab.* / Nav.* resource key.
@@ -146,6 +174,18 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["SettingsTab.Devices"] = new() { ["en"] = "Devices", ["zh"] = "设备", ["ja"] = "デバイス" },
             ["SettingsTab.Permissions"] = new() { ["en"] = "Permissions", ["zh"] = "权限", ["ja"] = "権限" },
             ["SettingsTab.Advanced"] = new() { ["en"] = "Advanced", ["zh"] = "高级", ["ja"] = "詳細設定" },
+            // Settings Actions row Titles (mirror the Mac SettingsView action labels).
+            ["SettingsAction.ExportSettings"] = new() { ["en"] = "Export settings", ["zh"] = "导出设置", ["ja"] = "設定をエクスポート" },
+            ["SettingsAction.ImportSettings"] = new() { ["en"] = "Import settings", ["zh"] = "导入设置", ["ja"] = "設定をインポート" },
+            ["SettingsAction.ResetSettings"] = new() { ["en"] = "Reset settings", ["zh"] = "重置设置", ["ja"] = "設定をリセット" },
+            ["SettingsAction.RefreshStatus"] = new() { ["en"] = "Refresh Status", ["zh"] = "刷新状态", ["ja"] = "ステータスを更新" },
+            ["SettingsAction.RequestPermission"] = new() { ["en"] = "Request Permission", ["zh"] = "请求权限", ["ja"] = "権限をリクエスト" },
+            ["SettingsAction.OpenSystemPreferences"] = new() { ["en"] = "Open System Preferences", ["zh"] = "打开系统设置", ["ja"] = "システム設定を開く" },
+            ["SettingsAction.ApplyFileTransferSettings"] = new() { ["en"] = "Apply file transfer settings", ["zh"] = "应用文件传输设置", ["ja"] = "ファイル転送設定を適用" },
+            ["SettingsAction.ApplyRemoteDesktopSettings"] = new() { ["en"] = "Apply remote desktop settings", ["zh"] = "应用远程桌面设置", ["ja"] = "リモートデスクトップ設定を適用" },
+            ["SettingsAction.RestoreDefaults"] = new() { ["en"] = "Restore Defaults", ["zh"] = "恢复默认", ["ja"] = "既定値に戻す" },
+            ["SettingsAction.ResetMonitorData"] = new() { ["en"] = "Reset Monitor Data", ["zh"] = "重置监控数据", ["ja"] = "監視データをリセット" },
+            ["SettingsAction.ClearHistoryData"] = new() { ["en"] = "Clear History Data", ["zh"] = "清除历史数据", ["ja"] = "履歴データを消去" },
         };
 
     // Lazily-created MRT Core manager (shared; cheap to reuse). null if construction fails.

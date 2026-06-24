@@ -1049,7 +1049,12 @@
                     <ColumnDefinition Width="180" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Section}" FontWeight="SemiBold" />
+                <!-- This is the COLLAPSED flat read-only mirror (Visibility="Collapsed" at its
+                     ItemsControl) kept for the contract; not user-visible. Section localizes via
+                     LabelKeyToLocalizedConverter (General/Devices/Permissions + reused tab keys;
+                     unknown Sections pass through verbatim). Label/Value/Detail are the canonical
+                     SettingsWorkspaceClient model strings and stay verbatim (gate reads that source). -->
+                <TextBlock Text="{Binding Section, Converter={StaticResource LabelKeyToLocalizedConverter}}" FontWeight="SemiBold" />
                 <TextBlock Grid.Column="1" Text="{Binding Label}" />
                 <TextBlock Grid.Column="2" Text="{Binding Value}" TextWrapping="Wrap" />
                 <TextBlock
@@ -1067,9 +1072,13 @@
                     <ColumnDefinition Width="110" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
+                <!-- Key stays the raw canonical action id (gate-asserted identifier column). Title
+                     + State localize at the binding layer (canonical English stays the model value):
+                     Title via LabelKeyToLocalizedConverter (SettingsAction.* map), State via
+                     StatusKeyToLocalizedConverter (Ready/Preview ready/Intent ready/Disabled). -->
                 <TextBlock Text="{Binding Key}" FontWeight="SemiBold" />
-                <TextBlock Grid.Column="1" Text="{Binding Title}" />
-                <TextBlock Grid.Column="2" Text="{Binding State}" />
+                <TextBlock Grid.Column="1" Text="{Binding Title, Converter={StaticResource LabelKeyToLocalizedConverter}}" />
+                <TextBlock Grid.Column="2" Text="{Binding State, Converter={StaticResource StatusKeyToLocalizedConverter}}" />
                 <TextBlock
                     Grid.Column="3"
                     Text="{Binding Detail}"

@@ -69,10 +69,12 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsNetworkCurrentNetworkLabel"
                                 Text="当前网络"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
                                 x:Name="CurrentNetworkDetail"
+                                x:Uid="SettingsNetworkCurrentNetworkDetail"
                                 Text="读取系统网络配置文件…"
                                 FontSize="11"
                                 TextWrapping="Wrap"
@@ -80,6 +82,7 @@
                         </StackPanel>
                         <TextBlock
                             x:Name="CurrentNetworkValue"
+                            x:Uid="SettingsCommonReading"
                             Grid.Column="1"
                             Text="读取中…"
                             VerticalAlignment="Center"
@@ -98,9 +101,11 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsNetworkAutoConnectLabel"
                                 Text="自动连接已知网络"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsNetworkAutoConnectCaption"
                                 Text="由 Windows 管理 — 偏好已保存，实际自动连接由系统 WLAN 配置决定"
                                 FontSize="11"
                                 TextWrapping="Wrap"
@@ -123,6 +128,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkShowHiddenNetworks"
                             Grid.Column="0"
                             Text="显示隐藏网络"
                             VerticalAlignment="Center"
@@ -148,9 +154,11 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsNetworkPrefer5GHzLabel"
                                 Text="优先使用5GHz/6GHz频段"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsNetworkPrefer5GHzCaption"
                                 Text="由 Windows 管理 — 频段由系统/驱动/路由器决定，偏好仅保存"
                                 FontSize="11"
                                 TextWrapping="Wrap"
@@ -174,6 +182,7 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock
+                                x:Uid="SettingsNetworkScanTimeoutLabel"
                                 Grid.Column="0"
                                 Text="扫描超时"
                                 VerticalAlignment="Center"
@@ -198,6 +207,7 @@
         <!-- ===================== 设备发现 ===================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsNetworkDiscoveryHeader"
                 Text="设备发现"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -212,6 +222,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkEnableBonjour"
                             Grid.Column="0"
                             Text="启用Bonjour发现"
                             VerticalAlignment="Center"
@@ -233,6 +244,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkEnableMDNS"
                             Grid.Column="0"
                             Text="启用mDNS解析"
                             VerticalAlignment="Center"
@@ -254,6 +266,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkScanCustomPorts"
                             Grid.Column="0"
                             Text="扫描自定义端口"
                             VerticalAlignment="Center"
@@ -276,15 +289,18 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsNetworkDiscoveryTimeoutLabel"
                                 Text="发现超时"
                                 VerticalAlignment="Center"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsNetworkDiscoveryTimeoutUnit"
                                 Text="单位：秒"
                                 FontSize="11"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         </StackPanel>
                         <TextBox
+                            x:Uid="SettingsNetworkDiscoveryTimeoutBox"
                             Grid.Column="1"
                             Width="96"
                             InputScope="Number"
@@ -297,9 +313,11 @@
                     <!-- 自定义服务类型 -> Settings.CustomServiceTypes (list editor, code-behind) -->
                     <StackPanel Spacing="8">
                         <TextBlock
+                            x:Uid="SettingsNetworkCustomServiceTypesLabel"
                             Text="自定义服务类型"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsNetworkCustomServiceTypesHint"
                             Text="例如 _skybridge._tcp"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -321,6 +339,7 @@
                                             VerticalAlignment="Center"
                                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                         <Border
+                                            x:Uid="SettingsNetworkRemoveServiceTypeAffordance"
                                             Grid.Column="1"
                                             Tag="{Binding}"
                                             Tapped="OnRemoveCustomServiceType"
@@ -353,6 +372,7 @@
                                 KeyDown="OnNewServiceTypeKeyDown"
                                 VerticalAlignment="Center" />
                             <Border
+                                x:Uid="SettingsNetworkAddServiceTypeAffordance"
                                 Grid.Column="1"
                                 Tapped="OnAddCustomServiceType"
                                 Background="Transparent"
@@ -373,6 +393,7 @@
         <!-- ===================== 顶部栏显示 ===================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsNetworkTopBarHeader"
                 Text="顶部栏显示"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -387,6 +408,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkShowTopBarIPLocation"
                             Grid.Column="0"
                             Text="显示 IP 城市与代理状态"
                             VerticalAlignment="Center"
@@ -408,6 +430,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkShowTopBarNetworkSpeed"
                             Grid.Column="0"
                             Text="显示实时网速"
                             VerticalAlignment="Center"
@@ -429,6 +452,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsNetworkShowTopBarNetworkLatency"
                             Grid.Column="0"
                             Text="显示网络延迟"
                             VerticalAlignment="Center"
@@ -449,6 +473,7 @@
         <!-- ===================== 连接 ===================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsNetworkConnectionHeader"
                 Text="连接"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -464,6 +489,7 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock
+                                x:Uid="SettingsNetworkConnectionTimeoutLabel"
                                 Grid.Column="0"
                                 Text="连接超时"
                                 VerticalAlignment="Center"
@@ -490,6 +516,7 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock
+                                x:Uid="SettingsCommonRetryCount"
                                 Grid.Column="0"
                                 Text="重试次数"
                                 VerticalAlignment="Center"

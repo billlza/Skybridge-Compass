@@ -113,6 +113,7 @@
              ===================================================================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsGeneralPreferencesHeader"
                 Text="偏好设置"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -127,6 +128,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralAutoScanRow"
                             Grid.Column="0"
                             Text="启动时自动扫描设备"
                             VerticalAlignment="Center"
@@ -145,6 +147,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralNotificationsRow"
                             Grid.Column="0"
                             Text="显示系统通知"
                             VerticalAlignment="Center"
@@ -163,6 +166,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralDarkModeRow"
                             Grid.Column="0"
                             Text="启用深色模式"
                             VerticalAlignment="Center"
@@ -181,6 +185,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralScanIntervalRow"
                             Grid.Column="0"
                             Text="扫描间隔"
                             VerticalAlignment="Center"
@@ -192,22 +197,22 @@
                             VerticalAlignment="Center"
                             SelectedValuePath="Tag"
                             SelectedValue="{Binding Settings.ScanInterval, Mode=TwoWay}">
-                            <ComboBoxItem Content="15 秒">
+                            <ComboBoxItem x:Uid="SettingsGeneralScanInterval15" Content="15 秒">
                                 <ComboBoxItem.Tag>
                                     <x:Int32>15</x:Int32>
                                 </ComboBoxItem.Tag>
                             </ComboBoxItem>
-                            <ComboBoxItem Content="30 秒">
+                            <ComboBoxItem x:Uid="SettingsGeneralScanInterval30" Content="30 秒">
                                 <ComboBoxItem.Tag>
                                     <x:Int32>30</x:Int32>
                                 </ComboBoxItem.Tag>
                             </ComboBoxItem>
-                            <ComboBoxItem Content="60 秒">
+                            <ComboBoxItem x:Uid="SettingsGeneralScanInterval60" Content="60 秒">
                                 <ComboBoxItem.Tag>
                                     <x:Int32>60</x:Int32>
                                 </ComboBoxItem.Tag>
                             </ComboBoxItem>
-                            <ComboBoxItem Content="120 秒">
+                            <ComboBoxItem x:Uid="SettingsGeneralScanInterval120" Content="120 秒">
                                 <ComboBoxItem.Tag>
                                     <x:Int32>120</x:Int32>
                                 </ComboBoxItem.Tag>
@@ -224,6 +229,7 @@
              ===================================================================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsGeneralInterfaceHeader"
                 Text="界面"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -238,6 +244,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralShowDeviceDetailsRow"
                             Grid.Column="0"
                             Text="显示设备详细信息"
                             VerticalAlignment="Center"
@@ -256,6 +263,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralShowConnectionStatsRow"
                             Grid.Column="0"
                             Text="显示连接统计"
                             VerticalAlignment="Center"
@@ -274,6 +282,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralCompactModeRow"
                             Grid.Column="0"
                             Text="紧凑模式"
                             VerticalAlignment="Center"
@@ -294,6 +303,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsGeneralThemeColorRow"
                             Grid.Column="0"
                             Text="主题颜色"
                             VerticalAlignment="Center"
@@ -308,37 +318,37 @@
                             <ComboBoxItem Tag="#3072EF">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#3072EF" />
-                                    <TextBlock Text="天空蓝" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchSkyBlue" Text="天空蓝" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                             <ComboBoxItem Tag="#34C759">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#34C759" />
-                                    <TextBlock Text="森林绿" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchForestGreen" Text="森林绿" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                             <ComboBoxItem Tag="#AF52DE">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#AF52DE" />
-                                    <TextBlock Text="紫罗兰" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchViolet" Text="紫罗兰" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                             <ComboBoxItem Tag="#FF9500">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#FF9500" />
-                                    <TextBlock Text="日落橙" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchSunsetOrange" Text="日落橙" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                             <ComboBoxItem Tag="#FF2D55">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#FF2D55" />
-                                    <TextBlock Text="玫红" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchRose" Text="玫红" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                             <ComboBoxItem Tag="#5AC8FA">
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <Border Width="16" Height="16" CornerRadius="4" Background="#5AC8FA" />
-                                    <TextBlock Text="青蓝" VerticalAlignment="Center" />
+                                    <TextBlock x:Uid="SettingsGeneralSwatchCyan" Text="青蓝" VerticalAlignment="Center" />
                                 </StackPanel>
                             </ComboBoxItem>
                         </ComboBox>
@@ -365,6 +375,7 @@
              ===================================================================== -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsGeneralDataManagementHeader"
                 Text="数据管理"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -386,9 +397,11 @@
                             Foreground="{StaticResource SkyBridgeAccentBrush}" />
                         <StackPanel Grid.Column="1" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsGeneralDataActionsTitle"
                                 Text="导出 / 导入 / 重置设置"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsGeneralDataActionsHint"
                                 Text="使用上方工具栏的「导出」「导入」「重置」操作管理设置文件，存储于 %LOCALAPPDATA%\SkyBridge\settings.json。"
                                 TextWrapping="Wrap"
                                 FontSize="12"
@@ -409,6 +422,7 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock
+                                x:Uid="SettingsGeneralCacheRow"
                                 Text="缓存"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <!-- settings.general.cacheSize: verbatim '当前缓存：' + computed size.
@@ -416,6 +430,7 @@
                                  pending state until the first async size computation completes. -->
                             <TextBlock
                                 x:Name="CacheSizeStatus"
+                                x:Uid="SettingsGeneralCacheSizeStatus"
                                 Text="当前缓存：计算中…"
                                 TextWrapping="Wrap"
                                 FontSize="12"
@@ -426,6 +441,7 @@
                         <Border
                             Grid.Column="1"
                             x:Name="ClearCacheAffordance"
+                            x:Uid="SettingsGeneralClearCacheAffordance"
                             VerticalAlignment="Center"
                             Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                             BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
@@ -441,6 +457,7 @@
                                     VerticalAlignment="Center"
                                     Foreground="{StaticResource SkyBridgeAccentBrush}" />
                                 <TextBlock
+                                    x:Uid="SettingsGeneralClearCacheLabel"
                                     Text="清除缓存"
                                     VerticalAlignment="Center"
                                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -456,9 +473,11 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock
+                                x:Uid="SettingsGeneralCleanKeychainRow"
                                 Text="清理重复的钥匙串项"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                             <TextBlock
+                                x:Uid="SettingsGeneralCleanKeychainCaption"
                                 Text="macOS 专属 — Windows 无钥匙串(Keychain)，凭据由 DPAPI 管理。"
                                 TextWrapping="Wrap"
                                 FontSize="12"
@@ -469,6 +488,7 @@
                             VerticalAlignment="Center"
                             Style="{StaticResource StatusPill}">
                             <TextBlock
+                                x:Uid="SettingsCommonMacOnly"
                                 Text="macOS 专属"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />

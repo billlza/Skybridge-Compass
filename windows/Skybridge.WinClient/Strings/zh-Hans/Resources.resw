@@ -705,4 +705,862 @@
     <value>高级</value>
     <comment>Settings tab name. Mac SettingsView Advanced tab.</comment>
   </data>
+
+  <!-- ============================ Settings tab views (x:Uid -> resw; the 8 Settings*View.xaml interactive tab views) ============================
+       Trilingual section headers + setting-row labels for the Settings page's interactive tab views.
+       Each key maps to an x:Uid element in Settings/Settings*View.xaml; the inline CJK in the XAML is the design-time fallback.
+       SettingsCommon* keys are shared across multiple views (reused via the same x:Uid). -->
+  <data name="SettingsCommonMacOnly.Text" xml:space="preserve">
+    <value>macOS 专属</value>
+  </data>
+  <data name="SettingsCommonWindowsOsAuth.Text" xml:space="preserve">
+    <value>Windows 系统级授权</value>
+  </data>
+  <data name="SettingsCommonRetryCount.Text" xml:space="preserve">
+    <value>重试次数</value>
+  </data>
+  <data name="SettingsCommonReading.Text" xml:space="preserve">
+    <value>读取中…</value>
+  </data>
+  <data name="SettingsCommonClearTransferHistory.Text" xml:space="preserve">
+    <value>清除传输历史记录</value>
+  </data>
+  <data name="SettingsCommonBalanced.Content" xml:space="preserve">
+    <value>平衡</value>
+  </data>
+  <data name="SettingsCommonAlwaysOn.Text" xml:space="preserve">
+    <value>始终开启</value>
+  </data>
+  <data name="SettingsCommonNoSensorNA.Text" xml:space="preserve">
+    <value>无可用传感器时该图块显示 N/A</value>
+  </data>
+  <data name="SettingsGeneralPreferencesHeader.Text" xml:space="preserve">
+    <value>偏好设置</value>
+  </data>
+  <data name="SettingsGeneralAutoScanRow.Text" xml:space="preserve">
+    <value>启动时自动扫描设备</value>
+  </data>
+  <data name="SettingsGeneralNotificationsRow.Text" xml:space="preserve">
+    <value>显示系统通知</value>
+  </data>
+  <data name="SettingsGeneralDarkModeRow.Text" xml:space="preserve">
+    <value>启用深色模式</value>
+  </data>
+  <data name="SettingsGeneralScanIntervalRow.Text" xml:space="preserve">
+    <value>扫描间隔</value>
+  </data>
+  <data name="SettingsGeneralScanInterval15.Content" xml:space="preserve">
+    <value>15 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval30.Content" xml:space="preserve">
+    <value>30 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval60.Content" xml:space="preserve">
+    <value>60 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval120.Content" xml:space="preserve">
+    <value>120 秒</value>
+  </data>
+  <data name="SettingsGeneralInterfaceHeader.Text" xml:space="preserve">
+    <value>界面</value>
+  </data>
+  <data name="SettingsGeneralShowDeviceDetailsRow.Text" xml:space="preserve">
+    <value>显示设备详细信息</value>
+  </data>
+  <data name="SettingsGeneralShowConnectionStatsRow.Text" xml:space="preserve">
+    <value>显示连接统计</value>
+  </data>
+  <data name="SettingsGeneralCompactModeRow.Text" xml:space="preserve">
+    <value>紧凑模式</value>
+  </data>
+  <data name="SettingsGeneralThemeColorRow.Text" xml:space="preserve">
+    <value>主题颜色</value>
+  </data>
+  <data name="SettingsGeneralSwatchSkyBlue.Text" xml:space="preserve">
+    <value>天空蓝</value>
+  </data>
+  <data name="SettingsGeneralSwatchForestGreen.Text" xml:space="preserve">
+    <value>森林绿</value>
+  </data>
+  <data name="SettingsGeneralSwatchViolet.Text" xml:space="preserve">
+    <value>紫罗兰</value>
+  </data>
+  <data name="SettingsGeneralSwatchSunsetOrange.Text" xml:space="preserve">
+    <value>日落橙</value>
+  </data>
+  <data name="SettingsGeneralSwatchRose.Text" xml:space="preserve">
+    <value>玫红</value>
+  </data>
+  <data name="SettingsGeneralSwatchCyan.Text" xml:space="preserve">
+    <value>青蓝</value>
+  </data>
+  <data name="SettingsGeneralDataManagementHeader.Text" xml:space="preserve">
+    <value>数据管理</value>
+  </data>
+  <data name="SettingsGeneralDataActionsTitle.Text" xml:space="preserve">
+    <value>导出 / 导入 / 重置设置</value>
+  </data>
+  <data name="SettingsGeneralDataActionsHint.Text" xml:space="preserve">
+    <value>使用上方工具栏的「导出」「导入」「重置」操作管理设置文件，存储于 %LOCALAPPDATA%\SkyBridge\settings.json。</value>
+  </data>
+  <data name="SettingsGeneralCacheRow.Text" xml:space="preserve">
+    <value>缓存</value>
+  </data>
+  <data name="SettingsGeneralCacheSizeStatus.Text" xml:space="preserve">
+    <value>当前缓存：计算中…</value>
+  </data>
+  <data name="SettingsGeneralClearCacheAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>清除应用缓存文件夹中的临时数据</value>
+  </data>
+  <data name="SettingsGeneralClearCacheLabel.Text" xml:space="preserve">
+    <value>清除缓存</value>
+  </data>
+  <data name="SettingsGeneralCleanKeychainRow.Text" xml:space="preserve">
+    <value>清理重复的钥匙串项</value>
+  </data>
+  <data name="SettingsGeneralCleanKeychainCaption.Text" xml:space="preserve">
+    <value>macOS 专属 — Windows 无钥匙串(Keychain)，凭据由 DPAPI 管理。</value>
+  </data>
+  <data name="SettingsNetworkCurrentNetworkLabel.Text" xml:space="preserve">
+    <value>当前网络</value>
+  </data>
+  <data name="SettingsNetworkCurrentNetworkDetail.Text" xml:space="preserve">
+    <value>读取系统网络配置文件…</value>
+  </data>
+  <data name="SettingsNetworkAutoConnectLabel.Text" xml:space="preserve">
+    <value>自动连接已知网络</value>
+  </data>
+  <data name="SettingsNetworkAutoConnectCaption.Text" xml:space="preserve">
+    <value>由 Windows 管理 — 偏好已保存，实际自动连接由系统 WLAN 配置决定</value>
+  </data>
+  <data name="SettingsNetworkShowHiddenNetworks.Text" xml:space="preserve">
+    <value>显示隐藏网络</value>
+  </data>
+  <data name="SettingsNetworkPrefer5GHzLabel.Text" xml:space="preserve">
+    <value>优先使用5GHz/6GHz频段</value>
+  </data>
+  <data name="SettingsNetworkPrefer5GHzCaption.Text" xml:space="preserve">
+    <value>由 Windows 管理 — 频段由系统/驱动/路由器决定，偏好仅保存</value>
+  </data>
+  <data name="SettingsNetworkScanTimeoutLabel.Text" xml:space="preserve">
+    <value>扫描超时</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryHeader.Text" xml:space="preserve">
+    <value>设备发现</value>
+  </data>
+  <data name="SettingsNetworkEnableBonjour.Text" xml:space="preserve">
+    <value>启用Bonjour发现</value>
+  </data>
+  <data name="SettingsNetworkEnableMDNS.Text" xml:space="preserve">
+    <value>启用mDNS解析</value>
+  </data>
+  <data name="SettingsNetworkScanCustomPorts.Text" xml:space="preserve">
+    <value>扫描自定义端口</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutLabel.Text" xml:space="preserve">
+    <value>发现超时</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutUnit.Text" xml:space="preserve">
+    <value>单位：秒</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutBox.PlaceholderText" xml:space="preserve">
+    <value>秒</value>
+  </data>
+  <data name="SettingsNetworkCustomServiceTypesLabel.Text" xml:space="preserve">
+    <value>自定义服务类型</value>
+  </data>
+  <data name="SettingsNetworkCustomServiceTypesHint.Text" xml:space="preserve">
+    <value>例如 _skybridge._tcp</value>
+  </data>
+  <data name="SettingsNetworkRemoveServiceTypeAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>移除</value>
+  </data>
+  <data name="SettingsNetworkAddServiceTypeAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>添加</value>
+  </data>
+  <data name="SettingsNetworkTopBarHeader.Text" xml:space="preserve">
+    <value>顶部栏显示</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarIPLocation.Text" xml:space="preserve">
+    <value>显示 IP 城市与代理状态</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarNetworkSpeed.Text" xml:space="preserve">
+    <value>显示实时网速</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarNetworkLatency.Text" xml:space="preserve">
+    <value>显示网络延迟</value>
+  </data>
+  <data name="SettingsNetworkConnectionHeader.Text" xml:space="preserve">
+    <value>连接</value>
+  </data>
+  <data name="SettingsNetworkConnectionTimeoutLabel.Text" xml:space="preserve">
+    <value>连接超时</value>
+  </data>
+  <data name="SettingsDevicesBluetoothHeader.Text" xml:space="preserve">
+    <value>蓝牙</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusLabel.Text" xml:space="preserve">
+    <value>蓝牙状态</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusCaption.Text" xml:space="preserve">
+    <value>经 BluetoothLEAdvertisementWatcher 读取实时状态</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusValue.Text" xml:space="preserve">
+    <value>未扫描</value>
+  </data>
+  <data name="SettingsDevicesBluetoothDiscoveredLabel.Text" xml:space="preserve">
+    <value>已发现设备数</value>
+  </data>
+  <data name="SettingsDevicesBluetoothDiscoveredValue.Text" xml:space="preserve">
+    <value>已发现: 0 设备</value>
+  </data>
+  <data name="SettingsDevicesScanLabel.Text" xml:space="preserve">
+    <value>扫描蓝牙设备</value>
+  </data>
+  <data name="SettingsDevicesScanCaption.Text" xml:space="preserve">
+    <value>开启后持续广播扫描（实时 BLE 广播扫描）</value>
+  </data>
+  <data name="SettingsDevicesScanToggle.OnContent" xml:space="preserve">
+    <value>扫描中</value>
+  </data>
+  <data name="SettingsDevicesScanToggle.OffContent" xml:space="preserve">
+    <value>已停止</value>
+  </data>
+  <data name="SettingsDevicesAutoConnectPaired.Text" xml:space="preserve">
+    <value>自动连接已配对设备</value>
+  </data>
+  <data name="SettingsDevicesShowRSSI.Text" xml:space="preserve">
+    <value>显示设备RSSI</value>
+  </data>
+  <data name="SettingsDevicesShowConnectableOnly.Text" xml:space="preserve">
+    <value>仅显示可连接设备</value>
+  </data>
+  <data name="SettingsDevicesAirPlayDescription.Text" xml:space="preserve">
+    <value>AirPlay 由 Apple 平台提供，Windows 端不可用，因此以下选项不予仿造。</value>
+  </data>
+  <data name="SettingsDevicesAirPlayStatusLabel.Text" xml:space="preserve">
+    <value>AirPlay 状态</value>
+  </data>
+  <data name="SettingsDevicesAirPlayAutoDiscover.Text" xml:space="preserve">
+    <value>自动发现Apple TV</value>
+  </data>
+  <data name="SettingsDevicesAirPlayShowHomePod.Text" xml:space="preserve">
+    <value>显示HomePod设备</value>
+  </data>
+  <data name="SettingsDevicesAirPlayShowThirdParty.Text" xml:space="preserve">
+    <value>显示第三方AirPlay设备</value>
+  </data>
+  <data name="SettingsDevicesFiltersHeader.Text" xml:space="preserve">
+    <value>设备过滤与排序</value>
+  </data>
+  <data name="SettingsDevicesHideOffline.Text" xml:space="preserve">
+    <value>隐藏离线设备</value>
+  </data>
+  <data name="SettingsDevicesSortBySignal.Text" xml:space="preserve">
+    <value>按信号强度排序</value>
+  </data>
+  <data name="SettingsDevicesShowIcons.Text" xml:space="preserve">
+    <value>显示设备图标</value>
+  </data>
+  <data name="SettingsDevicesMinSignalStrength.Text" xml:space="preserve">
+    <value>最小信号强度</value>
+  </data>
+  <data name="SettingsFileTransferTabTitle.Text" xml:space="preserve">
+    <value>文件传输</value>
+  </data>
+  <data name="SettingsFileTransferConfigHeader.Text" xml:space="preserve">
+    <value>传输配置</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathLabel.Text" xml:space="preserve">
+    <value>默认接收路径</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathBox.PlaceholderText" xml:space="preserve">
+    <value>路径</value>
+  </data>
+  <data name="SettingsFileTransferSelectFolderAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>选择文件夹</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathCaption.Text" xml:space="preserve">
+    <value>接收的文件将保存到此位置</value>
+  </data>
+  <data name="SettingsFileTransferMaxConcurrentLabel.Text" xml:space="preserve">
+    <value>最大并发传输数</value>
+  </data>
+  <data name="SettingsFileTransferChunkSizeLabel.Text" xml:space="preserve">
+    <value>分片大小</value>
+  </data>
+  <data name="SettingsFileTransferRateLimitLabel.Text" xml:space="preserve">
+    <value>传输速率限制</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedThroughputLabel.Text" xml:space="preserve">
+    <value>预计吞吐</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedThroughputCaption.Text" xml:space="preserve">
+    <value>按当前速率限制 · 并发数 · 分片大小估算</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedRateValue.Text" xml:space="preserve">
+    <value>受网络与磁盘限制</value>
+  </data>
+  <data name="SettingsFileTransferOptionsHeader.Text" xml:space="preserve">
+    <value>传输选项</value>
+  </data>
+  <data name="SettingsFileTransferShowNotificationsLabel.Text" xml:space="preserve">
+    <value>传输完成后显示通知</value>
+  </data>
+  <data name="SettingsFileTransferAutoRetryLabel.Text" xml:space="preserve">
+    <value>启用断点续传（失败自动重试）</value>
+  </data>
+  <data name="SettingsFileTransferKeepHistoryLabel.Text" xml:space="preserve">
+    <value>保持传输历史记录</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryStatus.Text" xml:space="preserve">
+    <value>清空当前会话已记录的传输条目</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>清除传输历史记录</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryButtonText.Text" xml:space="preserve">
+    <value>清除</value>
+  </data>
+  <data name="SettingsFileTransferKeepAwakeLabel.Text" xml:space="preserve">
+    <value>传输时保持系统唤醒</value>
+  </data>
+  <data name="SettingsFileTransferKeepAwakeCaption.Text" xml:space="preserve">
+    <value>仅在文件传输进行时阻止系统休眠</value>
+  </data>
+  <data name="SettingsFileTransferRetryCountBox.PlaceholderText" xml:space="preserve">
+    <value>次</value>
+  </data>
+  <data name="SettingsFileTransferSecurityHeader.Text" xml:space="preserve">
+    <value>安全</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionLabel.Text" xml:space="preserve">
+    <value>启用传输加密</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionCaption.Text" xml:space="preserve">
+    <value>始终开启（不可关闭）</value>
+  </data>
+  <data name="SettingsFileTransferCertVerifyLabel.Text" xml:space="preserve">
+    <value>证书校验</value>
+  </data>
+  <data name="SettingsFileTransferCertVerifyCaption.Text" xml:space="preserve">
+    <value>始终校验服务器证书以防中间人攻击</value>
+  </data>
+  <data name="SettingsFileTransferVirusScanLabel.Text" xml:space="preserve">
+    <value>扫描传输文件病毒</value>
+  </data>
+  <data name="SettingsFileTransferVirusScanCaption.Text" xml:space="preserve">
+    <value>需要 Windows Defender — 本应用未内置杀毒引擎，偏好已保存</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelLabel.Text" xml:space="preserve">
+    <value>扫描级别</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelQuick.Content" xml:space="preserve">
+    <value>快速</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelStandard.Content" xml:space="preserve">
+    <value>标准</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelDeep.Content" xml:space="preserve">
+    <value>深度</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionAlgorithmLabel.Text" xml:space="preserve">
+    <value>加密算法</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionAlgorithmCaption.Text" xml:space="preserve">
+    <value>对称加密套件（固定）</value>
+  </data>
+  <data name="SettingsPermissionsStatusHeader.Text" xml:space="preserve">
+    <value>权限状态</value>
+  </data>
+  <data name="SettingsPermissionsSummaryLabel.Text" xml:space="preserve">
+    <value>权限摘要</value>
+  </data>
+  <data name="SettingsPermissionsRefreshHint.Text" xml:space="preserve">
+    <value>刷新状态 · 顶部</value>
+  </data>
+  <data name="SettingsPermissionsWarningNotice.Text" xml:space="preserve">
+    <value>部分权限尚未授权。请使用顶部的“请求权限”操作，或在“打开系统设置”中手动授予所需权限。</value>
+  </data>
+  <data name="SettingsPermissionsDetailsHeader.Text" xml:space="preserve">
+    <value>权限详情</value>
+  </data>
+  <data name="SettingsPermissionsWifiTitle.Text" xml:space="preserve">
+    <value>Wi-Fi 访问</value>
+  </data>
+  <data name="SettingsPermissionsWifiCaption.Text" xml:space="preserve">
+    <value>扫描并连接附近的设备需要网络访问权限。</value>
+  </data>
+  <data name="SettingsPermissionsBluetoothTitle.Text" xml:space="preserve">
+    <value>蓝牙访问</value>
+  </data>
+  <data name="SettingsPermissionsBluetoothCaption.Text" xml:space="preserve">
+    <value>发现并连接蓝牙设备需要蓝牙权限。</value>
+  </data>
+  <data name="SettingsPermissionsLocationTitle.Text" xml:space="preserve">
+    <value>位置访问</value>
+  </data>
+  <data name="SettingsPermissionsLocationCaption.Text" xml:space="preserve">
+    <value>读取 Wi-Fi 网络名称等位置相关信息需要位置权限。</value>
+  </data>
+  <data name="SettingsPermissionsSystemConfigTitle.Text" xml:space="preserve">
+    <value>系统配置访问</value>
+  </data>
+  <data name="SettingsPermissionsSystemConfigCaption.Text" xml:space="preserve">
+    <value>读取网络与系统配置以进行设备发现与连接。</value>
+  </data>
+  <data name="SettingsPermissionsRequestHint.Text" xml:space="preserve">
+    <value>如需主动请求权限，请使用顶部工具栏的“请求权限”操作。</value>
+  </data>
+  <data name="SettingsPermissionsHelpHeader.Text" xml:space="preserve">
+    <value>帮助</value>
+  </data>
+  <data name="SettingsPermissionsHelpTitle.Text" xml:space="preserve">
+    <value>权限说明</value>
+  </data>
+  <data name="SettingsPermissionsHelpWifi.Text" xml:space="preserve">
+    <value>Wi-Fi 访问：用于扫描并连接附近可用的设备与网络。</value>
+  </data>
+  <data name="SettingsPermissionsHelpBluetooth.Text" xml:space="preserve">
+    <value>蓝牙访问：用于发现并连接蓝牙设备。</value>
+  </data>
+  <data name="SettingsPermissionsHelpLocation.Text" xml:space="preserve">
+    <value>位置访问：在部分系统上，读取 Wi-Fi 网络名称需要位置权限。</value>
+  </data>
+  <data name="SettingsPermissionsHelpSystemConfig.Text" xml:space="preserve">
+    <value>系统配置访问：用于读取网络与系统配置以完成设备发现与连接。</value>
+  </data>
+  <data name="SettingsPermissionsOpenSettingsHint.Text" xml:space="preserve">
+    <value>使用顶部工具栏的“打开系统设置”操作可跳转到 Windows 设置进行手动授权。</value>
+  </data>
+  <data name="SettingsRemoteDesktopQualityHeader.Text" xml:space="preserve">
+    <value>画质与性能</value>
+  </data>
+  <data name="SettingsRemoteDesktopCurrentConfigLabel.Text" xml:space="preserve">
+    <value>当前配置</value>
+  </data>
+  <data name="SettingsRemoteDesktopStatusBadgeOptimized.Text" xml:space="preserve">
+    <value>已优化</value>
+  </data>
+  <data name="SettingsRemoteDesktopEstimatedRateLabel.Text" xml:space="preserve">
+    <value>预估传输率</value>
+  </data>
+  <data name="SettingsRemoteDesktopLoadTierLow.Text" xml:space="preserve">
+    <value>负载 低</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHeader.Text" xml:space="preserve">
+    <value>预设方案</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHighPerformance.Content" xml:space="preserve">
+    <value>高性能</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHighQuality.Content" xml:space="preserve">
+    <value>高质量</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetLowLatency.Content" xml:space="preserve">
+    <value>低延迟</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetCaption.Text" xml:space="preserve">
+    <value>选择预设可一键套用分辨率 / 帧率 / 压缩质量 / 自适应比特率组合</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolutionLabel.Text" xml:space="preserve">
+    <value>分辨率</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution1080p.Content" xml:space="preserve">
+    <value>1080P (Full HD)　1920×1080</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution2k.Content" xml:space="preserve">
+    <value>2K (QHD)　2560×1440</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution4k.Content" xml:space="preserve">
+    <value>4K (Ultra HD)　3840×2160</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution5k.Content" xml:space="preserve">
+    <value>5K (Apple Retina)　5120×2880</value>
+  </data>
+  <data name="SettingsRemoteDesktopFrameRateLabel.Text" xml:space="preserve">
+    <value>帧率</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionQualityLabel.Text" xml:space="preserve">
+    <value>压缩质量</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionNone.Content" xml:space="preserve">
+    <value>无压缩</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionFast.Content" xml:space="preserve">
+    <value>快速压缩</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionBalanced.Content" xml:space="preserve">
+    <value>平衡压缩</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionMaximum.Content" xml:space="preserve">
+    <value>最大压缩</value>
+  </data>
+  <data name="SettingsRemoteDesktopHardwareAccelLabel.Text" xml:space="preserve">
+    <value>启用硬件加速</value>
+  </data>
+  <data name="SettingsRemoteDesktopAdaptiveBitrateLabel.Text" xml:space="preserve">
+    <value>自适应比特率</value>
+  </data>
+  <data name="SettingsRemoteDesktopAppleSiliconLabel.Text" xml:space="preserve">
+    <value>Apple Silicon 优化</value>
+  </data>
+  <data name="SettingsRemoteDesktopDisplayHeader.Text" xml:space="preserve">
+    <value>显示</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionLevelLabel.Text" xml:space="preserve">
+    <value>压缩级别</value>
+  </data>
+  <data name="SettingsRemoteDesktopFullScreenLabel.Text" xml:space="preserve">
+    <value>全屏模式</value>
+  </data>
+  <data name="SettingsRemoteDesktopInteractionHeader.Text" xml:space="preserve">
+    <value>交互</value>
+  </data>
+  <data name="SettingsRemoteDesktopClipboardSyncLabel.Text" xml:space="preserve">
+    <value>启用剪贴板同步</value>
+  </data>
+  <data name="SettingsRemoteDesktopAudioRedirectLabel.Text" xml:space="preserve">
+    <value>音频重定向</value>
+  </data>
+  <data name="SettingsRemoteDesktopAudioRedirectUnavailable.Text" xml:space="preserve">
+    <value>暂不可用</value>
+  </data>
+  <data name="SettingsRemoteDesktopFileTransferLabel.Text" xml:space="preserve">
+    <value>启用文件传输</value>
+  </data>
+  <data name="SettingsRemoteDesktopTrackpadGestureLabel.Text" xml:space="preserve">
+    <value>触控板手势</value>
+  </data>
+  <data name="SettingsRemoteDesktopMouseSensitivityLabel.Text" xml:space="preserve">
+    <value>鼠标灵敏度</value>
+  </data>
+  <data name="SettingsRemoteDesktopDoubleClickIntervalLabel.Text" xml:space="preserve">
+    <value>双击间隔</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkHeader.Text" xml:space="preserve">
+    <value>网络优化</value>
+  </data>
+  <data name="SettingsRemoteDesktopAdaptiveBandwidthLabel.Text" xml:space="preserve">
+    <value>启用带宽自适应</value>
+  </data>
+  <data name="SettingsRemoteDesktopUDPTransportLabel.Text" xml:space="preserve">
+    <value>启用UDP传输</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkEncryptionLabel.Text" xml:space="preserve">
+    <value>启用网络加密</value>
+  </data>
+  <data name="SettingsRemoteDesktopDataCompressionLabel.Text" xml:space="preserve">
+    <value>启用数据压缩</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkCompressionCaption.Text" xml:space="preserve">
+    <value>网络压缩级别　0=关闭　9=最大</value>
+  </data>
+  <data name="SettingsRemoteDesktopBandwidthLimitLabel.Text" xml:space="preserve">
+    <value>带宽限制 (Mbps)</value>
+  </data>
+  <data name="SettingsRemoteDesktopBufferSizeLabel.Text" xml:space="preserve">
+    <value>缓冲区大小</value>
+  </data>
+  <data name="SettingsAdvancedPageHeader.Text" xml:space="preserve">
+    <value>高级</value>
+  </data>
+  <data name="SettingsAdvancedDebugHeader.Text" xml:space="preserve">
+    <value>调试</value>
+  </data>
+  <data name="SettingsAdvancedVerboseLoggingLabel.Text" xml:space="preserve">
+    <value>启用详细日志</value>
+  </data>
+  <data name="SettingsAdvancedShowDebugInfoLabel.Text" xml:space="preserve">
+    <value>显示调试信息</value>
+  </data>
+  <data name="SettingsAdvancedSaveNetworkLogsLabel.Text" xml:space="preserve">
+    <value>保存网络日志</value>
+  </data>
+  <data name="SettingsAdvancedLogLevelLabel.Text" xml:space="preserve">
+    <value>日志级别</value>
+  </data>
+  <data name="SettingsAdvancedPerformanceHeader.Text" xml:space="preserve">
+    <value>性能</value>
+  </data>
+  <data name="SettingsAdvancedRenderModeLabel.Text" xml:space="preserve">
+    <value>渲染性能模式</value>
+  </data>
+  <data name="SettingsAdvancedRenderModeExtreme.Content" xml:space="preserve">
+    <value>极致</value>
+  </data>
+  <data name="SettingsAdvancedRenderModePowerSaving.Content" xml:space="preserve">
+    <value>节能</value>
+  </data>
+  <data name="SettingsAdvancedRealTimeWeatherLabel.Text" xml:space="preserve">
+    <value>启用实时天气</value>
+  </data>
+  <data name="SettingsAdvancedRealTimeWeatherCaption.Text" xml:space="preserve">
+    <value>启用后顶部栏与仪表盘显示实时天气数据</value>
+  </data>
+  <data name="SettingsAdvancedShowRealtimeFpsLabel.Text" xml:space="preserve">
+    <value>显示实时FPS</value>
+  </data>
+  <data name="SettingsAdvancedHardwareAccelLabel.Text" xml:space="preserve">
+    <value>硬件加速</value>
+  </data>
+  <data name="SettingsAdvancedOptimizeMemoryLabel.Text" xml:space="preserve">
+    <value>优化内存使用</value>
+  </data>
+  <data name="SettingsAdvancedBackgroundScanLabel.Text" xml:space="preserve">
+    <value>后台扫描</value>
+  </data>
+  <data name="SettingsAdvancedMaxConcurrentLabel.Text" xml:space="preserve">
+    <value>最大并发连接</value>
+  </data>
+  <data name="SettingsAdvancedMaxConcurrentInput.PlaceholderText" xml:space="preserve">
+    <value>个</value>
+  </data>
+  <data name="SettingsAdvancedMetalHudLabel.Text" xml:space="preserve">
+    <value>Metal 性能 HUD</value>
+  </data>
+  <data name="SettingsAdvancedMetalHudCaption.Text" xml:space="preserve">
+    <value>macOS 专属 · Metal 为 Apple 平台技术</value>
+  </data>
+  <data name="SettingsAdvancedExperimentalHeader.Text" xml:space="preserve">
+    <value>实验性功能</value>
+  </data>
+  <data name="SettingsAdvancedIPv6Label.Text" xml:space="preserve">
+    <value>启用 IPv6 支持</value>
+  </data>
+  <data name="SettingsAdvancedNewDiscoveryLabel.Text" xml:space="preserve">
+    <value>使用新的发现算法</value>
+  </data>
+  <data name="SettingsAdvancedP2PDirectLabel.Text" xml:space="preserve">
+    <value>启用P2P直连</value>
+  </data>
+  <data name="SettingsAdvancedExperimentalWarning.Text" xml:space="preserve">
+    <value>实验性功能可能不稳定，启用后如遇异常请关闭。</value>
+  </data>
+  <data name="SettingsAdvancedPqcHeader.Text" xml:space="preserve">
+    <value>后量子密码 PQC</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcLabel.Text" xml:space="preserve">
+    <value>启用后量子密码（应用层）</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcCaption.Text" xml:space="preserve">
+    <value>策略强制启用</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcStatus.Text" xml:space="preserve">
+    <value>已启用</value>
+  </data>
+  <data name="SettingsAdvancedHybridTlsLabel.Text" xml:space="preserve">
+    <value>启用TLS混合协商（系统支持时）</value>
+  </data>
+  <data name="SettingsAdvancedHybridTlsStatus.Text" xml:space="preserve">
+    <value>由系统自动协商</value>
+  </data>
+  <data name="SettingsAdvancedPreferXWingLabel.Text" xml:space="preserve">
+    <value>优先 X-Wing 混合套件</value>
+  </data>
+  <data name="SettingsAdvancedPreferXWingCaption.Text" xml:space="preserve">
+    <value>影响后量子密钥协商套件的优先级</value>
+  </data>
+  <data name="SettingsAdvancedSignatureAlgorithmLabel.Text" xml:space="preserve">
+    <value>签名算法</value>
+  </data>
+  <data name="SettingsAdvancedSecureEnclaveCaption.Text" xml:space="preserve">
+    <value>macOS 专属 · Windows 无 Secure Enclave</value>
+  </data>
+  <data name="SettingsAdvancedMlKemLabel.Text" xml:space="preserve">
+    <value>ML-KEM 密钥协商</value>
+  </data>
+  <data name="SettingsAdvancedMlKemStatus.Text" xml:space="preserve">
+    <value>X-Wing 混合 · 软件 · 临时会话密钥</value>
+  </data>
+  <data name="SettingsAdvancedPqcNote.Text" xml:space="preserve">
+    <value>后量子密码套件由策略强制启用，混合密钥协商在两端均支持 X-Wing 时优先采用。</value>
+  </data>
+  <data name="SettingsAdvancedSmoothingHeader.Text" xml:space="preserve">
+    <value>信号平滑</value>
+  </data>
+  <data name="SettingsAdvancedEmaAlphaLabel.Text" xml:space="preserve">
+    <value>强度平滑系数 (EMA)</value>
+  </data>
+  <data name="SettingsAdvancedEmaAlphaCaption.Text" xml:space="preserve">
+    <value>数值越大对最新采样越敏感，越小越平滑。</value>
+  </data>
+  <data name="SettingsAdvancedResetHeader.Text" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="SettingsAdvancedResetGuidance.Text" xml:space="preserve">
+    <value>使用上方设置工具栏的“重置 / 恢复默认”按钮可将全部设置恢复为默认值。</value>
+  </data>
+  <data name="SettingsAdvancedResetWarning.Text" xml:space="preserve">
+    <value>重置操作不可撤销，将清除你的全部自定义设置。</value>
+  </data>
+  <data name="SettingsSystemMonitorPageHeader.Text" xml:space="preserve">
+    <value>系统监控</value>
+  </data>
+  <data name="SettingsSystemMonitorConfigHeader.Text" xml:space="preserve">
+    <value>监控配置</value>
+  </data>
+  <data name="SettingsSystemMonitorRefreshIntervalLabel.Text" xml:space="preserve">
+    <value>刷新间隔</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableRealtimeLabel.Text" xml:space="preserve">
+    <value>启用实时监控</value>
+  </data>
+  <data name="SettingsSystemMonitorShowTrendLabel.Text" xml:space="preserve">
+    <value>显示趋势指示器</value>
+  </data>
+  <data name="SettingsSystemMonitorEnablePerfAlertsLabel.Text" xml:space="preserve">
+    <value>启用性能警报</value>
+  </data>
+  <data name="SettingsSystemMonitorRetentionDaysLabel.Text" xml:space="preserve">
+    <value>数据保留天数</value>
+  </data>
+  <data name="SettingsSystemMonitorRetentionDaysField.PlaceholderText" xml:space="preserve">
+    <value>天</value>
+  </data>
+  <data name="SettingsSystemMonitorMaxHistoryPointsLabel.Text" xml:space="preserve">
+    <value>最大历史数据点</value>
+  </data>
+  <data name="SettingsSystemMonitorDisplayHeader.Text" xml:space="preserve">
+    <value>显示项</value>
+  </data>
+  <data name="SettingsSystemMonitorShowCpuLabel.Text" xml:space="preserve">
+    <value>显示CPU使用率</value>
+  </data>
+  <data name="SettingsSystemMonitorShowMemoryLabel.Text" xml:space="preserve">
+    <value>显示内存使用率</value>
+  </data>
+  <data name="SettingsSystemMonitorShowDiskLabel.Text" xml:space="preserve">
+    <value>显示磁盘使用率</value>
+  </data>
+  <data name="SettingsSystemMonitorShowNetworkLabel.Text" xml:space="preserve">
+    <value>显示网络活动</value>
+  </data>
+  <data name="SettingsSystemMonitorShowTemperatureLabel.Text" xml:space="preserve">
+    <value>显示温度信息</value>
+  </data>
+  <data name="SettingsSystemMonitorShowFanSpeedLabel.Text" xml:space="preserve">
+    <value>显示风扇转速</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeLabel.Text" xml:space="preserve">
+    <value>图表类型</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeLine.Content" xml:space="preserve">
+    <value>折线图</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeBar.Content" xml:space="preserve">
+    <value>柱状图</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeArea.Content" xml:space="preserve">
+    <value>面积图</value>
+  </data>
+  <data name="SettingsSystemMonitorAlertsHeader.Text" xml:space="preserve">
+    <value>警报阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorCpuThresholdLabel.Text" xml:space="preserve">
+    <value>CPU警报阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorMemoryThresholdLabel.Text" xml:space="preserve">
+    <value>内存警报阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorDiskThresholdLabel.Text" xml:space="preserve">
+    <value>磁盘警报阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableTemperatureLabel.Text" xml:space="preserve">
+    <value>启用温度监控</value>
+  </data>
+  <data name="SettingsSystemMonitorTemperatureThresholdLabel.Text" xml:space="preserve">
+    <value>温度阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableFanSpeedLabel.Text" xml:space="preserve">
+    <value>启用风扇转速监控</value>
+  </data>
+  <data name="SettingsSystemMonitorFanSpeedThresholdLabel.Text" xml:space="preserve">
+    <value>风扇转速阈值</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableSoundAlertsLabel.Text" xml:space="preserve">
+    <value>启用声音警报</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableNotificationsLabel.Text" xml:space="preserve">
+    <value>启用通知中心</value>
+  </data>
+  <data name="SettingsSystemMonitorAdvancedHeader.Text" xml:space="preserve">
+    <value>高级</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableThermalThrottlingLabel.Text" xml:space="preserve">
+    <value>启用热节流警报</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableRemoteLabel.Text" xml:space="preserve">
+    <value>启用远程监控</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionLabel.Text" xml:space="preserve">
+    <value>采样精度</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionLow.Content" xml:space="preserve">
+    <value>低</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionNormal.Content" xml:space="preserve">
+    <value>正常</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionHigh.Content" xml:space="preserve">
+    <value>高</value>
+  </data>
+  <data name="SettingsSystemMonitorExportAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>将当前监控指标导出为 JSON 或 CSV 文件</value>
+  </data>
+  <data name="SettingsSystemMonitorExportTitle.Text" xml:space="preserve">
+    <value>导出监控数据</value>
+  </data>
+  <data name="SettingsSystemMonitorExportSubtitle.Text" xml:space="preserve">
+    <value>将当前监控指标快照与警报阈值保存到文件</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistoryAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>清空已采集的监控历史并重新采样</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistoryTitle.Text" xml:space="preserve">
+    <value>清除监控历史</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistorySubtitle.Text" xml:space="preserve">
+    <value>清空已采集的历史缓冲区并立即重新采样</value>
+  </data>
+
+  <!-- ============================ Settings Actions row Title/State (converter-localized; visible 'Settings Actions' list) ============================
+       SettingsAction.* localized by LabelKeyToLocalizedConverter (Title); Status.Disabled by StatusKeyToLocalizedConverter (State).
+       Canonical English Title/State stay the SettingsWorkspaceClient model values; only the displayed text is localized. -->
+  <data name="SettingsAction.ExportSettings" xml:space="preserve">
+    <value>导出设置</value>
+  </data>
+  <data name="SettingsAction.ImportSettings" xml:space="preserve">
+    <value>导入设置</value>
+  </data>
+  <data name="SettingsAction.ResetSettings" xml:space="preserve">
+    <value>重置设置</value>
+  </data>
+  <data name="SettingsAction.RefreshStatus" xml:space="preserve">
+    <value>刷新状态</value>
+  </data>
+  <data name="SettingsAction.RequestPermission" xml:space="preserve">
+    <value>请求权限</value>
+  </data>
+  <data name="SettingsAction.OpenSystemPreferences" xml:space="preserve">
+    <value>打开系统设置</value>
+  </data>
+  <data name="SettingsAction.ApplyFileTransferSettings" xml:space="preserve">
+    <value>应用文件传输设置</value>
+  </data>
+  <data name="SettingsAction.ApplyRemoteDesktopSettings" xml:space="preserve">
+    <value>应用远程桌面设置</value>
+  </data>
+  <data name="SettingsAction.RestoreDefaults" xml:space="preserve">
+    <value>恢复默认</value>
+  </data>
+  <data name="SettingsAction.ResetMonitorData" xml:space="preserve">
+    <value>重置监控数据</value>
+  </data>
+  <data name="SettingsAction.ClearHistoryData" xml:space="preserve">
+    <value>清除历史数据</value>
+  </data>
+  <data name="Status.Disabled" xml:space="preserve">
+    <value>已禁用</value>
+  </data>
 </root>

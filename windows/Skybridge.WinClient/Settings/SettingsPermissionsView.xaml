@@ -51,6 +51,7 @@
              ============================================================================ -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsPermissionsStatusHeader"
                 Text="权限状态"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -66,6 +67,7 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsPermissionsSummaryLabel"
                                 Text="权限摘要"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
@@ -86,6 +88,7 @@
                                 FontSize="13"
                                 Foreground="{StaticResource SkyBridgeAccentBrush}" />
                             <TextBlock
+                                x:Uid="SettingsPermissionsRefreshHint"
                                 Text="刷新状态 · 顶部"
                                 FontSize="11"
                                 VerticalAlignment="Center"
@@ -107,6 +110,7 @@
                                 VerticalAlignment="Top"
                                 Foreground="{StaticResource SkyBridgeWarningBrush}" />
                             <TextBlock
+                                x:Uid="SettingsPermissionsWarningNotice"
                                 TextWrapping="Wrap"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
@@ -125,6 +129,7 @@
              ============================================================================ -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsPermissionsDetailsHeader"
                 Text="权限详情"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -145,12 +150,12 @@
                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                            <TextBlock Text="Wi-Fi 访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock Text="扫描并连接附近的设备需要网络访问权限。"
+                            <TextBlock x:Uid="SettingsPermissionsWifiTitle" Text="Wi-Fi 访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock x:Uid="SettingsPermissionsWifiCaption" Text="扫描并连接附近的设备需要网络访问权限。"
                                 TextWrapping="Wrap" FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                         </StackPanel>
-                        <TextBlock Grid.Column="2" Text="Windows 系统级授权"
+                        <TextBlock x:Uid="SettingsCommonWindowsOsAuth" Grid.Column="2" Text="Windows 系统级授权"
                             FontSize="12" VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </Grid>
@@ -168,12 +173,12 @@
                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                            <TextBlock Text="蓝牙访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock Text="发现并连接蓝牙设备需要蓝牙权限。"
+                            <TextBlock x:Uid="SettingsPermissionsBluetoothTitle" Text="蓝牙访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock x:Uid="SettingsPermissionsBluetoothCaption" Text="发现并连接蓝牙设备需要蓝牙权限。"
                                 TextWrapping="Wrap" FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                         </StackPanel>
-                        <TextBlock Grid.Column="2" Text="Windows 系统级授权"
+                        <TextBlock x:Uid="SettingsCommonWindowsOsAuth" Grid.Column="2" Text="Windows 系统级授权"
                             FontSize="12" VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </Grid>
@@ -191,14 +196,14 @@
                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                            <TextBlock Text="位置访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock Text="读取 Wi-Fi 网络名称等位置相关信息需要位置权限。"
+                            <TextBlock x:Uid="SettingsPermissionsLocationTitle" Text="位置访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock x:Uid="SettingsPermissionsLocationCaption" Text="读取 Wi-Fi 网络名称等位置相关信息需要位置权限。"
                                 TextWrapping="Wrap" FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                         </StackPanel>
                         <!-- HARDWARE-REAL: live Geolocator access status, read in code-behind via
                              Geolocator.RequestAccessAsync() on load. Read-only status row. -->
-                        <TextBlock x:Name="LocationAccessValue" Grid.Column="2" Text="读取中…"
+                        <TextBlock x:Uid="SettingsCommonReading" x:Name="LocationAccessValue" Grid.Column="2" Text="读取中…"
                             FontSize="12" VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </Grid>
@@ -216,12 +221,12 @@
                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                            <TextBlock Text="系统配置访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                            <TextBlock Text="读取网络与系统配置以进行设备发现与连接。"
+                            <TextBlock x:Uid="SettingsPermissionsSystemConfigTitle" Text="系统配置访问" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            <TextBlock x:Uid="SettingsPermissionsSystemConfigCaption" Text="读取网络与系统配置以进行设备发现与连接。"
                                 TextWrapping="Wrap" FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                         </StackPanel>
-                        <TextBlock Grid.Column="2" Text="Windows 系统级授权"
+                        <TextBlock x:Uid="SettingsCommonWindowsOsAuth" Grid.Column="2" Text="Windows 系统级授权"
                             FontSize="12" VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </Grid>
@@ -233,6 +238,7 @@
                             FontSize="13"
                             Foreground="{StaticResource SkyBridgeAccentBrush}" />
                         <TextBlock
+                            x:Uid="SettingsPermissionsRequestHint"
                             Text="如需主动请求权限，请使用顶部工具栏的“请求权限”操作。"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -250,6 +256,7 @@
              ============================================================================ -->
         <StackPanel Spacing="8">
             <TextBlock
+                x:Uid="SettingsPermissionsHelpHeader"
                 Text="帮助"
                 FontSize="13"
                 FontWeight="SemiBold"
@@ -257,22 +264,27 @@
             <Border Style="{StaticResource GlassCard}">
                 <StackPanel Spacing="10">
                     <TextBlock
+                        x:Uid="SettingsPermissionsHelpTitle"
                         Text="权限说明"
                         FontWeight="SemiBold"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsPermissionsHelpWifi"
                         Text="Wi-Fi 访问：用于扫描并连接附近可用的设备与网络。"
                         TextWrapping="Wrap" FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsPermissionsHelpBluetooth"
                         Text="蓝牙访问：用于发现并连接蓝牙设备。"
                         TextWrapping="Wrap" FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsPermissionsHelpLocation"
                         Text="位置访问：在部分系统上，读取 Wi-Fi 网络名称需要位置权限。"
                         TextWrapping="Wrap" FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsPermissionsHelpSystemConfig"
                         Text="系统配置访问：用于读取网络与系统配置以完成设备发现与连接。"
                         TextWrapping="Wrap" FontSize="12"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
@@ -284,6 +296,7 @@
                             FontSize="13"
                             Foreground="{StaticResource SkyBridgeAccentBrush}" />
                         <TextBlock
+                            x:Uid="SettingsPermissionsOpenSettingsHint"
                             Text="使用顶部工具栏的“打开系统设置”操作可跳转到 Windows 设置进行手动授权。"
                             FontSize="11"
                             TextWrapping="Wrap"

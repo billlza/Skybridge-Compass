@@ -55,6 +55,11 @@ public sealed class StatusKeyToLocalizedConverter : IValueConverter
             ["Intent ready"] = "Status.IntentReady",
             ["No Core-validated peers"] = "Status.NoCoreValidatedPeers",
             ["Discovery stopped"] = "Status.DiscoveryStopped",
+            // Settings Actions row State (SettingsActionItem.State; visible "Settings Actions"
+            // list). "Ready"/"Preview ready"/"Intent ready" already map above; add the gated
+            // "Disabled" state shown for Open System Preferences / Clear History Data. The
+            // canonical English State stays the model value; only the displayed text localizes.
+            ["Disabled"] = "Status.Disabled",
         };
 
     // In-code trilingual fallback, keyed by resource key then language fold ("en"/"zh"/"ja").
@@ -68,6 +73,7 @@ public sealed class StatusKeyToLocalizedConverter : IValueConverter
             ["Status.IntentReady"] = new() { ["en"] = "Intent ready", ["zh"] = "操作就绪", ["ja"] = "操作準備完了" },
             ["Status.NoCoreValidatedPeers"] = new() { ["en"] = "No Core-validated peers", ["zh"] = "未发现经核心校验的设备", ["ja"] = "コア検証済みのピアがありません" },
             ["Status.DiscoveryStopped"] = new() { ["en"] = "Discovery stopped", ["zh"] = "已停止发现", ["ja"] = "検出を停止しました" },
+            ["Status.Disabled"] = new() { ["en"] = "Disabled", ["zh"] = "已禁用", ["ja"] = "無効" },
         };
 
     // Lazily-created MRT Core manager (shared; cheap to reuse). null if construction fails

@@ -49,6 +49,7 @@
 
         <!-- Tab title -->
         <TextBlock
+            x:Uid="SettingsFileTransferTabTitle"
             Text="文件传输 File Transfer"
             FontSize="13"
             FontWeight="SemiBold"
@@ -58,6 +59,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsFileTransferConfigHeader"
                     Text="传输配置"
                     FontWeight="SemiBold"
                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -66,6 +68,7 @@
                      clickable folder-picker FontIcon (code-behind), NOT a <Button>. -->
                 <StackPanel Spacing="6">
                     <TextBlock
+                        x:Uid="SettingsFileTransferDefaultPathLabel"
                         Text="默认接收路径"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <Grid ColumnSpacing="8">
@@ -75,6 +78,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBox
                             Grid.Column="0"
+                            x:Uid="SettingsFileTransferDefaultPathBox"
                             Text="{Binding Settings.DefaultTransferPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                             PlaceholderText="路径"
                             VerticalAlignment="Center" />
@@ -84,6 +88,7 @@
                         <Border
                             Grid.Column="1"
                             x:Name="SelectFolderAffordance"
+                            x:Uid="SettingsFileTransferSelectFolderAffordance"
                             Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                             BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                             BorderThickness="1"
@@ -101,6 +106,7 @@
                         </Border>
                     </Grid>
                     <TextBlock
+                        x:Uid="SettingsFileTransferDefaultPathCaption"
                         Text="接收的文件将保存到此位置"
                         FontSize="11"
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -114,6 +120,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsFileTransferMaxConcurrentLabel"
                             Text="最大并发传输数"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
@@ -132,6 +139,7 @@
                      values as tags (65536…1048576). -->
                 <StackPanel Spacing="6">
                     <TextBlock
+                        x:Uid="SettingsFileTransferChunkSizeLabel"
                         Text="分片大小"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <ComboBox
@@ -175,6 +183,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsFileTransferRateLimitLabel"
                             Text="传输速率限制"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
@@ -202,9 +211,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                         <TextBlock
+                            x:Uid="SettingsFileTransferEstimatedThroughputLabel"
                             Text="预计吞吐"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferEstimatedThroughputCaption"
                             Text="按当前速率限制 · 并发数 · 分片大小估算"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -213,6 +224,7 @@
                     <TextBlock
                         Grid.Column="1"
                         x:Name="EstimatedRateValue"
+                        x:Uid="SettingsFileTransferEstimatedRateValue"
                         Text="受网络与磁盘限制"
                         FontWeight="SemiBold"
                         VerticalAlignment="Center"
@@ -225,6 +237,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="12">
                 <TextBlock
+                    x:Uid="SettingsFileTransferOptionsHeader"
                     Text="传输选项"
                     FontWeight="SemiBold"
                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -236,6 +249,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsFileTransferShowNotificationsLabel"
                         Text="传输完成后显示通知"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -252,6 +266,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsFileTransferAutoRetryLabel"
                         Text="启用断点续传（失败自动重试）"
                         VerticalAlignment="Center"
                         TextWrapping="Wrap"
@@ -269,6 +284,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsFileTransferKeepHistoryLabel"
                         Text="保持传输历史记录"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -291,10 +307,12 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                         <TextBlock
+                            x:Uid="SettingsCommonClearTransferHistory"
                             Text="清除传输历史记录"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             x:Name="ClearHistoryStatusText"
+                            x:Uid="SettingsFileTransferClearHistoryStatus"
                             Text="清空当前会话已记录的传输条目"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -303,6 +321,7 @@
                     <Border
                         Grid.Column="1"
                         x:Name="ClearHistoryAffordance"
+                        x:Uid="SettingsFileTransferClearHistoryAffordance"
                         Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                         BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
                         BorderThickness="1"
@@ -318,6 +337,7 @@
                                 Foreground="{StaticResource SkyBridgeAccentBrush}"
                                 VerticalAlignment="Center" />
                             <TextBlock
+                                x:Uid="SettingsFileTransferClearHistoryButtonText"
                                 Text="清除"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
@@ -336,9 +356,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsFileTransferKeepAwakeLabel"
                             Text="传输时保持系统唤醒"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferKeepAwakeCaption"
                             Text="仅在文件传输进行时阻止系统休眠"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -353,9 +375,11 @@
                 <!-- 重试次数 → Settings.RetryCount (REAL-PERSIST, shared key; numeric TextBox) -->
                 <StackPanel Spacing="6">
                     <TextBlock
+                        x:Uid="SettingsCommonRetryCount"
                         Text="重试次数"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBox
+                        x:Uid="SettingsFileTransferRetryCountBox"
                         Text="{Binding Settings.RetryCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         PlaceholderText="次"
                         InputScope="Number"
@@ -370,6 +394,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="12">
                 <TextBlock
+                    x:Uid="SettingsFileTransferSecurityHeader"
                     Text="安全"
                     FontWeight="SemiBold"
                     Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -383,9 +408,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsFileTransferEncryptionLabel"
                             Text="启用传输加密"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferEncryptionCaption"
                             Text="始终开启（不可关闭）"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -405,6 +432,7 @@
                                 Foreground="{StaticResource SkyBridgeAccentBrush}"
                                 VerticalAlignment="Center" />
                             <TextBlock
+                                x:Uid="SettingsCommonAlwaysOn"
                                 Text="始终开启"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
@@ -421,9 +449,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsFileTransferCertVerifyLabel"
                             Text="证书校验"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferCertVerifyCaption"
                             Text="始终校验服务器证书以防中间人攻击"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -443,6 +473,7 @@
                                 Foreground="{StaticResource SkyBridgeAccentBrush}"
                                 VerticalAlignment="Center" />
                             <TextBlock
+                                x:Uid="SettingsCommonAlwaysOn"
                                 Text="始终开启"
                                 FontSize="12"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"
@@ -461,9 +492,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsFileTransferVirusScanLabel"
                             Text="扫描传输文件病毒"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferVirusScanCaption"
                             Text="需要 Windows Defender — 本应用未内置杀毒引擎，偏好已保存"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -479,6 +512,7 @@
                      mirroring the Mac .disabled gate. quick / standard / deep. -->
                 <StackPanel Spacing="6">
                     <TextBlock
+                        x:Uid="SettingsFileTransferScanLevelLabel"
                         Text="扫描级别"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <ComboBox
@@ -486,9 +520,9 @@
                         IsEnabled="{Binding Settings.ScanTransferFilesForVirus}"
                         SelectedValuePath="Tag"
                         SelectedValue="{Binding Settings.ScanLevel, Mode=TwoWay}">
-                        <ComboBoxItem Content="快速" Tag="quick" />
-                        <ComboBoxItem Content="标准" Tag="standard" />
-                        <ComboBoxItem Content="深度" Tag="deep" />
+                        <ComboBoxItem x:Uid="SettingsFileTransferScanLevelQuick" Content="快速" Tag="quick" />
+                        <ComboBoxItem x:Uid="SettingsFileTransferScanLevelStandard" Content="标准" Tag="standard" />
+                        <ComboBoxItem x:Uid="SettingsFileTransferScanLevelDeep" Content="深度" Tag="deep" />
                     </ComboBox>
                 </StackPanel>
 
@@ -500,9 +534,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsFileTransferEncryptionAlgorithmLabel"
                             Text="加密算法"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsFileTransferEncryptionAlgorithmCaption"
                             Text="对称加密套件（固定）"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />

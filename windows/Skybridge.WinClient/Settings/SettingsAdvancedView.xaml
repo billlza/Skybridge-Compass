@@ -43,6 +43,7 @@
     <StackPanel Spacing="14" Margin="0,0,0,14">
 
         <TextBlock
+            x:Uid="SettingsAdvancedPageHeader"
             Text="高级 Advanced"
             FontSize="13"
             FontWeight="SemiBold"
@@ -52,6 +53,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsAdvancedDebugHeader"
                     Text="调试"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -64,6 +66,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedVerboseLoggingLabel"
                         Text="启用详细日志"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -81,6 +84,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedShowDebugInfoLabel"
                         Text="显示调试信息"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -98,6 +102,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedSaveNetworkLogsLabel"
                         Text="保存网络日志"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -115,6 +120,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedLogLevelLabel"
                         Text="日志级别"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -137,6 +143,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsAdvancedPerformanceHeader"
                     Text="性能"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -151,6 +158,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedRenderModeLabel"
                         Text="渲染性能模式"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -160,9 +168,9 @@
                         HorizontalAlignment="Right"
                         SelectedValue="{Binding Settings.PerformanceMode, Mode=TwoWay}"
                         SelectedValuePath="Tag">
-                        <ComboBoxItem Tag="extreme" Content="极致" />
-                        <ComboBoxItem Tag="balanced" Content="平衡" />
-                        <ComboBoxItem Tag="powerSaving" Content="节能" />
+                        <ComboBoxItem x:Uid="SettingsAdvancedRenderModeExtreme" Tag="extreme" Content="极致" />
+                        <ComboBoxItem x:Uid="SettingsCommonBalanced" Tag="balanced" Content="平衡" />
+                        <ComboBoxItem x:Uid="SettingsAdvancedRenderModePowerSaving" Tag="powerSaving" Content="节能" />
                     </ComboBox>
                 </Grid>
 
@@ -174,10 +182,12 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsAdvancedRealTimeWeatherLabel"
                             Text="启用实时天气"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsAdvancedRealTimeWeatherCaption"
                             Text="启用后顶部栏与仪表盘显示实时天气数据"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -196,6 +206,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedShowRealtimeFpsLabel"
                         Text="显示实时FPS"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -213,6 +224,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedHardwareAccelLabel"
                         Text="硬件加速"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -230,6 +242,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedOptimizeMemoryLabel"
                         Text="优化内存使用"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -247,6 +260,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedBackgroundScanLabel"
                         Text="后台扫描"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -264,10 +278,12 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedMaxConcurrentLabel"
                         Text="最大并发连接"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBox
+                        x:Uid="SettingsAdvancedMaxConcurrentInput"
                         Grid.Column="1"
                         MinWidth="120"
                         HorizontalAlignment="Right"
@@ -296,9 +312,11 @@
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         <StackPanel Grid.Column="1" Spacing="2">
                             <TextBlock
+                                x:Uid="SettingsAdvancedMetalHudLabel"
                                 Text="Metal 性能 HUD"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsAdvancedMetalHudCaption"
                                 Text="macOS 专属 · Metal 为 Apple 平台技术"
                                 FontSize="11"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -318,6 +336,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsAdvancedExperimentalHeader"
                     Text="实验性功能"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -330,6 +349,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedIPv6Label"
                         Text="启用 IPv6 支持"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -347,6 +367,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedNewDiscoveryLabel"
                         Text="使用新的发现算法"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -364,6 +385,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedP2PDirectLabel"
                         Text="启用P2P直连"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -392,6 +414,7 @@
                             VerticalAlignment="Top"
                             Foreground="{StaticResource SkyBridgeWarningBrush}" />
                         <TextBlock
+                            x:Uid="SettingsAdvancedExperimentalWarning"
                             Grid.Column="1"
                             Text="实验性功能可能不稳定，启用后如遇异常请关闭。"
                             TextWrapping="Wrap"
@@ -406,6 +429,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsAdvancedPqcHeader"
                     Text="后量子密码 PQC"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -419,15 +443,18 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsAdvancedAppPqcLabel"
                             Text="启用后量子密码（应用层）"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsAdvancedAppPqcCaption"
                             Text="策略强制启用"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </StackPanel>
                     <TextBlock
+                        x:Uid="SettingsAdvancedAppPqcStatus"
                         Grid.Column="1"
                         Text="已启用"
                         VerticalAlignment="Center"
@@ -443,10 +470,12 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedHybridTlsLabel"
                         Text="启用TLS混合协商（系统支持时）"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsAdvancedHybridTlsStatus"
                         Grid.Column="1"
                         Text="由系统自动协商"
                         VerticalAlignment="Center"
@@ -462,10 +491,12 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsAdvancedPreferXWingLabel"
                             Text="优先 X-Wing 混合套件"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsAdvancedPreferXWingCaption"
                             Text="影响后量子密钥协商套件的优先级"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -484,6 +515,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedSignatureAlgorithmLabel"
                         Text="签名算法"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -521,6 +553,7 @@
                                 Text="Secure Enclave ML-DSA"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsAdvancedSecureEnclaveCaption"
                                 Text="macOS 专属 · Windows 无 Secure Enclave"
                                 FontSize="11"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -541,10 +574,12 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsAdvancedMlKemLabel"
                         Text="ML-KEM 密钥协商"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsAdvancedMlKemStatus"
                         Grid.Column="1"
                         Text="X-Wing 混合 · 软件 · 临时会话密钥"
                         VerticalAlignment="Center"
@@ -554,6 +589,7 @@
 
                 <!-- Note -->
                 <TextBlock
+                    x:Uid="SettingsAdvancedPqcNote"
                     Text="后量子密码套件由策略强制启用，混合密钥协商在两端均支持 X-Wing 时优先采用。"
                     TextWrapping="Wrap"
                     FontSize="11"
@@ -565,6 +601,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsAdvancedSmoothingHeader"
                     Text="信号平滑"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -578,6 +615,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsAdvancedEmaAlphaLabel"
                             Text="强度平滑系数 (EMA)"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -596,6 +634,7 @@
                         LargeChange="0.10"
                         Value="{Binding Settings.SignalStrengthAlpha, Mode=TwoWay}" />
                     <TextBlock
+                        x:Uid="SettingsAdvancedEmaAlphaCaption"
                         Text="数值越大对最新采样越敏感，越小越平滑。"
                         FontSize="11"
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -611,6 +650,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="10">
                 <TextBlock
+                    x:Uid="SettingsAdvancedResetHeader"
                     Text="重置"
                     FontSize="14"
                     FontWeight="SemiBold"
@@ -626,6 +666,7 @@
                         VerticalAlignment="Top"
                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                     <TextBlock
+                        x:Uid="SettingsAdvancedResetGuidance"
                         Grid.Column="1"
                         Text="使用上方设置工具栏的“重置 / 恢复默认”按钮可将全部设置恢复为默认值。"
                         TextWrapping="Wrap"
@@ -633,6 +674,7 @@
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                 </Grid>
                 <TextBlock
+                    x:Uid="SettingsAdvancedResetWarning"
                     Text="重置操作不可撤销，将清除你的全部自定义设置。"
                     TextWrapping="Wrap"
                     FontSize="11"

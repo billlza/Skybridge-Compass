@@ -61,6 +61,7 @@
              SECTION 1 — 画质与性能 (Quality & Performance)
              =================================================================== -->
         <TextBlock
+            x:Uid="SettingsRemoteDesktopQualityHeader"
             Text="画质与性能"
             FontSize="13"
             FontWeight="SemiBold"
@@ -93,6 +94,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Spacing="2">
                                 <TextBlock
+                                    x:Uid="SettingsRemoteDesktopCurrentConfigLabel"
                                     Text="当前配置"
                                     FontSize="11"
                                     Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -114,6 +116,7 @@
                                 Padding="10,4">
                                 <TextBlock
                                     x:Name="StatusBadgeText"
+                                    x:Uid="SettingsRemoteDesktopStatusBadgeOptimized"
                                     Text="已优化"
                                     FontSize="12"
                                     FontWeight="SemiBold"
@@ -128,6 +131,7 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock
+                                x:Uid="SettingsRemoteDesktopEstimatedRateLabel"
                                 Text="预估传输率"
                                 VerticalAlignment="Center"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -144,6 +148,7 @@
                                     Foreground="{StaticResource SkyBridgeAccentBrush}" />
                                 <TextBlock
                                     x:Name="LoadTierText"
+                                    x:Uid="SettingsRemoteDesktopLoadTierLow"
                                     Text="负载 低"
                                     FontSize="12"
                                     VerticalAlignment="Center"
@@ -159,6 +164,7 @@
                      hardware-accel on) to the existing coordinator props. -->
                 <StackPanel Spacing="6">
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopPresetHeader"
                         Text="预设方案"
                         FontWeight="SemiBold"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -166,12 +172,13 @@
                         x:Name="PresetGroup"
                         MaxColumns="4"
                         SelectionChanged="OnPresetSelectionChanged">
-                        <RadioButton Tag="balanced" Content="平衡" />
-                        <RadioButton Tag="highPerformance" Content="高性能" />
-                        <RadioButton Tag="highQuality" Content="高质量" />
-                        <RadioButton Tag="lowLatency" Content="低延迟" />
+                        <RadioButton x:Uid="SettingsCommonBalanced" Tag="balanced" Content="平衡" />
+                        <RadioButton x:Uid="SettingsRemoteDesktopPresetHighPerformance" Tag="highPerformance" Content="高性能" />
+                        <RadioButton x:Uid="SettingsRemoteDesktopPresetHighQuality" Tag="highQuality" Content="高质量" />
+                        <RadioButton x:Uid="SettingsRemoteDesktopPresetLowLatency" Tag="lowLatency" Content="低延迟" />
                     </RadioButtons>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopPresetCaption"
                         Text="选择预设可一键套用分辨率 / 帧率 / 压缩质量 / 自适应比特率组合"
                         FontSize="11"
                         TextWrapping="Wrap"
@@ -185,6 +192,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopResolutionLabel"
                         Text="分辨率"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -193,10 +201,10 @@
                         MinWidth="200"
                         SelectedValue="{Binding Settings.VideoResolution, Mode=TwoWay}"
                         SelectedValuePath="Tag">
-                        <ComboBoxItem Tag="hd1080p" Content="1080P (Full HD)　1920×1080" />
-                        <ComboBoxItem Tag="qhd2k" Content="2K (QHD)　2560×1440" />
-                        <ComboBoxItem Tag="uhd4k" Content="4K (Ultra HD)　3840×2160" />
-                        <ComboBoxItem Tag="apple5k" Content="5K (Apple Retina)　5120×2880" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopResolution1080p" Tag="hd1080p" Content="1080P (Full HD)　1920×1080" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopResolution2k" Tag="qhd2k" Content="2K (QHD)　2560×1440" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopResolution4k" Tag="uhd4k" Content="4K (Ultra HD)　3840×2160" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopResolution5k" Tag="apple5k" Content="5K (Apple Retina)　5120×2880" />
                     </ComboBox>
                 </Grid>
 
@@ -207,6 +215,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopFrameRateLabel"
                         Text="帧率"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -228,6 +237,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopCompressionQualityLabel"
                         Text="压缩质量"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -236,10 +246,10 @@
                         MinWidth="160"
                         SelectedValue="{Binding Settings.VideoCompressionQuality, Mode=TwoWay}"
                         SelectedValuePath="Tag">
-                        <ComboBoxItem Tag="none" Content="无压缩" />
-                        <ComboBoxItem Tag="fast" Content="快速压缩" />
-                        <ComboBoxItem Tag="balanced" Content="平衡压缩" />
-                        <ComboBoxItem Tag="maximum" Content="最大压缩" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopCompressionNone" Tag="none" Content="无压缩" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopCompressionFast" Tag="fast" Content="快速压缩" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopCompressionBalanced" Tag="balanced" Content="平衡压缩" />
+                        <ComboBoxItem x:Uid="SettingsRemoteDesktopCompressionMaximum" Tag="maximum" Content="最大压缩" />
                     </ComboBox>
                 </Grid>
 
@@ -250,6 +260,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopHardwareAccelLabel"
                         Text="启用硬件加速"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -265,6 +276,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopAdaptiveBitrateLabel"
                         Text="自适应比特率"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -281,9 +293,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopAppleSiliconLabel"
                             Text="Apple Silicon 优化"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         <TextBlock
+                            x:Uid="SettingsCommonMacOnly"
                             Text="macOS 专属"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -300,6 +314,7 @@
              SECTION 2 — 显示 (Display)
              =================================================================== -->
         <TextBlock
+            x:Uid="SettingsRemoteDesktopDisplayHeader"
             Text="显示"
             FontSize="13"
             FontWeight="SemiBold"
@@ -315,6 +330,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopCompressionLevelLabel"
                             Text="压缩级别"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -338,6 +354,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopFullScreenLabel"
                         Text="全屏模式"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -352,6 +369,7 @@
              SECTION 3 — 交互 (Interaction)
              =================================================================== -->
         <TextBlock
+            x:Uid="SettingsRemoteDesktopInteractionHeader"
             Text="交互"
             FontSize="13"
             FontWeight="SemiBold"
@@ -366,6 +384,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopClipboardSyncLabel"
                         Text="启用剪贴板同步"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -382,9 +401,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopAudioRedirectLabel"
                             Text="音频重定向"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopAudioRedirectUnavailable"
                             Text="暂不可用"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeWarningBrush}" />
@@ -402,6 +423,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopFileTransferLabel"
                         Text="启用文件传输"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -418,9 +440,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopTrackpadGestureLabel"
                             Text="触控板手势"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                         <TextBlock
+                            x:Uid="SettingsCommonMacOnly"
                             Text="macOS 专属"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -439,6 +463,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopMouseSensitivityLabel"
                             Text="鼠标灵敏度"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -463,6 +488,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopDoubleClickIntervalLabel"
                             Text="双击间隔"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -485,6 +511,7 @@
              SECTION 4 — 网络优化 (Network optimization)
              =================================================================== -->
         <TextBlock
+            x:Uid="SettingsRemoteDesktopNetworkHeader"
             Text="网络优化"
             FontSize="13"
             FontWeight="SemiBold"
@@ -499,6 +526,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopAdaptiveBandwidthLabel"
                         Text="启用带宽自适应"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -514,6 +542,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopUDPTransportLabel"
                         Text="启用UDP传输"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -529,6 +558,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopNetworkEncryptionLabel"
                         Text="启用网络加密"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -549,10 +579,12 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel>
                             <TextBlock
+                                x:Uid="SettingsRemoteDesktopDataCompressionLabel"
                                 Text="启用数据压缩"
                                 VerticalAlignment="Center"
                                 Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                             <TextBlock
+                                x:Uid="SettingsRemoteDesktopNetworkCompressionCaption"
                                 Text="网络压缩级别　0=关闭　9=最大"
                                 FontSize="11"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -578,6 +610,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsRemoteDesktopBandwidthLimitLabel"
                             Text="带宽限制 (Mbps)"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
@@ -601,6 +634,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsRemoteDesktopBufferSizeLabel"
                         Text="缓冲区大小"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />

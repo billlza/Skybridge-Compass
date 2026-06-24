@@ -705,4 +705,862 @@
     <value>詳細設定</value>
     <comment>Settings tab name. Mac SettingsView Advanced tab.</comment>
   </data>
+
+  <!-- ============================ Settings tab views (x:Uid -> resw; the 8 Settings*View.xaml interactive tab views) ============================
+       Trilingual section headers + setting-row labels for the Settings page's interactive tab views.
+       Each key maps to an x:Uid element in Settings/Settings*View.xaml; the inline CJK in the XAML is the design-time fallback.
+       SettingsCommon* keys are shared across multiple views (reused via the same x:Uid). -->
+  <data name="SettingsCommonMacOnly.Text" xml:space="preserve">
+    <value>macOS 専用</value>
+  </data>
+  <data name="SettingsCommonWindowsOsAuth.Text" xml:space="preserve">
+    <value>Windows のシステムレベル承認</value>
+  </data>
+  <data name="SettingsCommonRetryCount.Text" xml:space="preserve">
+    <value>リトライ回数</value>
+  </data>
+  <data name="SettingsCommonReading.Text" xml:space="preserve">
+    <value>読み込み中…</value>
+  </data>
+  <data name="SettingsCommonClearTransferHistory.Text" xml:space="preserve">
+    <value>転送履歴をクリア</value>
+  </data>
+  <data name="SettingsCommonBalanced.Content" xml:space="preserve">
+    <value>バランス</value>
+  </data>
+  <data name="SettingsCommonAlwaysOn.Text" xml:space="preserve">
+    <value>常時オン</value>
+  </data>
+  <data name="SettingsCommonNoSensorNA.Text" xml:space="preserve">
+    <value>利用可能なセンサーがない場合は N/A を表示</value>
+  </data>
+  <data name="SettingsGeneralPreferencesHeader.Text" xml:space="preserve">
+    <value>環境設定</value>
+  </data>
+  <data name="SettingsGeneralAutoScanRow.Text" xml:space="preserve">
+    <value>起動時にデバイスを自動スキャン</value>
+  </data>
+  <data name="SettingsGeneralNotificationsRow.Text" xml:space="preserve">
+    <value>システム通知を表示</value>
+  </data>
+  <data name="SettingsGeneralDarkModeRow.Text" xml:space="preserve">
+    <value>ダークモードを有効化</value>
+  </data>
+  <data name="SettingsGeneralScanIntervalRow.Text" xml:space="preserve">
+    <value>スキャン間隔</value>
+  </data>
+  <data name="SettingsGeneralScanInterval15.Content" xml:space="preserve">
+    <value>15 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval30.Content" xml:space="preserve">
+    <value>30 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval60.Content" xml:space="preserve">
+    <value>60 秒</value>
+  </data>
+  <data name="SettingsGeneralScanInterval120.Content" xml:space="preserve">
+    <value>120 秒</value>
+  </data>
+  <data name="SettingsGeneralInterfaceHeader.Text" xml:space="preserve">
+    <value>インターフェース</value>
+  </data>
+  <data name="SettingsGeneralShowDeviceDetailsRow.Text" xml:space="preserve">
+    <value>デバイスの詳細を表示</value>
+  </data>
+  <data name="SettingsGeneralShowConnectionStatsRow.Text" xml:space="preserve">
+    <value>接続統計を表示</value>
+  </data>
+  <data name="SettingsGeneralCompactModeRow.Text" xml:space="preserve">
+    <value>コンパクトモード</value>
+  </data>
+  <data name="SettingsGeneralThemeColorRow.Text" xml:space="preserve">
+    <value>テーマカラー</value>
+  </data>
+  <data name="SettingsGeneralSwatchSkyBlue.Text" xml:space="preserve">
+    <value>スカイブルー</value>
+  </data>
+  <data name="SettingsGeneralSwatchForestGreen.Text" xml:space="preserve">
+    <value>フォレストグリーン</value>
+  </data>
+  <data name="SettingsGeneralSwatchViolet.Text" xml:space="preserve">
+    <value>バイオレット</value>
+  </data>
+  <data name="SettingsGeneralSwatchSunsetOrange.Text" xml:space="preserve">
+    <value>サンセットオレンジ</value>
+  </data>
+  <data name="SettingsGeneralSwatchRose.Text" xml:space="preserve">
+    <value>ローズ</value>
+  </data>
+  <data name="SettingsGeneralSwatchCyan.Text" xml:space="preserve">
+    <value>シアン</value>
+  </data>
+  <data name="SettingsGeneralDataManagementHeader.Text" xml:space="preserve">
+    <value>データ管理</value>
+  </data>
+  <data name="SettingsGeneralDataActionsTitle.Text" xml:space="preserve">
+    <value>設定のエクスポート / インポート / リセット</value>
+  </data>
+  <data name="SettingsGeneralDataActionsHint.Text" xml:space="preserve">
+    <value>上部ツールバーの「エクスポート」「インポート」「リセット」操作で設定ファイルを管理します。保存先は %LOCALAPPDATA%\SkyBridge\settings.json です。</value>
+  </data>
+  <data name="SettingsGeneralCacheRow.Text" xml:space="preserve">
+    <value>キャッシュ</value>
+  </data>
+  <data name="SettingsGeneralCacheSizeStatus.Text" xml:space="preserve">
+    <value>現在のキャッシュ：計算中…</value>
+  </data>
+  <data name="SettingsGeneralClearCacheAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>アプリのキャッシュフォルダー内の一時データを消去</value>
+  </data>
+  <data name="SettingsGeneralClearCacheLabel.Text" xml:space="preserve">
+    <value>キャッシュを消去</value>
+  </data>
+  <data name="SettingsGeneralCleanKeychainRow.Text" xml:space="preserve">
+    <value>重複するキーチェーン項目を整理</value>
+  </data>
+  <data name="SettingsGeneralCleanKeychainCaption.Text" xml:space="preserve">
+    <value>macOS 専用 — Windows にはキーチェーンがなく、資格情報は DPAPI で管理されます。</value>
+  </data>
+  <data name="SettingsNetworkCurrentNetworkLabel.Text" xml:space="preserve">
+    <value>現在のネットワーク</value>
+  </data>
+  <data name="SettingsNetworkCurrentNetworkDetail.Text" xml:space="preserve">
+    <value>システムのネットワーク構成を読み込み中…</value>
+  </data>
+  <data name="SettingsNetworkAutoConnectLabel.Text" xml:space="preserve">
+    <value>既知のネットワークに自動接続</value>
+  </data>
+  <data name="SettingsNetworkAutoConnectCaption.Text" xml:space="preserve">
+    <value>Windows が管理 — 設定は保存されますが、実際の自動接続はシステムの WLAN 構成によって決まります</value>
+  </data>
+  <data name="SettingsNetworkShowHiddenNetworks.Text" xml:space="preserve">
+    <value>非表示のネットワークを表示</value>
+  </data>
+  <data name="SettingsNetworkPrefer5GHzLabel.Text" xml:space="preserve">
+    <value>5GHz/6GHz 帯域を優先</value>
+  </data>
+  <data name="SettingsNetworkPrefer5GHzCaption.Text" xml:space="preserve">
+    <value>Windows が管理 — 帯域はシステム／ドライバー／ルーターが決定し、設定は保存されるのみです</value>
+  </data>
+  <data name="SettingsNetworkScanTimeoutLabel.Text" xml:space="preserve">
+    <value>スキャンのタイムアウト</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryHeader.Text" xml:space="preserve">
+    <value>デバイス検出</value>
+  </data>
+  <data name="SettingsNetworkEnableBonjour.Text" xml:space="preserve">
+    <value>Bonjour 検出を有効化</value>
+  </data>
+  <data name="SettingsNetworkEnableMDNS.Text" xml:space="preserve">
+    <value>mDNS 解決を有効化</value>
+  </data>
+  <data name="SettingsNetworkScanCustomPorts.Text" xml:space="preserve">
+    <value>カスタムポートをスキャン</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutLabel.Text" xml:space="preserve">
+    <value>検出のタイムアウト</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutUnit.Text" xml:space="preserve">
+    <value>単位：秒</value>
+  </data>
+  <data name="SettingsNetworkDiscoveryTimeoutBox.PlaceholderText" xml:space="preserve">
+    <value>秒</value>
+  </data>
+  <data name="SettingsNetworkCustomServiceTypesLabel.Text" xml:space="preserve">
+    <value>カスタムサービスタイプ</value>
+  </data>
+  <data name="SettingsNetworkCustomServiceTypesHint.Text" xml:space="preserve">
+    <value>例: _skybridge._tcp</value>
+  </data>
+  <data name="SettingsNetworkRemoveServiceTypeAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>削除</value>
+  </data>
+  <data name="SettingsNetworkAddServiceTypeAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>追加</value>
+  </data>
+  <data name="SettingsNetworkTopBarHeader.Text" xml:space="preserve">
+    <value>上部バーの表示</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarIPLocation.Text" xml:space="preserve">
+    <value>IP 都市とプロキシ状態を表示</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarNetworkSpeed.Text" xml:space="preserve">
+    <value>リアルタイムの通信速度を表示</value>
+  </data>
+  <data name="SettingsNetworkShowTopBarNetworkLatency.Text" xml:space="preserve">
+    <value>ネットワーク遅延を表示</value>
+  </data>
+  <data name="SettingsNetworkConnectionHeader.Text" xml:space="preserve">
+    <value>接続</value>
+  </data>
+  <data name="SettingsNetworkConnectionTimeoutLabel.Text" xml:space="preserve">
+    <value>接続のタイムアウト</value>
+  </data>
+  <data name="SettingsDevicesBluetoothHeader.Text" xml:space="preserve">
+    <value>Bluetooth</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusLabel.Text" xml:space="preserve">
+    <value>Bluetooth の状態</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusCaption.Text" xml:space="preserve">
+    <value>BluetoothLEAdvertisementWatcher 経由でリアルタイムの状態を取得</value>
+  </data>
+  <data name="SettingsDevicesBluetoothStatusValue.Text" xml:space="preserve">
+    <value>未スキャン</value>
+  </data>
+  <data name="SettingsDevicesBluetoothDiscoveredLabel.Text" xml:space="preserve">
+    <value>検出されたデバイス数</value>
+  </data>
+  <data name="SettingsDevicesBluetoothDiscoveredValue.Text" xml:space="preserve">
+    <value>検出: 0 台</value>
+  </data>
+  <data name="SettingsDevicesScanLabel.Text" xml:space="preserve">
+    <value>Bluetooth デバイスをスキャン</value>
+  </data>
+  <data name="SettingsDevicesScanCaption.Text" xml:space="preserve">
+    <value>オンにすると継続的にアドバタイズスキャン（リアルタイム BLE アドバタイズスキャン）</value>
+  </data>
+  <data name="SettingsDevicesScanToggle.OnContent" xml:space="preserve">
+    <value>スキャン中</value>
+  </data>
+  <data name="SettingsDevicesScanToggle.OffContent" xml:space="preserve">
+    <value>停止済み</value>
+  </data>
+  <data name="SettingsDevicesAutoConnectPaired.Text" xml:space="preserve">
+    <value>ペアリング済みデバイスに自動接続</value>
+  </data>
+  <data name="SettingsDevicesShowRSSI.Text" xml:space="preserve">
+    <value>デバイスの RSSI を表示</value>
+  </data>
+  <data name="SettingsDevicesShowConnectableOnly.Text" xml:space="preserve">
+    <value>接続可能なデバイスのみ表示</value>
+  </data>
+  <data name="SettingsDevicesAirPlayDescription.Text" xml:space="preserve">
+    <value>AirPlay は Apple プラットフォームが提供するため Windows では利用できません。したがって以下のオプションは模倣しません。</value>
+  </data>
+  <data name="SettingsDevicesAirPlayStatusLabel.Text" xml:space="preserve">
+    <value>AirPlay の状態</value>
+  </data>
+  <data name="SettingsDevicesAirPlayAutoDiscover.Text" xml:space="preserve">
+    <value>Apple TV を自動検出</value>
+  </data>
+  <data name="SettingsDevicesAirPlayShowHomePod.Text" xml:space="preserve">
+    <value>HomePod デバイスを表示</value>
+  </data>
+  <data name="SettingsDevicesAirPlayShowThirdParty.Text" xml:space="preserve">
+    <value>サードパーティ製 AirPlay デバイスを表示</value>
+  </data>
+  <data name="SettingsDevicesFiltersHeader.Text" xml:space="preserve">
+    <value>デバイスのフィルターと並べ替え</value>
+  </data>
+  <data name="SettingsDevicesHideOffline.Text" xml:space="preserve">
+    <value>オフラインのデバイスを非表示</value>
+  </data>
+  <data name="SettingsDevicesSortBySignal.Text" xml:space="preserve">
+    <value>信号強度で並べ替え</value>
+  </data>
+  <data name="SettingsDevicesShowIcons.Text" xml:space="preserve">
+    <value>デバイスのアイコンを表示</value>
+  </data>
+  <data name="SettingsDevicesMinSignalStrength.Text" xml:space="preserve">
+    <value>最小信号強度</value>
+  </data>
+  <data name="SettingsFileTransferTabTitle.Text" xml:space="preserve">
+    <value>ファイル転送</value>
+  </data>
+  <data name="SettingsFileTransferConfigHeader.Text" xml:space="preserve">
+    <value>転送設定</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathLabel.Text" xml:space="preserve">
+    <value>既定の受信パス</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathBox.PlaceholderText" xml:space="preserve">
+    <value>パス</value>
+  </data>
+  <data name="SettingsFileTransferSelectFolderAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>フォルダーを選択</value>
+  </data>
+  <data name="SettingsFileTransferDefaultPathCaption.Text" xml:space="preserve">
+    <value>受信したファイルはこの場所に保存されます</value>
+  </data>
+  <data name="SettingsFileTransferMaxConcurrentLabel.Text" xml:space="preserve">
+    <value>最大同時転送数</value>
+  </data>
+  <data name="SettingsFileTransferChunkSizeLabel.Text" xml:space="preserve">
+    <value>チャンクサイズ</value>
+  </data>
+  <data name="SettingsFileTransferRateLimitLabel.Text" xml:space="preserve">
+    <value>転送速度制限</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedThroughputLabel.Text" xml:space="preserve">
+    <value>推定スループット</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedThroughputCaption.Text" xml:space="preserve">
+    <value>現在の速度制限・同時数・チャンクサイズから推定</value>
+  </data>
+  <data name="SettingsFileTransferEstimatedRateValue.Text" xml:space="preserve">
+    <value>ネットワークとディスクに制限されます</value>
+  </data>
+  <data name="SettingsFileTransferOptionsHeader.Text" xml:space="preserve">
+    <value>転送オプション</value>
+  </data>
+  <data name="SettingsFileTransferShowNotificationsLabel.Text" xml:space="preserve">
+    <value>転送完了時に通知を表示</value>
+  </data>
+  <data name="SettingsFileTransferAutoRetryLabel.Text" xml:space="preserve">
+    <value>再開を有効化（失敗時に自動再試行）</value>
+  </data>
+  <data name="SettingsFileTransferKeepHistoryLabel.Text" xml:space="preserve">
+    <value>転送履歴を保持</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryStatus.Text" xml:space="preserve">
+    <value>現在のセッションで記録された転送項目を消去</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>転送履歴を消去</value>
+  </data>
+  <data name="SettingsFileTransferClearHistoryButtonText.Text" xml:space="preserve">
+    <value>消去</value>
+  </data>
+  <data name="SettingsFileTransferKeepAwakeLabel.Text" xml:space="preserve">
+    <value>転送中はシステムをスリープさせない</value>
+  </data>
+  <data name="SettingsFileTransferKeepAwakeCaption.Text" xml:space="preserve">
+    <value>ファイル転送中のみシステムのスリープを防止</value>
+  </data>
+  <data name="SettingsFileTransferRetryCountBox.PlaceholderText" xml:space="preserve">
+    <value>回</value>
+  </data>
+  <data name="SettingsFileTransferSecurityHeader.Text" xml:space="preserve">
+    <value>セキュリティ</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionLabel.Text" xml:space="preserve">
+    <value>転送暗号化を有効化</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionCaption.Text" xml:space="preserve">
+    <value>常に有効（無効にできません）</value>
+  </data>
+  <data name="SettingsFileTransferCertVerifyLabel.Text" xml:space="preserve">
+    <value>証明書の検証</value>
+  </data>
+  <data name="SettingsFileTransferCertVerifyCaption.Text" xml:space="preserve">
+    <value>中間者攻撃を防ぐため常にサーバー証明書を検証</value>
+  </data>
+  <data name="SettingsFileTransferVirusScanLabel.Text" xml:space="preserve">
+    <value>転送ファイルをウイルススキャン</value>
+  </data>
+  <data name="SettingsFileTransferVirusScanCaption.Text" xml:space="preserve">
+    <value>Windows Defender が必要 — 本アプリにウイルス対策エンジンは内蔵されていません。設定は保存されました</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelLabel.Text" xml:space="preserve">
+    <value>スキャンレベル</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelQuick.Content" xml:space="preserve">
+    <value>クイック</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelStandard.Content" xml:space="preserve">
+    <value>標準</value>
+  </data>
+  <data name="SettingsFileTransferScanLevelDeep.Content" xml:space="preserve">
+    <value>ディープ</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionAlgorithmLabel.Text" xml:space="preserve">
+    <value>暗号化アルゴリズム</value>
+  </data>
+  <data name="SettingsFileTransferEncryptionAlgorithmCaption.Text" xml:space="preserve">
+    <value>対称暗号スイート（固定）</value>
+  </data>
+  <data name="SettingsPermissionsStatusHeader.Text" xml:space="preserve">
+    <value>権限ステータス</value>
+  </data>
+  <data name="SettingsPermissionsSummaryLabel.Text" xml:space="preserve">
+    <value>権限の概要</value>
+  </data>
+  <data name="SettingsPermissionsRefreshHint.Text" xml:space="preserve">
+    <value>ステータスを更新 · 上部</value>
+  </data>
+  <data name="SettingsPermissionsWarningNotice.Text" xml:space="preserve">
+    <value>一部の権限がまだ許可されていません。上部の「権限をリクエスト」操作を使用するか、「システム設定を開く」で手動で許可してください。</value>
+  </data>
+  <data name="SettingsPermissionsDetailsHeader.Text" xml:space="preserve">
+    <value>権限の詳細</value>
+  </data>
+  <data name="SettingsPermissionsWifiTitle.Text" xml:space="preserve">
+    <value>Wi-Fi アクセス</value>
+  </data>
+  <data name="SettingsPermissionsWifiCaption.Text" xml:space="preserve">
+    <value>付近のデバイスをスキャンして接続するにはネットワークアクセス権限が必要です。</value>
+  </data>
+  <data name="SettingsPermissionsBluetoothTitle.Text" xml:space="preserve">
+    <value>Bluetooth アクセス</value>
+  </data>
+  <data name="SettingsPermissionsBluetoothCaption.Text" xml:space="preserve">
+    <value>Bluetooth デバイスを検出して接続するには Bluetooth 権限が必要です。</value>
+  </data>
+  <data name="SettingsPermissionsLocationTitle.Text" xml:space="preserve">
+    <value>位置情報アクセス</value>
+  </data>
+  <data name="SettingsPermissionsLocationCaption.Text" xml:space="preserve">
+    <value>Wi-Fi ネットワーク名などの位置関連情報を読み取るには位置情報権限が必要です。</value>
+  </data>
+  <data name="SettingsPermissionsSystemConfigTitle.Text" xml:space="preserve">
+    <value>システム構成アクセス</value>
+  </data>
+  <data name="SettingsPermissionsSystemConfigCaption.Text" xml:space="preserve">
+    <value>デバイスの検出と接続のためにネットワークとシステム構成を読み取ります。</value>
+  </data>
+  <data name="SettingsPermissionsRequestHint.Text" xml:space="preserve">
+    <value>権限を能動的にリクエストするには、上部ツールバーの「権限をリクエスト」操作を使用してください。</value>
+  </data>
+  <data name="SettingsPermissionsHelpHeader.Text" xml:space="preserve">
+    <value>ヘルプ</value>
+  </data>
+  <data name="SettingsPermissionsHelpTitle.Text" xml:space="preserve">
+    <value>権限の説明</value>
+  </data>
+  <data name="SettingsPermissionsHelpWifi.Text" xml:space="preserve">
+    <value>Wi-Fi アクセス：付近の利用可能なデバイスとネットワークをスキャンして接続するために使用します。</value>
+  </data>
+  <data name="SettingsPermissionsHelpBluetooth.Text" xml:space="preserve">
+    <value>Bluetooth アクセス：Bluetooth デバイスを検出して接続するために使用します。</value>
+  </data>
+  <data name="SettingsPermissionsHelpLocation.Text" xml:space="preserve">
+    <value>位置情報アクセス：一部のシステムでは、Wi-Fi ネットワーク名の読み取りに位置情報権限が必要です。</value>
+  </data>
+  <data name="SettingsPermissionsHelpSystemConfig.Text" xml:space="preserve">
+    <value>システム構成アクセス：デバイスの検出と接続を完了するためにネットワークとシステム構成を読み取るために使用します。</value>
+  </data>
+  <data name="SettingsPermissionsOpenSettingsHint.Text" xml:space="preserve">
+    <value>上部ツールバーの「システム設定を開く」操作を使用すると、Windows 設定に移動して手動で許可できます。</value>
+  </data>
+  <data name="SettingsRemoteDesktopQualityHeader.Text" xml:space="preserve">
+    <value>画質とパフォーマンス</value>
+  </data>
+  <data name="SettingsRemoteDesktopCurrentConfigLabel.Text" xml:space="preserve">
+    <value>現在の構成</value>
+  </data>
+  <data name="SettingsRemoteDesktopStatusBadgeOptimized.Text" xml:space="preserve">
+    <value>最適化済み</value>
+  </data>
+  <data name="SettingsRemoteDesktopEstimatedRateLabel.Text" xml:space="preserve">
+    <value>推定転送レート</value>
+  </data>
+  <data name="SettingsRemoteDesktopLoadTierLow.Text" xml:space="preserve">
+    <value>負荷 低</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHeader.Text" xml:space="preserve">
+    <value>プリセット</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHighPerformance.Content" xml:space="preserve">
+    <value>高パフォーマンス</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetHighQuality.Content" xml:space="preserve">
+    <value>高画質</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetLowLatency.Content" xml:space="preserve">
+    <value>低遅延</value>
+  </data>
+  <data name="SettingsRemoteDesktopPresetCaption.Text" xml:space="preserve">
+    <value>プリセットを選ぶと解像度 / フレームレート / 圧縮品質 / 適応ビットレートの組み合わせをワンタップで適用</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolutionLabel.Text" xml:space="preserve">
+    <value>解像度</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution1080p.Content" xml:space="preserve">
+    <value>1080P (Full HD)　1920×1080</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution2k.Content" xml:space="preserve">
+    <value>2K (QHD)　2560×1440</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution4k.Content" xml:space="preserve">
+    <value>4K (Ultra HD)　3840×2160</value>
+  </data>
+  <data name="SettingsRemoteDesktopResolution5k.Content" xml:space="preserve">
+    <value>5K (Apple Retina)　5120×2880</value>
+  </data>
+  <data name="SettingsRemoteDesktopFrameRateLabel.Text" xml:space="preserve">
+    <value>フレームレート</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionQualityLabel.Text" xml:space="preserve">
+    <value>圧縮品質</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionNone.Content" xml:space="preserve">
+    <value>圧縮なし</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionFast.Content" xml:space="preserve">
+    <value>高速圧縮</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionBalanced.Content" xml:space="preserve">
+    <value>バランス圧縮</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionMaximum.Content" xml:space="preserve">
+    <value>最大圧縮</value>
+  </data>
+  <data name="SettingsRemoteDesktopHardwareAccelLabel.Text" xml:space="preserve">
+    <value>ハードウェアアクセラレーションを有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopAdaptiveBitrateLabel.Text" xml:space="preserve">
+    <value>適応ビットレート</value>
+  </data>
+  <data name="SettingsRemoteDesktopAppleSiliconLabel.Text" xml:space="preserve">
+    <value>Apple Silicon 最適化</value>
+  </data>
+  <data name="SettingsRemoteDesktopDisplayHeader.Text" xml:space="preserve">
+    <value>ディスプレイ</value>
+  </data>
+  <data name="SettingsRemoteDesktopCompressionLevelLabel.Text" xml:space="preserve">
+    <value>圧縮レベル</value>
+  </data>
+  <data name="SettingsRemoteDesktopFullScreenLabel.Text" xml:space="preserve">
+    <value>フルスクリーンモード</value>
+  </data>
+  <data name="SettingsRemoteDesktopInteractionHeader.Text" xml:space="preserve">
+    <value>操作</value>
+  </data>
+  <data name="SettingsRemoteDesktopClipboardSyncLabel.Text" xml:space="preserve">
+    <value>クリップボード同期を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopAudioRedirectLabel.Text" xml:space="preserve">
+    <value>オーディオリダイレクト</value>
+  </data>
+  <data name="SettingsRemoteDesktopAudioRedirectUnavailable.Text" xml:space="preserve">
+    <value>現在利用不可</value>
+  </data>
+  <data name="SettingsRemoteDesktopFileTransferLabel.Text" xml:space="preserve">
+    <value>ファイル転送を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopTrackpadGestureLabel.Text" xml:space="preserve">
+    <value>トラックパッドジェスチャ</value>
+  </data>
+  <data name="SettingsRemoteDesktopMouseSensitivityLabel.Text" xml:space="preserve">
+    <value>マウス感度</value>
+  </data>
+  <data name="SettingsRemoteDesktopDoubleClickIntervalLabel.Text" xml:space="preserve">
+    <value>ダブルクリック間隔</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkHeader.Text" xml:space="preserve">
+    <value>ネットワーク最適化</value>
+  </data>
+  <data name="SettingsRemoteDesktopAdaptiveBandwidthLabel.Text" xml:space="preserve">
+    <value>帯域幅適応を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopUDPTransportLabel.Text" xml:space="preserve">
+    <value>UDP 転送を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkEncryptionLabel.Text" xml:space="preserve">
+    <value>ネットワーク暗号化を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopDataCompressionLabel.Text" xml:space="preserve">
+    <value>データ圧縮を有効化</value>
+  </data>
+  <data name="SettingsRemoteDesktopNetworkCompressionCaption.Text" xml:space="preserve">
+    <value>ネットワーク圧縮レベル　0=オフ　9=最大</value>
+  </data>
+  <data name="SettingsRemoteDesktopBandwidthLimitLabel.Text" xml:space="preserve">
+    <value>帯域幅制限 (Mbps)</value>
+  </data>
+  <data name="SettingsRemoteDesktopBufferSizeLabel.Text" xml:space="preserve">
+    <value>バッファサイズ</value>
+  </data>
+  <data name="SettingsAdvancedPageHeader.Text" xml:space="preserve">
+    <value>詳細設定</value>
+  </data>
+  <data name="SettingsAdvancedDebugHeader.Text" xml:space="preserve">
+    <value>デバッグ</value>
+  </data>
+  <data name="SettingsAdvancedVerboseLoggingLabel.Text" xml:space="preserve">
+    <value>詳細ログを有効化</value>
+  </data>
+  <data name="SettingsAdvancedShowDebugInfoLabel.Text" xml:space="preserve">
+    <value>デバッグ情報を表示</value>
+  </data>
+  <data name="SettingsAdvancedSaveNetworkLogsLabel.Text" xml:space="preserve">
+    <value>ネットワークログを保存</value>
+  </data>
+  <data name="SettingsAdvancedLogLevelLabel.Text" xml:space="preserve">
+    <value>ログレベル</value>
+  </data>
+  <data name="SettingsAdvancedPerformanceHeader.Text" xml:space="preserve">
+    <value>パフォーマンス</value>
+  </data>
+  <data name="SettingsAdvancedRenderModeLabel.Text" xml:space="preserve">
+    <value>レンダリング性能モード</value>
+  </data>
+  <data name="SettingsAdvancedRenderModeExtreme.Content" xml:space="preserve">
+    <value>最高</value>
+  </data>
+  <data name="SettingsAdvancedRenderModePowerSaving.Content" xml:space="preserve">
+    <value>省電力</value>
+  </data>
+  <data name="SettingsAdvancedRealTimeWeatherLabel.Text" xml:space="preserve">
+    <value>リアルタイム天気を有効化</value>
+  </data>
+  <data name="SettingsAdvancedRealTimeWeatherCaption.Text" xml:space="preserve">
+    <value>有効にするとトップバーとダッシュボードにリアルタイム天気データを表示します</value>
+  </data>
+  <data name="SettingsAdvancedShowRealtimeFpsLabel.Text" xml:space="preserve">
+    <value>リアルタイムFPSを表示</value>
+  </data>
+  <data name="SettingsAdvancedHardwareAccelLabel.Text" xml:space="preserve">
+    <value>ハードウェアアクセラレーション</value>
+  </data>
+  <data name="SettingsAdvancedOptimizeMemoryLabel.Text" xml:space="preserve">
+    <value>メモリ使用量を最適化</value>
+  </data>
+  <data name="SettingsAdvancedBackgroundScanLabel.Text" xml:space="preserve">
+    <value>バックグラウンドスキャン</value>
+  </data>
+  <data name="SettingsAdvancedMaxConcurrentLabel.Text" xml:space="preserve">
+    <value>最大同時接続数</value>
+  </data>
+  <data name="SettingsAdvancedMaxConcurrentInput.PlaceholderText" xml:space="preserve">
+    <value>件</value>
+  </data>
+  <data name="SettingsAdvancedMetalHudLabel.Text" xml:space="preserve">
+    <value>Metal パフォーマンス HUD</value>
+  </data>
+  <data name="SettingsAdvancedMetalHudCaption.Text" xml:space="preserve">
+    <value>macOS 専用 · Metal は Apple プラットフォームの技術です</value>
+  </data>
+  <data name="SettingsAdvancedExperimentalHeader.Text" xml:space="preserve">
+    <value>実験的機能</value>
+  </data>
+  <data name="SettingsAdvancedIPv6Label.Text" xml:space="preserve">
+    <value>IPv6 サポートを有効化</value>
+  </data>
+  <data name="SettingsAdvancedNewDiscoveryLabel.Text" xml:space="preserve">
+    <value>新しい検出アルゴリズムを使用</value>
+  </data>
+  <data name="SettingsAdvancedP2PDirectLabel.Text" xml:space="preserve">
+    <value>P2P 直接接続を有効化</value>
+  </data>
+  <data name="SettingsAdvancedExperimentalWarning.Text" xml:space="preserve">
+    <value>実験的機能は不安定な場合があります。問題が発生した場合は無効にしてください。</value>
+  </data>
+  <data name="SettingsAdvancedPqcHeader.Text" xml:space="preserve">
+    <value>耐量子暗号 PQC</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcLabel.Text" xml:space="preserve">
+    <value>耐量子暗号を有効化（アプリケーション層）</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcCaption.Text" xml:space="preserve">
+    <value>ポリシーにより強制有効化</value>
+  </data>
+  <data name="SettingsAdvancedAppPqcStatus.Text" xml:space="preserve">
+    <value>有効</value>
+  </data>
+  <data name="SettingsAdvancedHybridTlsLabel.Text" xml:space="preserve">
+    <value>TLS ハイブリッドネゴシエーションを有効化（システム対応時）</value>
+  </data>
+  <data name="SettingsAdvancedHybridTlsStatus.Text" xml:space="preserve">
+    <value>システムが自動的にネゴシエート</value>
+  </data>
+  <data name="SettingsAdvancedPreferXWingLabel.Text" xml:space="preserve">
+    <value>X-Wing ハイブリッドスイートを優先</value>
+  </data>
+  <data name="SettingsAdvancedPreferXWingCaption.Text" xml:space="preserve">
+    <value>耐量子鍵共有スイートの優先度に影響します</value>
+  </data>
+  <data name="SettingsAdvancedSignatureAlgorithmLabel.Text" xml:space="preserve">
+    <value>署名アルゴリズム</value>
+  </data>
+  <data name="SettingsAdvancedSecureEnclaveCaption.Text" xml:space="preserve">
+    <value>macOS 専用 · Windows には Secure Enclave がありません</value>
+  </data>
+  <data name="SettingsAdvancedMlKemLabel.Text" xml:space="preserve">
+    <value>ML-KEM 鍵共有</value>
+  </data>
+  <data name="SettingsAdvancedMlKemStatus.Text" xml:space="preserve">
+    <value>X-Wing ハイブリッド · ソフトウェア · 一時セッション鍵</value>
+  </data>
+  <data name="SettingsAdvancedPqcNote.Text" xml:space="preserve">
+    <value>耐量子暗号スイートはポリシーにより強制有効化され、両端が X-Wing に対応している場合はハイブリッド鍵共有が優先されます。</value>
+  </data>
+  <data name="SettingsAdvancedSmoothingHeader.Text" xml:space="preserve">
+    <value>信号スムージング</value>
+  </data>
+  <data name="SettingsAdvancedEmaAlphaLabel.Text" xml:space="preserve">
+    <value>強度スムージング係数 (EMA)</value>
+  </data>
+  <data name="SettingsAdvancedEmaAlphaCaption.Text" xml:space="preserve">
+    <value>値が大きいほど最新のサンプルに敏感になり、小さいほど滑らかになります。</value>
+  </data>
+  <data name="SettingsAdvancedResetHeader.Text" xml:space="preserve">
+    <value>リセット</value>
+  </data>
+  <data name="SettingsAdvancedResetGuidance.Text" xml:space="preserve">
+    <value>上部の設定ツールバーの「リセット / 既定値に戻す」ボタンで、すべての設定を既定値に戻せます。</value>
+  </data>
+  <data name="SettingsAdvancedResetWarning.Text" xml:space="preserve">
+    <value>リセットは取り消せず、すべてのカスタム設定が消去されます。</value>
+  </data>
+  <data name="SettingsSystemMonitorPageHeader.Text" xml:space="preserve">
+    <value>システムモニター</value>
+  </data>
+  <data name="SettingsSystemMonitorConfigHeader.Text" xml:space="preserve">
+    <value>モニタリング設定</value>
+  </data>
+  <data name="SettingsSystemMonitorRefreshIntervalLabel.Text" xml:space="preserve">
+    <value>更新間隔</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableRealtimeLabel.Text" xml:space="preserve">
+    <value>リアルタイム監視を有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorShowTrendLabel.Text" xml:space="preserve">
+    <value>トレンドインジケーターを表示</value>
+  </data>
+  <data name="SettingsSystemMonitorEnablePerfAlertsLabel.Text" xml:space="preserve">
+    <value>パフォーマンスアラートを有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorRetentionDaysLabel.Text" xml:space="preserve">
+    <value>データ保持日数</value>
+  </data>
+  <data name="SettingsSystemMonitorRetentionDaysField.PlaceholderText" xml:space="preserve">
+    <value>日</value>
+  </data>
+  <data name="SettingsSystemMonitorMaxHistoryPointsLabel.Text" xml:space="preserve">
+    <value>履歴データの最大数</value>
+  </data>
+  <data name="SettingsSystemMonitorDisplayHeader.Text" xml:space="preserve">
+    <value>表示項目</value>
+  </data>
+  <data name="SettingsSystemMonitorShowCpuLabel.Text" xml:space="preserve">
+    <value>CPU使用率を表示</value>
+  </data>
+  <data name="SettingsSystemMonitorShowMemoryLabel.Text" xml:space="preserve">
+    <value>メモリ使用率を表示</value>
+  </data>
+  <data name="SettingsSystemMonitorShowDiskLabel.Text" xml:space="preserve">
+    <value>ディスク使用率を表示</value>
+  </data>
+  <data name="SettingsSystemMonitorShowNetworkLabel.Text" xml:space="preserve">
+    <value>ネットワークアクティビティを表示</value>
+  </data>
+  <data name="SettingsSystemMonitorShowTemperatureLabel.Text" xml:space="preserve">
+    <value>温度情報を表示</value>
+  </data>
+  <data name="SettingsSystemMonitorShowFanSpeedLabel.Text" xml:space="preserve">
+    <value>ファン回転数を表示</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeLabel.Text" xml:space="preserve">
+    <value>グラフの種類</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeLine.Content" xml:space="preserve">
+    <value>折れ線グラフ</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeBar.Content" xml:space="preserve">
+    <value>棒グラフ</value>
+  </data>
+  <data name="SettingsSystemMonitorChartTypeArea.Content" xml:space="preserve">
+    <value>面グラフ</value>
+  </data>
+  <data name="SettingsSystemMonitorAlertsHeader.Text" xml:space="preserve">
+    <value>アラートしきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorCpuThresholdLabel.Text" xml:space="preserve">
+    <value>CPUアラートしきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorMemoryThresholdLabel.Text" xml:space="preserve">
+    <value>メモリアラートしきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorDiskThresholdLabel.Text" xml:space="preserve">
+    <value>ディスクアラートしきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableTemperatureLabel.Text" xml:space="preserve">
+    <value>温度監視を有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorTemperatureThresholdLabel.Text" xml:space="preserve">
+    <value>温度しきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableFanSpeedLabel.Text" xml:space="preserve">
+    <value>ファン回転数監視を有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorFanSpeedThresholdLabel.Text" xml:space="preserve">
+    <value>ファン回転数しきい値</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableSoundAlertsLabel.Text" xml:space="preserve">
+    <value>サウンドアラートを有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableNotificationsLabel.Text" xml:space="preserve">
+    <value>通知センターを有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorAdvancedHeader.Text" xml:space="preserve">
+    <value>詳細設定</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableThermalThrottlingLabel.Text" xml:space="preserve">
+    <value>サーマルスロットリングアラートを有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorEnableRemoteLabel.Text" xml:space="preserve">
+    <value>リモート監視を有効にする</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionLabel.Text" xml:space="preserve">
+    <value>サンプリング精度</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionLow.Content" xml:space="preserve">
+    <value>低</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionNormal.Content" xml:space="preserve">
+    <value>標準</value>
+  </data>
+  <data name="SettingsSystemMonitorSamplingPrecisionHigh.Content" xml:space="preserve">
+    <value>高</value>
+  </data>
+  <data name="SettingsSystemMonitorExportAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>現在の監視メトリクスを JSON または CSV ファイルにエクスポート</value>
+  </data>
+  <data name="SettingsSystemMonitorExportTitle.Text" xml:space="preserve">
+    <value>監視データをエクスポート</value>
+  </data>
+  <data name="SettingsSystemMonitorExportSubtitle.Text" xml:space="preserve">
+    <value>現在の監視メトリクスのスナップショットとアラートしきい値をファイルに保存</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistoryAffordance.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>収集した監視履歴を消去して再サンプリング</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistoryTitle.Text" xml:space="preserve">
+    <value>監視履歴を消去</value>
+  </data>
+  <data name="SettingsSystemMonitorClearHistorySubtitle.Text" xml:space="preserve">
+    <value>収集した履歴バッファを消去して直ちに再サンプリング</value>
+  </data>
+
+  <!-- ============================ Settings Actions row Title/State (converter-localized; visible 'Settings Actions' list) ============================
+       SettingsAction.* localized by LabelKeyToLocalizedConverter (Title); Status.Disabled by StatusKeyToLocalizedConverter (State).
+       Canonical English Title/State stay the SettingsWorkspaceClient model values; only the displayed text is localized. -->
+  <data name="SettingsAction.ExportSettings" xml:space="preserve">
+    <value>設定をエクスポート</value>
+  </data>
+  <data name="SettingsAction.ImportSettings" xml:space="preserve">
+    <value>設定をインポート</value>
+  </data>
+  <data name="SettingsAction.ResetSettings" xml:space="preserve">
+    <value>設定をリセット</value>
+  </data>
+  <data name="SettingsAction.RefreshStatus" xml:space="preserve">
+    <value>ステータスを更新</value>
+  </data>
+  <data name="SettingsAction.RequestPermission" xml:space="preserve">
+    <value>権限をリクエスト</value>
+  </data>
+  <data name="SettingsAction.OpenSystemPreferences" xml:space="preserve">
+    <value>システム設定を開く</value>
+  </data>
+  <data name="SettingsAction.ApplyFileTransferSettings" xml:space="preserve">
+    <value>ファイル転送設定を適用</value>
+  </data>
+  <data name="SettingsAction.ApplyRemoteDesktopSettings" xml:space="preserve">
+    <value>リモートデスクトップ設定を適用</value>
+  </data>
+  <data name="SettingsAction.RestoreDefaults" xml:space="preserve">
+    <value>既定値に戻す</value>
+  </data>
+  <data name="SettingsAction.ResetMonitorData" xml:space="preserve">
+    <value>監視データをリセット</value>
+  </data>
+  <data name="SettingsAction.ClearHistoryData" xml:space="preserve">
+    <value>履歴データを消去</value>
+  </data>
+  <data name="Status.Disabled" xml:space="preserve">
+    <value>無効</value>
+  </data>
 </root>

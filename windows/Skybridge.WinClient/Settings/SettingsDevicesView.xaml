@@ -46,6 +46,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsDevicesBluetoothHeader"
                     Text="蓝牙"
                     FontSize="13"
                     FontWeight="SemiBold"
@@ -60,8 +61,9 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2">
-                        <TextBlock Text="蓝牙状态" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock x:Uid="SettingsDevicesBluetoothStatusLabel" Text="蓝牙状态" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsDevicesBluetoothStatusCaption"
                             Text="经 BluetoothLEAdvertisementWatcher 读取实时状态"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -69,6 +71,7 @@
                     </StackPanel>
                     <TextBlock
                         x:Name="BluetoothStatusValue"
+                        x:Uid="SettingsDevicesBluetoothStatusValue"
                         Grid.Column="1"
                         Text="未扫描"
                         VerticalAlignment="Center"
@@ -85,12 +88,14 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesBluetoothDiscoveredLabel"
                         Grid.Column="0"
                         Text="已发现设备数"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                     <TextBlock
                         x:Name="BluetoothDiscoveredCount"
+                        x:Uid="SettingsDevicesBluetoothDiscoveredValue"
                         Grid.Column="1"
                         Text="已发现: 0 设备"
                         VerticalAlignment="Center"
@@ -106,8 +111,9 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2">
-                        <TextBlock Text="扫描蓝牙设备" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                        <TextBlock x:Uid="SettingsDevicesScanLabel" Text="扫描蓝牙设备" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
+                            x:Uid="SettingsDevicesScanCaption"
                             Text="开启后持续广播扫描（实时 BLE 广播扫描）"
                             FontSize="11"
                             TextWrapping="Wrap"
@@ -115,6 +121,7 @@
                     </StackPanel>
                     <ToggleSwitch
                         x:Name="BluetoothScanToggle"
+                        x:Uid="SettingsDevicesScanToggle"
                         Grid.Column="1"
                         Toggled="OnBluetoothScanToggled"
                         OnContent="扫描中"
@@ -129,6 +136,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesAutoConnectPaired"
                         Grid.Column="0"
                         Text="自动连接已配对设备"
                         VerticalAlignment="Center"
@@ -146,6 +154,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesShowRSSI"
                         Grid.Column="0"
                         Text="显示设备RSSI"
                         VerticalAlignment="Center"
@@ -163,6 +172,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesShowConnectableOnly"
                         Grid.Column="0"
                         Text="仅显示可连接设备"
                         VerticalAlignment="Center"
@@ -200,6 +210,7 @@
                         Padding="8,3"
                         VerticalAlignment="Center">
                         <TextBlock
+                            x:Uid="SettingsCommonMacOnly"
                             Text="macOS 专属"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -207,6 +218,7 @@
                 </Grid>
 
                 <TextBlock
+                    x:Uid="SettingsDevicesAirPlayDescription"
                     Text="AirPlay 由 Apple 平台提供，Windows 端不可用，因此以下选项不予仿造。"
                     FontSize="11"
                     TextWrapping="Wrap"
@@ -219,11 +231,13 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesAirPlayStatusLabel"
                         Grid.Column="0"
                         Text="AirPlay 状态"
                         VerticalAlignment="Center"
                         Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     <TextBlock
+                        x:Uid="SettingsCommonMacOnly"
                         Grid.Column="1"
                         Text="macOS 专属"
                         VerticalAlignment="Center"
@@ -237,6 +251,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesAirPlayAutoDiscover"
                         Grid.Column="0"
                         Text="自动发现Apple TV"
                         VerticalAlignment="Center"
@@ -255,6 +270,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesAirPlayShowHomePod"
                         Grid.Column="0"
                         Text="显示HomePod设备"
                         VerticalAlignment="Center"
@@ -273,6 +289,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesAirPlayShowThirdParty"
                         Grid.Column="0"
                         Text="显示第三方AirPlay设备"
                         VerticalAlignment="Center"
@@ -292,6 +309,7 @@
         <Border Style="{StaticResource GlassCard}">
             <StackPanel Spacing="14">
                 <TextBlock
+                    x:Uid="SettingsDevicesFiltersHeader"
                     Text="设备过滤与排序"
                     FontSize="13"
                     FontWeight="SemiBold"
@@ -304,6 +322,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesHideOffline"
                         Grid.Column="0"
                         Text="隐藏离线设备"
                         VerticalAlignment="Center"
@@ -321,6 +340,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesSortBySignal"
                         Grid.Column="0"
                         Text="按信号强度排序"
                         VerticalAlignment="Center"
@@ -338,6 +358,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock
+                        x:Uid="SettingsDevicesShowIcons"
                         Grid.Column="0"
                         Text="显示设备图标"
                         VerticalAlignment="Center"
@@ -357,6 +378,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock
+                            x:Uid="SettingsDevicesMinSignalStrength"
                             Grid.Column="0"
                             Text="最小信号强度"
                             VerticalAlignment="Center"
