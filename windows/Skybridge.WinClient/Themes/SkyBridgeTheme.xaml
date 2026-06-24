@@ -63,6 +63,10 @@
          DesktopAcrylicBackdrop and drop these tints to ~half opacity for true OS frost. -->
     <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#1AFFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#14FFFFFF" />
+    <!-- Dark idle-screen backdrop — mirrors the Mac Remote Desktop preview
+         empty-state RoundedRectangle fill black.opacity(0.22), so an idle "screen"
+         reads as an off display area rather than a light translucent panel. -->
+    <SolidColorBrush x:Key="SkyBridgeIdleScreenBackdropBrush" Color="#38000000" />
     <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#E62E3857" />
     <!-- Panel = large section surface. 3-stop gloss: bright cool-white top-left
          highlight (#33) -> mid body (#1F) -> faint blue-tinted bottom-right (#14, the

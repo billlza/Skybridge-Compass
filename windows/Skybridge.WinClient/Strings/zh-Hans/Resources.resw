@@ -1595,4 +1595,16 @@
   <data name="Status.Disabled" xml:space="preserve">
     <value>已禁用</value>
   </data>
+  <data name="DiscoveryQrBannerTitle.Text" xml:space="preserve">
+    <value>扫码连接</value>
+  </data>
+  <data name="DiscoveryQrBannerBody.Text" xml:space="preserve">
+    <value>在本机生成加密二维码，或扫描其他设备的二维码以发起跨网络连接。</value>
+  </data>
+  <data name="DiscoveryRecentNoteTitle.Text" xml:space="preserve">
+    <value>最近连接</value>
+  </data>
+  <data name="DiscoveryRecentNoteBody.Text" xml:space="preserve">
+    <value>当 Windows 端支持连接历史存储后，最近连接过的设备将显示在这里。</value>
+  </data>
 </root>

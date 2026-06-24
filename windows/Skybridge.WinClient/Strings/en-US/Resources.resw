@@ -1636,4 +1636,20 @@
     <value>Disabled</value>
     <comment>Canonical status 'Disabled' (gated Settings action State); localized via StatusKeyToLocalizedConverter.</comment>
   </data>
+  <data name="DiscoveryQrBannerTitle.Text" xml:space="preserve">
+    <value>Scan to Connect</value>
+    <comment>QR section info banner title. Mac discovery qrCodeSection banner.</comment>
+  </data>
+  <data name="DiscoveryQrBannerBody.Text" xml:space="preserve">
+    <value>Generate an encrypted QR on this device, or scan another device's code to start a cross-network connection.</value>
+    <comment>QR section info banner body.</comment>
+  </data>
+  <data name="DiscoveryRecentNoteTitle.Text" xml:space="preserve">
+    <value>Recent Connections</value>
+    <comment>Recent-connections placeholder card title (Mac 最近连接 section).</comment>
+  </data>
+  <data name="DiscoveryRecentNoteBody.Text" xml:space="preserve">
+    <value>Recently connected devices will appear here once a connection-history store is available on Windows.</value>
+    <comment>Recent-connections placeholder card body (honest empty state).</comment>
+  </data>
 </root>

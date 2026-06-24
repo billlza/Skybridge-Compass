@@ -1942,9 +1942,10 @@
                                         </StackPanel>
                                         <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" />
                                     </Grid>
-                                    <!-- Tab 2: QR Code (blue) -->
+                                    <!-- Tab 2: QR Code (blue) — E722 = Scan (QR-in-camera-frame),
+                                         matches Mac qrcode.viewfinder (was the plain ED14 QR glyph). -->
                                     <StackPanel Grid.Column="1" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
-                                        <FontIcon Glyph="&#xED14;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                        <FontIcon Glyph="&#xE722;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
                                         <TextBlock x:Uid="DiscoveryModeQrTitle" Text="Scan QR" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
                                         <TextBlock x:Uid="DiscoveryModeQrSubtitle" Text="Scan" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                     </StackPanel>
@@ -2104,6 +2105,29 @@
                                 ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                 ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
 
+                            <!-- ===================================================================
+                                 QR Code info banner — element-matches the Mac qrCodeSection blue
+                                 InfoBanner (qrcode icon + title + description). Orientation card for
+                                 the generate/scan QR surface below. Non-interactive. -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeNavDashboardBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE722;" FontSize="26" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock x:Uid="DiscoveryQrBannerTitle" Text="Scan to Connect" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock x:Uid="DiscoveryQrBannerBody" Text="Generate an encrypted QR on this device, or scan another device's code to start a cross-network connection." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
                             <Grid ColumnSpacing="18">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -2128,15 +2152,15 @@
                                     </Grid>
                                     <Border
                                         AutomationProperties.AutomationId="CrossNetworkGeneratedQrCodePreview"
-                                        Width="168"
-                                        Height="168"
-                                        Padding="10"
+                                        Width="280"
+                                        Height="280"
+                                        Padding="16"
                                         HorizontalAlignment="Left"
                                         Visibility="{Binding IsCrossNetworkGeneratedQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
-                                        Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                                        Background="White"
                                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                         BorderThickness="1"
-                                        CornerRadius="8">
+                                        CornerRadius="12">
                                         <Image
                                             AutomationProperties.AutomationId="CrossNetworkGeneratedQrCodeImage"
                                             Source="{Binding CrossNetworkGeneratedQrCodeImage}"
@@ -2280,6 +2304,28 @@
                                  honest one-line note states why those sections are not shown — the
                                  "omit honestly" path. (When a Windows trust/recent store lands, replace
                                  this note with the real sections.) -->
+                            <!-- Split into two labeled placeholder cards (Trusted = green ring,
+                                 Recent = faint-green ring) so the section COUNT + headers match the
+                                 Mac 已信任设备 / 最近连接 sections. Honest empty state until a Windows
+                                 trust/recent store lands. -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeSuccessBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xEB95;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteTitle" Text="Trusted Devices &amp; Recent Connections" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteBody" Text="Paired devices will appear here. This version does not yet persist a trusted-device list or connection history, so trusted and recent devices are not shown yet." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
                             <Border
                                 Background="{StaticResource SkyBridgeCardFillBrush}"
                                 BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
@@ -2291,10 +2337,10 @@
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <FontIcon Glyph="&#xE946;" FontSize="20" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                                    <FontIcon Glyph="&#xE823;" FontSize="20" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
-                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteTitle" Text="Trusted Devices &amp; Recent Connections" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                                        <TextBlock x:Uid="DiscoveryTrustedRecentNoteBody" Text="Paired devices will appear here. This version does not yet persist a trusted-device list or connection history, so trusted and recent devices are not shown yet." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
+                                        <TextBlock x:Uid="DiscoveryRecentNoteTitle" Text="Recent Connections" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock x:Uid="DiscoveryRecentNoteBody" Text="Recently connected devices will appear here once a connection-history store is available on Windows." FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -2498,7 +2544,11 @@
                                     <Border Style="{StaticResource GlassCard}">
                                         <StackPanel Spacing="12">
                                             <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE701;" FontSize="18" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Center" />
+                                                <!-- Filled circle enclosing the wifi glyph — mirrors the Mac
+                                                     wifi.circle.fill (was the bare wifi-bars glyph E701). -->
+                                                <Border Width="26" Height="26" CornerRadius="13" Background="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Center">
+                                                    <FontIcon Glyph="&#xE701;" FontSize="14" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                </Border>
                                                 <TextBlock x:Uid="FileTransferConnectionStatusHeader" Text="Connection Status" FontWeight="SemiBold" VerticalAlignment="Center" />
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -2565,7 +2615,7 @@
                                          the shared Quick Actions buttons to stage a transfer. -->
                                     <Border Style="{StaticResource GlassCard}" Padding="28" MinHeight="160">
                                         <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                            <FontIcon Glyph="&#xE898;" FontSize="48" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            <FontIcon Glyph="&#xEA3C;" FontSize="56" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
                                             <TextBlock x:Uid="FileTransferDropZoneTitle" Text="Drop files to transfer" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />
                                             <TextBlock
                                                 x:Uid="FileTransferDropZoneSubtitle"
@@ -2903,7 +2953,7 @@
                                             <!-- Idle empty-state surface (Mac emptyStateView over the
                                                  black.opacity(0.22) backdrop). -->
                                             <Border
-                                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                                Background="{StaticResource SkyBridgeIdleScreenBackdropBrush}"
                                                 CornerRadius="14"
                                                 MinHeight="320"
                                                 Padding="24">
@@ -2967,7 +3017,7 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
-                                    <TextBlock x:Uid="SystemMonitorTitle" Text="System Monitor" FontSize="18" FontWeight="SemiBold" />
+                                    <TextBlock x:Uid="SystemMonitorTitle" Text="System Monitor" FontSize="22" FontWeight="Bold" />
                                     <TextBlock Text="{Binding SystemMonitorStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
                                 <ItemsControl

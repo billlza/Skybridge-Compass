@@ -1595,4 +1595,16 @@
   <data name="Status.Disabled" xml:space="preserve">
     <value>無効</value>
   </data>
+  <data name="DiscoveryQrBannerTitle.Text" xml:space="preserve">
+    <value>スキャンして接続</value>
+  </data>
+  <data name="DiscoveryQrBannerBody.Text" xml:space="preserve">
+    <value>このデバイスで暗号化QRコードを生成するか、他のデバイスのコードをスキャンしてクロスネットワーク接続を開始します。</value>
+  </data>
+  <data name="DiscoveryRecentNoteTitle.Text" xml:space="preserve">
+    <value>最近の接続</value>
+  </data>
+  <data name="DiscoveryRecentNoteBody.Text" xml:space="preserve">
+    <value>Windows側で接続履歴の保存に対応すると、最近接続したデバイスがここに表示されます。</value>
+  </data>
 </root>
