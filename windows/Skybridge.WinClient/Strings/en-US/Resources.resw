@@ -4,14 +4,12 @@
     SkyBridge Compass — English (en-US) UI strings.
     Default/fallback language (see <DefaultLanguage>en-US</DefaultLanguage> in the .csproj).
 
-    PILOT SCOPE: USB Management page only. This is the trilingual (en-US / zh-Hans / ja)
-    infrastructure pilot — keep every key that exists here mirrored in
-    Strings/zh-Hans/Resources.resw and Strings/ja/Resources.resw so the resource sets stay
-    1:1 across languages (a missing key falls back to en-US, never to an empty string).
+    Keep every key mirrored 1:1 across Strings/en-US, Strings/zh-Hans and Strings/ja so a
+    missing key always falls back to en-US, never to an empty string.
 
     Property-identifier convention: "<Uid>.<Property>" sets that property on the XAML element
     carrying x:Uid="<Uid>". For a TextBlock the property is "Text". The standard WinUI/UWP
-    resw schema below (resheader block + <data name="..."><value>...</value></data>) is what
+    resw schema below (resheader block + the data/value element pairs) is what
     MakePri/MSBuild indexes into the app's resources.pri for both packaged AND unpackaged.
   -->
   <resheader name="resmimetype">
@@ -27,28 +25,395 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
 
-  <!-- USB Management page title (Mac: usb.management.title) -->
+  <!-- ============================ USB Management (pilot) ============================ -->
   <data name="UsbManagementTitle.Text" xml:space="preserve">
     <value>USB Management</value>
     <comment>USB page header title. Mac key: usb.management.title.</comment>
   </data>
-
-  <!-- "Connected Devices" section header above the device list.
-       Not in the Mac Localizable.strings; authored here for all 3 languages. -->
   <data name="UsbConnectedDevices.Text" xml:space="preserve">
     <value>Connected Devices</value>
     <comment>Section header over the connected-USB-device list.</comment>
   </data>
-
-  <!-- Empty-state title (Mac: usb.empty.title) -->
   <data name="UsbEmptyTitle.Text" xml:space="preserve">
     <value>No USB Devices Found</value>
     <comment>Shown when zero USB devices are enumerated. Mac key: usb.empty.title.</comment>
   </data>
-
-  <!-- Empty-state guidance subtitle (Mac: usb.empty.subtitle) -->
   <data name="UsbEmptySubtitle.Text" xml:space="preserve">
     <value>Connect a device and refresh, or check cables and ports.</value>
     <comment>Guidance under the empty-state title. Mac key: usb.empty.subtitle.</comment>
+  </data>
+
+  <!-- ============================ Sidebar / brand ============================ -->
+  <data name="AppSidebarBrandName.Text" xml:space="preserve">
+    <value>Skybridge Compass</value>
+    <comment>Sidebar header app name (brand; conventionally not translated).</comment>
+  </data>
+  <data name="AppSidebarBrandTagline.Text" xml:space="preserve">
+    <value>Next-generation cross-platform connectivity</value>
+    <comment>Sidebar tagline (secondary). Rendered twice; muted variant is AppSidebarBrandTaglineMuted.</comment>
+  </data>
+  <data name="AppSidebarBrandTaglineMuted.Text" xml:space="preserve">
+    <value>Next-generation cross-platform connectivity</value>
+    <comment>Sidebar tagline (muted variant, same string as AppSidebarBrandTagline).</comment>
+  </data>
+
+  <!-- ============================ Top bar ============================ -->
+  <data name="TopBarDiagnosticsFpsLabel.Text" xml:space="preserve">
+    <value>FPS</value>
+    <comment>Top-bar diagnostics pill static label (acronym, kept as-is across locales).</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero ============================ -->
+  <data name="DashboardWeatherLoadingTitle.Text" xml:space="preserve">
+    <value>Fetching weather…</value>
+    <comment>Weather hero loading-state title.</comment>
+  </data>
+  <data name="DashboardWeatherLoadingHint.Text" xml:space="preserve">
+    <value>First load may take a few seconds</value>
+    <comment>Weather hero loading-state hint.</comment>
+  </data>
+  <data name="DashboardWeatherErrorTitle.Text" xml:space="preserve">
+    <value>Failed to load weather</value>
+    <comment>Weather hero error-state title.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButton.Text" xml:space="preserve">
+    <value>Retry</value>
+    <comment>Weather hero Retry button. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — 2x2 summary panels ============================ -->
+  <data name="DashboardDeviceDiscoveryPanelTitle.Text" xml:space="preserve">
+    <value>Device Discovery</value>
+    <comment>Dashboard Device-Discovery summary panel title (also DD page panel). Mac sidebar.deviceDiscovery.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptyTitle.Text" xml:space="preserve">
+    <value>No Devices Found</value>
+    <comment>Dashboard discovery summary empty-state title. Mac discovery.noDevices.title.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptySubtitle.Text" xml:space="preserve">
+    <value>Open Device Discovery to start scanning</value>
+    <comment>Dashboard discovery summary empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsPanelTitle.Text" xml:space="preserve">
+    <value>Remote Sessions</value>
+    <comment>Dashboard Remote-Sessions summary panel title. Mac dashboard.remoteSessions.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptyTitle.Text" xml:space="preserve">
+    <value>No Active Sessions</value>
+    <comment>Dashboard remote-sessions empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptySubtitle.Text" xml:space="preserve">
+    <value>Connect from Remote Desktop to start a session</value>
+    <comment>Dashboard remote-sessions empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardQuickActionsPanelTitle.Text" xml:space="preserve">
+    <value>Quick Actions</value>
+    <comment>Dashboard Quick-Actions panel title. Mac dashboard.quickActions.</comment>
+  </data>
+  <data name="DashboardSystemPerformancePanelTitle.Text" xml:space="preserve">
+    <value>System Performance</value>
+    <comment>Dashboard System-Performance panel title. Mac dashboard.systemPerformance.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptyTitle.Text" xml:space="preserve">
+    <value>No Data</value>
+    <comment>Dashboard system-performance empty-state title. Mac monitor.noData.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptySubtitle.Text" xml:space="preserve">
+    <value>Open System Monitor to collect performance data</value>
+    <comment>Dashboard system-performance empty-state subtitle.</comment>
+  </data>
+
+  <!-- ============================ File Transfer ============================ -->
+  <data name="FileTransferPageTitle.Text" xml:space="preserve">
+    <value>File Transfer</value>
+    <comment>File Transfer page header title. Mac sidebar.fileTransfer.</comment>
+  </data>
+  <data name="FileTransferConnectionStatusHeader.Text" xml:space="preserve">
+    <value>Connection Status</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.connectionStatus.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHeader.Text" xml:space="preserve">
+    <value>Quick Actions</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.quickActions.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHint.Text" xml:space="preserve">
+    <value>Select files / folder or generate a share QR. Selection prepares an in-memory intent only — no picker is opened and no files are read.</value>
+    <comment>Quick Actions explanatory subtitle (Windows-specific honesty note).</comment>
+  </data>
+  <data name="FileTransferRecentTransfersHeader.Text" xml:space="preserve">
+    <value>Recent Transfers</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.recentTransfers.</comment>
+  </data>
+  <data name="FileTransferRecentEmpty.Text" xml:space="preserve">
+    <value>No recent transfers yet</value>
+    <comment>Recent Transfers empty state. Mac fileTransfer.recent.empty.</comment>
+  </data>
+  <data name="FileTransferDropZoneTitle.Text" xml:space="preserve">
+    <value>Drop files to transfer</value>
+    <comment>Drop-zone title. Mac fileTransfer.drop.title.</comment>
+  </data>
+  <data name="FileTransferDropZoneSubtitle.Text" xml:space="preserve">
+    <value>Drag-and-drop is not yet wired on the Windows client. Use Select Files / Select Folder above to stage a transfer intent.</value>
+    <comment>Drop-zone honest subtitle (Windows-specific).</comment>
+  </data>
+  <data name="FileTransferQrPreviewTitle.Text" xml:space="preserve">
+    <value>File Transfer QR</value>
+    <comment>QR preview card title (gated). Mac qrcode.title.</comment>
+  </data>
+  <data name="FileTransferQueueHeader.Text" xml:space="preserve">
+    <value>Transfer Queue</value>
+    <comment>Right-pane section header. Mac activeTransfersSection / fileTransfer.activeTransfers.</comment>
+  </data>
+  <data name="FileTransferQueueEmpty.Text" xml:space="preserve">
+    <value>Queue is empty. Stage files or a folder from Quick Actions to populate it.</value>
+    <comment>Transfer Queue empty hint.</comment>
+  </data>
+  <data name="FileTransferHistoryHeader.Text" xml:space="preserve">
+    <value>Transfer History</value>
+    <comment>Right-pane section header. Mac fileTransfer.history.title.</comment>
+  </data>
+  <data name="FileTransferHistoryEmpty.Text" xml:space="preserve">
+    <value>No completed transfers yet.</value>
+    <comment>Transfer History empty state (gated). Mac fileTransfer.history.emptyTitle.</comment>
+  </data>
+  <data name="FileTransferSecurityHeader.Text" xml:space="preserve">
+    <value>File Transfer Security</value>
+    <comment>Right-pane facts card header.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop ============================ -->
+  <data name="RemoteDesktopHeaderTitle.Text" xml:space="preserve">
+    <value>Remote Desktop</value>
+    <comment>Page header title. Mac sidebar.remoteDesktop. GATE-CRITICAL ordering — keep before header/actions/Active Sessions.</comment>
+  </data>
+  <data name="RemoteDesktopModeAuto.Text" xml:space="preserve">
+    <value>Auto</value>
+    <comment>Connection-mode segmented tab. Mac remote.connectionMode.auto.</comment>
+  </data>
+  <data name="RemoteDesktopModeNear.Text" xml:space="preserve">
+    <value>Near</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.near.</comment>
+  </data>
+  <data name="RemoteDesktopModeFar.Text" xml:space="preserve">
+    <value>Far</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.far.</comment>
+  </data>
+  <data name="RemoteDesktopActiveSessionsHeader.Text" xml:space="preserve">
+    <value>Active Sessions</value>
+    <comment>Sidebar section header. Mac remote.activeSessions. GATE-CRITICAL: must stay after RemoteDesktopActions.</comment>
+  </data>
+  <data name="RemoteDesktopEmptyTitle.Text" xml:space="preserve">
+    <value>No active sessions</value>
+    <comment>Sidebar empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopEmptySubtitle.Text" xml:space="preserve">
+    <value>Trusted sessions appear here once verified</value>
+    <comment>Sidebar empty-state subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsHeader.Text" xml:space="preserve">
+    <value>Recent Connections</value>
+    <comment>Sidebar section header. Mac remote.recentConnections.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsNote.Text" xml:space="preserve">
+    <value>Recent peers reconnect only after a verified peer key is provided.</value>
+    <comment>Honest note under Recent Connections.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsCardTitle.Text" xml:space="preserve">
+    <value>Trusted Active Sessions</value>
+    <comment>Right-pane card title.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsTrailingEmpty.Text" xml:space="preserve">
+    <value>No active session</value>
+    <comment>Trailing badge when session count == 0. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsBody.Text" xml:space="preserve">
+    <value>Trusted peers will appear here once a verified remote session is established.</value>
+    <comment>Right-pane card descriptive body.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewCardTitle.Text" xml:space="preserve">
+    <value>Preview</value>
+    <comment>Preview card title. Mac action.preview.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewTrailingIdle.Text" xml:space="preserve">
+    <value>Idle</value>
+    <comment>Preview card trailing status badge. Mac status.idle.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptyTitle.Text" xml:space="preserve">
+    <value>Select a session to start Remote Desktop</value>
+    <comment>Preview idle-state title. Mac remote.empty.title.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptySubtitle.Text" xml:space="preserve">
+    <value>Connect from Device Discovery for a one-tap session. Manual RDP/VNC/SSH is an advanced path.</value>
+    <comment>Preview idle-state subtitle. Mac remote.empty.subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopQualityHeader.Text" xml:space="preserve">
+    <value>Quality</value>
+    <comment>Section header above bitrate/framerate combos.</comment>
+  </data>
+
+  <!-- ============================ Session Controls (app-wide) ============================ -->
+  <data name="SessionControlsTitle.Text" xml:space="preserve">
+    <value>Session Controls</value>
+    <comment>App-wide session-controls panel title.</comment>
+  </data>
+  <data name="SessionControlsBitrateLabel.Text" xml:space="preserve">
+    <value>Bitrate</value>
+    <comment>Session-controls Bitrate combo label.</comment>
+  </data>
+  <data name="SessionControlsFramerateLabel.Text" xml:space="preserve">
+    <value>Framerate</value>
+    <comment>Session-controls Framerate combo label.</comment>
+  </data>
+
+  <!-- ============================ System Monitor ============================ -->
+  <data name="SystemMonitorTitle.Text" xml:space="preserve">
+    <value>System Monitor</value>
+    <comment>System Monitor page header. Mac monitor.title / sidebar.systemMonitor.</comment>
+  </data>
+  <data name="SystemMonitorOverviewHeading.Text" xml:space="preserve">
+    <value>Overview</value>
+    <comment>Card 1 section heading. Mac monitor.overview.</comment>
+  </data>
+  <data name="SystemMonitorIndicatorsHeading.Text" xml:space="preserve">
+    <value>Indicators</value>
+    <comment>Indicators section heading.</comment>
+  </data>
+  <data name="SystemMonitorDetailedMonitoringHeading.Text" xml:space="preserve">
+    <value>Detailed Monitoring</value>
+    <comment>Card 2 section heading.</comment>
+  </data>
+
+  <!-- ============================ Top bar — status-pill tooltips ============================ -->
+  <data name="TopBarNetworkSpeedPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Network throughput (down / up), sampled every ~2s</value>
+    <comment>Top-bar net-speed pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarNetworkLatencyPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Round-trip latency to the SkyBridge endpoint, refreshed every ~15s</value>
+    <comment>Top-bar latency pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarIpLocationPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Public IP location and system-proxy state, refreshed every ~5min</value>
+    <comment>Top-bar IP/proxy pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarDiagnosticsPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>FPS / Diagnostics</value>
+    <comment>Top-bar diagnostics pill hover tooltip.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero controls ============================ -->
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Refresh weather</value>
+    <comment>Weather hero refresh button tooltip.</comment>
+  </data>
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Refresh weather</value>
+    <comment>Weather hero refresh button accessible name.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButtonRoot.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Retry</value>
+    <comment>Weather hero retry button accessible name. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — manual / cross-network ============================ -->
+  <data name="DiscoveryCompatibilityModeCheckBox.Content" xml:space="preserve">
+    <value>Compatibility Mode</value>
+    <comment>Toggle to broaden discovery to more device types. Mac discovery.compatibilityMode.</comment>
+  </data>
+  <data name="DiscoverySearchBox.PlaceholderText" xml:space="preserve">
+    <value>Search devices</value>
+    <comment>Discovered-device filter placeholder.</comment>
+  </data>
+  <data name="ManualConnectionHostLabel.Text" xml:space="preserve">
+    <value>Manual Host / IP</value>
+    <comment>Manual-connect host field label. Mac manualConnect.title / discovery.manualConnect.</comment>
+  </data>
+  <data name="ManualConnectionHostBox.PlaceholderText" xml:space="preserve">
+    <value>IP Address</value>
+    <comment>Manual-connect host field placeholder. Mac manualConnect.ipAddress.</comment>
+  </data>
+  <data name="ManualConnectionPortLabel.Text" xml:space="preserve">
+    <value>Port</value>
+    <comment>Manual-connect port field label. Mac manualConnect.port.</comment>
+  </data>
+  <data name="ManualConnectionCodeLabel.Text" xml:space="preserve">
+    <value>Code</value>
+    <comment>Manual-connect pairing-code field label. Mac discovery.manualConnect.code.</comment>
+  </data>
+  <data name="ManualConnectionCodeBox.PlaceholderText" xml:space="preserve">
+    <value>Optional code</value>
+    <comment>Manual-connect pairing-code placeholder (optional).</comment>
+  </data>
+  <data name="DynamicEncryptedQrCodeHeader.Text" xml:space="preserve">
+    <value>Dynamic Encrypted QR Code</value>
+    <comment>Cross-network QR section header. Mac discovery.qrCode.title.</comment>
+  </data>
+  <data name="SmartConnectionCodeHeader.Text" xml:space="preserve">
+    <value>Smart Connection Code</value>
+    <comment>Cross-network short-code section header. Mac connection.smartCode.title.</comment>
+  </data>
+  <data name="DiscoveryServiceLabel.Text" xml:space="preserve">
+    <value>Service</value>
+    <comment>DNS-SD service-type field label.</comment>
+  </data>
+  <data name="DiscoveryTxtRecordLabel.Text" xml:space="preserve">
+    <value>TXT record</value>
+    <comment>DNS-SD TXT-record field label.</comment>
+  </data>
+  <data name="PairingCodeLabel.Text" xml:space="preserve">
+    <value>Pairing Code</value>
+    <comment>Pairing-code field label. Mac manualConnect.pairingCode.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop — session search ============================ -->
+  <data name="RemoteDesktopSearchBox.PlaceholderText" xml:space="preserve">
+    <value>Search sessions...</value>
+    <comment>Active-session filter placeholder.</comment>
+  </data>
+
+  <!-- ============================ Settings — page chrome ============================ -->
+  <data name="SettingsPageTitle.Text" xml:space="preserve">
+    <value>Settings</value>
+    <comment>Settings page header title. Mac sidebar.settings / settings.header.title.</comment>
+  </data>
+  <data name="SettingsActionsHeader.Text" xml:space="preserve">
+    <value>Settings Actions</value>
+    <comment>Settings-actions section header.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — peer card ============================ -->
+  <data name="DiscoveredPeerFingerprintBadge.Text" xml:space="preserve">
+    <value>Fingerprint</value>
+    <comment>Discovered-peer identity badge (fingerprint-only, not a verified-trust claim).</comment>
+  </data>
+
+  <!-- ============================ USB Management — device card ============================ -->
+  <data name="UsbMfiCertifiedBadge.Text" xml:space="preserve">
+    <value>MFi Certified</value>
+    <comment>USB device-card MFi-certified badge. Mac DeviceCard "MFi Certified".</comment>
+  </data>
+  <data name="UsbDeviceIdLabel.Text" xml:space="preserve">
+    <value>Device ID</value>
+    <comment>USB device-card detail row label. Mac usb.device.id.</comment>
+  </data>
+  <data name="UsbVendorIdLabel.Text" xml:space="preserve">
+    <value>Vendor ID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbProductIdLabel.Text" xml:space="preserve">
+    <value>Product ID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbSerialNumberLabel.Text" xml:space="preserve">
+    <value>Serial Number</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbConnectionInterfaceLabel.Text" xml:space="preserve">
+    <value>Connection Interface</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbCapabilitiesLabel.Text" xml:space="preserve">
+    <value>Capabilities</value>
+    <comment>USB device-card detail row label. Mac usb.device.capabilities.</comment>
   </data>
 </root>

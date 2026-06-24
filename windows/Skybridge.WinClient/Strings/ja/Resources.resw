@@ -2,9 +2,7 @@
 <root>
   <!--
     SkyBridge Compass — 日本語 (ja) UI 文字列。
-    Strings/en-US/Resources.resw のキー集合と 1:1 で対応させること。
-    PILOT 範囲: USB 管理ページ。Mac の ja.lproj/Localizable.strings には USB キーが無いため、
-    全て本端で翻訳 (action.refresh="更新", sidebar.usbManagement="USB管理" は Mac core ja を参照)。
+    Strings/en-US/Resources.resw のキー集合と 1:1 で対応させること（キー欠落時は英語へフォールバック）。
   -->
   <resheader name="resmimetype">
     <value>text/microsoft-resx</value>
@@ -19,27 +17,395 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
 
-  <!-- Mac core ja: sidebar.usbManagement = "USB管理" -->
+  <!-- ============================ USB Management (pilot) ============================ -->
   <data name="UsbManagementTitle.Text" xml:space="preserve">
     <value>USB 管理</value>
     <comment>USB page header title. Mac key: usb.management.title.</comment>
   </data>
-
-  <!-- "Connected Devices" — 本端翻訳 -->
   <data name="UsbConnectedDevices.Text" xml:space="preserve">
     <value>接続済みデバイス</value>
     <comment>Section header over the connected-USB-device list.</comment>
   </data>
-
-  <!-- Mac en: usb.empty.title = "No USB Devices Found" — 本端翻訳 -->
   <data name="UsbEmptyTitle.Text" xml:space="preserve">
     <value>USB デバイスが見つかりません</value>
     <comment>Shown when zero USB devices are enumerated. Mac key: usb.empty.title.</comment>
   </data>
-
-  <!-- Mac en: usb.empty.subtitle — 本端翻訳 -->
   <data name="UsbEmptySubtitle.Text" xml:space="preserve">
     <value>デバイスを接続して更新するか、ケーブルとポートを確認してください。</value>
     <comment>Guidance under the empty-state title. Mac key: usb.empty.subtitle.</comment>
+  </data>
+
+  <!-- ============================ Sidebar / brand ============================ -->
+  <data name="AppSidebarBrandName.Text" xml:space="preserve">
+    <value>Skybridge Compass</value>
+    <comment>Sidebar header app name (brand; conventionally not translated).</comment>
+  </data>
+  <data name="AppSidebarBrandTagline.Text" xml:space="preserve">
+    <value>次世代のクロスプラットフォーム接続体験</value>
+    <comment>Sidebar tagline (secondary).</comment>
+  </data>
+  <data name="AppSidebarBrandTaglineMuted.Text" xml:space="preserve">
+    <value>次世代のクロスプラットフォーム接続体験</value>
+    <comment>Sidebar tagline (muted variant, same string as AppSidebarBrandTagline).</comment>
+  </data>
+
+  <!-- ============================ Top bar ============================ -->
+  <data name="TopBarDiagnosticsFpsLabel.Text" xml:space="preserve">
+    <value>FPS</value>
+    <comment>Top-bar diagnostics pill static label (acronym, kept as-is across locales).</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero ============================ -->
+  <data name="DashboardWeatherLoadingTitle.Text" xml:space="preserve">
+    <value>天気情報を取得中...</value>
+    <comment>Weather hero loading-state title.</comment>
+  </data>
+  <data name="DashboardWeatherLoadingHint.Text" xml:space="preserve">
+    <value>初回読み込みには数秒かかる場合があります</value>
+    <comment>Weather hero loading-state hint.</comment>
+  </data>
+  <data name="DashboardWeatherErrorTitle.Text" xml:space="preserve">
+    <value>天気データの取得に失敗しました</value>
+    <comment>Weather hero error-state title.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButton.Text" xml:space="preserve">
+    <value>再試行</value>
+    <comment>Weather hero Retry button. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — 2x2 summary panels ============================ -->
+  <data name="DashboardDeviceDiscoveryPanelTitle.Text" xml:space="preserve">
+    <value>デバイス検出</value>
+    <comment>Dashboard Device-Discovery summary panel title (also DD page panel). Mac sidebar.deviceDiscovery.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptyTitle.Text" xml:space="preserve">
+    <value>デバイスが見つかりません</value>
+    <comment>Dashboard discovery summary empty-state title. Mac discovery.noDevices.title.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptySubtitle.Text" xml:space="preserve">
+    <value>「デバイス検出」を開いてスキャンを開始</value>
+    <comment>Dashboard discovery summary empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsPanelTitle.Text" xml:space="preserve">
+    <value>リモートセッション</value>
+    <comment>Dashboard Remote-Sessions summary panel title. Mac dashboard.remoteSessions.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptyTitle.Text" xml:space="preserve">
+    <value>アクティブなセッションなし</value>
+    <comment>Dashboard remote-sessions empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptySubtitle.Text" xml:space="preserve">
+    <value>「リモートデスクトップ」から接続してセッションを開始</value>
+    <comment>Dashboard remote-sessions empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardQuickActionsPanelTitle.Text" xml:space="preserve">
+    <value>クイックアクション</value>
+    <comment>Dashboard Quick-Actions panel title. Mac dashboard.quickActions.</comment>
+  </data>
+  <data name="DashboardSystemPerformancePanelTitle.Text" xml:space="preserve">
+    <value>システムパフォーマンス</value>
+    <comment>Dashboard System-Performance panel title. Mac dashboard.systemPerformance.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptyTitle.Text" xml:space="preserve">
+    <value>データなし</value>
+    <comment>Dashboard system-performance empty-state title. Mac monitor.noData.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptySubtitle.Text" xml:space="preserve">
+    <value>「システムモニター」を開いてパフォーマンスデータを収集</value>
+    <comment>Dashboard system-performance empty-state subtitle.</comment>
+  </data>
+
+  <!-- ============================ File Transfer ============================ -->
+  <data name="FileTransferPageTitle.Text" xml:space="preserve">
+    <value>ファイル転送</value>
+    <comment>File Transfer page header title. Mac sidebar.fileTransfer.</comment>
+  </data>
+  <data name="FileTransferConnectionStatusHeader.Text" xml:space="preserve">
+    <value>接続状態</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.connectionStatus.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHeader.Text" xml:space="preserve">
+    <value>クイックアクション</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.quickActions.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHint.Text" xml:space="preserve">
+    <value>ファイル/フォルダを選択するか、共有用QRを生成します。選択はメモリ上で転送インテントを準備するだけです。ピッカーは開かれず、ファイルも読み込まれません。</value>
+    <comment>Quick Actions explanatory subtitle (Windows-specific honesty note).</comment>
+  </data>
+  <data name="FileTransferRecentTransfersHeader.Text" xml:space="preserve">
+    <value>最近の転送</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.recentTransfers.</comment>
+  </data>
+  <data name="FileTransferRecentEmpty.Text" xml:space="preserve">
+    <value>転送履歴はありません</value>
+    <comment>Recent Transfers empty state. Mac fileTransfer.recent.empty.</comment>
+  </data>
+  <data name="FileTransferDropZoneTitle.Text" xml:space="preserve">
+    <value>ここにファイルをドラッグ</value>
+    <comment>Drop-zone title. Mac fileTransfer.drop.title.</comment>
+  </data>
+  <data name="FileTransferDropZoneSubtitle.Text" xml:space="preserve">
+    <value>Windowsクライアントではドラッグ＆ドロップはまだ接続されていません。上の「ファイルを選択 / フォルダを選択」を使って転送インテントを準備してください。</value>
+    <comment>Drop-zone honest subtitle (Windows-specific).</comment>
+  </data>
+  <data name="FileTransferQrPreviewTitle.Text" xml:space="preserve">
+    <value>ファイル転送QRコード</value>
+    <comment>QR preview card title (gated). Mac qrcode.title.</comment>
+  </data>
+  <data name="FileTransferQueueHeader.Text" xml:space="preserve">
+    <value>アクティブ転送</value>
+    <comment>Right-pane section header. Mac activeTransfersSection / fileTransfer.activeTransfers.</comment>
+  </data>
+  <data name="FileTransferQueueEmpty.Text" xml:space="preserve">
+    <value>キューは空です。「クイックアクション」からファイルまたはフォルダを準備して追加してください。</value>
+    <comment>Transfer Queue empty hint.</comment>
+  </data>
+  <data name="FileTransferHistoryHeader.Text" xml:space="preserve">
+    <value>転送履歴</value>
+    <comment>Right-pane section header. Mac fileTransfer.history.title.</comment>
+  </data>
+  <data name="FileTransferHistoryEmpty.Text" xml:space="preserve">
+    <value>転送履歴はありません</value>
+    <comment>Transfer History empty state (gated). Mac fileTransfer.history.emptyTitle.</comment>
+  </data>
+  <data name="FileTransferSecurityHeader.Text" xml:space="preserve">
+    <value>ファイル転送セキュリティ</value>
+    <comment>Right-pane facts card header.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop ============================ -->
+  <data name="RemoteDesktopHeaderTitle.Text" xml:space="preserve">
+    <value>リモートデスクトップ</value>
+    <comment>Page header title. Mac sidebar.remoteDesktop.</comment>
+  </data>
+  <data name="RemoteDesktopModeAuto.Text" xml:space="preserve">
+    <value>自動</value>
+    <comment>Connection-mode segmented tab. Mac remote.connectionMode.auto.</comment>
+  </data>
+  <data name="RemoteDesktopModeNear.Text" xml:space="preserve">
+    <value>近距離</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.near.</comment>
+  </data>
+  <data name="RemoteDesktopModeFar.Text" xml:space="preserve">
+    <value>遠距離</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.far.</comment>
+  </data>
+  <data name="RemoteDesktopActiveSessionsHeader.Text" xml:space="preserve">
+    <value>アクティブセッション</value>
+    <comment>Sidebar section header. Mac remote.activeSessions.</comment>
+  </data>
+  <data name="RemoteDesktopEmptyTitle.Text" xml:space="preserve">
+    <value>アクティブなセッションなし</value>
+    <comment>Sidebar empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopEmptySubtitle.Text" xml:space="preserve">
+    <value>検証済みの信頼されたセッションがここに表示されます</value>
+    <comment>Sidebar empty-state subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsHeader.Text" xml:space="preserve">
+    <value>最近の接続</value>
+    <comment>Sidebar section header. Mac remote.recentConnections.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsNote.Text" xml:space="preserve">
+    <value>最近のピアは、検証済みのピアキーが提供された後にのみ再接続できます。</value>
+    <comment>Honest note under Recent Connections.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsCardTitle.Text" xml:space="preserve">
+    <value>信頼されたアクティブセッション</value>
+    <comment>Right-pane card title.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsTrailingEmpty.Text" xml:space="preserve">
+    <value>アクティブなセッションなし</value>
+    <comment>Trailing badge when session count == 0. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsBody.Text" xml:space="preserve">
+    <value>検証済みのリモートセッションが確立されると、信頼されたピアがここに表示されます。</value>
+    <comment>Right-pane card descriptive body.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewCardTitle.Text" xml:space="preserve">
+    <value>プレビュー</value>
+    <comment>Preview card title. Mac action.preview.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewTrailingIdle.Text" xml:space="preserve">
+    <value>待機中</value>
+    <comment>Preview card trailing status badge. Mac status.idle.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptyTitle.Text" xml:space="preserve">
+    <value>セッションを選択してリモートデスクトップを開始</value>
+    <comment>Preview idle-state title. Mac remote.empty.title.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptySubtitle.Text" xml:space="preserve">
+    <value>おすすめ：デバイス検出でワンタップ接続。手動の RDP/VNC/SSH は上級者向けの代替手段です。</value>
+    <comment>Preview idle-state subtitle. Mac remote.empty.subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopQualityHeader.Text" xml:space="preserve">
+    <value>画質</value>
+    <comment>Section header above bitrate/framerate combos.</comment>
+  </data>
+
+  <!-- ============================ Session Controls (app-wide) ============================ -->
+  <data name="SessionControlsTitle.Text" xml:space="preserve">
+    <value>セッションコントロール</value>
+    <comment>App-wide session-controls panel title.</comment>
+  </data>
+  <data name="SessionControlsBitrateLabel.Text" xml:space="preserve">
+    <value>ビットレート</value>
+    <comment>Session-controls Bitrate combo label.</comment>
+  </data>
+  <data name="SessionControlsFramerateLabel.Text" xml:space="preserve">
+    <value>フレームレート</value>
+    <comment>Session-controls Framerate combo label.</comment>
+  </data>
+
+  <!-- ============================ System Monitor ============================ -->
+  <data name="SystemMonitorTitle.Text" xml:space="preserve">
+    <value>システム監視</value>
+    <comment>System Monitor page header. Mac monitor.title / sidebar.systemMonitor.</comment>
+  </data>
+  <data name="SystemMonitorOverviewHeading.Text" xml:space="preserve">
+    <value>概要</value>
+    <comment>Card 1 section heading. Mac monitor.overview.</comment>
+  </data>
+  <data name="SystemMonitorIndicatorsHeading.Text" xml:space="preserve">
+    <value>インジケーター</value>
+    <comment>Indicators section heading.</comment>
+  </data>
+  <data name="SystemMonitorDetailedMonitoringHeading.Text" xml:space="preserve">
+    <value>詳細モニタリング</value>
+    <comment>Card 2 section heading.</comment>
+  </data>
+
+  <!-- ============================ Top bar — status-pill tooltips ============================ -->
+  <data name="TopBarNetworkSpeedPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>ネットワークスループット（下り / 上り）、約2秒ごとにサンプリング</value>
+    <comment>Top-bar net-speed pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarNetworkLatencyPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>SkyBridgeエンドポイントへの往復遅延、約15秒ごとに更新</value>
+    <comment>Top-bar latency pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarIpLocationPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>パブリックIPの位置とシステムプロキシの状態、約5分ごとに更新</value>
+    <comment>Top-bar IP/proxy pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarDiagnosticsPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>FPS / 診断</value>
+    <comment>Top-bar diagnostics pill hover tooltip.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero controls ============================ -->
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>天気を更新</value>
+    <comment>Weather hero refresh button tooltip.</comment>
+  </data>
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>天気を更新</value>
+    <comment>Weather hero refresh button accessible name.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButtonRoot.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>再試行</value>
+    <comment>Weather hero retry button accessible name. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — manual / cross-network ============================ -->
+  <data name="DiscoveryCompatibilityModeCheckBox.Content" xml:space="preserve">
+    <value>互換性/その他のデバイス</value>
+    <comment>Toggle to broaden discovery to more device types. Mac discovery.compatibilityMode.</comment>
+  </data>
+  <data name="DiscoverySearchBox.PlaceholderText" xml:space="preserve">
+    <value>デバイスを検索</value>
+    <comment>Discovered-device filter placeholder.</comment>
+  </data>
+  <data name="ManualConnectionHostLabel.Text" xml:space="preserve">
+    <value>手動ホスト / IP</value>
+    <comment>Manual-connect host field label. Mac manualConnect.title / discovery.manualConnect.</comment>
+  </data>
+  <data name="ManualConnectionHostBox.PlaceholderText" xml:space="preserve">
+    <value>IPアドレス</value>
+    <comment>Manual-connect host field placeholder. Mac manualConnect.ipAddress.</comment>
+  </data>
+  <data name="ManualConnectionPortLabel.Text" xml:space="preserve">
+    <value>ポート</value>
+    <comment>Manual-connect port field label. Mac manualConnect.port.</comment>
+  </data>
+  <data name="ManualConnectionCodeLabel.Text" xml:space="preserve">
+    <value>ペアリングコード</value>
+    <comment>Manual-connect pairing-code field label. Mac discovery.manualConnect.code.</comment>
+  </data>
+  <data name="ManualConnectionCodeBox.PlaceholderText" xml:space="preserve">
+    <value>任意のペアリングコード</value>
+    <comment>Manual-connect pairing-code placeholder (optional).</comment>
+  </data>
+  <data name="DynamicEncryptedQrCodeHeader.Text" xml:space="preserve">
+    <value>動的暗号化QRコード</value>
+    <comment>Cross-network QR section header. Mac discovery.qrCode.title.</comment>
+  </data>
+  <data name="SmartConnectionCodeHeader.Text" xml:space="preserve">
+    <value>スマート接続コード</value>
+    <comment>Cross-network short-code section header. Mac connection.smartCode.title.</comment>
+  </data>
+  <data name="DiscoveryServiceLabel.Text" xml:space="preserve">
+    <value>サービス</value>
+    <comment>DNS-SD service-type field label.</comment>
+  </data>
+  <data name="DiscoveryTxtRecordLabel.Text" xml:space="preserve">
+    <value>TXTレコード</value>
+    <comment>DNS-SD TXT-record field label.</comment>
+  </data>
+  <data name="PairingCodeLabel.Text" xml:space="preserve">
+    <value>ペアリングコード</value>
+    <comment>Pairing-code field label. Mac manualConnect.pairingCode.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop — session search ============================ -->
+  <data name="RemoteDesktopSearchBox.PlaceholderText" xml:space="preserve">
+    <value>セッションを検索...</value>
+    <comment>Active-session filter placeholder.</comment>
+  </data>
+
+  <!-- ============================ Settings — page chrome ============================ -->
+  <data name="SettingsPageTitle.Text" xml:space="preserve">
+    <value>設定</value>
+    <comment>Settings page header title. Mac sidebar.settings / settings.header.title.</comment>
+  </data>
+  <data name="SettingsActionsHeader.Text" xml:space="preserve">
+    <value>設定アクション</value>
+    <comment>Settings-actions section header.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — peer card ============================ -->
+  <data name="DiscoveredPeerFingerprintBadge.Text" xml:space="preserve">
+    <value>フィンガープリント</value>
+    <comment>Discovered-peer identity badge (fingerprint-only, not a verified-trust claim).</comment>
+  </data>
+
+  <!-- ============================ USB Management — device card ============================ -->
+  <data name="UsbMfiCertifiedBadge.Text" xml:space="preserve">
+    <value>MFi認証</value>
+    <comment>USB device-card MFi-certified badge. Mac DeviceCard "MFi Certified".</comment>
+  </data>
+  <data name="UsbDeviceIdLabel.Text" xml:space="preserve">
+    <value>デバイスID</value>
+    <comment>USB device-card detail row label. Mac usb.device.id.</comment>
+  </data>
+  <data name="UsbVendorIdLabel.Text" xml:space="preserve">
+    <value>ベンダーID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbProductIdLabel.Text" xml:space="preserve">
+    <value>製品ID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbSerialNumberLabel.Text" xml:space="preserve">
+    <value>シリアル番号</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbConnectionInterfaceLabel.Text" xml:space="preserve">
+    <value>接続インターフェース</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbCapabilitiesLabel.Text" xml:space="preserve">
+    <value>機能</value>
+    <comment>USB device-card detail row label. Mac usb.device.capabilities.</comment>
   </data>
 </root>

@@ -2,9 +2,7 @@
 <root>
   <!--
     SkyBridge Compass — 简体中文 (zh-Hans) UI 字符串。
-    必须与 Strings/en-US/Resources.resw 的键集 1:1 对应。
-    PILOT 范围：USB 管理页。zh 文案取自 Mac 应用 zh-Hans.lproj/Localizable.strings
-    (usb.management.title / usb.empty.title / usb.empty.subtitle)；"已连接设备" 为本端补译。
+    必须与 Strings/en-US/Resources.resw 的键集 1:1 对应（缺键回退英文，绝不空字符串）。
   -->
   <resheader name="resmimetype">
     <value>text/microsoft-resx</value>
@@ -19,27 +17,395 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
 
-  <!-- Mac: usb.management.title = "USB 管理" -->
+  <!-- ============================ USB Management (pilot) ============================ -->
   <data name="UsbManagementTitle.Text" xml:space="preserve">
     <value>USB 管理</value>
     <comment>USB page header title. Mac key: usb.management.title.</comment>
   </data>
-
-  <!-- "Connected Devices" — 本端补译 -->
   <data name="UsbConnectedDevices.Text" xml:space="preserve">
     <value>已连接设备</value>
     <comment>Section header over the connected-USB-device list.</comment>
   </data>
-
-  <!-- Mac: usb.empty.title = "未检测到 USB 设备" -->
   <data name="UsbEmptyTitle.Text" xml:space="preserve">
     <value>未检测到 USB 设备</value>
     <comment>Shown when zero USB devices are enumerated. Mac key: usb.empty.title.</comment>
   </data>
-
-  <!-- Mac: usb.empty.subtitle = "请连接设备后刷新，或检查数据线与端口" -->
   <data name="UsbEmptySubtitle.Text" xml:space="preserve">
     <value>请连接设备后刷新，或检查数据线与端口。</value>
     <comment>Guidance under the empty-state title. Mac key: usb.empty.subtitle.</comment>
+  </data>
+
+  <!-- ============================ Sidebar / brand ============================ -->
+  <data name="AppSidebarBrandName.Text" xml:space="preserve">
+    <value>Skybridge Compass</value>
+    <comment>Sidebar header app name (brand; conventionally not translated).</comment>
+  </data>
+  <data name="AppSidebarBrandTagline.Text" xml:space="preserve">
+    <value>下一代跨平台连接体验</value>
+    <comment>Sidebar tagline (secondary).</comment>
+  </data>
+  <data name="AppSidebarBrandTaglineMuted.Text" xml:space="preserve">
+    <value>下一代跨平台连接体验</value>
+    <comment>Sidebar tagline (muted variant, same string as AppSidebarBrandTagline).</comment>
+  </data>
+
+  <!-- ============================ Top bar ============================ -->
+  <data name="TopBarDiagnosticsFpsLabel.Text" xml:space="preserve">
+    <value>FPS</value>
+    <comment>Top-bar diagnostics pill static label (acronym, kept as-is across locales).</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero ============================ -->
+  <data name="DashboardWeatherLoadingTitle.Text" xml:space="preserve">
+    <value>正在获取天气信息...</value>
+    <comment>Weather hero loading-state title.</comment>
+  </data>
+  <data name="DashboardWeatherLoadingHint.Text" xml:space="preserve">
+    <value>首次加载可能需要几秒钟</value>
+    <comment>Weather hero loading-state hint.</comment>
+  </data>
+  <data name="DashboardWeatherErrorTitle.Text" xml:space="preserve">
+    <value>天气数据获取失败</value>
+    <comment>Weather hero error-state title.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButton.Text" xml:space="preserve">
+    <value>重试</value>
+    <comment>Weather hero Retry button. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — 2x2 summary panels ============================ -->
+  <data name="DashboardDeviceDiscoveryPanelTitle.Text" xml:space="preserve">
+    <value>设备发现</value>
+    <comment>Dashboard Device-Discovery summary panel title (also DD page panel). Mac sidebar.deviceDiscovery.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptyTitle.Text" xml:space="preserve">
+    <value>未发现设备</value>
+    <comment>Dashboard discovery summary empty-state title. Mac discovery.noDevices.title.</comment>
+  </data>
+  <data name="DashboardDeviceDiscoveryEmptySubtitle.Text" xml:space="preserve">
+    <value>打开「设备发现」开始扫描</value>
+    <comment>Dashboard discovery summary empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsPanelTitle.Text" xml:space="preserve">
+    <value>远程会话</value>
+    <comment>Dashboard Remote-Sessions summary panel title. Mac dashboard.remoteSessions.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptyTitle.Text" xml:space="preserve">
+    <value>无活跃会话</value>
+    <comment>Dashboard remote-sessions empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="DashboardRemoteSessionsEmptySubtitle.Text" xml:space="preserve">
+    <value>从「远程桌面」连接以开始会话</value>
+    <comment>Dashboard remote-sessions empty-state subtitle.</comment>
+  </data>
+  <data name="DashboardQuickActionsPanelTitle.Text" xml:space="preserve">
+    <value>快捷操作</value>
+    <comment>Dashboard Quick-Actions panel title. Mac dashboard.quickActions.</comment>
+  </data>
+  <data name="DashboardSystemPerformancePanelTitle.Text" xml:space="preserve">
+    <value>系统性能</value>
+    <comment>Dashboard System-Performance panel title. Mac dashboard.systemPerformance.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptyTitle.Text" xml:space="preserve">
+    <value>暂无数据</value>
+    <comment>Dashboard system-performance empty-state title. Mac monitor.noData.</comment>
+  </data>
+  <data name="DashboardSystemPerformanceEmptySubtitle.Text" xml:space="preserve">
+    <value>打开「系统监控」以采集性能数据</value>
+    <comment>Dashboard system-performance empty-state subtitle.</comment>
+  </data>
+
+  <!-- ============================ File Transfer ============================ -->
+  <data name="FileTransferPageTitle.Text" xml:space="preserve">
+    <value>文件传输</value>
+    <comment>File Transfer page header title. Mac sidebar.fileTransfer.</comment>
+  </data>
+  <data name="FileTransferConnectionStatusHeader.Text" xml:space="preserve">
+    <value>连接状态</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.connectionStatus.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHeader.Text" xml:space="preserve">
+    <value>快速操作</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.quickActions.</comment>
+  </data>
+  <data name="FileTransferQuickActionsHint.Text" xml:space="preserve">
+    <value>选择文件 / 文件夹或生成分享二维码。选择仅在内存中准备一个传输意图——不会打开选择器，也不会读取任何文件。</value>
+    <comment>Quick Actions explanatory subtitle (Windows-specific honesty note).</comment>
+  </data>
+  <data name="FileTransferRecentTransfersHeader.Text" xml:space="preserve">
+    <value>最近传输</value>
+    <comment>Left-sidebar card header. Mac fileTransfer.recentTransfers.</comment>
+  </data>
+  <data name="FileTransferRecentEmpty.Text" xml:space="preserve">
+    <value>暂无传输记录</value>
+    <comment>Recent Transfers empty state. Mac fileTransfer.recent.empty.</comment>
+  </data>
+  <data name="FileTransferDropZoneTitle.Text" xml:space="preserve">
+    <value>拖拽文件到此处</value>
+    <comment>Drop-zone title. Mac fileTransfer.drop.title.</comment>
+  </data>
+  <data name="FileTransferDropZoneSubtitle.Text" xml:space="preserve">
+    <value>Windows 客户端尚未接入拖放功能。请使用上方的“选择文件 / 选择文件夹”来准备传输意图。</value>
+    <comment>Drop-zone honest subtitle (Windows-specific).</comment>
+  </data>
+  <data name="FileTransferQrPreviewTitle.Text" xml:space="preserve">
+    <value>文件传输二维码</value>
+    <comment>QR preview card title (gated). Mac qrcode.title.</comment>
+  </data>
+  <data name="FileTransferQueueHeader.Text" xml:space="preserve">
+    <value>活跃传输</value>
+    <comment>Right-pane section header. Mac activeTransfersSection / fileTransfer.activeTransfers.</comment>
+  </data>
+  <data name="FileTransferQueueEmpty.Text" xml:space="preserve">
+    <value>队列为空。请从“快速操作”准备文件或文件夹以填充队列。</value>
+    <comment>Transfer Queue empty hint.</comment>
+  </data>
+  <data name="FileTransferHistoryHeader.Text" xml:space="preserve">
+    <value>传输历史</value>
+    <comment>Right-pane section header. Mac fileTransfer.history.title.</comment>
+  </data>
+  <data name="FileTransferHistoryEmpty.Text" xml:space="preserve">
+    <value>没有传输历史</value>
+    <comment>Transfer History empty state (gated). Mac fileTransfer.history.emptyTitle.</comment>
+  </data>
+  <data name="FileTransferSecurityHeader.Text" xml:space="preserve">
+    <value>文件传输安全</value>
+    <comment>Right-pane facts card header.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop ============================ -->
+  <data name="RemoteDesktopHeaderTitle.Text" xml:space="preserve">
+    <value>远程桌面</value>
+    <comment>Page header title. Mac sidebar.remoteDesktop.</comment>
+  </data>
+  <data name="RemoteDesktopModeAuto.Text" xml:space="preserve">
+    <value>自动</value>
+    <comment>Connection-mode segmented tab. Mac remote.connectionMode.auto.</comment>
+  </data>
+  <data name="RemoteDesktopModeNear.Text" xml:space="preserve">
+    <value>近距</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.near.</comment>
+  </data>
+  <data name="RemoteDesktopModeFar.Text" xml:space="preserve">
+    <value>远距</value>
+    <comment>Connection-mode tab. Mac remote.connectionMode.far.</comment>
+  </data>
+  <data name="RemoteDesktopActiveSessionsHeader.Text" xml:space="preserve">
+    <value>活跃会话</value>
+    <comment>Sidebar section header. Mac remote.activeSessions.</comment>
+  </data>
+  <data name="RemoteDesktopEmptyTitle.Text" xml:space="preserve">
+    <value>无活跃会话</value>
+    <comment>Sidebar empty-state title. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopEmptySubtitle.Text" xml:space="preserve">
+    <value>已验证的受信任会话将显示在此处</value>
+    <comment>Sidebar empty-state subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsHeader.Text" xml:space="preserve">
+    <value>最近连接</value>
+    <comment>Sidebar section header. Mac remote.recentConnections.</comment>
+  </data>
+  <data name="RemoteDesktopRecentConnectionsNote.Text" xml:space="preserve">
+    <value>最近的对端只有在提供已验证的对端密钥后才能重新连接。</value>
+    <comment>Honest note under Recent Connections.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsCardTitle.Text" xml:space="preserve">
+    <value>受信任的活跃会话</value>
+    <comment>Right-pane card title.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsTrailingEmpty.Text" xml:space="preserve">
+    <value>无活跃会话</value>
+    <comment>Trailing badge when session count == 0. Mac session.noActive.</comment>
+  </data>
+  <data name="RemoteDesktopTrustedSessionsBody.Text" xml:space="preserve">
+    <value>建立已验证的远程会话后，受信任的对端将显示在此处。</value>
+    <comment>Right-pane card descriptive body.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewCardTitle.Text" xml:space="preserve">
+    <value>预览</value>
+    <comment>Preview card title. Mac action.preview.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewTrailingIdle.Text" xml:space="preserve">
+    <value>空闲</value>
+    <comment>Preview card trailing status badge. Mac status.idle.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptyTitle.Text" xml:space="preserve">
+    <value>选择一个会话开始远程桌面</value>
+    <comment>Preview idle-state title. Mac remote.empty.title.</comment>
+  </data>
+  <data name="RemoteDesktopPreviewEmptySubtitle.Text" xml:space="preserve">
+    <value>推荐先到「设备发现」一键连接你的设备。手动 RDP/VNC/SSH 属于高级功能，可作为备选方案。</value>
+    <comment>Preview idle-state subtitle. Mac remote.empty.subtitle.</comment>
+  </data>
+  <data name="RemoteDesktopQualityHeader.Text" xml:space="preserve">
+    <value>画质</value>
+    <comment>Section header above bitrate/framerate combos.</comment>
+  </data>
+
+  <!-- ============================ Session Controls (app-wide) ============================ -->
+  <data name="SessionControlsTitle.Text" xml:space="preserve">
+    <value>会话控制</value>
+    <comment>App-wide session-controls panel title.</comment>
+  </data>
+  <data name="SessionControlsBitrateLabel.Text" xml:space="preserve">
+    <value>比特率</value>
+    <comment>Session-controls Bitrate combo label.</comment>
+  </data>
+  <data name="SessionControlsFramerateLabel.Text" xml:space="preserve">
+    <value>帧率</value>
+    <comment>Session-controls Framerate combo label.</comment>
+  </data>
+
+  <!-- ============================ System Monitor ============================ -->
+  <data name="SystemMonitorTitle.Text" xml:space="preserve">
+    <value>系统监控</value>
+    <comment>System Monitor page header. Mac monitor.title / sidebar.systemMonitor.</comment>
+  </data>
+  <data name="SystemMonitorOverviewHeading.Text" xml:space="preserve">
+    <value>系统概览</value>
+    <comment>Card 1 section heading. Mac monitor.overview.</comment>
+  </data>
+  <data name="SystemMonitorIndicatorsHeading.Text" xml:space="preserve">
+    <value>状态指示</value>
+    <comment>Indicators section heading.</comment>
+  </data>
+  <data name="SystemMonitorDetailedMonitoringHeading.Text" xml:space="preserve">
+    <value>详细监控</value>
+    <comment>Card 2 section heading.</comment>
+  </data>
+
+  <!-- ============================ Top bar — status-pill tooltips ============================ -->
+  <data name="TopBarNetworkSpeedPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>网络吞吐量（下行 / 上行），每约 2 秒采样一次</value>
+    <comment>Top-bar net-speed pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarNetworkLatencyPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>到 SkyBridge 端点的往返延迟，每约 15 秒刷新一次</value>
+    <comment>Top-bar latency pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarIpLocationPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>公网 IP 位置与系统代理状态，每约 5 分钟刷新一次</value>
+    <comment>Top-bar IP/proxy pill hover tooltip.</comment>
+  </data>
+  <data name="TopBarDiagnosticsPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>帧率 / 诊断</value>
+    <comment>Top-bar diagnostics pill hover tooltip.</comment>
+  </data>
+
+  <!-- ============================ Dashboard — weather hero controls ============================ -->
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>刷新天气</value>
+    <comment>Weather hero refresh button tooltip.</comment>
+  </data>
+  <data name="DashboardWeatherRefreshButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>刷新天气</value>
+    <comment>Weather hero refresh button accessible name.</comment>
+  </data>
+  <data name="DashboardWeatherRetryButtonRoot.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>重试</value>
+    <comment>Weather hero retry button accessible name. Mac notifications.action.retry.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — manual / cross-network ============================ -->
+  <data name="DiscoveryCompatibilityModeCheckBox.Content" xml:space="preserve">
+    <value>兼容/更多设备</value>
+    <comment>Toggle to broaden discovery to more device types. Mac discovery.compatibilityMode.</comment>
+  </data>
+  <data name="DiscoverySearchBox.PlaceholderText" xml:space="preserve">
+    <value>搜索设备</value>
+    <comment>Discovered-device filter placeholder.</comment>
+  </data>
+  <data name="ManualConnectionHostLabel.Text" xml:space="preserve">
+    <value>手动主机 / IP</value>
+    <comment>Manual-connect host field label. Mac manualConnect.title / discovery.manualConnect.</comment>
+  </data>
+  <data name="ManualConnectionHostBox.PlaceholderText" xml:space="preserve">
+    <value>IP 地址</value>
+    <comment>Manual-connect host field placeholder. Mac manualConnect.ipAddress.</comment>
+  </data>
+  <data name="ManualConnectionPortLabel.Text" xml:space="preserve">
+    <value>端口</value>
+    <comment>Manual-connect port field label. Mac manualConnect.port.</comment>
+  </data>
+  <data name="ManualConnectionCodeLabel.Text" xml:space="preserve">
+    <value>配对码</value>
+    <comment>Manual-connect pairing-code field label. Mac discovery.manualConnect.code.</comment>
+  </data>
+  <data name="ManualConnectionCodeBox.PlaceholderText" xml:space="preserve">
+    <value>可选配对码</value>
+    <comment>Manual-connect pairing-code placeholder (optional).</comment>
+  </data>
+  <data name="DynamicEncryptedQrCodeHeader.Text" xml:space="preserve">
+    <value>动态加密二维码</value>
+    <comment>Cross-network QR section header. Mac discovery.qrCode.title.</comment>
+  </data>
+  <data name="SmartConnectionCodeHeader.Text" xml:space="preserve">
+    <value>智能连接码</value>
+    <comment>Cross-network short-code section header. Mac connection.smartCode.title.</comment>
+  </data>
+  <data name="DiscoveryServiceLabel.Text" xml:space="preserve">
+    <value>服务</value>
+    <comment>DNS-SD service-type field label.</comment>
+  </data>
+  <data name="DiscoveryTxtRecordLabel.Text" xml:space="preserve">
+    <value>TXT 记录</value>
+    <comment>DNS-SD TXT-record field label.</comment>
+  </data>
+  <data name="PairingCodeLabel.Text" xml:space="preserve">
+    <value>配对码</value>
+    <comment>Pairing-code field label. Mac manualConnect.pairingCode.</comment>
+  </data>
+
+  <!-- ============================ Remote Desktop — session search ============================ -->
+  <data name="RemoteDesktopSearchBox.PlaceholderText" xml:space="preserve">
+    <value>搜索会话...</value>
+    <comment>Active-session filter placeholder.</comment>
+  </data>
+
+  <!-- ============================ Settings — page chrome ============================ -->
+  <data name="SettingsPageTitle.Text" xml:space="preserve">
+    <value>设置</value>
+    <comment>Settings page header title. Mac sidebar.settings / settings.header.title.</comment>
+  </data>
+  <data name="SettingsActionsHeader.Text" xml:space="preserve">
+    <value>设置操作</value>
+    <comment>Settings-actions section header.</comment>
+  </data>
+
+  <!-- ============================ Device Discovery — peer card ============================ -->
+  <data name="DiscoveredPeerFingerprintBadge.Text" xml:space="preserve">
+    <value>指纹</value>
+    <comment>Discovered-peer identity badge (fingerprint-only, not a verified-trust claim).</comment>
+  </data>
+
+  <!-- ============================ USB Management — device card ============================ -->
+  <data name="UsbMfiCertifiedBadge.Text" xml:space="preserve">
+    <value>MFi 认证</value>
+    <comment>USB device-card MFi-certified badge. Mac DeviceCard "MFi Certified".</comment>
+  </data>
+  <data name="UsbDeviceIdLabel.Text" xml:space="preserve">
+    <value>设备 ID</value>
+    <comment>USB device-card detail row label. Mac usb.device.id.</comment>
+  </data>
+  <data name="UsbVendorIdLabel.Text" xml:space="preserve">
+    <value>厂商 ID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbProductIdLabel.Text" xml:space="preserve">
+    <value>产品 ID</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbSerialNumberLabel.Text" xml:space="preserve">
+    <value>序列号</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbConnectionInterfaceLabel.Text" xml:space="preserve">
+    <value>连接接口</value>
+    <comment>USB device-card detail row label.</comment>
+  </data>
+  <data name="UsbCapabilitiesLabel.Text" xml:space="preserve">
+    <value>功能</value>
+    <comment>USB device-card detail row label. Mac usb.device.capabilities.</comment>
   </data>
 </root>
