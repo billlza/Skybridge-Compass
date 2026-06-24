@@ -100,9 +100,23 @@ public sealed class WeatherClient : IWeatherClient
         // through to the IP-based default path. It never throws into the UI.
         var coordinates = await TryGetDeviceCoordinatesAsync().ConfigureAwait(false);
 
-        // Strategy 1a: wttr.in BY COORDINATES (real device fix). Immune to proxy/VPN IP.
         if (coordinates is { } point)
         {
+            // Strategy 1a: OpenWeatherMap BY COORDINATES — the SAME provider the Mac uses
+            // (api.openweathermap.org, units=metric, lang=zh_cn). Only when a real device fix
+            // AND an API key are present; with no key we skip straight to wttr.in (no key
+            // needed) so the card never depends on the key being configured.
+            var apiKey = ResolveOpenWeatherApiKey();
+            if (!string.IsNullOrEmpty(apiKey))
+            {
+                var owm = await TryFetchOpenWeatherMapAsync(point, apiKey).ConfigureAwait(false);
+                if (owm is not null)
+                {
+                    return owm;
+                }
+            }
+
+            // Strategy 1b: wttr.in BY COORDINATES (real device fix, no key). Immune to proxy/VPN IP.
             var byCoords = await TryFetchWttrAsync(BuildCoordinateLocation(point), approximate: false)
                 .ConfigureAwait(false);
             if (byCoords is not null)
@@ -110,7 +124,7 @@ public sealed class WeatherClient : IWeatherClient
                 return byCoords;
             }
             // Coordinate query failed (network/parse) — fall through to the IP default so a
-            // transient wttr.in hiccup on the lat,lon path still yields a forecast.
+            // transient hiccup on the lat,lon path still yields a forecast.
         }
 
         // Strategy 1b: wttr.in IP-geolocated default (empty path). Used when the device
@@ -175,6 +189,137 @@ public sealed class WeatherClient : IWeatherClient
         var lon = point.Longitude.ToString("0.####", CultureInfo.InvariantCulture);
         return $"{lat},{lon}";
     }
+
+    // ---- OpenWeatherMap (Mac-parity provider, key-gated) -----------------------------
+
+    // API key resolution mirrors the Mac (Keychain, then WEATHER_API_KEY env var). On Windows
+    // we read, in order: the WEATHER_API_KEY environment variable, then
+    // %LOCALAPPDATA%\SkyBridge\openweather.key (a plain one-line file the user creates). No key
+    // → empty → we silently use wttr.in instead (never block the card). Never hardcoded/logged.
+    private static string ResolveOpenWeatherApiKey()
+    {
+        try
+        {
+            var env = Environment.GetEnvironmentVariable("WEATHER_API_KEY");
+            if (!string.IsNullOrWhiteSpace(env))
+            {
+                return env.Trim();
+            }
+
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrEmpty(localAppData))
+            {
+                var keyPath = System.IO.Path.Combine(localAppData, "SkyBridge", "openweather.key");
+                if (System.IO.File.Exists(keyPath))
+                {
+                    var contents = System.IO.File.ReadAllText(keyPath).Trim();
+                    if (!string.IsNullOrEmpty(contents))
+                    {
+                        return contents;
+                    }
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Any IO/permission failure → no key → wttr.in fallback. Never throws into refresh.
+        }
+
+        return string.Empty;
+    }
+
+    // Queries api.openweathermap.org exactly as the Mac RealTimeWeatherService does
+    // (lat/lon + appid + units=metric + lang=zh_cn) and projects the response onto the shared
+    // WeatherSnapshot.Create. Wind is m/s in metric units → ×3.6 to km/h; visibility m → km.
+    // AQI is omitted (this endpoint has none — same as the Mac, which shows no AQI). Any
+    // network/parse failure returns null so the caller falls back to wttr.in.
+    private static async Task<WeatherSnapshot?> TryFetchOpenWeatherMapAsync(BasicGeoposition point, string apiKey)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(PrimaryTimeout);
+            var lat = point.Latitude.ToString("0.####", CultureInfo.InvariantCulture);
+            var lon = point.Longitude.ToString("0.####", CultureInfo.InvariantCulture);
+            var key = Uri.EscapeDataString(apiKey);
+            var path = $"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric&lang=zh_cn";
+
+            using var response = await HttpClient.GetAsync(path, cts.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cts.Token).ConfigureAwait(false);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("main", out var main))
+            {
+                return null;
+            }
+
+            var temperatureC = main.TryGetProperty("temp", out var tempEl) ? tempEl.GetDouble() : 0.0;
+            var humidity = main.TryGetProperty("humidity", out var humEl) ? humEl.GetDouble() : 0.0;
+
+            var windMs = 0.0;
+            if (root.TryGetProperty("wind", out var wind) && wind.TryGetProperty("speed", out var speedEl))
+            {
+                windMs = speedEl.GetDouble();
+            }
+
+            double? visibilityKm = null;
+            if (root.TryGetProperty("visibility", out var visEl) && visEl.TryGetInt32(out var visMeters))
+            {
+                visibilityKm = visMeters / 1000.0;
+            }
+
+            var apiCondition = "Clear";
+            var description = string.Empty;
+            if (root.TryGetProperty("weather", out var weatherArray)
+                && weatherArray.ValueKind == JsonValueKind.Array
+                && weatherArray.GetArrayLength() > 0)
+            {
+                var first = weatherArray[0];
+                apiCondition = first.TryGetProperty("main", out var mainEl) ? (mainEl.GetString() ?? "Clear") : "Clear";
+                description = first.TryGetProperty("description", out var descEl) ? (descEl.GetString() ?? string.Empty) : string.Empty;
+            }
+
+            var location = root.TryGetProperty("name", out var nameEl) ? (nameEl.GetString() ?? string.Empty) : string.Empty;
+            if (string.IsNullOrWhiteSpace(location))
+            {
+                location = "当前位置";
+            }
+
+            return WeatherSnapshot.Create(
+                temperatureC,
+                MapOpenWeatherCondition(apiCondition),
+                humidity,
+                windMs * 3.6,
+                visibilityKm,
+                aqi: null,
+                description: description,
+                location: location,
+                source: "OpenWeatherMap");
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // OpenWeatherMap weather[].main -> our WeatherCondition (mirrors the Mac mapWeatherCondition).
+    private static WeatherCondition MapOpenWeatherCondition(string apiCondition) =>
+        apiCondition.ToLowerInvariant() switch
+        {
+            "clear" => WeatherCondition.Clear,
+            "clouds" => WeatherCondition.Cloudy,
+            "rain" or "drizzle" => WeatherCondition.Rainy,
+            "snow" => WeatherCondition.Snowy,
+            "thunderstorm" => WeatherCondition.Stormy,
+            "mist" or "fog" => WeatherCondition.Foggy,
+            "haze" or "smoke" or "dust" or "sand" => WeatherCondition.Haze,
+            _ => WeatherCondition.Unknown
+        };
 
     private static HttpClient CreateHttpClient()
     {
