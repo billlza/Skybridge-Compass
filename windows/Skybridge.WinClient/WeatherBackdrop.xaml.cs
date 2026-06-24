@@ -857,50 +857,66 @@ public sealed partial class WeatherBackdrop : UserControl
             var cloud = _compositor!.CreateContainerVisual();
             cloud.Size = new Vector2(cw, ch);
 
-            // Shaded body: vertical gradient (bright top -> dark bottom), soft via radial edges.
-            var body = RadialBlob(Math.Max(cw, ch), cirrus
-                ? new[]
-                {
-                    (0f, Argb(op * 0.48f, 235, 240, 250)),
-                    (0.5f, Argb(op * 0.40f, 219, 224, 240)),
-                    (0.85f, Argb(op * 0.20f, 179, 188, 204)),
-                    (1f, Color.FromArgb(0, 179, 188, 204)),
-                }
-                : new[]
-                {
-                    (0f, Argb(op * 0.75f, 219, 224, 235)),
-                    (0.5f, Argb(op * 0.62f, 199, 204, 214)),
-                    (0.82f, Argb(op * 0.55f, 140, 149, 163)),
-                    (1f, Color.FromArgb(0, 140, 149, 163)),
-                });
-            body.Size = new Vector2(cw, ch);
-            cloud.Children.InsertAtTop(body);
+            // ── Metaball-style cloud: a CLUSTER of soft round puffs, NOT one ellipse. A flat-ish
+            // base row of larger puffs + smaller billowing puffs above; soft radial falloff lets
+            // the overlapping puffs merge into one organic, fluffy mass (the WinUI stand-in for the
+            // Mac metaball+blur+alphaThreshold). Light from the top: upper puffs brighter, low darker.
+            var baseY = ch * 0.62f;
 
-            // Under-shadow (darker lower half) for volume — main layers only.
+            // Under-shadow band first (sits behind the puffs) for volume — main layers only.
             if (!cirrus)
             {
                 var shadow = RadialBlob(cw, new[]
                 {
-                    (0f, Color.FromArgb(0, 30, 36, 46)),
-                    (0.6f, Argb(op * 0.15f, 30, 36, 46)),
-                    (1f, Argb(op * 0.28f, 20, 24, 32)),
+                    (0f, Color.FromArgb(0, 30, 36, 48)),
+                    (0.55f, Argb(op * 0.12f, 30, 36, 48)),
+                    (1f, Argb(op * 0.24f, 20, 24, 34)),
                 });
-                shadow.Size = new Vector2(cw * 0.9f, ch * 0.6f);
-                shadow.Offset = new Vector3(cw * 0.05f, ch * 0.45f, 0f);
+                shadow.Size = new Vector2(cw * 0.92f, ch * 0.5f);
+                shadow.Offset = new Vector3(cw * 0.04f, baseY - ch * 0.08f, 0f);
                 cloud.Children.InsertAtTop(shadow);
             }
 
-            // Warm top-left rim "silver lining" — near layer only.
+            var puffCount = cirrus ? _rng.Next(5, 9) : _rng.Next(10, 16);
+            for (var p = 0; p < puffCount; p++)
+            {
+                var upper = _rng.NextDouble() < 0.45;
+                float pr, px, py;
+                if (upper)
+                {
+                    pr = ch * (cirrus ? Rand(0.18f, 0.30f) : Rand(0.30f, 0.50f));
+                    px = cw * 0.5f + (Rand(0.12f, 0.88f) * cw - cw * 0.5f) * 0.62f; // billows cluster toward centre
+                    py = baseY - ch * Rand(0.22f, 0.52f) - pr * 0.3f;
+                }
+                else
+                {
+                    pr = ch * (cirrus ? Rand(0.22f, 0.34f) : Rand(0.40f, 0.64f));
+                    px = Rand(0.08f, 0.92f) * cw;                                   // base row spans the width
+                    py = baseY - pr * Rand(0.05f, 0.35f);
+                }
+                var shade = Math.Clamp(0.62f + (1f - py / ch) * 0.5f, 0.45f, 1.15f); // top-lit
+                var core = Math.Clamp(op * (cirrus ? 0.5f : 0.95f) * shade, 0f, 1f);
+                var puff = RadialBlob(pr * 2f, new[]
+                {
+                    (0f, Argb(core, 238, 242, 250)),
+                    (0.42f, Argb(Math.Clamp(core * 0.88f, 0f, 1f), 224, 230, 242)),
+                    (0.72f, Argb(Math.Clamp(core * 0.5f, 0f, 1f), 190, 200, 216)),
+                    (1f, Color.FromArgb(0, 190, 200, 216)),
+                });
+                puff.Offset = new Vector3(px - pr, py - pr, 0f);
+                cloud.Children.InsertAtTop(puff);
+            }
+
+            // Warm top-left "silver lining" rim — near layer only.
             if (silverLining)
             {
-                var rim = RadialBlob(cw * 0.6f, new[]
+                var rim = RadialBlob(cw * 0.5f, new[]
                 {
-                    (0f, Argb(op * 0.5f, 255, 247, 230)),
-                    (0.5f, Argb(op * 0.25f, 255, 247, 230)),
-                    (1f, Color.FromArgb(0, 255, 247, 230)),
+                    (0f, Argb(op * 0.5f, 255, 248, 232)),
+                    (0.5f, Argb(op * 0.22f, 255, 248, 232)),
+                    (1f, Color.FromArgb(0, 255, 248, 232)),
                 });
-                rim.Size = new Vector2(cw * 0.5f, ch * 0.5f);
-                rim.Offset = new Vector3(cw * 0.08f, ch * 0.05f, 0f);
+                rim.Offset = new Vector3(cw * 0.12f, baseY - ch * 0.55f, 0f);
                 cloud.Children.InsertAtTop(rim);
             }
 
