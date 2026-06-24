@@ -54,7 +54,8 @@
     <Capability Name="internetClient" />
     <Capability Name="internetClientServer" />
     <Capability Name="privateNetworkClientServer" />
-    <uap:Capability Name="location" />
     <rescap:Capability Name="runFullTrust" />
+    <!-- DeviceCapability must come AFTER all Capability/rescap:Capability per the appx schema. -->
+    <DeviceCapability Name="location" />
   </Capabilities>
 </Package>
