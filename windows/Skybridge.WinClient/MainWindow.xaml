@@ -40,6 +40,7 @@
         <vm:ServiceKindToGlyphConverter x:Key="ServiceKindGlyphConverter" />
         <vm:ServiceKindToBrushConverter x:Key="ServiceKindBrushConverter" />
         <vm:WeatherConditionToGlyphConverter x:Key="WeatherConditionGlyphConverter" />
+        <vm:WeatherConditionToRainConverter x:Key="WeatherConditionRainConverter" />
         <vm:WeatherConditionToBrushConverter x:Key="WeatherConditionBrushConverter" />
         <vm:WeatherMetricKeyToGlyphConverter x:Key="WeatherMetricGlyphConverter" />
         <vm:WeatherMetricTintToBrushConverter x:Key="WeatherMetricTintBrushConverter" />
@@ -1340,7 +1341,10 @@
                  The half-transparent glass surfaces read AS lit glass over the moving
                  particles — the depth the flat static gradient was missing (Mac parity:
                  its dashboard runs a Metal weather particle system over .starryNight). -->
-            <local:WeatherBackdrop Grid.Row="0" Grid.RowSpan="2" />
+            <local:WeatherBackdrop
+                Grid.Row="0"
+                Grid.RowSpan="2"
+                RainEnabled="{Binding WeatherConditionKey, Converter={StaticResource WeatherConditionRainConverter}}" />
 
             <Border
                 Grid.Row="0"

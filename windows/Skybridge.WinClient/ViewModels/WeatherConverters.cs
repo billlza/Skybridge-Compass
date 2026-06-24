@@ -52,6 +52,21 @@ public sealed class WeatherConditionToGlyphConverter : IValueConverter
 }
 
 /// <summary>
+/// WeatherConditionKey (Clear/Cloudy/Rainy/Snowy/Foggy/Haze/Stormy/Unknown) -> whether the
+/// animated WeatherBackdrop renders falling rain. Only wet conditions (Rainy/Stormy) turn rain
+/// on; everything else shows the star field alone — mirroring the Mac, whose rain particle layer
+/// only runs under wet weather (the current 多云 dashboard is stars-only, no rain).
+/// </summary>
+public sealed class WeatherConditionToRainConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language) =>
+        (value as string) is "Rainy" or "Stormy";
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>
 /// Condition enum name -> the accent brush used for the glyph + glow, mirroring the Mac
 /// iconColor: clear=yellow, cloudy=gray, rainy=blue, snowy=cyan, foggy/haze=gray,
 /// stormy=purple/violet, unknown=gray. Resolves to the weather theme brushes.

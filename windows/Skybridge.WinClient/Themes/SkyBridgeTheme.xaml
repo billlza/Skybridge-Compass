@@ -61,26 +61,31 @@
          curvature the Mac material has while degrading perfectly (this IS the fallback).
          FUTURE (needs human visual check + code-behind): set Window.SystemBackdrop =
          DesktopAcrylicBackdrop and drop these tints to ~half opacity for true OS frost. -->
-    <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#2EFFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#33FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#1AFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#14FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#E62E3857" />
     <!-- Panel = large section surface. 3-stop gloss: bright cool-white top-left
          highlight (#33) -> mid body (#1F) -> faint blue-tinted bottom-right (#14, the
          starryNight slate bleeding through) so the panel reads as a curved lit pane. -->
     <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="0.85,1">
-        <GradientStop Color="#33FFFFFF" Offset="0.0" />
-        <GradientStop Color="#1FFFFFFF" Offset="0.5" />
-        <GradientStop Color="#14BCD0F2" Offset="1.0" />
+        <GradientStop Color="#1AFFFFFF" Offset="0.0" />
+        <GradientStop Color="#0FFFFFFF" Offset="0.5" />
+        <GradientStop Color="#0ABCD0F2" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#2EFFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#14FFFFFF" />
     <!-- Card = nested glass, a touch brighter than the panel so it lifts off it.
          Same cool-tinted roll-off (top-left highlight -> blue-gray base). -->
+    <!-- Aligned to the Mac StatCard material (bg white@0.04, stroke white@0.08): a much
+         more TRANSLUCENT card so the animated star/rain backdrop reads THROUGH it (that
+         透出感 is the depth the old near-opaque ~16% white card was missing). A faint
+         top-left→bottom gloss is kept (12%→8%→4%) for lit-glass curvature, but the average
+         now sits near Mac's 4-8% instead of ~16%. -->
     <LinearGradientBrush x:Key="SkyBridgeCardFillBrush" StartPoint="0,0" EndPoint="0.85,1">
-        <GradientStop Color="#3DFFFFFF" Offset="0.0" />
-        <GradientStop Color="#24FFFFFF" Offset="0.5" />
-        <GradientStop Color="#1ABCD0F2" Offset="1.0" />
+        <GradientStop Color="#1FFFFFFF" Offset="0.0" />
+        <GradientStop Color="#14FFFFFF" Offset="0.5" />
+        <GradientStop Color="#0ABCD0F2" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#33FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#14FFFFFF" />
     <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="#8C47618F" />
     <SolidColorBrush x:Key="SkyBridgeSelectedNavFillBrush" Color="#D12368E0" />
 
