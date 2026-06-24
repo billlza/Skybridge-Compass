@@ -58,6 +58,10 @@
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Vortice.WinUI" Version="3.8.3" />
+    <!-- Runtime HLSL compile (FXC, Shader Model 5.1 -> DXBC, accepted by D3D12) for the weather
+         raymarch shader. SM5.1 is enough for fbm + light-march loops; keeps iteration fast (no
+         MSBuild dxc step). Can move to compile-time dxc/.cso later. -->
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
          (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />

@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -9,6 +10,7 @@ using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Vortice.D3DCompiler;
 using Vortice.DXGI;
 using Vortice.Mathematics;
 using Vortice.WinUI;
@@ -18,11 +20,15 @@ using static Vortice.DXGI.DXGI;
 namespace Skybridge.WinClient;
 
 // =====================================================================================
-//  WeatherBackdropDX — Direct3D 12 + WinUI 3 SwapChainPanel feasibility probe.
+//  WeatherBackdropDX — Direct3D 12 + WinUI 3 SwapChainPanel cinematic weather backdrop.
 //
-//  Renders an ANIMATED clear color (time-based hue cycle) into a DXGI composition swap
-//  chain bound to a SwapChainPanel, proving the native DX12 pipeline runs on net10 with no
-//  Roslyn dependency. Clear-color only — NO HLSL shader yet.
+//  Renders a fullscreen raymarch HLSL shader (VS+PS, SV_VertexID fullscreen triangle) into a
+//  DXGI composition swap chain bound to a SwapChainPanel. The pixel shader composites a
+//  per-condition cinematic weather scene — volumetric raymarched clouds, parallax rain/snow,
+//  twinkling stars, height fog, and Stormy lightning — tuned to match the macOS cinematic
+//  weather effects (Sources/SkyBridgeCore/Weather/Effects/Cinematic/*). The clear color is kept
+//  as the backdrop base; the shader draws over it. Runs on net10 via Vortice 3.8.3 with no Roslyn
+//  dependency; shaders are compiled at init with Vortice.D3DCompiler (FXC vs_5_0/ps_5_0).
 //
 //  Lifecycle (all DX touch-points on the UI thread, which is where SwapChainPanel events
 //  and CompositionTarget.Rendering fire):
@@ -60,6 +66,25 @@ public sealed partial class WeatherBackdropDX : UserControl
     private readonly ID3D12Resource?[] _renderTargets = new ID3D12Resource?[BufferCount];
     private readonly ID3D12CommandAllocator?[] _allocators = new ID3D12CommandAllocator?[BufferCount];
     private ID3D12GraphicsCommandList4? _commandList;
+
+    // ── Graphics pipeline for the fullscreen weather shader pass. ──
+    private ID3D12RootSignature? _rootSignature;     // one root CBV at b0 (no descriptor heap)
+    private ID3D12PipelineState? _pipelineState;      // VS+PS fullscreen-triangle PSO
+    private ID3D12Resource? _constantBuffer;          // Upload heap, 256-byte CB, mapped per-frame
+    private bool _shaderReady;                        // true once PSO/root-sig/CB are valid
+
+    // CPU-side mirror of the cbuffer { float time; float2 resolution; int condition; }. HLSL packs
+    // float+float2 into one 16-byte row; int lands at offset 12. 16 bytes used; CB padded to 256.
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct WeatherConstants
+    {
+        public float Time;          // offset 0
+        public float ResolutionX;   // offset 4
+        public float ResolutionY;   // offset 8
+        public int Condition;       // offset 12
+    }
+
+    private const uint ConstantBufferSize = 256; // 256-byte aligned (D3D12 CBV requirement)
 
     private ID3D12Fence? _fence;
     private AutoResetEvent? _fenceEvent;
@@ -256,6 +281,21 @@ public sealed partial class WeatherBackdropDX : UserControl
         _fenceValue = 0;
         Array.Clear(_frameFenceValues, 0, _frameFenceValues.Length);
 
+        // 8. Compile the weather shader and build the size-independent graphics pipeline
+        //    (root signature + PSO + constant buffer). Failure here is non-fatal: the panel
+        //    falls back to the animated clear color rather than crashing.
+        try
+        {
+            CreateGraphicsPipeline();
+            _shaderReady = true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[WeatherBackdropDX] shader pipeline init failed, using clear-color fallback: {ex}");
+            DisposeGraphicsPipeline();
+            _shaderReady = false;
+        }
+
         // Apply the initial DPI-compensation transform.
         ApplyDpiTransform();
 
@@ -285,6 +325,124 @@ public sealed partial class WeatherBackdropDX : UserControl
             _renderTargets[i]?.Dispose();
             _renderTargets[i] = null;
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    //  Graphics pipeline (fullscreen weather shader) — size-independent, built once in init.
+    // -------------------------------------------------------------------------------------
+
+    private void CreateGraphicsPipeline()
+    {
+        if (_device is null)
+        {
+            return;
+        }
+
+        // 1. Compile VS + PS from the embedded HLSL (FXC, Shader Model 5.0).
+        //    Overload: (source, ShaderMacro[] defines, Include include, entryPoint, sourceName,
+        //    profile, ShaderFlags, out Blob, out Blob errorBlob). defines/include are null.
+        Compiler.Compile(
+            WeatherHlsl, null, null, "VSMain", "WeatherBackdrop.hlsl", "vs_5_0",
+            ShaderFlags.None, out Blob vsBlob, out Blob vsError).CheckError();
+        vsError?.Dispose();
+
+        Compiler.Compile(
+            WeatherHlsl, null, null, "PSMain", "WeatherBackdrop.hlsl", "ps_5_0",
+            ShaderFlags.None, out Blob psBlob, out Blob psError).CheckError();
+        psError?.Dispose();
+
+        using (vsBlob)
+        using (psBlob)
+        {
+            // 2. Root signature: ONE root CBV at b0, visible to all stages. No descriptor heap.
+            var cbvDescriptor = new RootDescriptor1(0, 0);
+            var rootParam = new RootParameter1(
+                RootParameterType.ConstantBufferView, cbvDescriptor, ShaderVisibility.All);
+            var rsDesc = new RootSignatureDescription1(
+                RootSignatureFlags.None, new[] { rootParam });
+            _rootSignature = _device.CreateRootSignature(rsDesc);
+
+            // 3. Graphics PSO: empty input layout (fullscreen triangle via SV_VertexID), triangle
+            //    topology, cull none, opaque blend, depth disabled, single B8G8R8A8_UNorm RTV.
+            var psoDesc = new GraphicsPipelineStateDescription
+            {
+                RootSignature = _rootSignature,
+                VertexShader = vsBlob.AsMemory(),
+                PixelShader = psBlob.AsMemory(),
+                InputLayout = null,
+                PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+                RasterizerState = RasterizerDescription.CullNone,
+                BlendState = BlendDescription.Opaque,
+                DepthStencilState = DepthStencilDescription.None, // DepthEnable=false preset
+                SampleMask = uint.MaxValue,
+                RenderTargetFormats = new[] { BackBufferFormat },
+                DepthStencilFormat = Format.Unknown,
+                SampleDescription = new SampleDescription(1, 0),
+            };
+            _pipelineState = _device.CreateGraphicsPipelineState<ID3D12PipelineState>(psoDesc);
+        }
+
+        // 4. Upload-heap constant buffer (256-byte aligned). Mapped per-frame via the safe
+        //    Span<T> overload in UpdateConstantBuffer; no persistent map / no unsafe field.
+        _constantBuffer = _device.CreateCommittedResource(
+            HeapType.Upload,
+            ResourceDescription.Buffer(ConstantBufferSize),
+            ResourceStates.GenericRead);
+    }
+
+    // Per-frame: write { time, resolution, condition } into the upload CB. Safe Span<T> map.
+    private void UpdateConstantBuffer()
+    {
+        if (_constantBuffer is null)
+        {
+            return;
+        }
+
+        var data = new WeatherConstants
+        {
+            Time = (float)_clock.Elapsed.TotalSeconds,
+            ResolutionX = _width,
+            ResolutionY = _height,
+            Condition = MapCondition(Condition),
+        };
+
+        Span<WeatherConstants> cb = _constantBuffer.Map<WeatherConstants>(0, 1);
+        cb[0] = data;
+        _constantBuffer.Unmap(0);
+    }
+
+    // Maps the WeatherBackdrop Condition string to the shader's integer condition selector.
+    // Matches the documented WeatherBackdrop conditions; unknown/empty falls back to Clear (0).
+    private static int MapCondition(string? condition)
+    {
+        if (string.IsNullOrWhiteSpace(condition))
+        {
+            return 0;
+        }
+
+        return condition.Trim().ToLowerInvariant() switch
+        {
+            "clear" or "unknown" or "sunny" or "fair" => 0,
+            "cloudy" or "clouds" or "overcast" or "partlycloudy" or "mostlycloudy" => 1,
+            "rainy" or "rain" or "drizzle" or "showers" => 2,
+            "stormy" or "storm" or "thunderstorm" or "thunder" => 3,
+            "snowy" or "snow" or "sleet" or "blizzard" => 4,
+            "foggy" or "fog" or "mist" => 5,
+            "haze" or "hazy" or "smoke" or "dust" => 6,
+            _ => 0,
+        };
+    }
+
+    private void DisposeGraphicsPipeline()
+    {
+        _pipelineState?.Dispose();
+        _pipelineState = null;
+
+        _rootSignature?.Dispose();
+        _rootSignature = null;
+
+        _constantBuffer?.Dispose();
+        _constantBuffer = null;
     }
 
     // -------------------------------------------------------------------------------------
@@ -334,7 +492,26 @@ public sealed partial class WeatherBackdropDX : UserControl
             _rtvHeap.GetCPUDescriptorHandleForHeapStart(), (int)_backBufferIndex, _rtvDescriptorSize);
 
         _commandList.OMSetRenderTargets(rtv, null);
-        _commandList.ClearRenderTargetView(rtv, ComputeAnimatedColor());
+
+        // Clear stays as the backdrop base. When the shader pipeline is live it draws over a
+        // black clear (so transparent/edge regions read as the composition background); the
+        // animated hue clear is the fallback when the shader failed to initialize.
+        Color4 clearColor = _shaderReady ? new Color4(0f, 0f, 0f, 1f) : ComputeAnimatedColor();
+        _commandList.ClearRenderTargetView(rtv, clearColor);
+
+        // Fullscreen weather raymarch pass (SV_VertexID triangle, no vertex/index buffers).
+        if (_shaderReady && _rootSignature is not null && _pipelineState is not null && _constantBuffer is not null)
+        {
+            UpdateConstantBuffer();
+
+            _commandList.SetGraphicsRootSignature(_rootSignature);
+            _commandList.SetPipelineState(_pipelineState);
+            _commandList.SetGraphicsRootConstantBufferView(0, _constantBuffer.GPUVirtualAddress);
+            _commandList.RSSetViewport(0f, 0f, _width, _height);
+            _commandList.RSSetScissorRect((int)_width, (int)_height); // full-surface rect from (0,0)
+            _commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+            _commandList.DrawInstanced(3, 1, 0, 0);
+        }
 
         // RenderTarget -> Present.
         _commandList.ResourceBarrierTransition(backBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
@@ -515,6 +692,7 @@ public sealed partial class WeatherBackdropDX : UserControl
     private void Teardown()
     {
         _ready = false;
+        _shaderReady = false;
 
         if (_renderingHooked)
         {
@@ -535,6 +713,9 @@ public sealed partial class WeatherBackdropDX : UserControl
         _clock.Reset();
 
         ReleaseRenderTargetViews();
+
+        // Weather shader pipeline (root sig + PSO + constant buffer).
+        DisposeGraphicsPipeline();
 
         for (int i = 0; i < BufferCount; i++)
         {
@@ -570,4 +751,486 @@ public sealed partial class WeatherBackdropDX : UserControl
         _backBufferIndex = 0;
         Array.Clear(_frameFenceValues, 0, _frameFenceValues.Length);
     }
+
+    // =====================================================================================
+    //  HLSL — fullscreen weather shader (VS + PS), Shader Model 5.0, FXC vs_5_0 / ps_5_0.
+    //
+    //  VSMain: SV_VertexID fullscreen triangle (no input layout, no vertex buffer).
+    //  PSMain: per-condition cinematic composite tuned to the macOS effects —
+    //    0 Clear   : blue->gold sky gradient + sun glow + caustic light spots
+    //    1 Cloudy  : raymarched volumetric clouds (lit fluffy edges), upper-left key light
+    //    2 Rainy   : dark volumetric clouds + parallax rain streaks + bottom atmospheric fog
+    //    3 Stormy  : rain x1.5 density / steeper slant + full-screen lightning flashes
+    //    4 Snowy   : blue-grey winter sky + sun halo + parallax drifting snowflakes
+    //    5 Foggy   : true raymarched Perlin-FBM height fog (octaves per quality)
+    //    6 Haze    : warm yellow-grey particulate haze layers reducing contrast
+    //  Starfield (twinkling parallax stars over the night gradient) shows through on Clear-night.
+    //  cbuffer matches { float time; float2 resolution; int condition; } at register(b0).
+    // =====================================================================================
+    private const string WeatherHlsl = @"
+cbuffer WeatherCB : register(b0)
+{
+    float  time;
+    float2 resolution;
+    int    condition;
+};
+
+// ----- fullscreen triangle (SV_VertexID) -----
+struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+
+VSOut VSMain(uint vid : SV_VertexID)
+{
+    VSOut o;
+    // 3-vertex oversized triangle covering the screen.
+    float2 uv = float2((vid << 1) & 2, vid & 2);   // (0,0) (2,0) (0,2)
+    o.uv  = uv;                                     // 0..2, clamps over the screen
+    o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+
+// ============================ noise / hashing ============================
+float hash11(float p)
+{
+    p = frac(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return frac(p);
+}
+
+float hash21(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float2 hash22(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.xx + p3.yz) * p3.zy);
+}
+
+float3 hash33(float3 p)
+{
+    p = frac(p * float3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return frac((p.xxy + p.yxx) * p.zyx);
+}
+
+// value noise (2D)
+float vnoise2(float2 p)
+{
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i + float2(0, 0));
+    float b = hash21(i + float2(1, 0));
+    float c = hash21(i + float2(0, 1));
+    float d = hash21(i + float2(1, 1));
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+// value noise (3D) — used for the cloud / fog density field
+float vnoise3(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = i.x + i.y * 57.0 + i.z * 113.0;
+    float a = lerp(lerp(lerp(hash11(n +   0.0), hash11(n +   1.0), f.x),
+                        lerp(hash11(n +  57.0), hash11(n +  58.0), f.x), f.y),
+                   lerp(lerp(hash11(n + 113.0), hash11(n + 114.0), f.x),
+                        lerp(hash11(n + 170.0), hash11(n + 171.0), f.x), f.y), f.z);
+    return a;
+}
+
+static const float2x2 ROT = float2x2(0.80, 0.60, -0.60, 0.80);
+
+// FBM over 3D value-noise; octaves chosen per quality (we use 6 — the macOS top tier).
+float fbm3(float3 p, int octaves)
+{
+    float a = 0.5;
+    float sum = 0.0;
+    [loop]
+    for (int i = 0; i < octaves; i++)
+    {
+        sum += a * vnoise3(p);
+        p *= 2.02;                 // lacunarity ~2
+        p.xy = mul(p.xy, ROT);     // rotate to break axis alignment
+        a *= 0.5;                  // gain 0.5
+    }
+    return sum;
+}
+
+float fbm2(float2 p, int octaves)
+{
+    float a = 0.5;
+    float sum = 0.0;
+    [loop]
+    for (int i = 0; i < octaves; i++)
+    {
+        sum += a * vnoise2(p);
+        p = mul(p, ROT) * 2.02;
+        a *= 0.5;
+    }
+    return sum;
+}
+
+// ============================ sky gradients (Mac params) ============================
+float3 clearSky(float t)   // top(0)->bottom(1): deep blue -> light -> pale -> pale gold
+{
+    float3 c0 = float3(0.40, 0.60, 0.90);
+    float3 c1 = float3(0.60, 0.80, 1.00);
+    float3 c2 = float3(0.90, 0.95, 0.98);
+    float3 c3 = float3(1.00, 0.98, 0.90);
+    float3 a = lerp(c0, c1, smoothstep(0.0, 0.40, t));
+    float3 b = lerp(c2, c3, smoothstep(0.65, 1.0, t));
+    return lerp(a, b, smoothstep(0.40, 0.75, t));
+}
+
+float3 snowSky(float t)    // blue-grey -> near white
+{
+    float3 c0 = float3(0.75, 0.80, 0.88);
+    float3 c1 = float3(0.82, 0.85, 0.90);
+    float3 c2 = float3(0.88, 0.90, 0.93);
+    float3 c3 = float3(0.92, 0.93, 0.95);
+    float3 a = lerp(c0, c1, smoothstep(0.0, 0.4, t));
+    float3 b = lerp(c2, c3, smoothstep(0.6, 1.0, t));
+    return lerp(a, b, smoothstep(0.4, 0.8, t));
+}
+
+float3 stormSky(float t)   // dark storm cloud band over theme
+{
+    float3 c0 = float3(0.12, 0.12, 0.18);
+    float3 c1 = float3(0.18, 0.18, 0.24);
+    float3 c2 = float3(0.25, 0.25, 0.32);
+    return lerp(lerp(c0, c1, smoothstep(0.0, 0.5, t)), c2, smoothstep(0.5, 1.0, t));
+}
+
+float3 nightSky(float t)   // starry base background
+{
+    float3 c0 = float3(0.01, 0.01, 0.08);
+    float3 c1 = float3(0.03, 0.03, 0.15);
+    float3 c2 = float3(0.08, 0.06, 0.25);
+    float3 c3 = float3(0.12, 0.10, 0.30);
+    float3 a = lerp(c0, c1, smoothstep(0.0, 0.4, t));
+    float3 b = lerp(c2, c3, smoothstep(0.6, 1.0, t));
+    return lerp(a, b, smoothstep(0.4, 0.8, t));
+}
+
+// ============================ twinkling parallax stars ============================
+// 3 layers (far/mid/near) of point stars with per-star twinkle + horizontal drift.
+float3 starLayer(float2 uv, float density, float driftSpeed, float twinkleSpeed,
+                 float baseSize, float3 tint, float layerOpacity)
+{
+    float3 acc = 0.0;
+    float2 p = uv;
+    p.x += time * driftSpeed * 0.02;       // horizontal wrap drift
+    float2 g = p * density;
+    float2 cell = floor(g);
+    float2 f = frac(g);
+    [unroll]
+    for (int oy = -1; oy <= 1; oy++)
+    [unroll]
+    for (int ox = -1; ox <= 1; ox++)
+    {
+        float2 o = float2(ox, oy);
+        float2 rnd = hash22(cell + o);
+        if (rnd.x < 0.55) continue;        // sparse population
+        float2 d = f - (o + rnd);
+        float dist = length(d);
+        float phase = rnd.y * 6.2831853;
+        float indiv = twinkleSpeed * (0.5 + rnd.x);
+        float bright = 0.5 + 0.5 * sin(time * indiv + phase);
+        float sizeJ = lerp(0.7, 1.3, rnd.x);
+        float r = baseSize * sizeJ * 0.012;
+        float star = smoothstep(r, 0.0, dist) * bright;
+        acc += tint * star;
+    }
+    return acc * layerOpacity;
+}
+
+float3 starfield(float2 uv)
+{
+    float3 c = 0.0;
+    c += starLayer(uv, 28.0, 0.3, 0.8, 0.8, float3(0.70, 0.80, 1.00), 0.6);  // far blue
+    c += starLayer(uv, 14.0, 0.8, 1.5, 1.5, float3(1.00, 1.00, 1.00), 0.8);  // mid white
+    c += starLayer(uv,  7.0, 1.2, 2.5, 2.8, float3(1.00, 1.00, 1.00), 1.0);  // near white
+    return c;
+}
+
+// ============================ raymarched volumetric clouds ============================
+// Genuine raymarch: 40 view steps through a cloud slab, 6-step light march toward the
+// upper-left sun, Beer-Lambert extinction + energy-conserving in-scatter. Lit fluffy edges.
+static const float SLAB_LO = 1.2;   // cloud altitude band, low
+static const float SLAB_HI = 3.0;   // cloud altitude band, high
+
+float cloudDensity(float3 p, float coverage)
+{
+    p.x += time * 0.20;             // scroll
+    float base = fbm3(p * 0.55, 5);
+    // height falloff to keep clouds inside the slab band
+    float h = (p.y - SLAB_LO) / (SLAB_HI - SLAB_LO);
+    float shape = smoothstep(0.0, 0.25, h) * smoothstep(1.0, 0.55, h);
+    float d = base * shape;
+    d = saturate((d - (1.0 - coverage)) * 1.7);   // coverage threshold + remap
+    return d;
+}
+
+// march toward the sun to estimate shadowing -> lit silver edges
+float cloudLight(float3 p, float3 sunDir, float coverage)
+{
+    float t = 0.0;
+    float dens = 0.0;
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        float3 sp = p + sunDir * t;
+        dens += cloudDensity(sp, coverage) * 0.16;
+        t += 0.18;
+    }
+    return exp(-dens * 3.0);        // Beer-Lambert transmittance toward the light
+}
+
+// returns rgb premultiplied scene contribution + alpha in .a
+float4 raymarchClouds(float3 ro, float3 rd, float coverage, float3 skyTint, float3 sunCol)
+{
+    // upper-left key light (matches Mac (0.28w,0.12h) light source)
+    float3 sunDir = normalize(float3(-0.55, 0.65, 0.25));
+    // intersect the view ray with the slab to bound the march
+    float tEnter = (SLAB_LO - ro.y) / max(rd.y, 0.001);
+    float tExit  = (SLAB_HI - ro.y) / max(rd.y, 0.001);
+    if (rd.y <= 0.001) return float4(0,0,0,0);
+    tEnter = max(tEnter, 0.0);
+    if (tExit <= tEnter) return float4(0,0,0,0);
+
+    float steps = 40.0;
+    float dt = (tExit - tEnter) / steps;
+    float jitter = hash21(rd.xy * resolution + time) * dt;   // blue-noise-ish dejitter
+    float t = tEnter + jitter;
+
+    float transmittance = 1.0;
+    float3 scattered = 0.0;
+    [loop]
+    for (int i = 0; i < 40; i++)
+    {
+        if (transmittance < 0.02) break;   // early-out
+        float3 p = ro + rd * t;
+        float d = cloudDensity(p, coverage);
+        if (d > 0.001)
+        {
+            float lit = cloudLight(p, sunDir, coverage);
+            // cloud body shading: dark base -> bright lit edges
+            float3 baseCol = float3(0.55, 0.58, 0.64);          // bottom shadow
+            float3 litCol  = float3(0.92, 0.94, 0.98);          // sunlit top
+            float3 col = lerp(baseCol, litCol, lit);
+            col = lerp(col, col * sunCol, 0.35);
+            float3 amb = skyTint * 0.5;
+            col += amb * (1.0 - lit) * 0.4;
+            // energy-conserving in-scatter integration
+            float dens = d * dt * 6.0;
+            float a = 1.0 - exp(-dens);
+            scattered += transmittance * a * col;
+            transmittance *= 1.0 - a;
+        }
+        t += dt;
+    }
+    float alpha = 1.0 - transmittance;
+    return float4(scattered, alpha);
+}
+
+// ============================ parallax rain ============================
+// 3 depth layers of streaks. `intensity` scales density, `slant` tilts (Stormy).
+float rainLayer(float2 uv, float scale, float speed, float slant, float thickness, float seed)
+{
+    float2 p = uv;
+    p.x += p.y * slant;                                   // tilt the whole field
+    p.x += sin(time * 0.3) * 0.04 * slant;                // wind oscillation
+    p *= scale;
+    p.y += time * speed;
+    float2 cell = floor(p);
+    float2 f = frac(p);
+    float r = hash21(cell + seed);
+    if (r < 0.5) return 0.0;                              // sparse columns
+    float colJ = hash21(cell.yx + seed) - 0.5;
+    float xline = smoothstep(thickness, 0.0, abs(f.x - 0.5 + colJ * 0.3));
+    // vertical streak with a brighter head on the top 30%
+    float streak = smoothstep(0.0, 0.15, f.y) * smoothstep(1.0, 0.4, f.y);
+    return xline * streak;
+}
+
+float3 rainComposite(float2 uv, float density, float slant)
+{
+    // streak color gradient white->cyan->blue->white-ish (Mac advanced streak)
+    float far  = rainLayer(uv, float2(80.0, 26.0) * density, 0.9 + density, slant * 0.6, 0.10, 11.0) * 0.6;
+    float mid  = rainLayer(uv, float2(60.0, 22.0) * density, 1.2 + density, slant * 0.8, 0.12, 23.0) * 0.65;
+    float near = rainLayer(uv, float2(40.0, 18.0) * density, 1.6 + density, slant,       0.16, 37.0) * 0.8;
+    float s = saturate(far + mid + near);
+    float3 streakCol = lerp(float3(0.7, 0.9, 1.0), float3(1.0, 1.0, 1.0), near);
+    return streakCol * s;
+}
+
+// ============================ parallax snow ============================
+float snowLayer(float2 uv, float scale, float fall, float sway, float size, float seed,
+                out float glow)
+{
+    float2 p = uv * scale;
+    p.x += sin(time * 2.0 + p.y * 3.0 + seed) * sway;     // sway
+    p.x += sin(time * 0.3) * 0.5;                          // wind
+    p.y += time * fall;
+    float2 cell = floor(p);
+    float2 f = frac(p);
+    float2 rnd = hash22(cell + seed);
+    glow = 0.0;
+    if (rnd.x < 0.45) return 0.0;
+    float2 c = rnd - 0.5;
+    float d = length(f - 0.5 - c * 0.6);
+    float flake = smoothstep(size, 0.0, d);
+    glow = smoothstep(size * 2.5, 0.0, d) * 0.25;
+    return flake;
+}
+
+float3 snowComposite(float2 uv)
+{
+    float g0, g1, g2;
+    // far bokeh (soft, small), mid, near (large crystals) — sizes/speeds per Mac tables
+    float far  = snowLayer(uv, 18.0, 0.10, 0.010, 0.45, 3.0, g0) * 0.4;
+    float mid  = snowLayer(uv, 12.0, 0.16, 0.018, 0.32, 9.0, g1) * 0.7;
+    float near = snowLayer(uv,  7.0, 0.22, 0.026, 0.26, 19.0, g2) * 0.95;
+    float s = saturate(far + mid + near);
+    float glow = (g0 + g1 + g2);
+    float3 col = float3(1.0, 1.0, 1.0) * s + float3(0.9, 0.95, 1.0) * glow;
+    return col;
+}
+
+// ============================ raymarched height fog (Perlin FBM) ============================
+// True ray-march: step through the volume, accumulate FBM density, depth-fade + scatter.
+float3 fogComposite(float2 uv, float intensity, out float fogAlpha)
+{
+    float3 ro = float3(0.0, 0.0, 0.0);
+    float3 rd = normalize(float3((uv - 0.5) * float2(resolution.x / resolution.y, 1.0), 1.0));
+    float stepSize = 200.0 / 64.0;                         // 64 steps, march length 200
+    float t = 0.0;
+    float density = 0.0;
+    [loop]
+    for (int i = 0; i < 64; i++)
+    {
+        float3 pos = ro + rd * t * stepSize;
+        float3 sp = pos * 0.01 + float3(time * 0.5, 0.0, 0.0);
+        float d = fbm3(sp, 6);
+        float depthFade = exp(-t * 0.02);
+        density += saturate(d - 0.35) * 0.06 * depthFade;
+        t += 1.0;
+    }
+    density *= intensity;
+    fogAlpha = saturate(density);
+    // bright neutral grey/white fog with a soft light-scatter glow
+    float3 fogCol = float3(0.82, 0.84, 0.86);
+    float scatter = saturate(density * 1.2);
+    fogCol += float3(0.05, 0.05, 0.06) * scatter;
+    return fogCol;
+}
+
+// ============================ pixel shader ============================
+float4 PSMain(VSOut input) : SV_TARGET
+{
+    float2 uv = saturate(input.uv);     // 0..1 screen uv (top-left origin)
+    float ty = uv.y;                    // vertical gradient param
+    float aspect = resolution.x / max(resolution.y, 1.0);
+
+    // view ray for the cloud raymarch (camera pitched up slightly; vertical squash)
+    float3 ro = float3(0.0, 0.0, 0.0);
+    float3 rd = normalize(float3((uv.x - 0.5) * aspect, (0.62 - uv.y) * 0.9 + 0.18, 1.0));
+
+    float3 col;
+
+    if (condition == 0)                 // ---- Clear ----
+    {
+        col = clearSky(ty);
+        // sun glow upper-left + caustic light spots
+        float2 sun = float2(0.28, 0.18);
+        float sd = length((uv - sun) * float2(aspect, 1.0));
+        col += float3(1.0, 0.95, 0.8) * smoothstep(0.45, 0.0, sd) * 0.5;
+        float caustic = fbm2(uv * 6.0 + time * 0.1, 4);
+        col += float3(1.0, 0.98, 0.9) * smoothstep(0.6, 0.95, caustic) * 0.12;
+        // a faint hint of stars high in a clear sky on the dark top
+        col += starfield(uv) * smoothstep(0.5, 0.0, ty) * 0.15;
+    }
+    else if (condition == 1)            // ---- Cloudy ----
+    {
+        float3 baseSky = lerp(float3(0.55, 0.62, 0.74), float3(0.78, 0.82, 0.88), ty);
+        float coverage = 0.72;
+        float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
+        col = lerp(baseSky, clouds.rgb, clouds.a);
+    }
+    else if (condition == 2)            // ---- Rainy ----
+    {
+        col = stormSky(ty);
+        float coverage = 0.85;
+        float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.2, 0.2, 0.26), float3(0.6, 0.6, 0.7));
+        col = lerp(col, clouds.rgb * 0.5, clouds.a);
+        col += rainComposite(uv, 1.0, 0.18);
+        // bottom atmospheric fog
+        col = lerp(col, float3(0.5, 0.5, 0.55), smoothstep(0.7, 1.0, ty) * 0.25);
+    }
+    else if (condition == 3)            // ---- Stormy ----
+    {
+        col = stormSky(ty) * 0.85;
+        float coverage = 0.92;
+        float4 clouds = raymarchClouds(ro, rd, coverage, float3(0.15, 0.15, 0.2), float3(0.5, 0.5, 0.6));
+        col = lerp(col, clouds.rgb * 0.4, clouds.a);
+        col += rainComposite(uv, 1.5, 0.4);    // x1.5 density, steeper slant
+        col = lerp(col, float3(0.45, 0.45, 0.5), smoothstep(0.65, 1.0, ty) * 0.3);
+        // lightning: randomized flash, full-screen white
+        float flashSeed = floor(time / 8.0);
+        float flashT = frac(time / 8.0);
+        float trigger = step(0.85, hash11(flashSeed));     // ~15% of windows fire
+        float flash = trigger * exp(-flashT * 14.0) * (0.6 + 0.4 * hash11(flashSeed + 7.0));
+        col += float3(1.0, 1.0, 1.0) * flash * 0.8;
+    }
+    else if (condition == 4)            // ---- Snowy ----
+    {
+        col = snowSky(ty);
+        // soft sun-through-cloud halo at (0.3w, 0.15h)
+        float2 halo = float2(0.3, 0.15);
+        float hd = length((uv - halo) * float2(aspect, 1.0));
+        col += float3(1.0, 0.98, 0.95) * smoothstep(0.35, 0.0, hd) * 0.18;
+        col += snowComposite(uv);
+        // cold color grade + faint vignette
+        col = lerp(col, col * float3(0.85, 0.90, 1.0), 0.15);
+    }
+    else if (condition == 5)            // ---- Foggy ----
+    {
+        float3 baseSky = lerp(float3(0.55, 0.57, 0.6), float3(0.78, 0.80, 0.82), ty);
+        float fogAlpha;
+        float3 fog = fogComposite(uv, 0.6, fogAlpha);
+        col = lerp(baseSky, fog, saturate(fogAlpha * 1.4));
+    }
+    else                                // ---- Haze (6) ----
+    {
+        float3 baseSky = lerp(float3(0.62, 0.60, 0.52), float3(0.80, 0.76, 0.66), ty);
+        // 3 drifting warm yellow-grey particulate layers reducing contrast
+        float h0 = fbm2(uv * 3.0 + float2(time * 0.02, 0.0), 4);
+        float h1 = fbm2(uv * 5.0 - float2(time * 0.015, 0.0), 4);
+        float h2 = fbm2(uv * 8.0 + float2(time * 0.01, time * 0.005), 3);
+        float haze = saturate(h0 * 0.5 + h1 * 0.3 + h2 * 0.2);
+        float3 hazeCol = float3(0.80, 0.74, 0.62);          // warm-grey particulate
+        col = lerp(baseSky, hazeCol, haze * 0.55);
+        col = lerp(col, float3(0.78, 0.75, 0.68), 0.15);    // contrast reduction
+    }
+
+    // ---- night starfield base shows through on the clear night theme (low-light scenes) ----
+    // (already added to Clear; leave others as-is so the weather reads clearly)
+
+    // ---- finish: Reinhard tonemap + gamma + vignette ----
+    col = col / (col + 1.0);                                // Reinhard
+    col = pow(saturate(col), 1.0 / 2.2);                    // gamma
+    float2 vd = uv - 0.5;
+    float vig = smoothstep(0.95, 0.35, length(vd) * 1.25);
+    col *= lerp(0.78, 1.0, vig);
+
+    return float4(col, 1.0);
+}
+";
 }
