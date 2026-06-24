@@ -72,6 +72,37 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["Working set"] = "SysMonCaption.WorkingSet",
             ["Storage"] = "SysMonCaption.Storage",
             ["Adapters"] = "SysMonCaption.Adapters",
+            // Sidebar nav titles (FeatureCatalogClient feeds FeatureEntry.Title as the canonical
+            // English key; FeatureCatalogClient localizes the rendered Title through Localize()).
+            ["Dashboard"] = "Nav.Dashboard",
+            ["Device Discovery"] = "Nav.DeviceDiscovery",
+            ["USB Management"] = "Nav.UsbManagement",
+            ["File Transfer"] = "Nav.FileTransfer",
+            ["Remote Desktop"] = "Nav.RemoteDesktop",
+            ["System Monitor"] = "Nav.SystemMonitor",
+            ["Settings"] = "Nav.Settings",
+            // NOTE: the Settings left sub-nav tab names are NOT in this string-keyed map. Two of
+            // them ("Advanced", "Network") collide with SysMon indicator/metric labels above that
+            // want a DIFFERENT translation, so settings tabs resolve by SettingsTab.* RESOURCE KEY
+            // via LocalizeByResourceKey (see SettingsTabResourceKey + the SettingsTab.* fallback
+            // rows below). "Dashboard"/"File Transfer"/"Remote Desktop"/"System Monitor"/"Settings"
+            // are unambiguous and shared with the Nav.* keys (identical text).
+        };
+
+    // Settings left sub-nav tab Title (stable English key) -> SettingsTab.* / Nav.* resource key.
+    // Kept SEPARATE from the string map above so the colliding "Advanced"/"Network" tab names get
+    // their own (tab-specific) translation instead of the SysMon indicator/metric one.
+    private static readonly Dictionary<string, string> SettingsTabResourceKey =
+        new(StringComparer.Ordinal)
+        {
+            ["General"] = "SettingsTab.General",
+            ["Network"] = "SettingsTab.Network",
+            ["Devices"] = "SettingsTab.Devices",
+            ["File Transfer"] = "Nav.FileTransfer",
+            ["Remote Desktop"] = "Nav.RemoteDesktop",
+            ["System Monitor"] = "Nav.SystemMonitor",
+            ["Permissions"] = "SettingsTab.Permissions",
+            ["Advanced"] = "SettingsTab.Advanced",
         };
 
     // In-code trilingual fallback, keyed by resource key then language fold ("en"/"zh"/"ja").
@@ -101,6 +132,20 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["SysMonCaption.WorkingSet"] = new() { ["en"] = "Working set", ["zh"] = "工作集", ["ja"] = "ワーキングセット" },
             ["SysMonCaption.Storage"] = new() { ["en"] = "Storage", ["zh"] = "存储", ["ja"] = "ストレージ" },
             ["SysMonCaption.Adapters"] = new() { ["en"] = "Adapters", ["zh"] = "适配器", ["ja"] = "アダプター" },
+            // Sidebar nav titles (mirror the Mac NavigationItem.localizedTitle).
+            ["Nav.Dashboard"] = new() { ["en"] = "Dashboard", ["zh"] = "主控台", ["ja"] = "ダッシュボード" },
+            ["Nav.DeviceDiscovery"] = new() { ["en"] = "Device Discovery", ["zh"] = "设备发现", ["ja"] = "デバイス検出" },
+            ["Nav.UsbManagement"] = new() { ["en"] = "USB Management", ["zh"] = "USB 管理", ["ja"] = "USB 管理" },
+            ["Nav.FileTransfer"] = new() { ["en"] = "File Transfer", ["zh"] = "文件传输", ["ja"] = "ファイル転送" },
+            ["Nav.RemoteDesktop"] = new() { ["en"] = "Remote Desktop", ["zh"] = "远程桌面", ["ja"] = "リモートデスクトップ" },
+            ["Nav.SystemMonitor"] = new() { ["en"] = "System Monitor", ["zh"] = "系统监控", ["ja"] = "システムモニター" },
+            ["Nav.Settings"] = new() { ["en"] = "Settings", ["zh"] = "设置", ["ja"] = "設定" },
+            // Settings left sub-nav tab names (mirror the Mac SettingsView tab localizedName).
+            ["SettingsTab.General"] = new() { ["en"] = "General", ["zh"] = "通用", ["ja"] = "一般" },
+            ["SettingsTab.Network"] = new() { ["en"] = "Network", ["zh"] = "网络", ["ja"] = "ネットワーク" },
+            ["SettingsTab.Devices"] = new() { ["en"] = "Devices", ["zh"] = "设备", ["ja"] = "デバイス" },
+            ["SettingsTab.Permissions"] = new() { ["en"] = "Permissions", ["zh"] = "权限", ["ja"] = "権限" },
+            ["SettingsTab.Advanced"] = new() { ["en"] = "Advanced", ["zh"] = "高级", ["ja"] = "詳細設定" },
         };
 
     // Lazily-created MRT Core manager (shared; cheap to reuse). null if construction fails.
@@ -156,6 +201,58 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
 
         // Last resort: the canonical English the caller passed in.
         return input;
+    }
+
+    /// <summary>
+    /// Localizes the Settings left sub-nav tab name from its stable English tab Title to the
+    /// active UI language. Kept separate from <see cref="Localize"/> because two tab names
+    /// ("Advanced", "Network") collide with SysMon indicator/metric labels that want a different
+    /// translation; this resolves through a tab-specific Title -> resource-key map. Unknown tab
+    /// titles pass through verbatim (honest fallback). Used by SettingsTabItemView.DisplayName.
+    /// </summary>
+    public static string LocalizeSettingsTab(string title)
+    {
+        if (string.IsNullOrEmpty(title))
+        {
+            return title;
+        }
+
+        if (!SettingsTabResourceKey.TryGetValue(title, out var resourceKey))
+        {
+            return title;
+        }
+
+        return LocalizeByResourceKey(resourceKey, title);
+    }
+
+    /// <summary>
+    /// Resolves one resource key (e.g. "SettingsTab.General") to the active UI language using the
+    /// SAME resw-first / dictionary-fallback path as <see cref="Localize"/>, falling back to the
+    /// supplied English text if neither source has the key. Lets callers that already know the
+    /// resource key (rather than a canonical English string) reuse the shared resolution.
+    /// </summary>
+    public static string LocalizeByResourceKey(string resourceKey, string fallbackEnglish)
+    {
+        if (string.IsNullOrEmpty(resourceKey))
+        {
+            return fallbackEnglish;
+        }
+
+        var lang = ResolveLanguageFold();
+
+        var fromResw = TryResolveFromResw(resourceKey, lang);
+        if (!string.IsNullOrEmpty(fromResw))
+        {
+            return fromResw!;
+        }
+
+        if (FallbackTable.TryGetValue(resourceKey, out var perLang) &&
+            (perLang.TryGetValue(lang, out var localized) || perLang.TryGetValue("en", out localized)))
+        {
+            return localized;
+        }
+
+        return fallbackEnglish;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)

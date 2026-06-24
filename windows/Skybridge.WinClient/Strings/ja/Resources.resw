@@ -653,4 +653,56 @@
     <value>再起動して適用してください。</value>
     <comment>Shown after the user changes the language: the new language takes full effect on next launch.</comment>
   </data>
+
+  <!-- ============================ Sidebar nav titles (Nav.*) ============================ -->
+  <data name="Nav.Dashboard" xml:space="preserve">
+    <value>ダッシュボード</value>
+    <comment>Sidebar nav title. Mac NavigationItem.dashboard / sidebar.dashboard.</comment>
+  </data>
+  <data name="Nav.DeviceDiscovery" xml:space="preserve">
+    <value>デバイス検出</value>
+    <comment>Sidebar nav title. Mac sidebar.deviceDiscovery.</comment>
+  </data>
+  <data name="Nav.UsbManagement" xml:space="preserve">
+    <value>USB 管理</value>
+    <comment>Sidebar nav title. Mac sidebar.usbManagement / usb.management.title.</comment>
+  </data>
+  <data name="Nav.FileTransfer" xml:space="preserve">
+    <value>ファイル転送</value>
+    <comment>Sidebar nav title. Mac sidebar.fileTransfer. Shared by the Settings "File Transfer" tab.</comment>
+  </data>
+  <data name="Nav.RemoteDesktop" xml:space="preserve">
+    <value>リモートデスクトップ</value>
+    <comment>Sidebar nav title. Mac sidebar.remoteDesktop. Shared by the Settings "Remote Desktop" tab.</comment>
+  </data>
+  <data name="Nav.SystemMonitor" xml:space="preserve">
+    <value>システムモニター</value>
+    <comment>Sidebar nav title. Mac sidebar.systemMonitor. Shared by the Settings "System Monitor" tab.</comment>
+  </data>
+  <data name="Nav.Settings" xml:space="preserve">
+    <value>設定</value>
+    <comment>Sidebar nav title. Mac sidebar.settings.</comment>
+  </data>
+
+  <!-- ============================ Settings left sub-nav tabs (SettingsTab.*) ============================ -->
+  <data name="SettingsTab.General" xml:space="preserve">
+    <value>一般</value>
+    <comment>Settings tab name. Mac SettingsView General tab.</comment>
+  </data>
+  <data name="SettingsTab.Network" xml:space="preserve">
+    <value>ネットワーク</value>
+    <comment>Settings tab name. Mac SettingsView Network tab.</comment>
+  </data>
+  <data name="SettingsTab.Devices" xml:space="preserve">
+    <value>デバイス</value>
+    <comment>Settings tab name. Mac SettingsView Devices tab.</comment>
+  </data>
+  <data name="SettingsTab.Permissions" xml:space="preserve">
+    <value>権限</value>
+    <comment>Settings tab name. Mac SettingsView Permissions tab.</comment>
+  </data>
+  <data name="SettingsTab.Advanced" xml:space="preserve">
+    <value>詳細設定</value>
+    <comment>Settings tab name. Mac SettingsView Advanced tab.</comment>
+  </data>
 </root>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Windows.Input;
+using Skybridge.WinClient.Converters;
 using Skybridge.WinClient.Services;
 
 namespace Skybridge.WinClient.ViewModels;
@@ -16,25 +17,16 @@ public sealed record SettingsTabItemView(
 {
     public string Glyph => ResolveGlyph(Title);
 
-    // The localized (zh) label shown in the left sub-nav. The Mac SettingsView sidebar
-    // lists each tab by its localizedName (通用 / 网络 / 设备 / …) with NO subtitle; the
-    // Windows port mirrors that exactly. Title stays the stable English key (the
-    // SettingsTabKeyVisibilityConverter matches the right-pane UserControl against it and
-    // the detail re-projection groups on Section == Title); DisplayName is view-only.
-    public string DisplayName => ResolveDisplayName(Title);
-
-    private static string ResolveDisplayName(string title) => title switch
-    {
-        "General" => "通用",
-        "Network" => "网络",
-        "Devices" => "设备",
-        "File Transfer" => "文件传输",
-        "Remote Desktop" => "远程桌面",
-        "System Monitor" => "系统监控",
-        "Permissions" => "权限",
-        "Advanced" => "高级",
-        _ => title
-    };
+    // The localized label shown in the left sub-nav (zh/ja/en for the active UI language). The
+    // Mac SettingsView sidebar lists each tab by its localizedName (通用 / 网络 / 设备 / …) with
+    // NO subtitle; the Windows port mirrors that exactly. Title stays the stable ENGLISH key (the
+    // SettingsTabKeyVisibilityConverter matches the right-pane UserControl against it and the
+    // detail re-projection groups on Section == Title); DisplayName is view-only and resolves
+    // through the same resw-first/dictionary-fallback table the binding-layer converters use
+    // (SettingsTab.* keys), so a known tab title localizes and an unknown one passes through.
+    // Uses the tab-specific resolver (LocalizeSettingsTab) so the "Advanced"/"Network" tab names
+    // get their tab translation rather than the colliding SysMon indicator/metric translation.
+    public string DisplayName => LabelKeyToLocalizedConverter.LocalizeSettingsTab(Title);
 
     public static SettingsTabItemView FromItem(SettingsTabItem item) =>
         new(item.Title, item.Detail);

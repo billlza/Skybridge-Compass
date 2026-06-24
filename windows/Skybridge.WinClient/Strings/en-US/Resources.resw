@@ -661,4 +661,63 @@
     <value>Restart to apply.</value>
     <comment>Shown after the user changes the language: the new language takes full effect on next launch.</comment>
   </data>
+
+  <!-- ============================ Sidebar nav titles (Nav.* — localized at the model layer by FeatureCatalogClient via LabelKeyToLocalizedConverter.Localize) ============================
+       Data-bound through NavigationItemTemplate's {Binding Title} + the header {Binding
+       SelectedFeature.Title}. The FeatureEntry.Title VALUE is localized; the canonical English
+       string ("Dashboard"/…) stays the stable converter key. FeatureEntryId (NOT Title) is the
+       gate-asserted identity. No ".Text" suffix: looked up by raw key (same convention as Status.*). -->
+  <data name="Nav.Dashboard" xml:space="preserve">
+    <value>Dashboard</value>
+    <comment>Sidebar nav title. Mac NavigationItem.dashboard / sidebar.dashboard.</comment>
+  </data>
+  <data name="Nav.DeviceDiscovery" xml:space="preserve">
+    <value>Device Discovery</value>
+    <comment>Sidebar nav title. Mac sidebar.deviceDiscovery.</comment>
+  </data>
+  <data name="Nav.UsbManagement" xml:space="preserve">
+    <value>USB Management</value>
+    <comment>Sidebar nav title. Mac sidebar.usbManagement / usb.management.title.</comment>
+  </data>
+  <data name="Nav.FileTransfer" xml:space="preserve">
+    <value>File Transfer</value>
+    <comment>Sidebar nav title. Mac sidebar.fileTransfer. Shared by the Settings "File Transfer" tab.</comment>
+  </data>
+  <data name="Nav.RemoteDesktop" xml:space="preserve">
+    <value>Remote Desktop</value>
+    <comment>Sidebar nav title. Mac sidebar.remoteDesktop. Shared by the Settings "Remote Desktop" tab.</comment>
+  </data>
+  <data name="Nav.SystemMonitor" xml:space="preserve">
+    <value>System Monitor</value>
+    <comment>Sidebar nav title. Mac sidebar.systemMonitor. Shared by the Settings "System Monitor" tab.</comment>
+  </data>
+  <data name="Nav.Settings" xml:space="preserve">
+    <value>Settings</value>
+    <comment>Sidebar nav title. Mac sidebar.settings.</comment>
+  </data>
+
+  <!-- ============================ Settings left sub-nav tabs (SettingsTab.* — localized at the model layer by SettingsTabItemView.DisplayName via LabelKeyToLocalizedConverter.Localize) ============================
+       The {Binding DisplayName} in SettingsTabItemTemplate. The English tab Title stays the stable
+       key SettingsTabKeyToVisibilityConverter groups the right pane against (Section == Title).
+       File Transfer / Remote Desktop / System Monitor reuse the Nav.* keys above (identical text). -->
+  <data name="SettingsTab.General" xml:space="preserve">
+    <value>General</value>
+    <comment>Settings tab name. Mac SettingsView General tab.</comment>
+  </data>
+  <data name="SettingsTab.Network" xml:space="preserve">
+    <value>Network</value>
+    <comment>Settings tab name. Mac SettingsView Network tab.</comment>
+  </data>
+  <data name="SettingsTab.Devices" xml:space="preserve">
+    <value>Devices</value>
+    <comment>Settings tab name. Mac SettingsView Devices tab.</comment>
+  </data>
+  <data name="SettingsTab.Permissions" xml:space="preserve">
+    <value>Permissions</value>
+    <comment>Settings tab name. Mac SettingsView Permissions tab.</comment>
+  </data>
+  <data name="SettingsTab.Advanced" xml:space="preserve">
+    <value>Advanced</value>
+    <comment>Settings tab name. Mac SettingsView Advanced tab.</comment>
+  </data>
 </root>
