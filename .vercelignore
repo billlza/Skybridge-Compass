@@ -1,0 +1,15 @@
+.env
+.env.*
+.env*.local
+.vercel
+.git
+node_modules
+.pnpm
+.pnpm-store
+dist
+dist-ssr
+target
+rust-backend/target
+coverage
+.DS_Store
+*.log
