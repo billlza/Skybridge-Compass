@@ -18,54 +18,54 @@ interface FormErrors {
   [fieldName: string]: string;
 }
 
+// 用户ID验证规则
+const USER_ID_RULES: ValidationRule[] = [
+  {
+    test: (value: string) => /^[a-zA-Z0-9_\u4e00-\u9fff-]+$/.test(value),
+    message: '用户ID只能包含字母、数字、汉字、下划线和连字符'
+  },
+  {
+    test: (value: string) => value.length >= 3 && value.length <= 30,
+    message: '用户ID长度必须在3-30个字符之间'
+  }
+];
+
+// 邮箱验证规则
+const EMAIL_RULES: ValidationRule[] = [
+  {
+    test: (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+    message: '请输入有效的邮箱地址'
+  }
+];
+
+// 手机号验证规则
+const PHONE_RULES: ValidationRule[] = [
+  {
+    test: (value: string) => /^1[3-9]\d{9}$/.test(value),
+    message: '请输入有效的中国大陆手机号码'
+  }
+];
+
+// 密码验证规则
+const PASSWORD_RULES: ValidationRule[] = [
+  {
+    test: (value: string) => value.length >= 8,
+    message: '密码长度不能少于8位'
+  }
+];
+
+// 预定义规则集合
+const PREDEFINED_RULES = {
+  userId: USER_ID_RULES,
+  nebulaId: USER_ID_RULES, // 星云ID使用相同规则
+  email: EMAIL_RULES,
+  phone: PHONE_RULES,
+  password: PASSWORD_RULES
+};
+
 export function useFormValidation(rules: ValidationRules) {
   const [errors, setErrors] = useState<FormErrors>({});
   const { safeSetState } = useSafeComponent();
-
-  // 用户ID验证规则
-  const USER_ID_RULES: ValidationRule[] = [
-    {
-      test: (value: string) => /^[a-zA-Z0-9_\u4e00-\u9fff-]+$/.test(value),
-      message: '用户ID只能包含字母、数字、汉字、下划线和连字符'
-    },
-    {
-      test: (value: string) => value.length >= 3 && value.length <= 30,
-      message: '用户ID长度必须在3-30个字符之间'
-    }
-  ];
-
-  // 邮箱验证规则
-  const EMAIL_RULES: ValidationRule[] = [
-    {
-      test: (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
-      message: '请输入有效的邮箱地址'
-    }
-  ];
-
-  // 手机号验证规则
-  const PHONE_RULES: ValidationRule[] = [
-    {
-      test: (value: string) => /^1[3-9]\d{9}$/.test(value),
-      message: '请输入有效的中国大陆手机号码'
-    }
-  ];
-
-  // 密码验证规则
-  const PASSWORD_RULES: ValidationRule[] = [
-    {
-      test: (value: string) => value.length >= 8,
-      message: '密码长度不能少于8位'
-    }
-  ];
-
-  // 预定义规则集合
-  const PREDEFINED_RULES = {
-    userId: USER_ID_RULES,
-    nebulaId: USER_ID_RULES, // 星云ID使用相同规则
-    email: EMAIL_RULES,
-    phone: PHONE_RULES,
-    password: PASSWORD_RULES
-  };
 
   // 验证单个字段
   const validateField = useCallback((fieldName: string, value: string): string | null => {

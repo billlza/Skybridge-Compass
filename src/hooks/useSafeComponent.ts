@@ -122,22 +122,23 @@ export function useSafeComponent() {
 
   // 组件生命周期管理
   useEffect(() => {
-    stateRef.current.isMounted = true;
+    const state = stateRef.current;
+    state.isMounted = true;
 
     return () => {
       // 立即标记为已卸载
-      stateRef.current.isMounted = false;
-      stateRef.current.isSubmitting = false;
+      state.isMounted = false;
+      state.isSubmitting = false;
 
       // 清理所有定时器
-      stateRef.current.timers.forEach(timerId => {
+      state.timers.forEach(timerId => {
         try {
           clearTimeout(timerId);
         } catch (error) {
           console.warn('Timer cleanup failed:', error);
         }
       });
-      stateRef.current.timers.clear();
+      state.timers.clear();
     };
   }, []);
 

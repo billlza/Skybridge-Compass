@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from './lib/queryClient';
 import { AuthProvider } from './contexts/AuthContext';
@@ -32,6 +32,16 @@ function RouteFallback() {
   );
 }
 
+function RoutedBackground() {
+  const location = useLocation();
+
+  if (location.pathname === '/') {
+    return null;
+  }
+
+  return <StarryBackground />;
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -39,9 +49,9 @@ function App() {
         <AuthProvider>
           <Router>
             <div className="min-h-screen bg-black relative overflow-hidden">
-              {/* Starry Background */}
+              {/* Global background for non-home routes; the homepage owns its realtime cinematic field. */}
               <ErrorBoundary>
-                <StarryBackground />
+                <RoutedBackground />
               </ErrorBoundary>
               
               {/* Navigation */}

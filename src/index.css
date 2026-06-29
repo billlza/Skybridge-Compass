@@ -1,5 +1,53 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/fonts/instrument-serif-400-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/fonts/instrument-serif-italic-400-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("/fonts/barlow-300-latin.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("/fonts/barlow-400-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("/fonts/barlow-500-latin.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("/fonts/barlow-600-latin.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* TailwindCSS 4.0 Theme Configuration */
 @theme {
   /* Custom colors */
@@ -63,6 +111,136 @@
 
 /* Custom component styles */
 @layer components {
+  .font-heading {
+    font-family: "Instrument Serif", "Songti SC", "STSong", Georgia, serif;
+  }
+
+  .font-body {
+    font-family: "Barlow", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .liquid-glass {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.035)),
+      rgba(5, 10, 24, 0.32);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      0 24px 60px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+  }
+
+  .liquid-glass::before {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.16), transparent 42%),
+      radial-gradient(circle at 20% 0%, rgba(94, 234, 212, 0.12), transparent 44%),
+      radial-gradient(circle at 90% 10%, rgba(129, 140, 248, 0.12), transparent 48%);
+    opacity: 0.9;
+    pointer-events: none;
+  }
+
+  .liquid-glass-strong {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background:
+      linear-gradient(135deg, rgba(45, 212, 191, 0.34), rgba(59, 130, 246, 0.24) 48%, rgba(124, 58, 237, 0.26)),
+      rgba(8, 13, 28, 0.58);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      0 22px 56px rgba(14, 165, 233, 0.18);
+    backdrop-filter: blur(26px) saturate(160%);
+    -webkit-backdrop-filter: blur(26px) saturate(160%);
+    transition:
+      transform 240ms ease,
+      border-color 240ms ease,
+      box-shadow 240ms ease,
+      background-color 240ms ease;
+  }
+
+  .liquid-glass-strong:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.3);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.28),
+      0 28px 68px rgba(14, 165, 233, 0.24);
+  }
+
+  .cinematic-hero {
+    background:
+      radial-gradient(circle at 16% 18%, rgba(20, 184, 166, 0.2), transparent 30%),
+      radial-gradient(circle at 78% 10%, rgba(99, 102, 241, 0.18), transparent 34%),
+      #020617;
+  }
+
+  .cinematic-media {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .cinematic-poster {
+    opacity: 0.82;
+    transform: scale(1.03);
+  }
+
+  .cinematic-video {
+    opacity: 0.72;
+    filter: saturate(112%) contrast(104%);
+  }
+
+  .cinematic-vignette {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background:
+      radial-gradient(circle at 62% 38%, transparent 0%, rgba(2, 6, 23, 0.16) 38%, rgba(2, 6, 23, 0.78) 100%),
+      linear-gradient(90deg, rgba(2, 6, 23, 0.82) 0%, rgba(2, 6, 23, 0.28) 44%, rgba(2, 6, 23, 0.74) 100%),
+      linear-gradient(180deg, rgba(2, 6, 23, 0.22) 0%, rgba(2, 6, 23, 0.2) 54%, #000 100%);
+  }
+
+  .cinematic-light-sweep {
+    position: absolute;
+    inset: -20% auto auto -15%;
+    z-index: 3;
+    width: 52%;
+    height: 140%;
+    background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, 0.09) 48%, transparent 70%);
+    transform: rotate(9deg);
+    animation: cinematicSweep 10s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  .cinematic-scan-lines {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    opacity: 0.12;
+    background-image: linear-gradient(rgba(255, 255, 255, 0.16) 1px, transparent 1px);
+    background-size: 100% 7px;
+    mix-blend-mode: screen;
+  }
+
+  .cinematic-mini-sweep {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(112deg, transparent 0%, rgba(255, 255, 255, 0.12) 44%, transparent 62%);
+    transform: translateX(-58%);
+    animation: cinematicMiniSweep 7s ease-in-out infinite;
+    pointer-events: none;
+  }
+
   .btn {
     @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 focus:outline-hidden;
   }
@@ -338,6 +516,34 @@
   }
 }
 
+@keyframes cinematicSweep {
+  0%, 34% {
+    opacity: 0;
+    transform: translateX(-42%) rotate(9deg);
+  }
+  52% {
+    opacity: 0.65;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(235%) rotate(9deg);
+  }
+}
+
+@keyframes cinematicMiniSweep {
+  0%, 45% {
+    opacity: 0;
+    transform: translateX(-58%);
+  }
+  62% {
+    opacity: 0.8;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(70%);
+  }
+}
+
 /* Performance optimizations */
 * {
   box-sizing: border-box;
@@ -359,7 +565,14 @@ img {
   }
 
   .apple-glass-panel-interactive:hover,
-  .apple-glass-cta:hover {
+  .apple-glass-cta:hover,
+  .liquid-glass-strong:hover {
     transform: none !important;
+  }
+
+  .cinematic-light-sweep,
+  .cinematic-mini-sweep,
+  .cinematic-scan-lines {
+    animation: none !important;
   }
 }

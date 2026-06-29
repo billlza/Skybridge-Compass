@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { BRAND_NAME, PRODUCT_SHORT_NAME } from '../lib/branding';
 import { getPreferredDisplayName } from '../lib/userDisplay';
 

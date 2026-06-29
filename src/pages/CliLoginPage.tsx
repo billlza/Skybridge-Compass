@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { approveCliLoginSession, fetchCliLoginSession, type CliLoginSession } from '../lib/cliLogin';
 
 function formatExpiry(isoValue: string) {

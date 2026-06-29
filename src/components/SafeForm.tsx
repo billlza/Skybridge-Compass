@@ -58,8 +58,9 @@ export const SafeForm: React.FC<SafeFormProps> = ({
 
   // 只在组件卸载时做最小清理，避免在重渲染时替换 React 管理的表单节点。
   useEffect(() => {
+    const form = formRef.current;
+
     return () => {
-      const form = formRef.current;
       if (!form) return;
 
       try {

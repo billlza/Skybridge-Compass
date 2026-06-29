@@ -5,7 +5,7 @@ import {
   unbindAccount,
   getUserBindingStatus
 } from '../lib/supabase';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { getPreferredNebulaId } from '../lib/userDisplay';
 
 interface AccountBindingV2Props {

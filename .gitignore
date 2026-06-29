@@ -36,6 +36,5 @@ rust-backend/target/
 
 # Package manager
 .pnpm-store
-pnpm-lock.yaml
 .vercel
 .env*.local

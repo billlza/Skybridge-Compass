@@ -4,7 +4,7 @@
  */
 import React, { useState, useCallback, useEffect } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import useSafeComponent from '../hooks/useSafeComponent';
 import useFormValidation from '../hooks/useFormValidation';
 import SafeForm from '../components/SafeForm';
@@ -47,6 +47,20 @@ const INITIAL_FORM_DATA: FormData = {
 };
 
 const WEBSITE_REGISTRATION_SOURCE = 'SkyBridge Compass Website';
+const CONSTELLATIONS = [
+  { value: 'Andromeda', label: 'Andromeda 仙女座', description: '守护智慧与美丽' },
+  { value: 'Gemini', label: 'Gemini 双子座', description: '守护沟通与灵活' },
+  { value: 'Virgo', label: 'Virgo 处女座', description: '守护完美与精确' },
+  { value: 'Libra', label: 'Libra 天秤座', description: '守护平衡与和谐' },
+  { value: 'Scorpio', label: 'Scorpio 天蝎座', description: '守护深度与变革' },
+  { value: 'Cygnus', label: 'Cygnus 天鹅座', description: '守护优雅与高贵' },
+  { value: 'Sagittarius', label: 'Sagittarius 射手座', description: '守护自由与探索' },
+  { value: 'Cancer', label: 'Cancer 巨蟹座', description: '守护关怀与保护' },
+  { value: 'Aquarius', label: 'Aquarius 水瓶座', description: '守护创新与未来' },
+  { value: 'Leo', label: 'Leo 狮子座', description: '守护勇气与领导' },
+  { value: 'Orion', label: 'Orion 猎户座', description: '守护力量与决心' },
+  { value: 'Taurus', label: 'Taurus 金牛座', description: '守护稳定与财富' }
+];
 
 const SecureAuthPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -127,22 +141,6 @@ const SecureAuthPage: React.FC = () => {
       rememberPostAuthRedirect(redirectAfterAuth);
     }
   }, [redirectAfterAuth]);
-
-  // 星座数据
-  const constellations = [
-    { value: 'Andromeda', label: 'Andromeda 仙女座', description: '守护智慧与美丽' },
-    { value: 'Gemini', label: 'Gemini 双子座', description: '守护沟通与灵活' },
-    { value: 'Virgo', label: 'Virgo 处女座', description: '守护完美与精确' },
-    { value: 'Libra', label: 'Libra 天秤座', description: '守护平衡与和谐' },
-    { value: 'Scorpio', label: 'Scorpio 天蝎座', description: '守护深度与变革' },
-    { value: 'Cygnus', label: 'Cygnus 天鹅座', description: '守护优雅与高贵' },
-    { value: 'Sagittarius', label: 'Sagittarius 射手座', description: '守护自由与探索' },
-    { value: 'Cancer', label: 'Cancer 巨蟹座', description: '守护关怀与保护' },
-    { value: 'Aquarius', label: 'Aquarius 水瓶座', description: '守护创新与未来' },
-    { value: 'Leo', label: 'Leo 狮子座', description: '守护勇气与领导' },
-    { value: 'Orion', label: 'Orion 猎户座', description: '守护力量与决心' },
-    { value: 'Taurus', label: 'Taurus 金牛座', description: '守护稳定与财富' }
-  ];
 
   const resetPhoneOtpState = useCallback(() => {
     safeSetState(setPhoneOtpSent, false);
@@ -321,67 +319,6 @@ const SecureAuthPage: React.FC = () => {
     }, 1000); // 稳定的延迟时间
   }, [isMounted, safeSetState, safeSetTimeout, navigate, redirectAfterAuth]);
 
-  // 主表单提交处理
-  const handleSubmit = useCallback(async () => {
-    if (!isMounted()) {
-      return;
-    }
-
-    if (mode === 'login' && loginMethod === 'nebula' && nebulaOAuthConfigured) {
-      await handleNebulaBrowserAuth('login');
-      return;
-    }
-
-    const formDataForValidation: Record<string, string> = {};
-
-    if (mode === 'login') {
-      if (loginMethod === 'email') {
-        formDataForValidation.email = formData.email;
-        formDataForValidation.password = formData.password;
-      } else if (loginMethod === 'phone') {
-        formDataForValidation.phone = formData.phone;
-      } else {
-        formDataForValidation.nebulaId = formData.nebulaId;
-        formDataForValidation.password = formData.password;
-      }
-    } else if (registerMethod === 'email') {
-      formDataForValidation.email = formData.email;
-      formDataForValidation.password = formData.password;
-      formDataForValidation.confirmPassword = formData.confirmPassword;
-    } else if (registerMethod === 'phone') {
-      formDataForValidation.phone = formData.phone;
-      formDataForValidation.email = formData.email;
-    } else {
-      formDataForValidation.constellation = formData.constellation;
-      formDataForValidation.email = formData.email;
-      formDataForValidation.password = formData.password;
-      formDataForValidation.confirmPassword = formData.confirmPassword;
-    }
-    
-    if (!validateForSubmit(formDataForValidation)) {
-      return;
-    }
-
-    safeSetState(setError, '');
-    safeSetState(setSuccess, '');
-    safeSetState(setIsLoading, true);
-
-    try {
-      if (mode === 'register') {
-        await handleRegisterFlow();
-      } else {
-        await handleLoginFlow();
-      }
-    } catch (err: any) {
-      console.error('SecureAuthPage: Submit error:', err);
-      safeSetState(setError, err.message || '操作失败，请稍后重试');
-    } finally {
-      if (isMounted()) {
-        safeSetState(setIsLoading, false);
-      }
-    }
-  }, [isMounted, safeSetState, validateForSubmit, formData, mode, loginMethod, registerMethod, nebulaOAuthConfigured, handleNebulaBrowserAuth]);
-
   // 注册流程处理
   const handleRegisterFlow = useCallback(async () => {
     const normalizedEmail = formData.email.trim().toLowerCase();
@@ -453,7 +390,7 @@ const SecureAuthPage: React.FC = () => {
         throw new Error('请输入邮箱地址用于接收验证邮件');
       }
 
-      const constellation = constellations.find(c => c.value === formData.constellation);
+      const constellation = CONSTELLATIONS.find(c => c.value === formData.constellation);
       email = normalizedEmail;
       metadata = {
         account_type: 'constellation',
@@ -508,7 +445,7 @@ const SecureAuthPage: React.FC = () => {
           : `注册成功！您的 Nebula ID 是：${nebulaId}，请检查邮箱完成验证。`;
       handleRegisterSuccess(successMessage);
     }
-  }, [formData, registerMethod, constellations, signUp, verifyOTP, phoneOtpSent, isMounted, handleRegisterSuccess, resetPhoneOtpState, syncWebsiteProfile]);
+  }, [formData, registerMethod, signUp, verifyOTP, phoneOtpSent, isMounted, handleRegisterSuccess, resetPhoneOtpState, syncWebsiteProfile]);
 
   // 登录流程处理
   const handleLoginFlow = useCallback(async () => {
@@ -540,6 +477,79 @@ const SecureAuthPage: React.FC = () => {
       handleLoginSuccess();
     }
   }, [formData, loginMethod, phoneOtpSent, signIn, signInNebula, verifyOTP, resetPhoneOtpState, isMounted, handleLoginSuccess]);
+
+  // 主表单提交处理
+  const handleSubmit = useCallback(async () => {
+    if (!isMounted()) {
+      return;
+    }
+
+    if (mode === 'login' && loginMethod === 'nebula' && nebulaOAuthConfigured) {
+      await handleNebulaBrowserAuth('login');
+      return;
+    }
+
+    const formDataForValidation: Record<string, string> = {};
+
+    if (mode === 'login') {
+      if (loginMethod === 'email') {
+        formDataForValidation.email = formData.email;
+        formDataForValidation.password = formData.password;
+      } else if (loginMethod === 'phone') {
+        formDataForValidation.phone = formData.phone;
+      } else {
+        formDataForValidation.nebulaId = formData.nebulaId;
+        formDataForValidation.password = formData.password;
+      }
+    } else if (registerMethod === 'email') {
+      formDataForValidation.email = formData.email;
+      formDataForValidation.password = formData.password;
+      formDataForValidation.confirmPassword = formData.confirmPassword;
+    } else if (registerMethod === 'phone') {
+      formDataForValidation.phone = formData.phone;
+      formDataForValidation.email = formData.email;
+    } else {
+      formDataForValidation.constellation = formData.constellation;
+      formDataForValidation.email = formData.email;
+      formDataForValidation.password = formData.password;
+      formDataForValidation.confirmPassword = formData.confirmPassword;
+    }
+
+    if (!validateForSubmit(formDataForValidation)) {
+      return;
+    }
+
+    safeSetState(setError, '');
+    safeSetState(setSuccess, '');
+    safeSetState(setIsLoading, true);
+
+    try {
+      if (mode === 'register') {
+        await handleRegisterFlow();
+      } else {
+        await handleLoginFlow();
+      }
+    } catch (err: any) {
+      console.error('SecureAuthPage: Submit error:', err);
+      safeSetState(setError, err.message || '操作失败，请稍后重试');
+    } finally {
+      if (isMounted()) {
+        safeSetState(setIsLoading, false);
+      }
+    }
+  }, [
+    formData,
+    handleLoginFlow,
+    handleNebulaBrowserAuth,
+    handleRegisterFlow,
+    isMounted,
+    loginMethod,
+    mode,
+    nebulaOAuthConfigured,
+    registerMethod,
+    safeSetState,
+    validateForSubmit,
+  ]);
 
   // 获取登录输入框的相关信息
   const getLoginInfo = useCallback(() => {
@@ -575,7 +585,7 @@ const SecureAuthPage: React.FC = () => {
     }
   }, [loginMethod, formData]);
 
-  const selectedConstellation = constellations.find(c => c.value === formData.constellation);
+  const selectedConstellation = CONSTELLATIONS.find(c => c.value === formData.constellation);
   const loginInfo = getLoginInfo();
 
   return (
@@ -762,7 +772,7 @@ const SecureAuthPage: React.FC = () => {
                           className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white focus:ring-2 focus:ring-blue-500 appearance-none"
                         >
                           <option value="">请选择您的守护星座</option>
-                          {constellations.map(constellation => (
+                          {CONSTELLATIONS.map(constellation => (
                             <option key={constellation.value} value={constellation.value}>
                               {constellation.label}
                             </option>

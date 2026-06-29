@@ -1,7 +1,6 @@
 # Dependencies
 node_modules
 .pnpm-store
-pnpm-lock.yaml
 
 # Development files
 .env.local
@@ -45,4 +44,3 @@ DEPLOYMENT.md
 Dockerfile*
 docker-compose*.yml
 .dockerignore
-

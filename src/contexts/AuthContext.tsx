@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react'
-import { User } from '@supabase/supabase-js'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
+import type { User } from '@supabase/supabase-js'
 import { 
   supabase, 
   getCurrentUser,
@@ -13,36 +13,7 @@ import {
   verifyPhoneOTP, 
   signOut
 } from '../lib/supabase'
-
-interface UserProfile {
-  id: string
-  email: string | null
-  phone: string | null
-  custom_user_id: string | null
-  nebula_id: string | null
-  full_name: string | null
-  account_type: string | null
-  avatar_url: string | null
-  created_at: string
-  updated_at: string
-}
-
-interface AuthContextType {
-  user: User | null
-  userProfile: UserProfile | null
-  loading: boolean
-  refreshProfile: () => Promise<void>
-  signIn: (email: string, password: string) => Promise<any>
-  signInNebula: (nebulaId: string, password: string) => Promise<any>
-  signInPhone: (phone: string, password: string) => Promise<any>
-  signUp: (email: string, password: string, metadata?: any) => Promise<any>
-  signUpPhone: (phone: string, password: string, metadata?: any) => Promise<any>
-  sendOTP: (phone: string) => Promise<any>
-  verifyOTP: (phone: string, token: string) => Promise<any>
-  signOut: () => Promise<any>
-}
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined)
+import { AuthContext, type UserProfile } from './authContextValue'
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -90,6 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 用户状态初始化和监听
   useEffect(() => {
     isMountedRef.current = true
+    const pendingTimeouts = updateTimeoutsRef.current
 
     async function initializeAuth() {
       try {
@@ -222,7 +194,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       isMountedRef.current = false
-      const pendingTimeouts = updateTimeoutsRef.current
       
       // 清理初始化定时器
       if (initTimeoutRef.current) {
@@ -359,12 +330,4 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       {children}
     </AuthContext.Provider>
   )
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext)
-  if (context === undefined) {
-    throw new Error('useAuth 必须在 AuthProvider 内使用')
-  }
-  return context
 }
