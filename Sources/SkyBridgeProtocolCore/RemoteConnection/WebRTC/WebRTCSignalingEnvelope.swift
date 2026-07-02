@@ -61,6 +61,8 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
         public var protocolPublicKeyFingerprint: String?
         public var protocolPublicKeyBytes: Data?
         public var kemPublicKeys: [BootstrapKEMPublicKey]?
+        public var platform: String?
+        public var osVersion: String?
         
         public init(
             sdp: String? = nil,
@@ -70,7 +72,9 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
             protocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil,
             protocolPublicKeyFingerprint: String? = nil,
             protocolPublicKeyBytes: Data? = nil,
-            kemPublicKeys: [BootstrapKEMPublicKey]? = nil
+            kemPublicKeys: [BootstrapKEMPublicKey]? = nil,
+            platform: String? = nil,
+            osVersion: String? = nil
         ) {
             self.sdp = sdp
             self.candidate = candidate
@@ -80,6 +84,8 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
             self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
             self.protocolPublicKeyBytes = protocolPublicKeyBytes
             self.kemPublicKeys = kemPublicKeys
+            self.platform = platform
+            self.osVersion = osVersion
         }
     }
 }

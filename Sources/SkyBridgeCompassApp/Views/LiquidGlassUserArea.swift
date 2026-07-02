@@ -16,6 +16,7 @@ struct LiquidGlassUserArea: View {
     @State private var showingQuickMenu = false
     @State private var checkingForUpdates = false
     @State private var showingAbout = false
+    @State private var cachedAvatar: NSImage?
     
  // MARK: - 动画配置
  // 🔧 优化：使用更快的动画，减少延迟感
@@ -66,6 +67,9 @@ struct LiquidGlassUserArea: View {
                 .padding(.bottom, 16)
         }
         .background(.ultraThinMaterial.opacity(0.8))
+        .task(id: authModel.currentSession?.userIdentifier) {
+            await loadCachedAvatar(for: authModel.currentSession?.userIdentifier)
+        }
     }
     
  // MARK: - Liquid Glass分隔线
@@ -107,7 +111,7 @@ struct LiquidGlassUserArea: View {
     private var userAvatar: some View {
         Group {
             if let userId = authModel.currentSession?.userIdentifier,
-               let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+               let cachedAvatar = cachedAvatar ?? AvatarCacheManager.shared.getAvatar(for: userId) {
  // 真实头像
                 Image(nsImage: cachedAvatar)
                     .resizable()
@@ -298,6 +302,9 @@ struct LiquidGlassUserArea: View {
  // ✅ 兼容性：.menuIndicator(.hidden) 是 macOS 26+ 的特性
             .modifier(MenuIndicatorHiddenModifier())
             .buttonStyle(LiquidGlassButtonStyle())
+ // 让无边框菜单收缩到齿轮图标的固有宽度，否则它会吃掉 Spacer 让出的空间，
+ // 导致齿轮停在左侧；固定尺寸后 Spacer 才能把齿轮推到尾部（右侧）。
+            .fixedSize()
             .help(LocalizationManager.shared.localizedString("profile.quickActions"))
         }
         .sheet(isPresented: $showingAbout) {
@@ -410,6 +417,16 @@ struct LiquidGlassUserArea: View {
     private func openWebsite() {
         if let url = URL(string: "https://skybridge-compass.vercel.app") {
             NSWorkspace.shared.open(url)
+            }
+        }
+
+    private func loadCachedAvatar(for userId: String?) async {
+        cachedAvatar = nil
+        guard let userId else { return }
+        do {
+            cachedAvatar = try await AvatarCacheManager.shared.loadCachedAvatar(for: userId)
+        } catch {
+            SkyBridgeLogger.ui.error("加载头像缓存失败: \(error.localizedDescription, privacy: .private)")
         }
     }
 }

@@ -2420,7 +2420,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
         do {
  // 首先检查本地缓存
-            if AvatarCacheManager.shared.getAvatar(for: session.userIdentifier) != nil {
+            if try await AvatarCacheManager.shared.loadCachedAvatar(for: session.userIdentifier) != nil {
                 SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 从本地缓存加载头像")
                 return
             }

@@ -57,9 +57,13 @@ final class DowngradeEventTests: XCTestCase {
         await fulfillment(of: [fallbackEvent], timeout: 0.5)
 
         let capturedContext = await contextBox.get()
-        XCTAssertEqual(capturedContext["deviceId"], "event-test-device")
-        XCTAssertEqual(capturedContext["reason"], String(describing: HandshakeFailureReason.suiteNegotiationFailed))
+        XCTAssertEqual(capturedContext["deviceId"], SkyBridgeDiagnosticRedaction.redacted)
+        XCTAssertNotEqual(capturedContext["deviceId"], "event-test-device")
+        XCTAssertEqual(capturedContext["reason"], HandshakeFailureReason.suiteNegotiationFailed.diagnosticReasonCode)
         XCTAssertEqual(capturedContext["strategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
+        XCTAssertEqual(capturedContext["fromStrategy"], HandshakeAttemptStrategy.pqcOnly.rawValue)
+        XCTAssertEqual(capturedContext["toStrategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
+        XCTAssertEqual(capturedContext["policyAllowClassicFallback"], "1")
     }
 
     private static func makeSessionKeys() -> SessionKeys {

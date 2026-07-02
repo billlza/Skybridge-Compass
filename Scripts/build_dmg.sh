@@ -36,7 +36,7 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${VERSION}.dmg"
-TEMP_DMG="$DIST_DIR/temp_${DMG_NAME}.dmg"
+TEMP_DMG="$DIST_DIR/temp_${DMG_NAME}.sparsebundle"
 STAGE_DIR="$DIST_DIR/dmg_stage"
 BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 BG_NAME="background.png"
@@ -71,6 +71,7 @@ SKIP_BUILD=false
 SKIP_SIGN=false
 USE_EXISTING_APP=false
 JUST_BUILT_RELEASE=false
+FINAL_SOURCE_MOUNT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -147,7 +148,7 @@ esac
 skybridge_assert_no_smoke_auto_approval_for_release_context "release_dmg build" || exit 1
 skybridge_assert_release_stable_toolchain "release_dmg" "$PROJECT_ROOT/Scripts/verify_xcode_toolchain.sh" "Release DMG build" || exit 1
 
-if [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" && "$USE_EXISTING_APP" != true ]]; then
+if [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" ]]; then
     SWIFTPM_RELEASE_BUILD_DIR="$(skybridge_resolve_swiftpm_release_build_dir "$PROJECT_ROOT" "$BUILD_ARCH" "$XCODE_PACKAGE_SCHEME")" || exit 1
     SWIFTPM_PACKAGE_EXECUTABLE="$SWIFTPM_RELEASE_BUILD_DIR/SkyBridgeCompassApp"
 fi
@@ -795,7 +796,13 @@ assert_existing_app_bundle_is_fresh() {
 
 cleanup() {
     log_info "清理临时文件..."
-    hdiutil detach "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
+    if [[ -n "${FINAL_SOURCE_MOUNT_DIR:-}" ]]; then
+        diskutil eject "$FINAL_SOURCE_MOUNT_DIR" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${MOUNT_DIR:-}" ]]; then
+        diskutil eject "$MOUNT_DIR" >/dev/null 2>&1 || true
+    fi
+    diskutil eject "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
     rm -rf "$STAGE_DIR" "$TEMP_DMG"
 }
 
@@ -989,7 +996,8 @@ log_step "步骤 4: 创建 DMG"
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "$VERSION")"
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${APP_VERSION}.dmg"
 
-rm -f "$DMG_PATH" "$TEMP_DMG"
+rm -f "$DMG_PATH"
+rm -rf "$TEMP_DMG"
 rm -rf "$STAGE_DIR"
 
 log_info "准备 DMG staging 目录..."
@@ -1008,22 +1016,18 @@ else
     log_info "未找到背景源图：$BG_SRC_PNG（将使用默认白底）"
 fi
 
-APP_SIZE=$(du -sm "$STAGE_DIR" | cut -f1)
-DMG_SIZE=$((APP_SIZE + 50))
-
-log_info "创建临时 DMG (${DMG_SIZE}MB)..."
-hdiutil create -srcfolder "$STAGE_DIR" \
-    -volname "$VOLUME_NAME" \
-    -fs APFS \
-    -format UDRW \
-    -size "${DMG_SIZE}m" \
+log_info "创建临时 sparsebundle..."
+diskutil image create from \
+    --format UDSB \
+    --volumeName "$VOLUME_NAME" \
+    "$STAGE_DIR" \
     "$TEMP_DMG"
 
 log_info "挂载 DMG..."
 if [[ -d "/Volumes/$VOLUME_NAME" ]]; then
-    hdiutil detach "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
+    diskutil eject "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
 fi
-ATTACH_INFO=$(hdiutil attach -readwrite -noverify -noautoopen "$TEMP_DMG")
+ATTACH_INFO=$(diskutil image attach "$TEMP_DMG")
 MOUNT_DIR=$(echo "$ATTACH_INFO" | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/')
 DMG_DISPLAY_NAME=$(basename "$MOUNT_DIR")
 
@@ -1078,26 +1082,33 @@ OSA
 scrub_bundle_custom_icon "$MOUNT_DIR/$APP_NAME.app"
 
 sync
-hdiutil detach "$MOUNT_DIR"
+diskutil eject "$MOUNT_DIR"
 
 log_info "压缩 DMG..."
-if [[ ! -f "$TEMP_DMG" ]]; then
+if [[ ! -e "$TEMP_DMG" ]]; then
     log_error "找不到临时 DMG: $TEMP_DMG"
     ls -lah "$DIST_DIR" || true
     exit 1
 fi
 
-# hdiutil 会在 -o 参数上自动处理扩展名；显式传入 .dmg 时，个别环境下可能在成功写出产物后仍返回
-# “无此文件或目录”。统一改用不带扩展名的输出基名，并在完成后归一化到目标路径。
-DMG_OUTPUT_BASE="${DMG_PATH%.dmg}"
-DMG_OUTPUT_CANDIDATE="${DMG_OUTPUT_BASE}.dmg"
-rm -f "$DMG_OUTPUT_BASE" "$DMG_OUTPUT_CANDIDATE"
-hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUTPUT_BASE"
+rm -f "$DMG_PATH"
+READONLY_ATTACH_INFO=$(diskutil image attach --readOnly --nobrowse "$TEMP_DMG")
+FINAL_SOURCE_MOUNT_DIR=$(echo "$READONLY_ATTACH_INFO" | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/')
 
-if [[ -f "$DMG_OUTPUT_CANDIDATE" && "$DMG_OUTPUT_CANDIDATE" != "$DMG_PATH" ]]; then
-    rm -f "$DMG_PATH"
-    mv "$DMG_OUTPUT_CANDIDATE" "$DMG_PATH"
+if [[ -z "$FINAL_SOURCE_MOUNT_DIR" ]]; then
+    log_error "无法重新挂载临时 DMG 以生成最终压缩镜像"
+    echo "$READONLY_ATTACH_INFO" >&2
+    exit 1
 fi
+
+diskutil image create from \
+    --format UDZO \
+    --volumeName "$VOLUME_NAME" \
+    "$FINAL_SOURCE_MOUNT_DIR" \
+    "$DMG_PATH"
+
+diskutil eject "$FINAL_SOURCE_MOUNT_DIR"
+FINAL_SOURCE_MOUNT_DIR=""
 
 if [[ ! -f "$DMG_PATH" ]]; then
     log_error "压缩 DMG 后未找到目标文件: $DMG_PATH"
@@ -1105,7 +1116,7 @@ if [[ ! -f "$DMG_PATH" ]]; then
     exit 1
 fi
 
-rm -f "$TEMP_DMG"
+rm -rf "$TEMP_DMG"
 
 log_success "DMG 创建完成: $DMG_PATH"
 

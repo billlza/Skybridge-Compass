@@ -5,7 +5,7 @@ import SkyBridgeRealtimeMedia
 enum CrossNetworkWebRTCDiagnostics {
     static func appendSmokeStatus(_ line: String) {
         guard let statusURL = smokeStatusURL() else { return }
-        let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(sanitizeStatus(line))\n"
         guard let data = rendered.data(using: .utf8) else { return }
         try? FileManager.default.createDirectory(
             at: statusURL.deletingLastPathComponent(),
@@ -121,10 +121,32 @@ enum CrossNetworkWebRTCDiagnostics {
     }
 
     static func sanitizeStatus(_ value: String) -> String {
-        value
+        let lineSafe = value
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
+        return smokeStatusRedactionPatterns.reduce(lineSafe) { current, rule in
+            rule.regex.stringByReplacingMatches(
+                in: current,
+                range: NSRange(current.startIndex..<current.endIndex, in: current),
+                withTemplate: rule.replacement
+            )
+        }
     }
+
+    private static let smokeStatusRedactionPatterns: [(regex: NSRegularExpression, replacement: String)] = [
+        (
+            try! NSRegularExpression(pattern: #"(session|sessionId|code|deviceId|peerId|fingerprint|from|to)=("[^"\s]+"|[^"\s]+)"#),
+            "$1=<redacted>"
+        ),
+        (
+            try! NSRegularExpression(pattern: #"(sessionId|code): "[^"]+""#),
+            "$1: \"<redacted>\""
+        ),
+        (
+            try! NSRegularExpression(pattern: #"\bcode [A-Za-z0-9_-]{6,}\b"#),
+            "code <redacted>"
+        )
+    ]
 
     static func describeScreenPayloadMagic(_ payload: Data) -> String {
         guard payload.count >= 4 else { return "raw" }

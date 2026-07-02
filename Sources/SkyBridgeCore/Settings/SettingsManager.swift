@@ -72,6 +72,9 @@ public struct SettingsExportData: Codable {
 
 public enum SettingsStorageKeys {
     public static let preferXWingHybrid = "Settings.PreferXWingHybrid"
+    /// Experimental (beta): prefer the Q-Periapt ContextBound hybrid suite. Only takes effect
+    /// in a q-periapt-enabled core build, and only negotiates when the peer also supports it.
+    public static let preferQPeriaptBeta = "Settings.PreferQPeriaptBeta"
 }
 
 /// 设置错误类型
@@ -243,6 +246,8 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var enablePQCHybridTLS: Bool = false
  /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
     @Published public var preferXWingHybrid: Bool = false
+ /// 量子安全（beta）：是否优先协商 Q-Periapt ContextBound 混合套件；仅在启用 q-periapt 的核心构建中生效。
+    @Published public var preferQPeriaptBeta: Bool = false
 
  // MARK: - 系统监控设置
     @Published public var systemMonitorRefreshInterval: Double = 1.0
@@ -608,6 +613,23 @@ public class SettingsManager: ObservableObject, Sendable {
             return "ML-DSA-87"
         default:
             return "ML-DSA-65"
+        }
+    }
+
+    private static func applyQPeriaptEnvironmentPreference(_ enabled: Bool) {
+        let preferredSuiteKey = "SKYBRIDGE_PQC_PREFERRED_SUITE"
+        let betaGateKey = "SB_ENABLE_QPERIAPT"
+        if enabled {
+            setenv(preferredSuiteKey, "q-periapt", 1)
+            setenv(betaGateKey, "1", 1)
+            return
+        }
+
+        if ProcessInfo.processInfo.environment[preferredSuiteKey] == "q-periapt" {
+            unsetenv(preferredSuiteKey)
+        }
+        if ProcessInfo.processInfo.environment[betaGateKey] == "1" {
+            unsetenv(betaGateKey)
         }
     }
 
@@ -1524,6 +1546,12 @@ public class SettingsManager: ObservableObject, Sendable {
         )
         enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
         preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
+        preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
+        if preferQPeriaptBeta && !QPeriaptPlatformPolicy.isLocalRuntimeSupported {
+            preferQPeriaptBeta = false
+            userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+        }
+        Self.applyQPeriaptEnvironmentPreference(preferQPeriaptBeta)
         useSecureEnclaveMLDSA = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLDSA", defaultValue: true)
         useSecureEnclaveMLKEM = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLKEM", defaultValue: true)
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
@@ -1985,6 +2013,21 @@ public class SettingsManager: ObservableObject, Sendable {
         $preferXWingHybrid.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: SettingsStorageKeys.preferXWingHybrid)
             self?.clearCryptoProviderCacheForSettingsChange()
+        }.store(in: &settingsCancellables)
+        $preferQPeriaptBeta.sink { [weak self] value in
+            guard let self else { return }
+            guard !value || QPeriaptPlatformPolicy.isLocalRuntimeSupported else {
+                self.userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+                Self.applyQPeriaptEnvironmentPreference(false)
+                self.clearCryptoProviderCacheForSettingsChange()
+                if self.preferQPeriaptBeta {
+                    self.preferQPeriaptBeta = false
+                }
+                return
+            }
+            self.userDefaults.set(value, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+            Self.applyQPeriaptEnvironmentPreference(value)
+            self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $useSecureEnclaveMLDSA.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseSecureEnclaveMLDSA")

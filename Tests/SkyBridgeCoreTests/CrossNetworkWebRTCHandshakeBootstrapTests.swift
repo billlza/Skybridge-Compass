@@ -566,6 +566,20 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
+    func testRemoteJoinResendsLocalJoinBootstrapOnlyFromOfferer() throws {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: true)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: false)
+        )
+
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        XCTAssertTrue(source.contains("join-bootstrap-resend session=\\(env.sessionId) reason=remote-join"))
+        XCTAssertTrue(source.contains("await sendWebRTCJoinSignal(sessionID: env.sessionId, localDeviceId: session.localDeviceId, retries: 2)"))
+        XCTAssertTrue(source.contains("await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)"))
+    }
+
     func testQRCodeBootstrapUsesLongerStartupWindowsThanRuntimeHeartbeat() {
         XCTAssertGreaterThanOrEqual(
             CrossNetworkConnectionManager.qrCodeGenerationWatchdogTimeoutSeconds,

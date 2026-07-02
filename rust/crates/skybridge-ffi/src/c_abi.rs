@@ -574,7 +574,7 @@ pub unsafe extern "C" fn skybridge_policy_gate_authorize_downgrade(
             return SkyBridgeStatus::InvalidArgument;
         };
         let transcript = match unsafe { slice_from_raw(transcript_ptr, transcript_len) } {
-            Some(s) if s.is_empty() => None,
+            Some([]) => None,
             Some(s) => Some(s),
             None => return SkyBridgeStatus::NullArgument,
         };
@@ -791,7 +791,10 @@ pub unsafe extern "C" fn skybridge_client_start_discovery(
                     Err(_) => {
                         // Surface the failure as an empty snapshot event rather
                         // than dropping it silently.
-                        sink.emit(SkyBridgeEventKind::DiscoverySnapshot, b"{\"error\":\"scan_failed\"}");
+                        sink.emit(
+                            SkyBridgeEventKind::DiscoverySnapshot,
+                            b"{\"error\":\"scan_failed\"}",
+                        );
                     }
                 }
                 sink.emit(SkyBridgeEventKind::DiscoveryStopped, &[]);
@@ -1177,13 +1180,22 @@ mod tests {
                 0,
                 &mut decision,
             );
-            assert_eq!(rc, SkyBridgeStatus::Ok.code(), "eligible downgrade authorized");
+            assert_eq!(
+                rc,
+                SkyBridgeStatus::Ok.code(),
+                "eligible downgrade authorized"
+            );
             assert!(!decision.ptr.is_null());
-            let json =
-                std::slice::from_raw_parts(decision.ptr, decision.len);
+            let json = std::slice::from_raw_parts(decision.ptr, decision.len);
             let text = std::str::from_utf8(json).unwrap();
-            assert!(text.contains("downgrade_resistance"), "audit record present: {text}");
-            assert_eq!(skybridge_buffer_free(&mut decision), SkyBridgeStatus::Ok.code());
+            assert!(
+                text.contains("downgrade_resistance"),
+                "audit record present: {text}"
+            );
+            assert_eq!(
+                skybridge_buffer_free(&mut decision),
+                SkyBridgeStatus::Ok.code()
+            );
 
             // A BLOCKED reason is denied (timeout).
             let mut denied = SkyBridgeBuffer::empty();
@@ -1198,11 +1210,21 @@ mod tests {
                 0,
                 &mut denied,
             );
-            assert_eq!(rc, SkyBridgeStatus::DowngradeDenied.code(), "timeout never downgraded");
+            assert_eq!(
+                rc,
+                SkyBridgeStatus::DowngradeDenied.code(),
+                "timeout never downgraded"
+            );
             let dtext =
                 std::str::from_utf8(std::slice::from_raw_parts(denied.ptr, denied.len)).unwrap();
-            assert!(dtext.contains("reason_ineligible"), "denial reason: {dtext}");
-            assert_eq!(skybridge_buffer_free(&mut denied), SkyBridgeStatus::Ok.code());
+            assert!(
+                dtext.contains("reason_ineligible"),
+                "denial reason: {dtext}"
+            );
+            assert_eq!(
+                skybridge_buffer_free(&mut denied),
+                SkyBridgeStatus::Ok.code()
+            );
 
             assert_eq!(skybridge_policy_gate_free(gate), SkyBridgeStatus::Ok.code());
         }
@@ -1214,10 +1236,7 @@ mod tests {
         unsafe {
             let mut gate: *mut SkyBridgePolicyGate = ptr::null_mut();
             assert_eq!(
-                skybridge_policy_gate_new(
-                    SkyBridgeDowngradePolicy::StrictPqcCompliance,
-                    &mut gate
-                ),
+                skybridge_policy_gate_new(SkyBridgeDowngradePolicy::StrictPqcCompliance, &mut gate),
                 SkyBridgeStatus::Ok.code()
             );
             let peer = b"peer-strict";
@@ -1234,11 +1253,16 @@ mod tests {
                 &mut decision,
             );
             assert_eq!(rc, SkyBridgeStatus::DowngradeDenied.code());
-            let text =
-                std::str::from_utf8(std::slice::from_raw_parts(decision.ptr, decision.len))
-                    .unwrap();
-            assert!(text.contains("\"denied\":\"policy\""), "policy denial: {text}");
-            assert_eq!(skybridge_buffer_free(&mut decision), SkyBridgeStatus::Ok.code());
+            let text = std::str::from_utf8(std::slice::from_raw_parts(decision.ptr, decision.len))
+                .unwrap();
+            assert!(
+                text.contains("\"denied\":\"policy\""),
+                "policy denial: {text}"
+            );
+            assert_eq!(
+                skybridge_buffer_free(&mut decision),
+                SkyBridgeStatus::Ok.code()
+            );
             assert_eq!(skybridge_policy_gate_free(gate), SkyBridgeStatus::Ok.code());
         }
     }
@@ -1260,7 +1284,10 @@ mod tests {
                 SkyBridgeStatus::Ok.code()
             );
             assert!(signing.len > 0, "ML-DSA-65 public key is non-empty");
-            assert_eq!(skybridge_buffer_free(&mut signing), SkyBridgeStatus::Ok.code());
+            assert_eq!(
+                skybridge_buffer_free(&mut signing),
+                SkyBridgeStatus::Ok.code()
+            );
 
             let mut kem = SkyBridgeBuffer::empty();
             assert_eq!(
@@ -1307,13 +1334,15 @@ mod tests {
                 skybridge_file_frame_decode(frame.ptr, frame.len, &mut json),
                 SkyBridgeStatus::Ok.code()
             );
-            let text =
-                std::str::from_utf8(std::slice::from_raw_parts(json.ptr, json.len)).unwrap();
+            let text = std::str::from_utf8(std::slice::from_raw_parts(json.ptr, json.len)).unwrap();
             assert!(text.contains("\"type\":\"chunk\""), "decoded JSON: {text}");
             assert!(text.contains("\"sequence\":42"));
 
             assert_eq!(skybridge_buffer_free(&mut json), SkyBridgeStatus::Ok.code());
-            assert_eq!(skybridge_buffer_free(&mut frame), SkyBridgeStatus::Ok.code());
+            assert_eq!(
+                skybridge_buffer_free(&mut frame),
+                SkyBridgeStatus::Ok.code()
+            );
         }
     }
 
@@ -1330,10 +1359,22 @@ mod tests {
                 SkyBridgeStatus::NullArgument.code()
             );
             // freeing NULL is a no-op
-            assert_eq!(skybridge_policy_gate_free(ptr::null_mut()), SkyBridgeStatus::Ok.code());
-            assert_eq!(skybridge_identity_free(ptr::null_mut()), SkyBridgeStatus::Ok.code());
-            assert_eq!(skybridge_client_free(ptr::null_mut()), SkyBridgeStatus::Ok.code());
-            assert_eq!(skybridge_buffer_free(ptr::null_mut()), SkyBridgeStatus::Ok.code());
+            assert_eq!(
+                skybridge_policy_gate_free(ptr::null_mut()),
+                SkyBridgeStatus::Ok.code()
+            );
+            assert_eq!(
+                skybridge_identity_free(ptr::null_mut()),
+                SkyBridgeStatus::Ok.code()
+            );
+            assert_eq!(
+                skybridge_client_free(ptr::null_mut()),
+                SkyBridgeStatus::Ok.code()
+            );
+            assert_eq!(
+                skybridge_buffer_free(ptr::null_mut()),
+                SkyBridgeStatus::Ok.code()
+            );
         }
     }
 
@@ -1342,7 +1383,10 @@ mod tests {
     fn c_abi_client_lifecycle() {
         unsafe {
             let mut client: *mut SkyBridgeClient = ptr::null_mut();
-            assert_eq!(skybridge_client_new(&mut client), SkyBridgeStatus::Ok.code());
+            assert_eq!(
+                skybridge_client_new(&mut client),
+                SkyBridgeStatus::Ok.code()
+            );
             assert!(!client.is_null());
 
             // Clearing the callback (NULL) is valid.

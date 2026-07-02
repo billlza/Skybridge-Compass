@@ -97,6 +97,12 @@ let package = Package(
             name: "liboqs",
             path: "Sources/Vendor/liboqs.xcframework"
         ),
+        // Q-Periapt ContextBound hybrid KEM (ML-KEM-768 + X25519) FFI.
+        // Additive, feature-flagged at runtime; mirrors how liboqs is vendored.
+        .binaryTarget(
+            name: "QPeriaptFFI",
+            path: "Sources/Vendor/qperiapt.xcframework"
+        ),
         .binaryTarget(
             name: "libopus",
             path: "Sources/Vendor/libopus.xcframework"
@@ -122,6 +128,24 @@ let package = Package(
                 // 中文注释：启用 C++23 支持，统一 Apple 端原生桥接目标的语言标准。
                 .unsafeFlags(latestCXXStandardFlags)
             ]
+        ),
+        // Q-Periapt FFI 的 C 包装目标（mirror OQSRAII）。
+        //
+        // 动机：qperiapt.xcframework 与 liboqs.xcframework 都会把 module.modulemap 放进共享的
+        // Release/include/ 目录，导致 Xcode 报 "Multiple commands produce
+        // '.../Release/include/module.modulemap'"。OQSRAII 的成熟做法是：liboqs 仅作 .binaryTarget
+        // 提供静态库，由一个常规 C/C++ 目标 OQSRAII 消费（Swift `import OQSRAII`），SwiftPM 在该目标
+        // 自有模块目录里自动生成模块，不与共享 include 冲突。这里对 QPeriaptFFI 完全照搬：
+        //   - QPeriaptFFI（binaryTarget）只贡献 libq_periapt_ffi.a，不再携带任何 module.modulemap；
+        //   - CQPeriapt 自带一份 q_periapt.h（vendored，与 OQSRAII 自带 OQSRAII.h 同构），通过伞头
+        //     CQPeriapt.h 重新导出 C ABI；SwiftPM 为 CQPeriapt 自动生成模块映射；
+        //   - Swift 端改为 `import CQPeriapt`（替代 `import QPeriaptFFI`）。
+        // q_periapt_* 符号不变，仅模块名变化。
+        .target(
+            name: "CQPeriapt",
+            dependencies: ["QPeriaptFFI"],
+            path: "Sources/CQPeriapt",
+            publicHeadersPath: "include"
         ),
         .target(
             name: "FreeRDPBridge",
@@ -283,6 +307,7 @@ let package = Package(
                 .product(name: "WebRTC", package: "WebRTC"),
                 "liboqs",
                 "OQSRAII",
+                "CQPeriapt",
                 "SkyBridgeWidgetShared"
             ],
             path: "Sources/SkyBridgeCore",

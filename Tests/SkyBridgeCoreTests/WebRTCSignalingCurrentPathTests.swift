@@ -43,6 +43,26 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(redacted.contains("shard=%3Credacted%3E") || redacted.contains("shard=<redacted>"))
     }
 
+    @Test("Signaling server-frame handlers expose stable failure code/class instead of raw reason")
+    func signalingServerFrameHandlersDoNotExposeRawServerReason() throws {
+        let macSource = try String(
+            contentsOfFile: "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift",
+            encoding: .utf8
+        )
+        let iosSource = try String(
+            contentsOfFile: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift",
+            encoding: .utf8
+        )
+
+        for source in [macSource, iosSource] {
+            #expect(!source.contains("Signaling error: \\(reason)"))
+            #expect(!source.contains("error=\\(reason"))
+            #expect(!source.contains("error=\\(frame.error"))
+            #expect(source.contains("failure_code=\\(failureCode"))
+            #expect(source.contains("failure_class=\\(publicFailureClass"))
+        }
+    }
+
     @Test("SignalServerClient 的当前 WebRTC 端点与编解码逻辑保持稳定")
     func signalServerClientCurrentEndpointContracts() throws {
         #expect(SignalServerClient.registerCodePath == "/api/webrtc/register-code")
@@ -263,6 +283,169 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(missingPathURL == nil)
     }
 
+    @Test("WebRTC JOIN bootstrap payload carries Q-Periapt platform metadata")
+    func webRTCJoinBootstrapPayloadCarriesQPeriaptPlatformMetadata() throws {
+        let payload = WebRTCSignalingEnvelope.Payload(
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            protocolPublicKeyBytes: Data(repeating: 0x44, count: 1_952),
+            kemPublicKeys: [
+                .init(
+                    suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                    publicKey: Data(repeating: 0x55, count: QPeriaptPlatformPolicy.publicKeyLength)
+                )
+            ],
+            platform: "macOS",
+            osVersion: "macOS 26.0"
+        )
+
+        let decoded = try JSONDecoder().decode(
+            WebRTCSignalingEnvelope.Payload.self,
+            from: try JSONEncoder().encode(payload)
+        )
+
+        #expect(decoded.platform == "macOS")
+        #expect(decoded.osVersion == "macOS 26.0")
+        #expect(decoded.kemPublicKeys?.count == 1)
+        #expect(decoded.kemPublicKeys?.first?.suiteWireId == CryptoSuite.qperiaptContextBound.wireId)
+        #expect(decoded.kemPublicKeys?.first?.publicKey.count == QPeriaptPlatformPolicy.publicKeyLength)
+    }
+
+    @Test("Current-path signaling policy accepts only explicit safe WebSocket paths")
+    func currentPathSignalingPolicyValidatesWebSocketPaths() throws {
+        #expect(try CurrentPathSignalingWebSocketPolicy.validatedWebSocketPath(" /tenant/ws ") == "/tenant/ws")
+        #expect(try CurrentPathSignalingWebSocketPolicy.validatedWebSocketPath("/current-path/ws") == "/current-path/ws")
+
+        let invalidPaths: [String?] = [
+            nil,
+            "",
+            "/",
+            "tenant/ws",
+            "/ws?x=1",
+            "/ws#x",
+            "/../ws",
+            "/tenant/../ws",
+            "/tenant//ws",
+            "/tenant\\ws",
+            "/%2e%2e/ws",
+            "/tenant/%2F/ws",
+            "/tenant/%5C/ws",
+            "/tenant/%00/ws",
+            "/ten ant/ws",
+            "/租户/ws",
+            "/" + String(repeating: "a", count: CurrentPathSignalingWebSocketPolicy.maxWebSocketPathLength)
+        ]
+        for path in invalidPaths {
+            #expect(throws: CurrentPathSignalingWebSocketPolicy.PolicyError.invalidWebSocketPath) {
+                _ = try CurrentPathSignalingWebSocketPolicy.validatedWebSocketPath(path)
+            }
+        }
+    }
+
+    @Test("Current-path signaling policy separates header and query-token credential transport")
+    func currentPathSignalingPolicySeparatesCredentialTransportModes() throws {
+        let headerURL = try #require(CurrentPathSignalingWebSocketPolicy.webSocketURL(
+            signalingServerOrigin: "https://api.example.com",
+            wsPath: "/tenant/ws",
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2",
+            credentialTransport: .headers
+        ))
+        let headerQuery = queryDictionary(for: headerURL)
+        #expect(headerURL.scheme == "wss")
+        #expect(headerQuery["shard"] == "ABC123")
+        #expect(headerQuery["cv"] == "1.2.3")
+        #expect(headerQuery["pv"] == "2")
+        #expect(headerQuery["st"] == nil)
+
+        let headerModeHeaders = try #require(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2",
+            credentialTransport: .headers
+        ))
+        #expect(headerModeHeaders[CurrentPathSignalingWebSocketPolicy.sessionIDHeader] == "ABC123")
+        #expect(headerModeHeaders[CurrentPathSignalingWebSocketPolicy.sessionTokenHeader] == "token-1")
+
+        let queryURL = try #require(CurrentPathSignalingWebSocketPolicy.webSocketURL(
+            signalingServerOrigin: "https://api.example.com",
+            wsPath: "/tenant/ws",
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2",
+            credentialTransport: .queryToken
+        ))
+        let queryModeQuery = queryDictionary(for: queryURL)
+        #expect(queryModeQuery["shard"] == "ABC123")
+        #expect(queryModeQuery["st"] == "token-1")
+        #expect(queryModeQuery["cv"] == "1.2.3")
+        #expect(queryModeQuery["pv"] == "2")
+
+        let queryModeHeaders = try #require(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2",
+            credentialTransport: .queryToken
+        ))
+        #expect(queryModeHeaders[CurrentPathSignalingWebSocketPolicy.sessionIDHeader] == nil)
+        #expect(queryModeHeaders[CurrentPathSignalingWebSocketPolicy.sessionTokenHeader] == nil)
+        #expect(queryModeHeaders[CurrentPathSignalingWebSocketPolicy.clientVersionHeader] == "1.2.3")
+        #expect(queryModeHeaders[CurrentPathSignalingWebSocketPolicy.protocolVersionHeader] == "2")
+    }
+
+    @Test("Current-path signaling policy rejects bad credential values")
+    func currentPathSignalingPolicyRejectsBadCredentials() {
+        let badValues = [
+            "",
+            "line\r\nbreak",
+            "nul\u{0}byte",
+            "delete\u{7F}",
+            "comma,value"
+        ]
+
+        for value in badValues {
+            #expect(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+                sessionID: value,
+                sessionToken: "token-1",
+                clientVersion: "1.2.3",
+                protocolVersion: "2"
+            ) == nil)
+            #expect(CurrentPathSignalingWebSocketPolicy.webSocketURL(
+                signalingServerOrigin: "https://api.example.com",
+                wsPath: "/tenant/ws",
+                sessionID: "abc123",
+                sessionToken: value,
+                clientVersion: "1.2.3",
+                protocolVersion: "2",
+                credentialTransport: .queryToken
+            ) == nil)
+        }
+
+        #expect(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: String(repeating: "A", count: CurrentPathSignalingWebSocketPolicy.maxSessionIDLength + 1),
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ) == nil)
+        #expect(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: "abc123",
+            sessionToken: String(repeating: "a", count: CurrentPathSignalingWebSocketPolicy.maxSessionTokenLength + 1),
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ) == nil)
+        #expect(CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: String(repeating: "1", count: CurrentPathSignalingWebSocketPolicy.maxVersionLength + 1),
+            protocolVersion: "2"
+        ) == nil)
+    }
+
     @Test("Current-path WebSocket URL rejects public cleartext origins but keeps loopback compatibility")
     func currentPathWebSocketURLRejectsPublicCleartextOrigins() throws {
         #expect(throws: CurrentPathSecurityError.self) {
@@ -300,6 +483,12 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(!managerSource.contains("return \"/ws\""))
         #expect(!managerSource.contains("return URL(string: SkyBridgeServerConfig.signalingWebSocketURL)"))
         #expect(!managerSource.contains("URLQueryItem(name: \"st\""))
+        #expect(managerSource.contains("credentialTransport: .headers"))
+        #expect(!managerSource.contains("credentialTransport: .queryToken"))
+
+        let policySource = try String(contentsOfFile: "Sources/SkyBridgeProtocolCore/RemoteConnection/CurrentPathSignalingWebSocketPolicy.swift")
+        #expect(policySource.contains("case queryToken"))
+        #expect(policySource.contains(#"URLQueryItem(name: "st", value: sessionToken)"#))
 
         let probeSource = try String(contentsOfFile: "Sources/CurrentPathProbe/main.swift")
         #expect(!probeSource.contains("?? \"/ws\""))
@@ -307,6 +496,17 @@ struct WebRTCSignalingCurrentPathTests {
 
         let iOSManagerSource = try String(contentsOfFile: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
         #expect(!iOSManagerSource.contains("URLQueryItem(name: \"st\""))
+        #expect(!iOSManagerSource.contains("headers.removeValue(forKey: \"X-SkyBridge-Session-Id\")"))
+        #expect(!iOSManagerSource.contains("headers.removeValue(forKey: \"X-SkyBridge-Session\")"))
+        #expect(iOSManagerSource.contains("CurrentPathSignalingWebSocketPolicyCompat.webSocketURL("))
+        #expect(iOSManagerSource.contains("CurrentPathSignalingWebSocketPolicyCompat.webSocketHeaders("))
+        #expect(iOSManagerSource.contains("credentialTransport: .headers"))
+        #expect(!iOSManagerSource.contains("credentialTransport: .queryToken"))
+
+        let iOSPolicySource = try String(contentsOfFile: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCSignalingPolicy.swift")
+        #expect(iOSPolicySource.contains("enum CurrentPathSignalingWebSocketPolicyCompat"))
+        #expect(iOSPolicySource.contains(#"URLQueryItem(name: "st", value: sessionToken)"#))
+        #expect(iOSPolicySource.contains("scalar == \",\""))
 
         let serverSource = try String(contentsOfFile: "Server/skybridge-signaling/server.js")
         #expect(serverSource.contains("SIGNALING_WEBSOCKET_PATH"))
@@ -403,6 +603,15 @@ struct WebRTCSignalingCurrentPathTests {
     func controlPlaneClientAPIKeyDefaultIsPresent() {
         #expect(!SkyBridgeServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
+}
+
+private func queryDictionary(for url: URL) -> [String: String] {
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return [:]
+    }
+    return Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+        item.value.map { (item.name, $0) }
+    })
 }
 
 private func assertEndpointValidationPrecedesTokenCaching(

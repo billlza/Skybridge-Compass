@@ -1420,11 +1420,11 @@ public actor HandshakeDriver {
         if let ctx = context, let suite = await ctx.negotiatedSuite, suite.isPQC {
  // PQC suite 优先使用 PQC 签名 provider
             if let pqcProvider = signatureProvider,
-               pqcProvider.tier == .liboqsPQC || pqcProvider.tier == .nativePQC {
+               Self.isPQCSignatureTier(pqcProvider.tier) {
                 return pqcProvider
             }
  // Fallback: 使用主 cryptoProvider（如果它支持 PQC 签名）
-            if cryptoProvider.tier == .liboqsPQC || cryptoProvider.tier == .nativePQC {
+            if Self.isPQCSignatureTier(cryptoProvider.tier) {
                 return cryptoProvider
             }
         }
@@ -1447,11 +1447,20 @@ public actor HandshakeDriver {
 
  // 检查是否有可用的 PQC 签名 provider
         if let pqcProvider = signatureProvider,
-           pqcProvider.tier == .liboqsPQC || pqcProvider.tier == .nativePQC {
+           Self.isPQCSignatureTier(pqcProvider.tier) {
             return true
         }
 
-        return cryptoProvider.tier == .liboqsPQC || cryptoProvider.tier == .nativePQC
+        return Self.isPQCSignatureTier(cryptoProvider.tier)
+    }
+
+    private nonisolated static func isPQCSignatureTier(_ tier: CryptoTier) -> Bool {
+        switch tier {
+        case .qperiaptPQC, .nativePQC, .liboqsPQC:
+            return true
+        case .classic:
+            return false
+        }
     }
 
     private func enforceIdentityPinning(deviceId: String, identityKeys: IdentityPublicKeys) async throws {

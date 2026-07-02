@@ -4,6 +4,47 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class KEMTrustStoreTests: XCTestCase {
+    func testDefaultPQCSuitesExcludeQPeriaptBeta() {
+        XCTAssertEqual(CryptoSuite.explicitBetaPQCSuites, [.qperiaptContextBound])
+        XCTAssertFalse(CryptoSuite.allPQCSuites.contains(.qperiaptContextBound))
+        XCTAssertTrue(CryptoSuite.allPQCSuites.contains(.xwing))
+    }
+
+    func testQPeriaptMirrorNormalizationRequiresEligiblePeerPlatform() {
+        let qPeriaptKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+            publicKey: Data(repeating: 0x11, count: 1_216)
+        )
+        let xWingKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwing.wireId,
+            publicKey: Data(repeating: 0x22, count: 1_216)
+        )
+
+        let missingPlatform = KEMPublicKeyInfo.normalizedValidKeys(
+            [qPeriaptKey, xWingKey],
+            platform: nil,
+            osVersion: "iOS 26.0"
+        )
+        XCTAssertEqual(missingPlatform.map(\.suiteWireId), [CryptoSuite.xwing.wireId])
+
+        let oldAndroidApi = KEMPublicKeyInfo.normalizedValidKeys(
+            [qPeriaptKey, xWingKey],
+            platform: "Android",
+            osVersion: "Android 16 (API 35)"
+        )
+        XCTAssertEqual(oldAndroidApi.map(\.suiteWireId), [CryptoSuite.xwing.wireId])
+
+        let eligibleIOS = KEMPublicKeyInfo.normalizedValidKeys(
+            [qPeriaptKey, xWingKey],
+            platform: "iOS",
+            osVersion: "iOS 26.0"
+        )
+        XCTAssertEqual(
+            eligibleIOS.map(\.suiteWireId),
+            [CryptoSuite.xwing.wireId, CryptoSuite.qperiaptContextBound.wireId]
+        )
+    }
+
     func testPersistAndRestoreKEMTrustStore() async throws {
         let suiteName = "KEMTrustStoreTests.\(UUID().uuidString)"
         guard let cleanupDefaults = UserDefaults(suiteName: suiteName) else {

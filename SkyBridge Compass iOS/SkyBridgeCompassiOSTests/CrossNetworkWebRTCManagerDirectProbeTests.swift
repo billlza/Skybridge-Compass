@@ -37,6 +37,61 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertFalse(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(Data([0xff, 0, 0, 0, 0])))
     }
 
+    func testNativeVideoPolicyNormalizesEvenBackedOddVisibleFrameSize() {
+        let normalization = CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+            forCodedSize: CGSize(width: 1920, height: 1080),
+            expectedVisibleSize: CGSize(width: 1919, height: 1079)
+        )
+
+        XCTAssertEqual(normalization.visibleSize, CGSize(width: 1919, height: 1079))
+        XCTAssertTrue(normalization.usedEvenPadding)
+    }
+
+    func testNativeVideoPolicyKeepsExactExpectedFrameWithoutPaddingFlag() {
+        let normalization = CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+            forCodedSize: CGSize(width: 1920, height: 1080),
+            expectedVisibleSize: CGSize(width: 1920, height: 1080)
+        )
+
+        XCTAssertEqual(normalization.visibleSize, CGSize(width: 1920, height: 1080))
+        XCTAssertFalse(normalization.usedEvenPadding)
+    }
+
+    func testNativeVideoPolicyReturnsCodedSizeWhenExpectedFrameIsMissingInvalidOrMismatched() {
+        let codedSize = CGSize(width: 1280, height: 720)
+
+        XCTAssertEqual(
+            CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+                forCodedSize: codedSize,
+                expectedVisibleSize: nil
+            ),
+            CrossNetworkWebRTCNativeVideoPolicy.VisibleFrameNormalization(
+                visibleSize: codedSize,
+                usedEvenPadding: false
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+                forCodedSize: codedSize,
+                expectedVisibleSize: CGSize(width: 0, height: 720)
+            ),
+            CrossNetworkWebRTCNativeVideoPolicy.VisibleFrameNormalization(
+                visibleSize: codedSize,
+                usedEvenPadding: false
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+                forCodedSize: codedSize,
+                expectedVisibleSize: CGSize(width: 1024, height: 768)
+            ),
+            CrossNetworkWebRTCNativeVideoPolicy.VisibleFrameNormalization(
+                visibleSize: codedSize,
+                usedEvenPadding: false
+            )
+        )
+    }
+
     func testWebRTCSecureEnvelopeRejectsReplayAndWrongPacketType() throws {
         let receiverKeys = makeSessionKeys()
         let senderRole: HandshakeRole = receiverKeys.role == .initiator ? .responder : .initiator
@@ -756,6 +811,31 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertEqual(
             CrossNetworkWebRTCManager.testOnlyMediaRelayLeaseFailureReasonAfterRefresh(status: 401, body: body),
             "serverStateMismatch"
+        )
+    }
+
+    func testMediaLeaseLimitRefreshabilityUsesStructuredErrorCode() {
+        let structuredBody = #"{"code":"media_admission_token_lease_limit","message":"retry with a refreshed lease"}"#
+        let messageOnlyBody = #"{"message":"media_admission_token_lease_limit"}"#
+
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyIsMediaAdmissionTokenRefreshable(
+                status: 429,
+                body: structuredBody
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.testOnlyMediaRelayLeaseFailureReason(
+                status: 429,
+                body: structuredBody
+            ),
+            "leaseLimit"
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsMediaAdmissionTokenRefreshable(
+                status: 429,
+                body: messageOnlyBody
+            )
         )
     }
 

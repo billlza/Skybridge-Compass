@@ -316,13 +316,9 @@ mod tests {
         let mut gate = PolicyGate::new(DowngradePolicy::PreferPqc);
         let identity = test_identity();
         let public_key = identity.public_key.clone();
-        let mut driver = TwoAttemptHandshakeDriver::new(
-            &mut gate,
-            &identity,
-            PQC_SUITE,
-            CLASSIC_SUITE,
-        )
-        .with_transcript_anchor(vec![0xaa, 0xbb, 0xcc, 0xdd]);
+        let mut driver =
+            TwoAttemptHandshakeDriver::new(&mut gate, &identity, PQC_SUITE, CLASSIC_SUITE)
+                .with_transcript_anchor(vec![0xaa, 0xbb, 0xcc, 0xdd]);
 
         let mut events = Vec::new();
         let mut classic_calls = 0_u32;
@@ -466,7 +462,11 @@ mod tests {
                 other => panic!("expected FallbackRateLimited, got {other:?}"),
             }
         }
-        assert_eq!(events.len(), 1, "rate-limited second fallback emits no event");
+        assert_eq!(
+            events.len(),
+            1,
+            "rate-limited second fallback emits no event"
+        );
     }
 
     /// If the authorized classic attempt itself fails, the event was still emitted

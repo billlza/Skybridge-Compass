@@ -645,6 +645,41 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentPathAdditionalProtocolFingerprintsBySessionId[sessionID] ?? []
     }
 
+    /// Validates a self-asserted protocol identity carried in a WebRTC `.join` bootstrap and returns the
+    /// canonical lowercase fingerprint when the bytes encode correctly AND hash to the claimed fingerprint.
+    ///
+    /// This is the same binding check the answerer/QR trust path performs
+    /// (`ProtocolIdentityBinding.validateKeyEncoding` + `computeFingerprint`). It does NOT by itself prove
+    /// possession of the private key — the join carries no signature — but the resulting pin is only ever
+    /// used to scope the strict-PQC handshake, whose transcript-bound MessageB signature provides the
+    /// end-to-end proof-of-possession against this exact fingerprint.
+    private func validatedJoinBootstrapAuthority(
+        from payload: WebRTCSignalingEnvelope.Payload
+    ) -> (algorithm: ProtocolSigningAlgorithm, fingerprint: String, publicKeyBytes: Data)? {
+        guard let algorithm = payload.protocolSigningAlgorithm,
+              let publicKeyBytes = payload.protocolPublicKeyBytes,
+              !publicKeyBytes.isEmpty,
+              let claimedFingerprint = payload.protocolPublicKeyFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+              !claimedFingerprint.isEmpty else {
+            return nil
+        }
+        do {
+            try ProtocolIdentityBinding.validateKeyEncoding(bytes: publicKeyBytes, algorithm: algorithm)
+        } catch {
+            return nil
+        }
+        let computedFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: algorithm,
+            publicKeyBytes: publicKeyBytes
+        ).lowercased()
+        guard computedFingerprint == claimedFingerprint else {
+            return nil
+        }
+        return (algorithm: algorithm, fingerprint: claimedFingerprint, publicKeyBytes: publicKeyBytes)
+    }
+
     private func currentPathTrustedProtocolFingerprints(for sessionID: String) -> Set<String> {
         var fingerprints = additionalProtocolFingerprints(for: sessionID)
         if let expected = currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolPublicKeyFingerprint
@@ -662,10 +697,23 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) async -> [UInt16: Data] {
         let pinnedFingerprints = currentPathTrustedProtocolFingerprints(for: sessionID)
         guard !pinnedFingerprints.isEmpty else { return [:] }
-        return await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
+        // Tier 1 (preferred): signed LAN KEM refresh material bound to the pinned protocol identity.
+        var merged = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
             forCandidates: candidates,
             pinnedProtocolFingerprints: pinnedFingerprints
         )
+        // Tier 2: pairing-identity-exchange KEM bound to the pinned current-path authority. This makes
+        // the verified join KEM usable for the strict-PQC initial handshake gate without weakening the
+        // 701 reject for genuinely-untrusted peers (an empty pin set still yields nothing). Signed
+        // refresh keys win on suite-id conflicts.
+        let authorityBound = await PeerKEMBootstrapStore.shared.authorityBoundPairingKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
+        for (suiteWireId, publicKey) in authorityBound where merged[suiteWireId] == nil {
+            merged[suiteWireId] = publicKey
+        }
+        return merged
     }
 
     private func stopJoinHeartbeat(for sessionID: String) {
@@ -691,91 +739,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) {
         currentPathSignalingOriginBySessionId[sessionID] = endpoint.origin
         currentPathSignalingWebSocketPathBySessionId[sessionID] = endpoint.wsPath
-    }
-
-    nonisolated static func validatedSignalingWebSocketPath(_ rawPath: String?) throws -> String {
-        let trimmed = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard trimmed.first == "/",
-              trimmed != "/",
-              !trimmed.contains("?"),
-              !trimmed.contains("#"),
-              trimmed.unicodeScalars.allSatisfy({ scalar in
-                  scalar.isASCII && !CharacterSet.whitespacesAndNewlines.contains(scalar)
-              }) else {
-            throw NSError(
-                domain: "CrossNetworkConnectionManager",
-                code: 654,
-                userInfo: [NSLocalizedDescriptionKey: "invalid current-path signaling websocket path"]
-            )
-        }
-        return trimmed
-    }
-
-    nonisolated public static func currentPathSignalingWebSocketURL(
-        signalingServerOrigin: String,
-        wsPath: String?,
-        sessionID: String,
-        sessionToken: String,
-        clientVersion: String,
-        protocolVersion: String
-    ) -> URL? {
-        let origin = signalingServerOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sessionToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let canonicalOrigin = try? CurrentPathOriginPolicy.canonicalOrigin(origin) else {
-            return nil
-        }
-        guard !origin.isEmpty, !sessionID.isEmpty, !sessionToken.isEmpty,
-              var components = URLComponents(string: canonicalOrigin),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "https" || scheme == "http",
-              components.host?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            return nil
-        }
-
-        guard let path = try? validatedSignalingWebSocketPath(wsPath) else {
-            return nil
-        }
-        components.scheme = scheme == "https" ? "wss" : "ws"
-        components.path = path
-        components.fragment = nil
-        components.queryItems = [
-            URLQueryItem(name: "shard", value: sessionID.uppercased()),
-            URLQueryItem(name: "cv", value: clientVersion),
-            URLQueryItem(name: "pv", value: protocolVersion)
-        ]
-        return components.url
-    }
-
-    nonisolated public static func currentPathSignalingWebSocketHeaders(
-        sessionID: String,
-        sessionToken: String,
-        clientVersion: String,
-        protocolVersion: String
-    ) -> [String: String]? {
-        let sessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let sessionToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clientVersion = clientVersion.trimmingCharacters(in: .whitespacesAndNewlines)
-        let protocolVersion = protocolVersion.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidWebSocketCredentialValue(sessionID, maxLength: 512),
-              isValidWebSocketCredentialValue(sessionToken, maxLength: 4096),
-              isValidWebSocketCredentialValue(clientVersion, maxLength: 64),
-              isValidWebSocketCredentialValue(protocolVersion, maxLength: 64) else {
-            return nil
-        }
-        return [
-            "X-SkyBridge-Session-Id": sessionID,
-            "X-SkyBridge-Session": sessionToken,
-            "X-SkyBridge-Client-Version": clientVersion,
-            "X-SkyBridge-Protocol-Version": protocolVersion
-        ]
-    }
-
-    nonisolated private static func isValidWebSocketCredentialValue(_ value: String, maxLength: Int) -> Bool {
-        guard !value.isEmpty, value.count <= maxLength else { return false }
-        return !value.unicodeScalars.contains { scalar in
-            scalar.value < 0x20 || scalar.value == 0x7F
-        }
     }
 
     private var remoteDesktopNetworkStatsEnabled: Bool {
@@ -897,7 +860,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     suiteWireId: $0.suiteWireId,
                     publicKey: $0.publicKey
                 )
-            }
+            },
+            platform: QPeriaptPlatformPolicy.localPlatformName(),
+            osVersion: QPeriaptPlatformPolicy.localOSVersionString()
         )
         webrtcJoinBootstrapPayloadBySessionId[sessionID] = payload
         return payload
@@ -941,6 +906,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let normalizedRemoteId = remoteDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedRemoteId.isEmpty else { return }
 
+        // The verified protocol fingerprint to bind the bootstrap KEM to (nil unless the authority is
+        // pinned, either pre-existing or seeded below for the offerer path).
+        var verifiedAuthorityFingerprint: String?
+
         if let expected = currentPathExpectedRemoteAuthorityBySessionId[sessionID] {
             let incomingAlgorithm = payload.protocolSigningAlgorithm
             let incomingFingerprint = payload.protocolPublicKeyFingerprint?
@@ -970,18 +939,47 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     deviceName: expected.deviceName
                 )
             }
+            // The authority was pinned out-of-band (answerer code/QR path) and the join matched it; its
+            // fingerprint is the trusted pin to bind the bootstrap KEM to.
+            verifiedAuthorityFingerprint = expectedFingerprint
+        } else if let authority = validatedJoinBootstrapAuthority(from: payload) {
+            // Offerer path: no out-of-band authority was pinned (the Mac generated the connection code and
+            // learns the remote identity only from this inbound join). Seed the current-path authority from
+            // the self-asserted-but-encoding-validated join identity, only when absent. The bound KEM is
+            // still authenticated end-to-end by the strict-PQC handshake's transcript-bound MessageB
+            // signature, which is verified against exactly this pinned fingerprint.
+            currentPathExpectedRemoteAuthorityBySessionId[sessionID] = CurrentPathRemoteAuthority(
+                deviceId: normalizedRemoteId,
+                protocolSigningAlgorithm: authority.algorithm,
+                protocolPublicKeyFingerprint: authority.fingerprint,
+                protocolPublicKeyBytes: authority.publicKeyBytes,
+                deviceName: nil
+            )
+            verifiedAuthorityFingerprint = authority.fingerprint
+            appendWebRTCSessionDiagnostic(
+                "join-bootstrap-authority-seeded session=\(sessionID) remote=\(normalizedRemoteId)",
+                sessionID: sessionID
+            )
         }
 
         let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
             (payload.kemPublicKeys ?? []).map {
                 KEMPublicKeyInfo(suiteWireId: $0.suiteWireId, publicKey: $0.publicKey)
-            }
+            },
+            platform: payload.platform,
+            osVersion: payload.osVersion
         )
         guard !kemKeys.isEmpty else { return }
 
-        await PeerKEMBootstrapStore.shared.upsert(deviceIds: [normalizedRemoteId], kemPublicKeys: kemKeys)
+        await PeerKEMBootstrapStore.shared.upsert(
+            deviceIds: [normalizedRemoteId],
+            kemPublicKeys: kemKeys,
+            platform: payload.platform,
+            osVersion: payload.osVersion,
+            verifiedProtocolFingerprint: verifiedAuthorityFingerprint
+        )
         appendWebRTCSessionDiagnostic(
-            "join-bootstrap-accepted session=\(sessionID) remote=\(normalizedRemoteId) kemKeys=\(kemKeys.count)",
+            "join-bootstrap-accepted session=\(sessionID) remote=\(normalizedRemoteId) kemKeys=\(kemKeys.count) bound=\(verifiedAuthorityFingerprint != nil)",
             sessionID: sessionID
         )
     }
@@ -2299,17 +2297,31 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     /// 生成服务器签发的智能连接码（当前默认 8 位）
     public func generateConnectionCode() async throws -> String {
+        try await issueConnectionCode(leaseMode: connectionCodeLeaseMode).code
+    }
+
+    /// 生成服务器签发的智能连接码，并使用调用方显式传入的 lease。
+    ///
+    /// GUI 默认入口仍由 `generateConnectionCode()` 读取 `connectionCodeLeaseMode`；
+    /// Operator/CLI 入口必须传入 lease，避免通过写入 GUI UserDefaults 偏好来表达一次性命令参数。
+    public func issueConnectionCode(leaseMode requestedLeaseMode: ConnectionCodeLeaseMode) async throws -> IssuedConnectionCode {
         logger.info("生成智能连接码")
-        let requestedLeaseMode = connectionCodeLeaseMode
         let localBinding = try await currentPathLocalBinding()
         let canReuseCurrentAuthority = activeConnectionCodeMatchesCurrentAuthority(localBinding)
         if let existing = connectionCode,
+           let activeSessionID = activeConnectionCodeSessionID,
+           !activeSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            case .waiting(let activeCode) = connectionStatus,
            activeCode == existing,
            Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt),
            canReuseCurrentAuthority {
-            return existing
+            return IssuedConnectionCode(
+                code: existing,
+                sessionID: activeSessionID,
+                expiresAt: connectionCodeExpiresAt,
+                leaseMode: requestedLeaseMode
+            )
         }
         if let existing = connectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
@@ -2384,7 +2396,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             startWebRTCOfferSession(sessionID: lease.sessionID)
 
             logger.info("✅ 连接码生成成功: code=<redacted>")
-            return code
+            return IssuedConnectionCode(
+                code: code,
+                sessionID: lease.sessionID,
+                expiresAt: self.connectionCodeExpiresAt,
+                leaseMode: requestedLeaseMode
+            )
         } catch {
             logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
             connectionStatus = .failed(error.localizedDescription)
@@ -2760,29 +2777,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         } catch {
             throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint(error.localizedDescription)
         }
-        guard let url = Self.currentPathSignalingWebSocketURL(
+        guard let url = CurrentPathSignalingWebSocketPolicy.webSocketURL(
             signalingServerOrigin: origin,
             wsPath: currentPathSignalingWebSocketPathBySessionId[shardKey],
             sessionID: shardKey,
             sessionToken: sessionToken,
             clientVersion: resolvedClientVersion,
-            protocolVersion: protocolVersion
+            protocolVersion: protocolVersion,
+            credentialTransport: .headers
         ) else {
             throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling origin")
         }
- // 令牌走 query(st):Cloudflare 等代理会在 WebSocket 升级时剥掉 X-SkyBridge-* 自定义头,
- // 源站收不到令牌(missing_session_token);query 参数能穿过。服务端 allowLegacyQueryToken 已开启。
- // 在实例层组装(而非静态 builder),与 signalingWebSocketHeaders 的"移除会话头"配套:
- // 同一连接只用 query 令牌、不带会话头,避免服务端 conflicting_session_credentials;
- // 静态 builder 保持 header-only,供 CurrentPathProbe 等其它用途复用。
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return url
-        }
-        var items = components.queryItems ?? []
-        items.removeAll { $0.name == "st" }
-        items.append(URLQueryItem(name: "st", value: sessionToken))
-        components.queryItems = items
-        return components.url ?? url
+        return url
     }
 
     private func signalingWebSocketHeaders(shardKey: String) throws -> [String: String] {
@@ -2796,18 +2802,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             ? clientVersion!
             : (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0")
         let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
-        guard var headers = Self.currentPathSignalingWebSocketHeaders(
+        guard let headers = CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
             sessionID: shardKey,
             sessionToken: sessionToken,
             clientVersion: resolvedClientVersion,
-            protocolVersion: protocolVersion
+            protocolVersion: protocolVersion,
+            credentialTransport: .headers
         ) else {
             throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling headers")
         }
- // 令牌改走 query(st)后,从请求头移除会话凭据:服务端若同时见到"会话头 + query 令牌"会判为
- // conflicting_session_credentials。移除后只剩版本头(被代理剥掉也无妨,版本同样在 query 的 cv/pv)。
-        headers.removeValue(forKey: "X-SkyBridge-Session-Id")
-        headers.removeValue(forKey: "X-SkyBridge-Session")
         return headers
     }
 
@@ -3313,7 +3316,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let sessionID = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = frame.error ?? "unknown_signaling_error"
         let failureClass = Self.classifySignalingFailure(from: frame)
-        appendSmokeStatus("signal-server-error session=\(sessionID ?? "-") error=\(reason)")
+        let failureCode = Self.publicSignalingFailureCode(failureClass)
+        let publicFailureClass = Self.publicSignalingFailureClass(failureClass)
+        let sessionLabel = Self.publicSignalingSessionLabel(sessionID)
+        appendSmokeStatus(
+            "signal-server-error session=\(sessionLabel) failure_code=\(failureCode) failure_class=\(publicFailureClass)"
+        )
 
         guard let sessionID else {
             if reason == "server_error",
@@ -3321,8 +3329,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 logger.info("ℹ️ ignore unscoped signaling server_error after transport establishment")
                 return
             }
-            logger.error("❌ signaling server rejected frame: session=- error=\(reason, privacy: .public)")
-            connectionStatus = .failed("Signaling error: \(reason)")
+            logger.error("❌ signaling server rejected frame: session=- failure_code=\(failureCode, privacy: .public) failure_class=\(publicFailureClass, privacy: .public)")
+            connectionStatus = .failed("Signaling error: \(failureCode)")
             readiness = .idle
             return
         }
@@ -3333,22 +3341,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             noteDetachedSignalingAfterTransportEstablished(
                 for: sessionID,
                 source: "server_frame",
-                failure: reason,
+                failure: failureCode,
                 fatal: Self.isFatalPostTransportFailure(failureClass)
             )
             return
         }
 
-        logger.error("❌ signaling server rejected frame: session=\(sessionID, privacy: .public) error=\(reason, privacy: .public)")
+        logger.error("❌ signaling server rejected frame: session=present failure_code=\(failureCode, privacy: .public) failure_class=\(publicFailureClass, privacy: .public)")
         if Self.isFatalPreTransportFailure(failureClass) {
             if webrtcSessionsBySessionId[sessionID] != nil {
                 cleanupWebRTCSession(
                     sessionID,
-                    reason: "signaling_server_error:\(reason)",
+                    reason: "signaling_server_error:\(failureCode)",
                     disconnectKind: .explicit
                 )
             }
-            connectionStatus = .failed("Signaling error: \(reason)")
+            connectionStatus = .failed("Signaling error: \(failureCode)")
             readiness = .idle
             return
         }
@@ -3422,9 +3430,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         case .join:
             Task { @MainActor [weak self] in
-                await self?.resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)
-                await self?.resendCachedAnswerIfNeeded(for: env.sessionId, reason: "remote-join")
-                await self?.resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote-join")
+                guard let self else { return }
+                if Self.shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: session.role == .offerer) {
+                    appendSmokeStatus(
+                        "join-bootstrap-resend session=\(env.sessionId) reason=remote-join"
+                    )
+                    await sendWebRTCJoinSignal(sessionID: env.sessionId, localDeviceId: session.localDeviceId, retries: 2)
+                }
+                await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)
+                await resendCachedAnswerIfNeeded(for: env.sessionId, reason: "remote-join")
+                await resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote-join")
             }
         case .leave:
             cleanupWebRTCSession(
@@ -3456,6 +3471,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             authorityBoundBootstrap: authorityBoundWebRTCBootstrapSessionIds.contains(sessionID),
             hasSignalingToken: webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false
         )
+    }
+
+    nonisolated static func shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: Bool) -> Bool {
+        isOfferer
     }
 
     // MARK: - WebRTC -> Handshake/Control Channel
@@ -3920,13 +3939,48 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                     let selection = bootstrapPlan.selection
 
-                    let cryptoProvider = CryptoProviderFactory.make(policy: selection)
                     let sigAAlgorithm: ProtocolSigningAlgorithm = selection == .classicOnly ? .ed25519 : .mlDSA65
-                    let offeredSuites: [CryptoSuite] = selection == .classicOnly
-                        ? cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
-                        : DeviceIdentityKeyManager
-                            .pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
-                            .filter(\.isPQCGroup)
+                    let cryptoProvider: any CryptoProvider
+                    let offeredSuites: [CryptoSuite]
+                    if selection == .classicOnly {
+                        cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                        offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                    } else {
+                        // Strict / PQC path. The offerer must NOT elect its MessageA suite set purely from
+                        // local provider capability — that offers X-Wing-only to an ML-KEM-only peer and
+                        // fails suite negotiation even though both share ML-KEM-768. Mirror the REKEY /
+                        // inbound-responder election: intersect the local advertised PQC suites with the
+                        // peer's authority-bound advertised KEM, and pick a provider that can encapsulate
+                        // the shared family.
+                        //
+                        // `trustedPeerKEMKeys` ([UInt16: Data], keyed by CryptoSuite.wireId) is the
+                        // authority-bound / signed-refresh peer KEM resolved above; on the strict-PQC path
+                        // the bootstrap decision already guaranteed it is non-empty (else code 701).
+                        let peerAdvertisedSuites: [CryptoSuite] = trustedPeerKEMKeys.keys.map { CryptoSuite(wireId: $0) }
+                        let initiatorProvider = CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+                            policy: selection,
+                            peerAdvertisedSuites: peerAdvertisedSuites
+                        )
+                        let advertised = DeviceIdentityKeyManager
+                            .pairingIdentityAdvertisedPQCSuites(using: initiatorProvider)
+                        let shared = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
+                            localPQCSuites: advertised,
+                            with: trustedPeerKEMKeys
+                        )
+                        guard !shared.isEmpty else {
+                            // Fail closed: no mutually-supported PQC family. NEVER fall back to classic.
+                            logger.error(
+                                "⛔️ WebRTC 初始出站握手挑选不出共享 PQC 套件: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) localAdvertised=\(advertised.map(\.wireId), privacy: .public) peerKEM=\(Array(trustedPeerKEMKeys.keys), privacy: .public)"
+                            )
+                            throw NSError(
+                                domain: "CrossNetworkConnectionManager",
+                                code: 704,
+                                userInfo: [NSLocalizedDescriptionKey: "严格 PQC 已启用，但 WebRTC 初始握手与对端没有共享的 PQC 套件族（suiteNegotiationFailed）；当前已拒绝 classic fallback。peer=\(trustLookupPeerId)"]
+                            )
+                        }
+                        cryptoProvider = initiatorProvider
+                        offeredSuites = shared.filter(\.isPQCGroup)
+                    }
 
                     let outboundDriver = try HandshakeDriver(
                         transport: transport,
@@ -3940,7 +3994,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         offeredSuites: offeredSuites,
                         policy: handshakePolicy,
                         cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: offeredSuites),
-                        trustProvider: selection == .classicOnly ? currentPathTrustProvider : nil
+                        // The current-path trust provider carries the pinned remote authority (set by the
+                        // answerer code/QR path, or — on the offerer path — by ingestWebRTCJoinBootstrapPayload).
+                        // It is required on the strict-PQC path too: it supplies the authority-bound peer KEM
+                        // for encapsulation AND enforces protocol-identity pinning on MessageB. Without it the
+                        // driver falls back to DefaultHandshakeTrustProvider, which has no current-path authority
+                        // and returns no peer KEM for a fresh cross-network peer (the 701 deadlock).
+                        trustProvider: currentPathTrustProvider
                     )
                     handshakeState.driver = outboundDriver
 
@@ -6118,6 +6178,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                        Date().timeIntervalSince(lastNativeVideoStatsReportAt) >= 2.0 {
                         let sendSnapshot = session.nativeScreenVideoSendSnapshot()
                         let rtcStats = await session.outgoingNativeScreenVideoRTCStats()
+                        let negotiatedProfileLevelID = session.selectedNativeScreenVideoProfileLevelID() ?? "-"
                         let nativeVideoTrackReadyForStats =
                             self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
                         let nextHealthState: NativeVideoHealthState = {
@@ -6340,6 +6401,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-", privacy: .public) \
                             timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-", privacy: .public) \
                             timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted, privacy: .public) \
+                            profileLevelID=\(negotiatedProfileLevelID, privacy: .public) \
                             outboundStats=\(rtcStats.outboundStatsPresent, privacy: .public) \
                             framesEncoded=\(rtcStats.framesEncoded, privacy: .public) \
                             framesSent=\(rtcStats.framesSent, privacy: .public) \
@@ -6364,7 +6426,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             """
                         )
                         self.appendSmokeStatus(
-                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)"
+                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) profileLevelID=\(negotiatedProfileLevelID) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)"
                         )
                         if self.remoteDesktopNetworkStatsEnabled {
                             self.appendWebRTCSessionDiagnostic(
@@ -7269,7 +7331,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                             peerDeviceId,
                                             endpointDescription
                                         ]),
-                                        kemPublicKeys: payload.kemPublicKeys
+                                        kemPublicKeys: payload.kemPublicKeys,
+                                        platform: payload.platform,
+                                        osVersion: payload.osVersion
                                     )
                                     logger.info(
                                         "🔑 WebRTC bootstrap KEM cache updated: declared=\(payload.deviceId, privacy: .public) peer=\(endpointDescription, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"

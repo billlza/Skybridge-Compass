@@ -354,11 +354,11 @@ final class AppUpdateManifestTests: XCTestCase {
             releaseReadiness.contains("[[ \"${target_path}\" == *.dmg ]] && xcrun stapler validate"),
             "The notarization confirmation path must not be limited to DMGs; stapled App bundles are release evidence too."
         )
-        XCTAssertTrue(workflow.contains("DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer"))
-        XCTAssertTrue(workflow.contains("SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: \"6.3.2\""))
+        XCTAssertTrue(workflow.contains("DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer"))
+        XCTAssertTrue(workflow.contains("SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: \"6.3.3\""))
         XCTAssertFalse(
             workflow.contains("swift-actions/setup-swift"),
-            "Apple-platform release builds must use the Xcode 26.5 Apple toolchain, not a separate Swift.org toolchain."
+            "Apple-platform release builds must use the Xcode 26.6 Apple toolchain, not a separate Swift.org toolchain."
         )
         XCTAssertTrue(workflow.contains("contents: write"))
         XCTAssertTrue(workflow.contains("actions/download-artifact@v4"))
@@ -408,9 +408,9 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
         XCTAssertTrue(fastfile.contains("Scripts/publish_macos_update_release.sh"))
         XCTAssertTrue(xcodeVerifier.contains("TOOLCHAIN_POLICY=\"${SKYBRIDGE_XCODE_TOOLCHAIN_POLICY:-stable-release}\""))
-        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_VERSION=\"26.5\""))
-        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_BUILD=\"17F42\""))
-        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_SWIFT_VERSION=\"6.3.2\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_VERSION=\"26.6\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_BUILD=\"17F113\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_SWIFT_VERSION=\"6.3.3\""))
         XCTAssertTrue(xcodeVerifier.contains("EXPECTED_MACOS_SDK_VERSION=\"26.5\""))
         XCTAssertTrue(xcodeVerifier.contains("stable release toolchain must not use beta Xcode developer directory"))
         XCTAssertTrue(xcodeVerifier.contains("custom-diagnostic"))

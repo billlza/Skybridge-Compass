@@ -223,8 +223,8 @@ struct HazeEffectView: View {
 
     var body: some View {
         Canvas { context, size in
- // 创建多层雾霾
-            for layer in 0..<3 {
+ // 创建多层雾霾（2 层即可，降低 Canvas 每帧重绘开销）
+            for layer in 0..<2 {
                 let opacity = intensity * (1.0 - Double(layer) * 0.2)
                 let layerOffset = animationOffset * CGFloat(layer + 1) * 10
 
@@ -248,16 +248,17 @@ struct HazeEffectView: View {
     private func drawHazeLayer(in context: GraphicsContext, size: CGSize, opacity: Double, offset: CGFloat, clearZones: [ClearZone]) {
  // 使用渐变模拟雾霾
         let gradient = Gradient(colors: [
-            Color(red: 0.7, green: 0.7, blue: 0.65).opacity(opacity * 0.8),
-            Color(red: 0.8, green: 0.75, blue: 0.7).opacity(opacity * 0.6),
-            Color(red: 0.75, green: 0.7, blue: 0.68).opacity(opacity * 0.9)
+            Color(white: 0.72).opacity(opacity * 0.8),
+            Color(white: 0.78).opacity(opacity * 0.6),
+            Color(white: 0.75).opacity(opacity * 0.9)
         ])
 
         var context = context
         context.opacity = opacity
 
  // 绘制雾霾块（避开鼠标清除区域）
-        let blockSize: CGFloat = 200
+ // 增大块尺寸（200→320）以大幅减少每帧绘制的渐变块数量
+        let blockSize: CGFloat = 320
         let rows = Int(ceil(size.height / blockSize)) + 2
         let cols = Int(ceil(size.width / blockSize)) + 2
 

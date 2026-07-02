@@ -336,6 +336,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "The release package path must remove Xcode beta/cryptex toolchain rpaths before final signing instead of relying on runtime library-validation exceptions."
         )
         XCTAssertTrue(
+            packageScript.contains("release_dmg 打包缺少预构建 FreeRDP 动态库目录") &&
+            packageScript.contains("正式 DMG 禁止回退用户机器上的 Homebrew libfreerdp3") &&
+            packageScript.contains("release_dmg 打包缺少必要的 FreeRDP 动态库"),
+            "The release package path must fail closed when the self-contained FreeRDP dylib closure is missing instead of publishing a Homebrew-dependent RDP build."
+        )
+        XCTAssertTrue(
+            packageScript.contains("release_dmg 打包中 swift-stdlib-tool 执行失败") &&
+            packageScript.contains("release_dmg 打包缺少 swift-stdlib-tool"),
+            "The release package path must fail closed if Swift runtime copying cannot be proven."
+        )
+        XCTAssertTrue(
             releaseReadinessScript.contains("validate_release_rpaths \"${APP_EXECUTABLE_PATH}\"") &&
             releaseReadinessScript.contains("release app executable must not retain external Xcode beta/cryptex toolchain rpaths") &&
             releaseReadinessScript.contains("/Applications/Xcode*.app/Contents/Developer/Toolchains/*/usr/lib/swift*") &&
@@ -589,7 +600,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             discoverySource.contains("hasHigherPriorityPresentation(") &&
             discoverySource.contains("represented.id == candidate.id") &&
             discoverySource.contains("private var displayedTrustedRecordsForUI") &&
-            discoverySource.contains("hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices)") &&
+            discoverySource.contains("hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input)") &&
             discoverySource.contains("let records = trustedLookupRecords(for: group)") &&
             discoverySource.contains("resolvedTrustRecord(for: device, among: records)"),
             "Enhanced discovery must keep connected, recent, trusted, and online sections mutually exclusive across the full trust group so one physical iPad is not rendered multiple times."
@@ -720,6 +731,15 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             discoverySource.contains("buildPresentationSnapshot("),
             "Presentation state should be recomputed when discovery/trust/presence inputs change, not from computed properties inside body."
         )
+        XCTAssertTrue(discoverySource.contains("private enum DeviceDiscoveryPresentationProjector"))
+        XCTAssertTrue(discoverySource.contains("@State private var presentationRefreshGeneration"))
+        XCTAssertTrue(discoverySource.contains("presentationRefreshTask?.cancel()"))
+        XCTAssertTrue(discoverySource.contains("Task.detached(priority: .userInitiated)"))
+        XCTAssertTrue(discoverySource.contains("makePresentationProjectorInput("))
+        XCTAssertTrue(
+            discoverySource.contains("presentationRefreshGeneration == generation"),
+            "Background presentation projection must reject stale results instead of overwriting newer UI state."
+        )
         XCTAssertTrue(
             discoverySource.contains("private var activeOnlineDevicesNonLocal: [OnlineDevice] {\n        cachedPresentationSnapshot.activeOnlineDevicesNonLocal") &&
             discoverySource.contains("private var groupedRecentlyConnectedDevices: [OnlineDevice] {\n        cachedPresentationSnapshot.groupedRecentlyConnectedDevices") &&
@@ -735,6 +755,33 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             discoverySource.contains("accessibilityIdentityByDeviceId"),
             "Online row accessibility identities should be calculated with the presentation snapshot instead of resolving protocol identity for every row render."
         )
+    }
+
+    func testAvatarCacheDiskIOStaysOutOfSynchronousViewPath() throws {
+        let cacheSource = try repositorySource("Sources/SkyBridgeCore/Services/AvatarCacheManager.swift")
+        let liquidUserArea = try repositorySource("Sources/SkyBridgeCompassApp/Views/LiquidGlassUserArea.swift")
+        let profileView = try repositorySource("Sources/SkyBridgeCompassApp/UserProfileView.swift")
+        let profileOverlay = try repositorySource("Sources/SkyBridgeCompassApp/UserProfileOverlay.swift")
+        let authViewModel = try repositorySource("Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift")
+
+        XCTAssertTrue(cacheSource.contains("private actor AvatarDiskCacheStore"))
+        XCTAssertTrue(cacheSource.contains("public func loadCachedAvatar(for userId: String) async throws -> NSImage?"))
+        XCTAssertTrue(cacheSource.contains("func loadData(for userId: String) throws -> Data?"))
+        XCTAssertTrue(cacheSource.contains("return try Data(contentsOf: url)"))
+
+        let getAvatarStart = try XCTUnwrap(cacheSource.range(of: "public func getAvatar(for userId: String) -> NSImage?"))
+        let loadAvatarStart = try XCTUnwrap(cacheSource.range(of: "public func loadCachedAvatar(for userId: String) async throws -> NSImage?"))
+        let getAvatarBody = String(cacheSource[getAvatarStart.lowerBound..<loadAvatarStart.lowerBound])
+        XCTAssertFalse(
+            getAvatarBody.contains("Data(contentsOf:"),
+            "The synchronous avatar getter is called from SwiftUI body paths and must stay memory-only."
+        )
+        XCTAssertFalse(getAvatarBody.contains("fileExists("))
+
+        XCTAssertTrue(liquidUserArea.contains(".task(id: authModel.currentSession?.userIdentifier)"))
+        XCTAssertTrue(profileOverlay.contains(".task(id: authModel.currentSession?.userIdentifier)"))
+        XCTAssertTrue(profileView.contains("try await AvatarCacheManager.shared.loadCachedAvatar(for: userId)"))
+        XCTAssertTrue(authViewModel.contains("try await AvatarCacheManager.shared.loadCachedAvatar(for: session.userIdentifier)"))
     }
 
     func testLegacyP2PConnectionViewDoesNotExposePlanningOnlyConnectionCodeButton() throws {

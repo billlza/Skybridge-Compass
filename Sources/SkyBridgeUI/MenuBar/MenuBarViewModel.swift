@@ -414,7 +414,9 @@ public final class MenuBarViewModel: ObservableObject {
               let transferId = userInfo["transferId"] as? String,
               let fileName = userInfo["fileName"] as? String,
               let progress = userInfo["progress"] as? Double,
-              let speed = userInfo["speed"] as? Double else {
+              let speed = userInfo["speed"] as? Double,
+              let transferredBytes = Self.int64UserInfoValue(userInfo["transferredBytes"]),
+              let totalBytes = Self.int64UserInfoValue(userInfo["totalBytes"]) else {
             return
         }
         
@@ -425,6 +427,8 @@ public final class MenuBarViewModel: ObservableObject {
                 fileName: fileName,
                 progress: progress,
                 speed: speed,
+                transferredBytes: transferredBytes,
+                totalBytes: totalBytes,
                 state: .transferring
             )
         } else {
@@ -433,6 +437,8 @@ public final class MenuBarViewModel: ObservableObject {
                 fileName: fileName,
                 progress: progress,
                 speed: speed,
+                transferredBytes: transferredBytes,
+                totalBytes: totalBytes,
                 state: .transferring
             ))
         }
@@ -467,6 +473,8 @@ public final class MenuBarViewModel: ObservableObject {
                 fileName: item.fileName,
                 progress: item.progress,
                 speed: 0,
+                transferredBytes: item.transferredBytes,
+                totalBytes: item.totalBytes,
                 state: .failed
             )
         }
@@ -482,9 +490,31 @@ public final class MenuBarViewModel: ObservableObject {
             iconState = .error
         } else {
  // 计算总进度
-            let totalProgress = activeTransfers.reduce(0.0) { $0 + $1.progress } / Double(activeTransfers.count)
+            let totalBytes = activeTransfers.reduce(Int64(0)) { $0 + max(0, $1.totalBytes) }
+            let totalProgress: Double
+            if totalBytes > 0 {
+                let transferredBytes = activeTransfers.reduce(Int64(0)) { total, item in
+                    total + max(0, min(item.transferredBytes, item.totalBytes))
+                }
+                totalProgress = Double(transferredBytes) / Double(totalBytes)
+            } else {
+                totalProgress = activeTransfers.allSatisfy { $0.progress >= 1.0 } ? 1.0 : 0.0
+            }
             iconState = .transferring(progress: totalProgress)
         }
+    }
+
+    private static func int64UserInfoValue(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 {
+            return value
+        }
+        if let value = value as? Int {
+            return Int64(value)
+        }
+        if let value = value as? NSNumber {
+            return value.int64Value
+        }
+        return nil
     }
 }
 

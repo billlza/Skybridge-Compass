@@ -1606,6 +1606,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// The H264 `profile-level-id` of the selected (first-listed) native-screen video
+    /// payload in the last emitted local SDP, or `nil` if no H264 video m-line has been
+    /// emitted yet. Diagnostic-only; the profile-level-id is not sensitive. Lets the
+    /// `native-video-tx` telemetry confirm the host flipped to `42e01f` (Baseline).
+    public func selectedNativeScreenVideoProfileLevelID() -> String? {
+        guard let sdp = withState({ self.lastEmittedLocalSDP }) else { return nil }
+        return Self.selectedH264ProfileLevelID(fromVideoMLineOf: sdp)
+    }
+
     public func nativeScreenVideoSendSnapshot() -> NativeScreenVideoSendSnapshot {
 #if canImport(WebRTC)
         withState {
@@ -1993,11 +2002,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             height: targetHeight,
             fps: targetFPS
         )
-        let strictMinimumBitrate = WebRTCNativeScreenVideoValuePolicy.minimumExtremeBitrateBps(
-            width: targetWidth,
-            height: targetHeight,
-            fps: targetFPS
-        )
         let disallowQualityDegradation = lastOutgoingNativeVideoDisallowQualityDegradation
         let encodings = parameters.encodings.isEmpty
             ? [RTCRtpEncodingParameters()]
@@ -2008,7 +2012,16 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             encoding.maxBitrateBps = NSNumber(value: targetBitrate)
             encoding.bitratePriority = max(encoding.bitratePriority, disallowQualityDegradation ? 2.0 : 1.0)
             if disallowQualityDegradation {
-                encoding.minBitrateBps = NSNumber(value: Int(strictMinimumBitrate))
+                // Production cross-network RD previously pinned a hard `minBitrateBps`
+                // floor (≈ availableOutgoingBitrate, zero headroom) plus
+                // `degradationPreference = .disabled`. libwebrtc's bitrate allocator
+                // could never hand the stream a satisfiable target above that floor, so
+                // the macOS-host VideoToolbox H264 encoder waited forever and never
+                // issued a single Encode() (framesEncoded=0). Remove the floor and use
+                // `.maintainResolution` so the allocator can start at a real target;
+                // resolution is preserved (`scaleResolutionDownBy = 1.0`) and only fps
+                // is sacrificed under congestion — the correct RD degradation policy.
+                encoding.minBitrateBps = nil
                 encoding.scaleResolutionDownBy = NSNumber(value: 1.0)
                 encoding.numTemporalLayers = NSNumber(value: 1)
             } else {
@@ -2018,11 +2031,25 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return encoding
         }
         if disallowQualityDegradation {
-            parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.disabled.rawValue)
+            parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainResolution.rawValue)
         } else {
             parameters.degradationPreference = nil
         }
         sender.parameters = parameters
+        if let appliedEncoding = parameters.encodings.first {
+            logger.info(
+                """
+                🎚️ native screen sender params applied: \
+                sessionId=\(self.sessionId, privacy: .public) \
+                disallowQualityDegradation=\(disallowQualityDegradation, privacy: .public) \
+                minBitrateBps=\(appliedEncoding.minBitrateBps?.stringValue ?? "nil", privacy: .public) \
+                maxBitrateBps=\(appliedEncoding.maxBitrateBps?.stringValue ?? "nil", privacy: .public) \
+                degradationPreference=\(parameters.degradationPreference?.stringValue ?? "nil", privacy: .public) \
+                scaleResolutionDownBy=\(appliedEncoding.scaleResolutionDownBy?.stringValue ?? "nil", privacy: .public) \
+                isActive=\(appliedEncoding.isActive, privacy: .public)
+                """
+            )
+        }
     }
 
     private func configureOutgoingSystemAudioIfNeeded(
@@ -2324,25 +2351,47 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         _ sdp: String,
         kind: String
     ) -> String {
-        guard prefersNativeOutgoingScreenTrack,
-              WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled() else { return sdp }
-        let constrained = Self.sdpWithNativeScreenH264LevelSupport(
-            sdp,
-            requiredLevelHex: WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex,
-            maxFS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS,
-            maxMBPS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS
-        )
-        guard constrained != sdp else { return sdp }
-        _onTrace?(
-            """
-            local-sdp-h264-extreme-constraints session=\(sessionId) \
-            kind=\(kind) \
-            level=\(WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex) \
-            maxFS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS) \
-            maxMBPS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS)
-            """
-        )
-        return constrained
+        guard prefersNativeOutgoingScreenTrack else { return sdp }
+
+        var result = sdp
+
+        // Always (independent of the extreme-media flag): if the native screen video
+        // m-line offers both a Constrained-Baseline (profile-level-id 42…) and a High
+        // (640c…) H264 payload, make Baseline the first/selected payload. The macOS
+        // VideoToolbox encoder will not bring up Constrained-High, so leaving High
+        // first leaves framesEncoded stuck at 0 (black viewer). We reorder rather than
+        // delete the High payload to keep the offer/answer payload set intact.
+        let baselineFirst = Self.sdpWithNativeScreenH264BaselineFirst(result)
+        if baselineFirst != result {
+            _onTrace?(
+                "local-sdp-h264-baseline-first session=\(sessionId) kind=\(kind)"
+            )
+            result = baselineFirst
+        }
+
+        // Extreme-media only: raise H264 level + macroblock caps for high-res capture.
+        if WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled() {
+            let constrained = Self.sdpWithNativeScreenH264LevelSupport(
+                result,
+                requiredLevelHex: WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex,
+                maxFS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS,
+                maxMBPS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS
+            )
+            if constrained != result {
+                _onTrace?(
+                    """
+                    local-sdp-h264-extreme-constraints session=\(sessionId) \
+                    kind=\(kind) \
+                    level=\(WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex) \
+                    maxFS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS) \
+                    maxMBPS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS)
+                    """
+                )
+                result = constrained
+            }
+        }
+
+        return result
     }
 
     private func createOffer() {

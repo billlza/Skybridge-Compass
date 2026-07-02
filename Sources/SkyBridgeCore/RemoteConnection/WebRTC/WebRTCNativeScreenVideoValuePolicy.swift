@@ -99,6 +99,32 @@ enum WebRTCNativeScreenVideoValuePolicy {
         codecName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "rtx"
     }
 
+    /// Secondary ordering key for two H264 codec entries that tie on `codecPreferenceRank`.
+    ///
+    /// The macOS-host WebRTC VideoToolbox encoder will not bring up a Constrained-High
+    /// (`profile-idc=0x64`, e.g. `640c1f`) H264 stream — it stays at framesEncoded=0.
+    /// Constrained Baseline (`profile-idc=0x42`, e.g. `42e01f`) starts cleanly. The
+    /// `profile-level-id` is six hex chars: the first two are the `profile-idc`. Lower
+    /// rank sorts first, so Baseline (`42`) precedes Main (`4d`) precedes High (`64`).
+    /// Entries without a parseable `profile-level-id` sort after the recognized ones but
+    /// keep their relative order via the stable sort's offset tiebreak.
+    static func h264ProfilePreferenceRank(profileLevelID: String?) -> Int {
+        guard let profileLevelID else { return 3 }
+        let cleaned = profileLevelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard cleaned.count >= 2 else { return 3 }
+        let profileIDC = String(cleaned.prefix(2))
+        switch profileIDC {
+        case "42": // Baseline / Constrained Baseline — encoder starts cleanly.
+            return 0
+        case "4d": // Main — acceptable middle ground.
+            return 1
+        case "64": // High / Constrained High — encoder won't bring it up; demote.
+            return 2
+        default:
+            return 3
+        }
+    }
+
 #if canImport(WebRTC)
     static func preferredHardwareVideoEncoderCodec(
         from supportedCodecs: [RTCVideoCodecInfo] = RTCDefaultVideoEncoderFactory.supportedCodecs()
@@ -134,6 +160,22 @@ enum WebRTCNativeScreenVideoValuePolicy {
             let rhsRank = codecPreferenceRank(rhs.element.name)
             if lhsRank != rhsRank {
                 return lhsRank < rhsRank
+            }
+            // Secondary key: among tied H264 entries, prefer Constrained Baseline
+            // (`profile-level-id` starting `42`) over High (`640c`). The family-level
+            // ordering above is untouched; this only reorders within H264.
+            if lhsRank == codecPreferenceRank("h264"),
+               codecIsHardwarePreferred(lhs.element.name),
+               codecIsHardwarePreferred(rhs.element.name) {
+                let lhsProfileRank = h264ProfilePreferenceRank(
+                    profileLevelID: lhs.element.parameters["profile-level-id"]
+                )
+                let rhsProfileRank = h264ProfilePreferenceRank(
+                    profileLevelID: rhs.element.parameters["profile-level-id"]
+                )
+                if lhsProfileRank != rhsProfileRank {
+                    return lhsProfileRank < rhsProfileRank
+                }
             }
             return lhs.offset < rhs.offset
         }.map(\.element)

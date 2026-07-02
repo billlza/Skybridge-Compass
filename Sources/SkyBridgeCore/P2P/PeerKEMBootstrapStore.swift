@@ -31,6 +31,8 @@ public actor PeerKEMBootstrapStore {
         var payloadHashHex: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
         var signedRefreshDeviceId: String? = nil
+        var platform: String? = nil
+        var osVersion: String? = nil
     }
 
     private struct Snapshot: Codable, Sendable {
@@ -66,12 +68,29 @@ public actor PeerKEMBootstrapStore {
         self.entries = Self.loadEntries(from: defaults)
     }
 
-    public func upsert(deviceIds: [String], kemPublicKeys: [KEMPublicKeyInfo]) {
+    /// Stores a `pairing_identity_exchange` bootstrap KEM.
+    ///
+    /// `verifiedProtocolFingerprint`, when supplied, is the lowercase canonical protocol identity
+    /// fingerprint that the caller has already validated against the carried protocol public key
+    /// bytes (i.e. `ProtocolIdentityBinding.computeFingerprint(...) == fingerprint`). It is recorded
+    /// alongside the KEM so an authority-bound lookup (`authorityBoundPairingKEMPublicKeys`) can later
+    /// return this material *only* when the consumer pins that exact fingerprint. The KEM itself is
+    /// still authenticated end-to-end by the strict-PQC handshake transcript signature; the stored
+    /// fingerprint simply lets the offerer scope the encapsulation target to the pinned identity.
+    public func upsert(
+        deviceIds: [String],
+        kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String? = nil,
+        osVersion: String? = nil,
+        verifiedProtocolFingerprint: String? = nil
+    ) {
         let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
-        let incoming = incomingKEMMap(kemPublicKeys)
+        let incoming = incomingKEMMap(kemPublicKeys, platform: platform, osVersion: osVersion)
         guard !incoming.isEmpty else { return }
+
+        let normalizedFingerprint = Self.normalizedProtocolFingerprint(verifiedProtocolFingerprint)
 
         let now = Date()
         var changed = false
@@ -95,15 +114,30 @@ public actor PeerKEMBootstrapStore {
                 merged[suiteWireId] = publicKey
             }
 
-            if merged != existingKeys || entries[deviceId] == nil {
+            // Preserve any previously-recorded verified fingerprint when this call does not
+            // carry one, so a later un-fingerprinted refresh of the same keys can't strip the pin.
+            let resolvedFingerprint = normalizedFingerprint
+                ?? (existingEntry?.source == "pairing_identity_exchange"
+                    ? Self.normalizedProtocolFingerprint(existingEntry?.protocolIdentityFingerprint)
+                    : nil)
+
+            let fingerprintChanged = resolvedFingerprint
+                != Self.normalizedProtocolFingerprint(existingEntry?.protocolIdentityFingerprint)
+
+            if merged != existingKeys || entries[deviceId] == nil || fingerprintChanged {
                 entries[deviceId] = Entry(
                     kemPublicKeys: merged,
                     updatedAt: now,
-                    source: "pairing_identity_exchange"
+                    source: "pairing_identity_exchange",
+                    protocolIdentityFingerprint: resolvedFingerprint,
+                    platform: platform ?? existingEntry?.platform,
+                    osVersion: osVersion ?? existingEntry?.osVersion
                 )
                 changed = true
             } else if var current = entries[deviceId] {
                 current.updatedAt = now
+                current.platform = platform ?? current.platform
+                current.osVersion = osVersion ?? current.osVersion
                 entries[deviceId] = current
             }
         }
@@ -144,7 +178,11 @@ public actor PeerKEMBootstrapStore {
             throw SignedRefreshImportError.signatureVerificationFailed
         }
 
-        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(validPayload.kemPublicKeys)
+        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(
+            validPayload.kemPublicKeys,
+            platform: nil,
+            osVersion: nil
+        )
         guard !validKeys.isEmpty else { return }
 
         let identifiers = [validPayload.deviceId] + validPayload.aliases + deviceIds
@@ -199,12 +237,64 @@ public actor PeerKEMBootstrapStore {
             }
             if let expiresAt = entry.expiresAt, expiresAt <= Date() { continue }
             let signedSuiteWireIds = Set(entry.signedSuiteWireIds ?? entry.kemPublicKeys.keys.sorted())
-            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(entry.kemPublicKeys)
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(
+                entry.kemPublicKeys,
+                platform: entry.platform,
+                osVersion: entry.osVersion
+            )
             where signedSuiteWireIds.contains(suiteWireId) {
                 let candidateKey = SelectedKey(
                     publicKey: publicKey,
                     updatedAt: entry.updatedAt,
                     isSignedRefresh: true,
+                    lookupIndex: index
+                )
+                if Self.shouldPrefer(candidateKey, over: selected[suiteWireId]) {
+                    selected[suiteWireId] = candidateKey
+                }
+            }
+        }
+
+        return Dictionary(uniqueKeysWithValues: selected.map { ($0.key, $0.value.publicKey) })
+    }
+
+    /// Returns `pairing_identity_exchange` bootstrap KEM keyed strictly to a verified, pinned
+    /// protocol identity.
+    ///
+    /// Security contract: a `pairing_identity_exchange` entry is only returned when its stored
+    /// `protocolIdentityFingerprint` — recorded by `upsert(...,verifiedProtocolFingerprint:)` after the
+    /// caller validated `computeFingerprint(bytes) == fingerprint` — is present in
+    /// `pinnedProtocolFingerprints`. There is no blanket "return all" path: an empty pin set, an entry
+    /// with no recorded fingerprint, or a fingerprint outside the pin set all yield nothing. This lets
+    /// the strict-PQC offerer scope its KEM encapsulation target to the pinned authority while the
+    /// handshake transcript signature still provides end-to-end authentication of the chosen KEM.
+    public func authorityBoundPairingKEMPublicKeys(
+        forCandidates candidates: [String],
+        pinnedProtocolFingerprints: Set<String>
+    ) -> [UInt16: Data] {
+        let normalizedPins = Set(pinnedProtocolFingerprints.compactMap(Self.normalizedProtocolFingerprint))
+        guard !normalizedPins.isEmpty else { return [:] }
+        let normalizedCandidates = trustMaterialIds(candidates)
+        guard !normalizedCandidates.isEmpty else { return [:] }
+
+        var selected: [UInt16: SelectedKey] = [:]
+        for (index, candidate) in normalizedCandidates.enumerated() {
+            guard let entry = entries[candidate],
+                  entry.source == "pairing_identity_exchange",
+                  let storedFingerprint = Self.normalizedProtocolFingerprint(entry.protocolIdentityFingerprint),
+                  normalizedPins.contains(storedFingerprint) else {
+                continue
+            }
+            if let expiresAt = entry.expiresAt, expiresAt <= Date() { continue }
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(
+                entry.kemPublicKeys,
+                platform: entry.platform,
+                osVersion: entry.osVersion
+            ) {
+                let candidateKey = SelectedKey(
+                    publicKey: publicKey,
+                    updatedAt: entry.updatedAt,
+                    isSignedRefresh: false,
                     lookupIndex: index
                 )
                 if Self.shouldPrefer(candidateKey, over: selected[suiteWireId]) {
@@ -228,7 +318,11 @@ public actor PeerKEMBootstrapStore {
                 ? Array(entry.kemPublicKeys.keys)
                 : []
             let signedSuiteWireIds = Set(entry.signedSuiteWireIds ?? fallbackSignedSuiteWireIds)
-            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(entry.kemPublicKeys) {
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(
+                entry.kemPublicKeys,
+                platform: entry.platform,
+                osVersion: entry.osVersion
+            ) {
                 let candidateKey = SelectedKey(
                     publicKey: publicKey,
                     updatedAt: entry.updatedAt,
@@ -344,9 +438,17 @@ public actor PeerKEMBootstrapStore {
         lookupCandidates(forAny: rawIds)
     }
 
-    private func incomingKEMMap(_ kemPublicKeys: [KEMPublicKeyInfo]) -> [UInt16: Data] {
+    private func incomingKEMMap(
+        _ kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String?,
+        osVersion: String?
+    ) -> [UInt16: Data] {
         var result: [UInt16: Data] = [:]
-        for key in KEMPublicKeyInfo.normalizedValidKeys(kemPublicKeys) {
+        for key in KEMPublicKeyInfo.normalizedValidKeys(
+            kemPublicKeys,
+            platform: platform,
+            osVersion: osVersion
+        ) {
             result[key.suiteWireId] = key.publicKey
         }
         return result
@@ -419,7 +521,11 @@ public actor PeerKEMBootstrapStore {
 
     private static func sanitizedEntry(_ entry: Entry) -> Entry? {
         var sanitized = entry
-        sanitized.kemPublicKeys = sanitizedKEMMap(entry.kemPublicKeys)
+        sanitized.kemPublicKeys = sanitizedKEMMap(
+            entry.kemPublicKeys,
+            platform: entry.platform,
+            osVersion: entry.osVersion
+        )
         guard !sanitized.kemPublicKeys.isEmpty else { return nil }
         if let signedSuiteWireIds = sanitized.signedSuiteWireIds {
             sanitized.signedSuiteWireIds = signedSuiteWireIds
@@ -429,10 +535,18 @@ public actor PeerKEMBootstrapStore {
         return sanitized
     }
 
-    private static func sanitizedKEMMap(_ keys: [UInt16: Data]) -> [UInt16: Data] {
+    private static func sanitizedKEMMap(
+        _ keys: [UInt16: Data],
+        platform: String? = nil,
+        osVersion: String? = nil
+    ) -> [UInt16: Data] {
         let keyInfos = keys.map { KEMPublicKeyInfo(suiteWireId: $0.key, publicKey: $0.value) }
         return Dictionary(
-            uniqueKeysWithValues: KEMPublicKeyInfo.normalizedValidKeys(keyInfos).map {
+            uniqueKeysWithValues: KEMPublicKeyInfo.normalizedValidKeys(
+                keyInfos,
+                platform: platform,
+                osVersion: osVersion
+            ).map {
                 ($0.suiteWireId, $0.publicKey)
             }
         )

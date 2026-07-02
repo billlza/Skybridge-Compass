@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod check;
 mod common;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod crossnet;
 mod doctor;
 mod operator;
@@ -13,7 +13,7 @@ mod test;
 
 pub(crate) use check::*;
 pub(crate) use common::*;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub(crate) use crossnet::*;
 pub(crate) use doctor::*;
 pub(crate) use operator::*;
@@ -38,7 +38,7 @@ pub(crate) enum Commands {
     Device(DeviceCommand),
     Code(CodeCommand),
     Connect(ConnectCommand),
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     Crossnet(CrossnetCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),

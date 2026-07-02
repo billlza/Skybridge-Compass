@@ -58,10 +58,23 @@ struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
         let pinnedFingerprints = await trustedFingerprints(for: deviceId)
-        let merged = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
-            forCandidates: candidateDeviceIds(for: deviceId),
+        let candidates = candidateDeviceIds(for: deviceId)
+        // Tier 1 (preferred): signed LAN KEM refresh material bound to the pinned protocol identity.
+        var merged = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
+            forCandidates: candidates,
             pinnedProtocolFingerprints: pinnedFingerprints
         )
+        // Tier 2: pairing-identity-exchange KEM, returned only for entries whose recorded protocol
+        // fingerprint matches the pinned current-path authority. This unblocks the strict-PQC initial
+        // handshake (the signed-refresh tier only populates over the already-encrypted DataChannel,
+        // i.e. after the handshake). Signed-refresh keys win on suite-id conflicts.
+        let authorityBound = await PeerKEMBootstrapStore.shared.authorityBoundPairingKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
+        for (suiteWireId, publicKey) in authorityBound where merged[suiteWireId] == nil {
+            merged[suiteWireId] = publicKey
+        }
         return merged.reduce(into: [:]) { partialResult, item in
             partialResult[CryptoSuite(wireId: item.key)] = item.value
         }

@@ -44,6 +44,7 @@
 		513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */; };
 		56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */; };
 		56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */; };
+		578C17D12B409B31D49DF061 /* OperatorControlRuntimeFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578C17D02B409B31D49DF061 /* OperatorControlRuntimeFactory.swift */; };
 		589EE25508C29C0854EB4912 /* MissingIconHintView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A2082093DBBCD396198A9C /* MissingIconHintView.swift */; };
 		5A25017DFEF93E116ECA08E2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
@@ -85,6 +86,7 @@
 		A4FB6EB862F04D9BB309A69A /* WidgetIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CEA4D01349D879638CC4917 /* WidgetIntents.swift */; };
 		A75371379A7B47C826D07860 /* StatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A11BCD0B79A6F1CDD86265 /* StatCard.swift */; };
 		A754A5A5420B98FC76F858A0 /* UnifiedDeviceDiscoveryIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */; };
+		A8E040312B409B31D49DF061 /* OperatorControlServerBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8E040302B409B31D49DF061 /* OperatorControlServerBootstrap.swift */; };
 		A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA32C39188C5F008B50B36E5 /* AppleSiliconFeatures.swift */; };
 		AF3A7DB70017A5645EB81DB9 /* SkyBridgeCompassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 840BCB4182BD17479821AF66 /* SkyBridgeCompassApp.swift */; };
 		AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */; };
@@ -155,6 +157,7 @@
 		271098ACD4DC0594546D9468 /* EventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventMonitor.swift; sourceTree = "<group>"; };
 		27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButton.swift; sourceTree = "<group>"; };
 		28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupCoordinator.swift; sourceTree = "<group>"; };
+		578C17D02B409B31D49DF061 /* OperatorControlRuntimeFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlRuntimeFactory.swift; sourceTree = "<group>"; };
 		2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppIntents.framework; sourceTree = "<group>"; };
 		2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferRow.swift; sourceTree = "<group>"; };
 		2E06A601920A0654D26DC0CF /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
@@ -217,6 +220,7 @@
 		A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherDashboardCard.swift; sourceTree = "<group>"; };
 		A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationNotifications.swift; sourceTree = "<group>"; };
 		A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
+		A8E040302B409B31D49DF061 /* OperatorControlServerBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlServerBootstrap.swift; sourceTree = "<group>"; };
 		AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WidgetKit.framework; sourceTree = "<group>"; };
 		AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactDeviceRow.swift; sourceTree = "<group>"; };
 		B59C11557E4D37206C350EB7 /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationView.swift; sourceTree = "<group>"; };
@@ -413,6 +417,8 @@
 				D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */,
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
 				61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */,
+				578C17D02B409B31D49DF061 /* OperatorControlRuntimeFactory.swift */,
+				A8E040302B409B31D49DF061 /* OperatorControlServerBootstrap.swift */,
 				F0BFA79F007535E0ADD84BC2 /* Weather */,
 			);
 			path = Services;
@@ -782,6 +788,8 @@
 				AF3A7DB70017A5645EB81DB9 /* SkyBridgeCompassApp.swift in Sources */,
 				E81FFD20E659CB05F6991F79 /* StarryBackground.swift in Sources */,
 				56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */,
+				578C17D12B409B31D49DF061 /* OperatorControlRuntimeFactory.swift in Sources */,
+				A8E040312B409B31D49DF061 /* OperatorControlServerBootstrap.swift in Sources */,
 				A75371379A7B47C826D07860 /* StatCard.swift in Sources */,
 				DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */,
 				FDD48779FE89C3C746869876 /* SupabaseTurnstileView.swift in Sources */,

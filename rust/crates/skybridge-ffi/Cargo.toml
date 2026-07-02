@@ -22,6 +22,9 @@ uniffi-scaffolding = ["dep:uniffi"]
 # `uniffi-bindgen` binary. Kept off the default build so the lean library /
 # C-ABI build does not drag in the binding-generator toolchain.
 uniffi-cli = ["uniffi-scaffolding", "uniffi?/cli"]
+# Experimental, default-OFF: forward the Q-Periapt ContextBound hybrid suite down to the agent
+# and core. A beta build adds `--features q-periapt`; the shipping (default) build is unchanged.
+q-periapt = ["skybridge-agent/q-periapt", "skybridge-core/q-periapt"]
 
 [dependencies]
 skybridge-core = { path = "../skybridge-core" }

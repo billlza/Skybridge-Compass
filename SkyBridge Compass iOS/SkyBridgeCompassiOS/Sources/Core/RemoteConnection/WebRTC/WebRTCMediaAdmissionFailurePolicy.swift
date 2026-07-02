@@ -3,20 +3,35 @@ import SkyBridgeRealtimeMedia
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
-    static func isMediaAdmissionTokenRefreshable(_ error: Error) -> Bool {
+    private struct MediaAdmissionLeaseRejection: Decodable {
+        let code: String?
+        let error: String?
+        let reason: String?
+        let rejectReason: String?
+        let mediaTokenRequestGeneration: String?
+        let mediaTokenGeneration: String?
+        let mediaTokenExpectedGeneration: String?
+        let mediaTokenExpectedPresent: Bool?
+        let mediaTokenSessionPresent: Bool?
+        let mediaTokenState: String?
+        let mediaTokenRevokedReason: String?
+        let serverBuildFingerprint: String?
+    }
+
+    nonisolated static func isMediaAdmissionTokenRefreshable(_ error: Error) -> Bool {
         guard case SignalServerClientCompat.ClientError.serverRejected(let status, let body) = error else {
             return false
         }
         guard !mediaLeaseBodyIndicatesSessionAuthorityLost(body) else {
             return false
         }
-        if status == 401 && (
-            body.contains("media_admission_token_superseded")
-                || body.contains("media_admission_token_expired")
-        ) {
+        let errorCode = mediaAdmissionLeaseErrorCode(from: body)
+        if status == 401,
+           errorCode == "media_admission_token_superseded"
+            || errorCode == "media_admission_token_expired" {
             return true
         }
-        return status == 429 && body.contains("media_admission_token_lease_limit")
+        return status == 429 && errorCode == "media_admission_token_lease_limit"
     }
 
     static func isUsableMediaRelayEndpoint(_ endpoint: SkyBridgeMediaEndpoint, now: Date = Date()) -> Bool {
@@ -31,14 +46,15 @@ extension CrossNetworkWebRTCManager {
         if mediaLeaseBodyIndicatesSessionAuthorityLost(body) {
             return "sessionAuthorityLost"
         }
-        if body.contains("media_admission_token_superseded") {
+        switch mediaAdmissionLeaseErrorCode(from: body) {
+        case "media_admission_token_superseded":
             return "superseded"
-        }
-        if body.contains("media_admission_token_expired") {
+        case "media_admission_token_expired":
             return "expired"
-        }
-        if body.contains("media_admission_token_lease_limit") {
+        case "media_admission_token_lease_limit":
             return "leaseLimit"
+        default:
+            break
         }
         if body.contains("missing_session") || body.contains("session_inactive") {
             return "sessionAuthorityLost"
@@ -56,30 +72,19 @@ extension CrossNetworkWebRTCManager {
 
     nonisolated static func mediaTokenDiagnosticSummary(for error: Error) -> String? {
         guard case SignalServerClientCompat.ClientError.serverRejected(_, let body) = error,
-              let data = body.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let rejection = mediaAdmissionLeaseRejection(from: body) else {
             return nil
         }
-        let request = object["mediaTokenRequestGeneration"] as? String
-            ?? object["mediaTokenGeneration"] as? String
+        let request = rejection.mediaTokenRequestGeneration
+            ?? rejection.mediaTokenGeneration
             ?? "-"
-        let expected = object["mediaTokenExpectedGeneration"] as? String ?? "-"
-        let expectedPresent: String = {
-            if let bool = object["mediaTokenExpectedPresent"] as? Bool {
-                return bool ? "true" : "false"
-            }
-            return "-"
-        }()
-        let sessionPresent: String = {
-            if let bool = object["mediaTokenSessionPresent"] as? Bool {
-                return bool ? "true" : "false"
-            }
-            return "-"
-        }()
-        let state = object["mediaTokenState"] as? String ?? "-"
-        let revokedReason = object["mediaTokenRevokedReason"] as? String ?? "-"
-        let build = object["serverBuildFingerprint"] as? String ?? "-"
-        let rejectReason = object["rejectReason"] as? String ?? "-"
+        let expected = rejection.mediaTokenExpectedGeneration ?? "-"
+        let expectedPresent = rejection.mediaTokenExpectedPresent.map { $0 ? "true" : "false" } ?? "-"
+        let sessionPresent = rejection.mediaTokenSessionPresent.map { $0 ? "true" : "false" } ?? "-"
+        let state = rejection.mediaTokenState ?? "-"
+        let revokedReason = rejection.mediaTokenRevokedReason ?? "-"
+        let build = rejection.serverBuildFingerprint ?? "-"
+        let rejectReason = rejection.rejectReason ?? "-"
         return "requestGeneration=\(request) expectedGeneration=\(expected) expectedPresent=\(expectedPresent) sessionPresent=\(sessionPresent) tokenState=\(state) tokenRevokedReason=\(revokedReason) rejectReason=\(rejectReason) serverBuild=\(build)"
     }
 
@@ -136,27 +141,67 @@ extension CrossNetworkWebRTCManager {
     }
 
     nonisolated static func mediaLeaseBodyIndicatesSessionAuthorityLost(_ body: String) -> Bool {
-        guard let data = body.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return body.contains("session_inactive") || body.contains("missing_session")
+        guard let rejection = mediaAdmissionLeaseRejection(from: body) else {
+            return !looksLikeJSONObject(body)
+                && (body.contains("session_inactive") || body.contains("missing_session"))
         }
-        if let present = object["mediaTokenSessionPresent"] as? Bool, present == false {
+        if rejection.mediaTokenSessionPresent == false {
             return true
         }
-        if let error = object["error"] as? String,
-           error == "session_inactive" || error == "missing_session" {
+        if ["session_inactive", "missing_session"].contains(mediaAdmissionLeaseErrorCode(from: rejection)) {
             return true
         }
-        if let rejectReason = object["rejectReason"] as? String,
+        if let rejectReason = rejection.rejectReason,
            ["missingRecord", "revoked", "activeExpired", "iceKilled", "remote_kill", "session_killed"].contains(rejectReason) {
             return true
         }
-        if let state = object["mediaTokenState"] as? String,
-           state.caseInsensitiveCompare("revoked") == .orderedSame {
-            let expectedPresent = object["mediaTokenExpectedPresent"] as? Bool
-            let sessionPresent = object["mediaTokenSessionPresent"] as? Bool
-            return expectedPresent != true || sessionPresent == false
+        if rejection.mediaTokenState?.caseInsensitiveCompare("revoked") == .orderedSame {
+            return rejection.mediaTokenExpectedPresent != true || rejection.mediaTokenSessionPresent == false
         }
         return false
+    }
+
+    nonisolated private static func mediaAdmissionLeaseErrorCode(from body: String) -> String? {
+        if let rejection = mediaAdmissionLeaseRejection(from: body) {
+            return mediaAdmissionLeaseErrorCode(from: rejection)
+        }
+        guard !looksLikeJSONObject(body) else {
+            return nil
+        }
+        if body.contains("media_admission_token_superseded") {
+            return "media_admission_token_superseded"
+        }
+        if body.contains("media_admission_token_expired") {
+            return "media_admission_token_expired"
+        }
+        if body.contains("media_admission_token_lease_limit") {
+            return "media_admission_token_lease_limit"
+        }
+        if body.contains("session_inactive") {
+            return "session_inactive"
+        }
+        if body.contains("missing_session") {
+            return "missing_session"
+        }
+        return nil
+    }
+
+    nonisolated private static func mediaAdmissionLeaseErrorCode(
+        from rejection: MediaAdmissionLeaseRejection
+    ) -> String? {
+        rejection.error ?? rejection.code ?? rejection.reason
+    }
+
+    nonisolated private static func mediaAdmissionLeaseRejection(from body: String) -> MediaAdmissionLeaseRejection? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikeJSONObject(trimmed),
+              let data = trimmed.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(MediaAdmissionLeaseRejection.self, from: data)
+    }
+
+    nonisolated private static func looksLikeJSONObject(_ body: String) -> Bool {
+        body.trimmingCharacters(in: .whitespacesAndNewlines).first == "{"
     }
 }

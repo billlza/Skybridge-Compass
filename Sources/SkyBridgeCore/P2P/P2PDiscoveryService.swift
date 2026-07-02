@@ -3370,8 +3370,10 @@ public class P2PDiscoveryService: BaseManager {
 
                                 await PeerKEMBootstrapStore.shared.upsert(
                                     deviceIds: [payload.deviceId, peer.deviceId],
-                                    kemPublicKeys: payload.kemPublicKeys
-	                                )
+                                    kemPublicKeys: payload.kemPublicKeys,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion
+		                                )
 	                                logger.info(
 	                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payloadDiagnosticLabel, privacy: .public) peer=\(peerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
 	                                )

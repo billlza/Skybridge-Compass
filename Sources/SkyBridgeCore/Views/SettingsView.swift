@@ -29,6 +29,12 @@ public struct SettingsView: View {
     @State private var showingTransferPathFallbackAlert = false
     @State private var transferPathFallbackMessage = ""
     @State private var newCustomServiceType = ""
+    @State private var cacheSizeDisplay = "..."
+    @State private var isCacheOperationInProgress = false
+    @State private var cacheOperationMessage: String?
+    @State private var cacheOperationIsError = false
+
+    private let applicationCacheService = ApplicationCacheService.shared
     
  // MARK: - 设置标签页
     enum SettingsTab: String, CaseIterable {
@@ -192,6 +198,10 @@ public struct SettingsView: View {
             Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
         } message: {
             Text(transferPathFallbackMessage)
+        }
+        .task(id: selectedTab) {
+            guard selectedTab == .general else { return }
+            await refreshApplicationCacheSize()
         }
     }
     
@@ -376,15 +386,26 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Button(localizationManager.localizedString("settings.general.clearCache")) {
- // 实际清除缓存操作
                                 clearApplicationCache()
                             }
                             .buttonStyle(.bordered)
+                            .disabled(isCacheOperationInProgress)
+
+                            if isCacheOperationInProgress {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
                             
                             Spacer()
                             
-                            Text(String(format: localizationManager.localizedString("settings.general.cacheSize"), getFormattedCacheSize()))
+                            Text(String(format: localizationManager.localizedString("settings.general.cacheSize"), cacheSizeDisplay))
                                 .foregroundColor(.secondary)
+                        }
+
+                        if let cacheOperationMessage {
+                            Text(cacheOperationMessage)
+                                .font(.caption)
+                                .foregroundColor(cacheOperationIsError ? .red : .secondary)
                         }
                         
                         HStack {
@@ -1053,6 +1074,12 @@ public struct SettingsView: View {
                         Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Toggle("Q-Periapt ContextBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
+                            .disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)
+                            .help("实验性：优先协商 Q-Periapt 的 ContextBound 组合器。仅在启用 q-periapt 的核心构建、macOS 26+/iOS 26+ 运行时、且对端也开启时才协商成功。")
+                        Text("Beta：与现有 X-Wing / ML-KEM 不互通，仅在双方都开启 Q-Periapt 时协商。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
                             Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
@@ -1635,6 +1662,17 @@ public struct SettingsView: View {
         .buttonStyle(.plain)
         .help(preset.description)
     }
+
+    private var remoteNetworkCompressionEnabled: Binding<Bool> {
+        Binding(
+            get: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel > 0 },
+            set: { isEnabled in
+                let currentLevel = remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel
+                let restoredLevel = currentLevel > 0 ? currentLevel : 6
+                remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = isEnabled ? restoredLevel : 0
+            }
+        )
+    }
     
  // MARK: - 远程桌面设置
     private var remoteDesktopSettings: some View {
@@ -1704,21 +1742,23 @@ public struct SettingsView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.green)
                         }
+                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: remoteNetworkCompressionEnabled)
                         HStack {
-                            Text(localizationManager.localizedString("settings.remote.network.enableCompression"))
+                            Text(localizationManager.localizedString("settings.remote.display.compressionLevel"))
                             Slider(
                                 value: Binding(
-                                    get: { Double(remoteDesktopSettingsManager.settings.networkSettings.compressionLevel) },
+                                    get: { Double(remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel) },
                                     set: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = Int($0) }
                                 ),
-                                in: 0...9,
+                                in: 1...9,
                                 step: 1
                             )
-                            Text("\(remoteDesktopSettingsManager.settings.networkSettings.compressionLevel)")
+                            .disabled(!remoteNetworkCompressionEnabled.wrappedValue)
+                            Text("\(remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel)")
                                 .foregroundColor(.secondary)
                                 .frame(width: 20)
                         }
-                        .help("网络数据压缩级别（0 = 关闭，9 = 最大压缩）。与远程桌面页的压缩级别为同一设置。")
+                        .help("网络数据压缩级别（1 = 最低，9 = 最大压缩）。关闭压缩时写入 0。")
 
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bandwidthLimit"))
@@ -1990,52 +2030,65 @@ public struct SettingsView: View {
     
  /// 清除应用缓存
     private func clearApplicationCache() {
- // 清除各种缓存
-        let cacheURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        for cacheURL in cacheURLs {
-            do {
-                let contents = try FileManager.default.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: nil)
-                for fileURL in contents {
-                    try FileManager.default.removeItem(at: fileURL)
-                }
-            } catch {
- // 静默处理错误，避免在生产环境中输出调试信息
-            }
-        }
-        
- // 清除设备管理器缓存
-        DeviceManagementSettingsManager.shared.clearDeviceCache()
-        
- // 刷新设备列表
+        guard !isCacheOperationInProgress else { return }
+
+        isCacheOperationInProgress = true
+        cacheOperationIsError = false
+        cacheOperationMessage = localizationManager.localizedString("settings.general.cache.clearing")
+
         Task {
-            await wifiManager.refreshNetworks()
+            do {
+                let result = try await applicationCacheService.clearCaches()
+
+                DeviceManagementSettingsManager.shared.clearDeviceCache()
+                await wifiManager.refreshNetworks()
+                bluetoothManager.refreshDevices()
+                airplayManager.refreshDevices()
+
+                await refreshApplicationCacheSize(showErrorMessage: false)
+
+                cacheOperationIsError = false
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.clearComplete"),
+                    formattedByteCount(result.clearedBytes)
+                )
+            } catch {
+                cacheOperationIsError = true
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.clearFailed"),
+                    error.localizedDescription
+                )
+                SkyBridgeLogger.ui.error("清理缓存失败: \(error.localizedDescription, privacy: .private)")
+                await refreshApplicationCacheSize(showErrorMessage: false)
+            }
+
+            isCacheOperationInProgress = false
         }
-        bluetoothManager.refreshDevices()
-        airplayManager.refreshDevices()
     }
     
- /// 获取格式化的缓存大小
-    private func getFormattedCacheSize() -> String {
-        let cacheURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        var totalSize: Int64 = 0
-        
-        for cacheURL in cacheURLs {
-            do {
-                let contents = try FileManager.default.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: [.fileSizeKey])
-                for fileURL in contents {
-                    let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                    totalSize += Int64(resourceValues.fileSize ?? 0)
-                }
-            } catch {
- // 忽略错误，继续计算其他文件
+    private func refreshApplicationCacheSize(showErrorMessage: Bool = true) async {
+        do {
+            let snapshot = try await applicationCacheService.cacheUsageSnapshot()
+            cacheSizeDisplay = formattedByteCount(snapshot.totalBytes)
+        } catch {
+            cacheSizeDisplay = localizationManager.localizedString("settings.general.cacheSize.unavailable")
+            SkyBridgeLogger.ui.error("计算缓存大小失败: \(error.localizedDescription, privacy: .private)")
+
+            if showErrorMessage {
+                cacheOperationIsError = true
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.sizeFailed"),
+                    error.localizedDescription
+                )
             }
         }
-        
- // 格式化大小显示
+    }
+
+    private func formattedByteCount(_ byteCount: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: totalSize)
+        return formatter.string(fromByteCount: byteCount)
     }
     
     private func applyDefaultTransferPathFromSettings() {

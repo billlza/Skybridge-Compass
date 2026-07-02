@@ -1,5 +1,5 @@
 mod check;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod crossnet;
 mod device;
 mod doctor;

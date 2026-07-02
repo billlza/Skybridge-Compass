@@ -38,6 +38,9 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     
     /// X-Wing: X25519 + ML-KEM-768（混合）
     case xwing
+
+    /// Q-Periapt ContextBound（beta，X25519 + ML-KEM-768 混合）
+    case qperiaptContextBound
     
     /// X25519 + Ed25519（经典）
     case x25519Ed25519
@@ -59,6 +62,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
             return "ML-KEM-768-FS"
         case .xwing:
             return "X-Wing"
+        case .qperiaptContextBound:
+            return "Q-Periapt-ContextBound"
         case .x25519Ed25519:
             return "X25519-Ed25519"
         case .x25519:
@@ -78,6 +83,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
             self = .mlkem768fs
         case "X-Wing":
             self = .xwing
+        case "Q-Periapt-ContextBound":
+            self = .qperiaptContextBound
         case "X25519-Ed25519":
             self = .x25519Ed25519
         case "X25519":
@@ -102,6 +109,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     public var wireId: UInt16 {
         switch self {
         case .xwing: return 0x0001      // Hybrid: X-Wing
+        case .qperiaptContextBound: return 0x0011 // Hybrid beta: Q-Periapt ContextBound
         case .mlkem768: return 0x0101   // PQC: ML-KEM-768
         case .mlkem768fs: return 0x0102 // PQC: ML-KEM-768-FS
         case .x25519Ed25519: return 0x1001  // Classic: X25519+Ed25519
@@ -115,6 +123,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     public init(wireId: UInt16) {
         switch wireId {
         case 0x0001: self = .xwing
+        case 0x0011: self = .qperiaptContextBound
         case 0x0101: self = .mlkem768
         case 0x0102: self = .mlkem768fs
         case 0x1001: self = .x25519Ed25519
@@ -136,6 +145,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         case .mlkem768: return true
         case .mlkem768fs: return true
         case .xwing: return true
+        case .qperiaptContextBound: return true
         case .unknown(let wireId):
             let tier = wireId >> 8
             return tier == 0x00 || tier == 0x01
@@ -145,7 +155,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     
     /// 是否是混合套件
     public var isHybrid: Bool {
-        self == .xwing
+        self == .xwing || self == .qperiaptContextBound
     }
     
     /// 是否属于 PQC 组（用于签名算法选择）
@@ -156,6 +166,11 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     /// 所有 PQC 套件
     public static var allPQCSuites: [CryptoSuite] {
         [.mlkem768, .mlkem768fs, .xwing]
+    }
+
+    /// 显式 beta PQC 套件。Q-Periapt 不进入默认 PQC 列表，避免旧 iOS 镜像路径默认通告。
+    public static var explicitBetaPQCSuites: [CryptoSuite] {
+        [.qperiaptContextBound]
     }
     
     /// 所有 Classic 套件
@@ -186,6 +201,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
 public extension CryptoSuite {
     /// macOS Core naming: X-Wing + ML-DSA-65 (v1 uses suite group for signature selection)
     static let xwingMLDSA: CryptoSuite = .xwing
+    /// macOS Core naming: Q-Periapt ContextBound (beta)
+    static let qperiaptContextBoundMLDSA: CryptoSuite = .qperiaptContextBound
     /// macOS Core naming: ML-KEM-768 + ML-DSA-65
     static let mlkem768MLDSA65: CryptoSuite = .mlkem768
     /// macOS Core naming: ML-KEM-768-FS + ML-DSA-65

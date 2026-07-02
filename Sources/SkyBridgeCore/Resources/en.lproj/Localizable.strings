@@ -209,6 +209,11 @@
 "settings.general.dataManagement" = "Data Management";
 "settings.general.clearCache" = "Clear cache";
 "settings.general.cacheSize" = "Current cache: %@";
+"settings.general.cacheSize.unavailable" = "Unavailable";
+"settings.general.cache.clearing" = "Clearing cache...";
+"settings.general.cache.clearComplete" = "Cache cleared. Freed %@.";
+"settings.general.cache.clearFailed" = "Cache clear failed: %@";
+"settings.general.cache.sizeFailed" = "Cache size unavailable: %@";
 "settings.general.exportSettings" = "Export settings";
 "settings.general.importSettings" = "Import settings";
 "settings.general.resetSettings" = "Reset to defaults";

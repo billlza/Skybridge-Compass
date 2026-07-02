@@ -1091,6 +1091,8 @@ struct AdvancedPreferencesView: View {
             Section("量子安全套件") {
                 Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
                     .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
+                Toggle("Q-Periapt ContextBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
+                    .help("实验性：偏好 Q-Periapt 的 ContextBound 组合器（仅在启用 q-periapt 的核心构建中生效，且仅当对端也支持时协商成功）。")
             }
 
             Section("性能优化") {

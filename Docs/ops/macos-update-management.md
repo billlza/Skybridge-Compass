@@ -119,8 +119,8 @@ the notarized DMG URL. It does not install silently.
 The release workflow uses GitHub-hosted `macos-26` with:
 
 ```text
-Xcode 26.5
-Apple Swift 6.3.2
+Xcode 26.6
+Apple Swift 6.3.3
 ```
 
 Do not downgrade `swift-tools-version` below `6.3`. The release readiness gate

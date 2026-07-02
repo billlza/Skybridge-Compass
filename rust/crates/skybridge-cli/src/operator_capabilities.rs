@@ -23,9 +23,57 @@ impl OperatorCapabilityStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OperatorRuntimeTarget {
+    MacAppRuntime,
+    NativeHeadlessStateDir,
+    AgentOwnedRegistry,
+    ArtifactOnly,
+}
+
+impl OperatorRuntimeTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MacAppRuntime => "mac_app_runtime",
+            Self::NativeHeadlessStateDir => "native_headless_state_dir",
+            Self::AgentOwnedRegistry => "agent_owned_registry",
+            Self::ArtifactOnly => "artifact_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OperatorControlEffect {
+    ReadOnly,
+    RequestOnly,
+    NativeMutation,
+    MacMutationNotEnabled,
+    ContractOnly,
+    PlannedFailClosed,
+    ArtifactOnly,
+}
+
+impl OperatorControlEffect {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::RequestOnly => "request_only",
+            Self::NativeMutation => "native_mutation",
+            Self::MacMutationNotEnabled => "mac_mutation_not_enabled",
+            Self::ContractOnly => "contract_only",
+            Self::PlannedFailClosed => "planned_fail_closed",
+            Self::ArtifactOnly => "artifact_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct OperatorCapability {
     id: &'static str,
     status: OperatorCapabilityStatus,
+    runtime_target: OperatorRuntimeTarget,
+    control_effect: OperatorControlEffect,
     command: &'static str,
     owner_module: &'static str,
     authority_boundary: &'static str,
@@ -37,40 +85,90 @@ const OPERATOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 fn operator_capabilities() -> &'static [OperatorCapability] {
     &[
         OperatorCapability {
-            id: "crossnet.host",
-            status: OperatorCapabilityStatus::Available,
-            command: "app-bound: skybridge crossnet host [--lease short|long] [--json]",
+            id: "crossnet.preflight",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet preflight [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Mac app operator socket; requires the running signed Mac app to have auth_loaded=true and tenant_bound=true; returns a real app-issued connection code and never falls back to native CLI auth",
-            verification_gate: "skybridge-crossnet-client fake UDS preflight tests + live app socket smoke",
+            authority_boundary: "Reads the running Mac app's crossnet-control/1 hello state and reports protocol/auth/tenant preconditions; mutation_methods_enabled remains false until signed Mac app socket smoke proves live mutation; does not generate codes, connect peers, mutate settings, or control iOS runtime",
+            verification_gate: "crossnet_preflight_json_contract + Mac OperatorControlServer hello round-trip + signed Mac app socket smoke",
+        },
+        OperatorCapability {
+            id: "crossnet.host",
+            status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacMutationNotEnabled,
+            command: "planned/app-bound: skybridge crossnet host [--lease short|long] [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; host must still fail closed with method_not_enabled until the signed Mac app owns auth_loaded=true, tenant_bound=true, real code issuance, and live socket smoke evidence",
+            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + live signed-app socket smoke + real code issuance evidence",
         },
         OperatorCapability {
             id: "crossnet.connect",
-            status: OperatorCapabilityStatus::Available,
-            command: "app-bound: skybridge crossnet connect <code> [--json]",
+            status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacMutationNotEnabled,
+            command: "planned/app-bound: skybridge crossnet connect <code> [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Mac app operator socket; mutates CrossNetworkConnectionManager in the running Mac app only after app auth and tenant preflight pass",
-            verification_gate: "skybridge-crossnet-client fake UDS preflight tests + live app socket smoke",
+            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; connect validates the code contract but must still fail closed with method_not_enabled until the signed Mac app mutates CrossNetworkConnectionManager after app auth, tenant preflight, and live socket smoke pass",
+            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + live signed-app socket smoke + CrossNetworkConnectionManager mutation evidence",
         },
         OperatorCapability {
             id: "crossnet.disconnect",
-            status: OperatorCapabilityStatus::Available,
-            command: "app-bound: skybridge crossnet disconnect [--json]",
+            status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacMutationNotEnabled,
+            command: "planned/app-bound: skybridge crossnet disconnect [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Mac app operator socket; requires app auth and tenant binding and reports whether an app session was present before disconnect",
-            verification_gate: "OperatorControlServer disconnect auth gate + crossnet client preflight tests",
+            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; disconnect must still fail closed with method_not_enabled until app auth, tenant binding, app session presence, and live socket smoke are enforced by the signed Mac app",
+            verification_gate: "Mac OperatorControlServer disconnect auth gate tests + live signed-app socket smoke + app session teardown evidence",
         },
         OperatorCapability {
-            id: "crossnet.status",
+            id: "crossnet.status.snapshot",
             status: OperatorCapabilityStatus::ReadOnly,
-            command: "app-bound/read-only: skybridge crossnet status [--watch] [--json]",
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet status [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "read-only Mac app operator socket status; reports auth_loaded/tenant_bound plus redacted session presence/ref without exposing raw session ids",
-            verification_gate: "crossnet status redaction tests + live app socket smoke",
+            authority_boundary: "Reads one Mac-only crossnet-control/1 status snapshot from the running Mac app; exposes auth_loaded, tenant_bound, readiness, and redacted session_ref only; does not watch streams, mutate sessions, change settings, or control iOS runtime",
+            verification_gate: "Mac OperatorControlServer status redaction tests + signed Mac app socket smoke before release readiness claims",
+        },
+        OperatorCapability {
+            id: "crossnet.settings.snapshot",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet settings [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Reads an allowlisted, non-secret Mac app settings projection through crossnet-control/1; all entries are reported immutable in this CLI slice, raw paths/tokens/session ids are excluded, and this command does not write UserDefaults, mutate runtime state, or control iOS runtime",
+            verification_gate: "Mac OperatorControlServer settings snapshot allowlist tests + Rust settings JSON contract + signed Mac app socket smoke before release readiness claims",
+        },
+        OperatorCapability {
+            id: "crossnet.settings.set",
+            status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacMutationNotEnabled,
+            command: "planned/app-bound: skybridge crossnet settings set <id> <value> [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Settings mutation must remain Mac-app-bound and fail closed until a typed allowlist, auth_loaded=true, tenant_bound=true, explicit downgrade rejection, runtime apply proof, runtime observation proof, and signed Mac app socket smoke exist; Rust state_dir/UserDefaults direct writes are not valid GUI control",
+            verification_gate: "Mac OperatorControlServer auth/tenant and settings allowlist tests + runtime observation tests + live signed-app socket smoke",
+        },
+        OperatorCapability {
+            id: "crossnet.status.watch",
+            status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::PlannedFailClosed,
+            command: "planned/fail-closed: skybridge crossnet status --watch [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "The Mac-only status watch parser/client shape exists, but the server currently returns watch_not_supported; watch must stay fail-closed until stream lifecycle, backpressure, and signed Mac app socket smoke are proven",
+            verification_gate: "Mac OperatorControlServer watch_not_supported tests + stream lifecycle/backpressure tests + live signed-app socket smoke",
         },
         OperatorCapability {
             id: "device.status",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge device status [--json]",
             owner_module: "device_commands::status",
             authority_boundary: "local identity, PQC identity, and agent health read-only report",
@@ -79,6 +177,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "device.discovery.nearby",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge device discover --nearby [--json]",
             owner_module: "device_commands + NearbyDiscoverySnapshotRegistry",
             authority_boundary: "read-only agent-owned nearby discovery snapshot; this command does not start Bonjour/local-network scanning, missing or stale snapshots fail closed, and discovery does not authorize connection",
@@ -87,6 +187,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "device.discovery.active_scan",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge device discover --nearby --scan [--json]",
             owner_module: "device_commands + agent-owned active mDNS scanner",
             authority_boundary: "read-only result of the agent-owned active mDNS scanner; the agent performs the live Bonjour/local-network scan with protocol identity dedupe and locator-free device refs, missing or stale active snapshots fail closed, and discovery never authorizes connection",
@@ -95,6 +197,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "native.code.create",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::NativeMutation,
             command: "headless-native: skybridge code create [--json]",
             owner_module: "connection_code::create + skybridge-agent state",
             authority_boundary: "standalone native CLI auth/session state under the selected state_dir; does not mutate the Mac GUI runtime and must not be used as a GUI interop substitute",
@@ -103,6 +207,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "native.connect",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::NativeMutation,
             command: "headless-native: skybridge connect <code> [--json]",
             owner_module: "connection_code::connect + skybridge-agent state",
             authority_boundary: "standalone native signaling/WebRTC runtime backed by Rust state_dir; does not bind or update CrossNetworkConnectionManager in the Mac app",
@@ -111,6 +217,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "session.list",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge session ls [--json]",
             owner_module: "session_commands",
             authority_boundary: "read-only native/headless SessionRegistry projection; for Mac GUI session state use `skybridge crossnet status`",
@@ -119,6 +227,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "session.inspect",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge session inspect <id> [--json]",
             owner_module: "session_commands",
             authority_boundary: "read-only native/headless single-session projection; not a Mac GUI runtime projection",
@@ -127,6 +237,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "session.disconnect",
             status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::NativeMutation,
             command: "skybridge disconnect <session-id>",
             owner_module: "session_commands",
             authority_boundary: "updates native/headless ManagedSessionControl and RuntimeSessionRecord through skybridge-agent state helpers; for Mac GUI disconnect use `skybridge crossnet disconnect`",
@@ -135,6 +247,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "file.transfer.send",
             status: OperatorCapabilityStatus::RequestOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::RequestOnly,
             command: "request-only: skybridge file send <path> --to <peer> --session-id <id> [--json]",
             owner_module: "file_commands + FileTransferControlRequestRegistry + agent file_transfer coordinator",
             authority_boundary: "requires current handshake-complete session proof, bound remote protocol identity, and local regular-file SHA-256 snapshot; the CLI synchronously writes only an agent-owned pending request, after which the managed agent performs a live chunked transfer over the encrypted control channel and records success only on a SHA-256-verified receipt; transfer outcome is observable via `file history`",
@@ -143,6 +257,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "file.transfer.receive",
             status: OperatorCapabilityStatus::Planned,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::PlannedFailClosed,
             command: "planned/fail-closed: skybridge file receive [--json]",
             owner_module: "file_commands + agent file_transfer coordinator",
             authority_boundary: "inbound transfers are auto-received by the managed agent runtime into the state-dir received/ directory with filename sanitization, path-traversal and symlink rejection, collision-safe non-overwriting writes, and SHA-256 verification before atomic rename; the standalone `file receive` CLI verb stays fail-closed because reception requires no synchronous operator action",
@@ -151,6 +267,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "file.transfer.history",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge file history [--json]",
             owner_module: "file_commands",
             authority_boundary: "reports redacted request registry state including evidence-gated transfer progress and SHA-256 receipt verification; success fields are true only when the agent recorded a verified receipt",
@@ -159,6 +277,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.contract",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::ArtifactOnly,
+            control_effect: OperatorControlEffect::ContractOnly,
             command: "skybridge remote-desktop contract [--json]",
             owner_module: "remote_desktop_commands",
             authority_boundary: "read-only CLI request contract; cannot mutate sessions or claim live sender mode evidence",
@@ -167,6 +287,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.status",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge remote-desktop status [--session-id <id>] [--json]",
             owner_module: "remote_desktop_commands + SessionRegistry + RemoteDesktopControlRequestRegistry",
             authority_boundary: "read-only runtime session and pending request projection; cannot claim live sender apply evidence",
@@ -175,6 +297,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.resolution_contract",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::ArtifactOnly,
+            control_effect: OperatorControlEffect::ContractOnly,
             command: "skybridge remote-desktop resolutions [--json]",
             owner_module: "remote_desktop_commands",
             authority_boundary: "request-contract-only list, not observed sender-supported modes",
@@ -183,6 +307,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.start",
             status: OperatorCapabilityStatus::RequestOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::RequestOnly,
             command: "request-only: skybridge remote-desktop start --session-id <id> [--resolution <preset>] [--fps <value>] [--json]",
             owner_module: "remote_desktop_commands + RemoteDesktopControlRequestRegistry",
             authority_boundary: "writes an agent-owned pending request for an established session; live apply still requires sender apply evidence and real-device evidence",
@@ -191,6 +317,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.stop",
             status: OperatorCapabilityStatus::RequestOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::RequestOnly,
             command: "request-only: skybridge remote-desktop stop --session-id <id> [--json]",
             owner_module: "remote_desktop_commands + RemoteDesktopControlRequestRegistry",
             authority_boundary: "writes an agent-owned pending request only; does not kill processes or report stream stopped before observe",
@@ -199,6 +327,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.resolutions.list",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::ReadOnly,
             command: "skybridge remote-desktop resolutions --session-id <id> [--json]",
             owner_module: "remote_desktop_commands + RemoteDesktopCapabilitySnapshotRegistry",
             authority_boundary: "read-only agent-owned observed sender display capability snapshot; not a sender apply receipt and not live apply",
@@ -207,6 +337,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.resolution.set",
             status: OperatorCapabilityStatus::RequestOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::RequestOnly,
             command: "request-only: skybridge remote-desktop set-resolution --session-id <id> --resolution <preset> [--json]",
             owner_module: "remote_desktop_commands + RemoteDesktopControlRequestRegistry",
             authority_boundary: "validates the request contract and records a pending request; observed sender mode change still requires observe evidence",
@@ -215,6 +347,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.fps.set",
             status: OperatorCapabilityStatus::RequestOnly,
+            runtime_target: OperatorRuntimeTarget::AgentOwnedRegistry,
+            control_effect: OperatorControlEffect::RequestOnly,
             command: "request-only: skybridge remote-desktop set-fps --session-id <id> --fps <value> [--json]",
             owner_module: "remote_desktop_commands + RemoteDesktopControlRequestRegistry",
             authority_boundary: "validates bounded fps and records a pending request; FPS is not applied until sender apply and media evidence exist",
@@ -223,6 +357,8 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         OperatorCapability {
             id: "remote_desktop.media.doctor",
             status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::ArtifactOnly,
+            control_effect: OperatorControlEffect::ArtifactOnly,
             command: "skybridge doctor webrtc-media --latest|--session-id <id> [--json]",
             owner_module: "webrtc_media_doctor",
             authority_boundary: "artifact-only diagnosis; cannot mutate live sessions",
@@ -238,6 +374,9 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "schema_version": OPERATOR_CAPABILITY_SCHEMA_VERSION,
+                "ios_runtime_control_supported": false,
+                "mac_gui_control_protocol": "crossnet-control/1",
+                "mac_gui_control_release_gate": "signed_mac_app_socket_smoke_required",
                 "capabilities": capabilities,
             }))?
         );
@@ -248,11 +387,15 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
         "Operator Capability Contract v{}",
         OPERATOR_CAPABILITY_SCHEMA_VERSION
     );
+    println!("iOS runtime control supported: false");
+    println!("Mac GUI control protocol: crossnet-control/1 (signed Mac app socket smoke required)");
     for capability in capabilities {
         println!(
-            "{} [{}] {}",
+            "{} [{} target={} effect={}] {}",
             capability.id,
             capability.status.as_str(),
+            capability.runtime_target.as_str(),
+            capability.control_effect.as_str(),
             capability.command
         );
     }
@@ -273,7 +416,9 @@ mod tests {
         assert_eq!(ids.len(), capabilities.len());
 
         for required in [
-            "crossnet.status",
+            "crossnet.preflight",
+            "crossnet.status.snapshot",
+            "crossnet.settings.snapshot",
             "device.discovery.nearby",
             "remote_desktop.contract",
             "remote_desktop.status",
@@ -296,21 +441,135 @@ mod tests {
             );
         }
 
+        let preflight = capabilities
+            .iter()
+            .find(|capability| capability.id == "crossnet.preflight")
+            .expect("crossnet preflight capability must be declared");
+        assert_eq!(preflight.status, OperatorCapabilityStatus::ReadOnly);
+        assert_eq!(
+            preflight.runtime_target,
+            OperatorRuntimeTarget::MacAppRuntime
+        );
+        assert_eq!(preflight.control_effect, OperatorControlEffect::ReadOnly);
+        assert!(preflight.command.contains("crossnet preflight"));
+        assert!(
+            preflight.authority_boundary.contains("Mac app")
+                && preflight.authority_boundary.contains("does not")
+                && preflight.authority_boundary.contains("iOS runtime"),
+            "crossnet.preflight must stay Mac-only and read-only"
+        );
+
+        let status_snapshot = capabilities
+            .iter()
+            .find(|capability| capability.id == "crossnet.status.snapshot")
+            .expect("crossnet status snapshot capability must be declared");
+        assert_eq!(status_snapshot.status, OperatorCapabilityStatus::ReadOnly);
+        assert_eq!(
+            status_snapshot.runtime_target,
+            OperatorRuntimeTarget::MacAppRuntime
+        );
+        assert_eq!(
+            status_snapshot.control_effect,
+            OperatorControlEffect::ReadOnly
+        );
+        assert!(
+            status_snapshot
+                .authority_boundary
+                .contains("redacted session_ref")
+                && status_snapshot.authority_boundary.contains("does not")
+                && status_snapshot.authority_boundary.contains("iOS runtime"),
+            "crossnet.status.snapshot must stay Mac-only, read-only, and redacted"
+        );
+
+        let settings_snapshot = capabilities
+            .iter()
+            .find(|capability| capability.id == "crossnet.settings.snapshot")
+            .expect("crossnet settings snapshot capability must be declared");
+        assert_eq!(settings_snapshot.status, OperatorCapabilityStatus::ReadOnly);
+        assert_eq!(
+            settings_snapshot.runtime_target,
+            OperatorRuntimeTarget::MacAppRuntime
+        );
+        assert_eq!(
+            settings_snapshot.control_effect,
+            OperatorControlEffect::ReadOnly
+        );
+        assert!(
+            settings_snapshot.authority_boundary.contains("allowlisted")
+                && settings_snapshot.authority_boundary.contains("non-secret")
+                && settings_snapshot
+                    .authority_boundary
+                    .contains("does not write UserDefaults")
+                && settings_snapshot.authority_boundary.contains("iOS runtime"),
+            "crossnet.settings.snapshot must stay allowlisted, read-only, and Mac-only"
+        );
+
+        let settings_set = capabilities
+            .iter()
+            .find(|capability| capability.id == "crossnet.settings.set")
+            .expect("crossnet settings set capability must be declared");
+        assert_eq!(settings_set.status, OperatorCapabilityStatus::Planned);
+        assert_eq!(
+            settings_set.runtime_target,
+            OperatorRuntimeTarget::MacAppRuntime
+        );
+        assert_eq!(
+            settings_set.control_effect,
+            OperatorControlEffect::MacMutationNotEnabled
+        );
+        assert!(
+            settings_set.authority_boundary.contains("typed allowlist")
+                && settings_set
+                    .authority_boundary
+                    .contains("runtime observation proof")
+                && settings_set.authority_boundary.contains("fail closed"),
+            "crossnet.settings.set must not claim writable GUI settings yet"
+        );
+
+        let status_watch = capabilities
+            .iter()
+            .find(|capability| capability.id == "crossnet.status.watch")
+            .expect("crossnet status watch capability must be declared");
+        assert_eq!(status_watch.status, OperatorCapabilityStatus::Planned);
+        assert_eq!(
+            status_watch.runtime_target,
+            OperatorRuntimeTarget::MacAppRuntime
+        );
+        assert_eq!(
+            status_watch.control_effect,
+            OperatorControlEffect::PlannedFailClosed
+        );
+        assert!(
+            status_watch
+                .authority_boundary
+                .contains("watch_not_supported")
+                && status_watch.authority_boundary.contains("fail-closed"),
+            "crossnet.status.watch must keep the fail-closed stream gate visible"
+        );
+
         for required in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
             let capability = capabilities
                 .iter()
                 .find(|capability| capability.id == required)
                 .expect("app-bound crossnet capability must be declared");
-            assert_eq!(capability.status, OperatorCapabilityStatus::Available);
+            assert_eq!(capability.status, OperatorCapabilityStatus::Planned);
+            assert_eq!(
+                capability.runtime_target,
+                OperatorRuntimeTarget::MacAppRuntime
+            );
+            assert_eq!(
+                capability.control_effect,
+                OperatorControlEffect::MacMutationNotEnabled
+            );
             assert!(
                 capability.command.contains("app-bound"),
                 "{required} must advertise the Mac app authority boundary"
             );
             assert!(
-                capability
-                    .authority_boundary
-                    .contains("Mac app operator socket"),
-                "{required} must not look like a native state-dir mutation"
+                capability.authority_boundary.contains("Mac-only")
+                    && capability.authority_boundary.contains("signed Mac app")
+                    && capability.authority_boundary.contains("live socket smoke"),
+                "{required} must keep the Mac-only signed-app smoke gate visible"
             );
         }
 
@@ -320,6 +579,14 @@ mod tests {
                 .find(|capability| capability.id == required)
                 .expect("native/headless capability must be declared");
             assert_eq!(capability.status, OperatorCapabilityStatus::Available);
+            assert_eq!(
+                capability.runtime_target,
+                OperatorRuntimeTarget::NativeHeadlessStateDir
+            );
+            assert_eq!(
+                capability.control_effect,
+                OperatorControlEffect::NativeMutation
+            );
             assert!(
                 capability.authority_boundary.contains("does not"),
                 "{required} must not imply GUI mutation"
@@ -390,6 +657,44 @@ mod tests {
                 !capability.verification_gate.trim().is_empty(),
                 "{required} must declare its verification gate"
             );
+        }
+    }
+
+    #[test]
+    fn operator_capability_matrix_keeps_ios_out_of_rust_runtime_control() {
+        for capability in operator_capabilities() {
+            for field in [
+                capability.id,
+                capability.command,
+                capability.owner_module,
+                capability.authority_boundary,
+                capability.verification_gate,
+            ] {
+                assert!(
+                    !field.contains("ios_app_runtime"),
+                    "{} must not introduce an iOS Rust CLI runtime target",
+                    capability.id
+                );
+            }
+
+            if capability.runtime_target == OperatorRuntimeTarget::MacAppRuntime {
+                assert!(
+                    capability
+                        .owner_module
+                        .contains("Mac OperatorControlServer"),
+                    "{} must keep Mac GUI authority behind the app-owned OperatorControl server",
+                    capability.id
+                );
+            }
+
+            if capability.control_effect == OperatorControlEffect::MacMutationNotEnabled {
+                assert_eq!(
+                    capability.status,
+                    OperatorCapabilityStatus::Planned,
+                    "{} must not claim an enabled Mac GUI mutation before signed-app runtime proof",
+                    capability.id
+                );
+            }
         }
     }
 

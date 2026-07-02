@@ -84,7 +84,12 @@ final class SettingsViewSourceContractTests: XCTestCase {
             "settings.remote.network.enableEncryption",
             "settings.systemMonitor.config.maxHistoryPoints",
             "settings.systemMonitor.alerts.enableTemperatureMonitoring",
-            "settings.systemMonitor.alerts.enableFanSpeedMonitoring"
+            "settings.systemMonitor.alerts.enableFanSpeedMonitoring",
+            "settings.general.cacheSize.unavailable",
+            "settings.general.cache.clearing",
+            "settings.general.cache.clearComplete",
+            "settings.general.cache.clearFailed",
+            "settings.general.cache.sizeFailed"
         ]
 
         for locale in ["en.lproj", "zh-Hans.lproj", "ja.lproj"] {
@@ -93,6 +98,23 @@ final class SettingsViewSourceContractTests: XCTestCase {
                 XCTAssertTrue(source.contains("\"\(key)\" ="), "\(key) missing from \(locale)")
             }
         }
+    }
+
+    func testCacheManagementFileIOStaysOutOfSettingsView() throws {
+        let settingsSource = try repositorySource("Sources/SkyBridgeCore/Views/SettingsView.swift")
+        let cacheServiceSource = try repositorySource("Sources/SkyBridgeCore/Settings/ApplicationCacheService.swift")
+
+        XCTAssertTrue(settingsSource.contains("private let applicationCacheService = ApplicationCacheService.shared"))
+        XCTAssertTrue(settingsSource.contains(".task(id: selectedTab)"))
+        XCTAssertTrue(settingsSource.contains("try await applicationCacheService.cacheUsageSnapshot()"))
+        XCTAssertTrue(settingsSource.contains("try await applicationCacheService.clearCaches()"))
+        XCTAssertFalse(settingsSource.contains("getFormattedCacheSize()"))
+        XCTAssertFalse(settingsSource.contains("FileManager.default.urls(for: .cachesDirectory"))
+
+        XCTAssertTrue(cacheServiceSource.contains("public actor ApplicationCacheService"))
+        XCTAssertTrue(cacheServiceSource.contains("case scanFailed([CacheOperationFailure])"))
+        XCTAssertTrue(cacheServiceSource.contains("case clearFailed(CacheClearResult)"))
+        XCTAssertFalse(cacheServiceSource.contains("try?"))
     }
 
     func testMetalHUDSettingsControlRenderedRootOverlay() throws {

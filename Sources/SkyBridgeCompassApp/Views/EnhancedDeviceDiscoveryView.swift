@@ -21,7 +21,7 @@ private struct TrustedGroupSelection: Identifiable, Equatable {
     let id: String
 }
 
-private struct TrustedRecordCardPresentation: Identifiable {
+private struct TrustedRecordCardPresentation: Identifiable, Sendable {
     let group: TrustRecordDisplayGroup
     let subtitle: String
     let status: OnlineDeviceStatus
@@ -29,7 +29,7 @@ private struct TrustedRecordCardPresentation: Identifiable {
     var id: String { group.id }
 }
 
-private struct DeviceDiscoveryPresentationSnapshot {
+private struct DeviceDiscoveryPresentationSnapshot: Sendable {
     var connectedOnlineDevicesNonLocal: [OnlineDevice]
     var activeOnlineDevicesNonLocal: [OnlineDevice]
     var filteredOnlineDevicesNonLocal: [OnlineDevice]
@@ -47,6 +47,872 @@ private struct DeviceDiscoveryPresentationSnapshot {
         accessibilityIdentityByDeviceId: [:],
         hasResolvedConnectableControlRouteByDeviceId: [:]
     )
+}
+
+private struct DeviceDiscoveryResolvedProtocolIdentity: Sendable {
+    let deviceId: String?
+    let pubKeyFP: String?
+}
+
+private enum DeviceDiscoveryPresentationProjector {
+    struct Input: Sendable {
+        let onlineDevices: [OnlineDevice]
+        let trustedGroups: [TrustRecordDisplayGroup]
+        let searchText: String
+        let showConnectableDevicesOnly: Bool
+        let trustedMetadata: [String: ApplePeerDeviceMetadataNormalizer.Presentation]
+        let trustedLiveMetadata: [String: ApplePeerDeviceMetadataNormalizer.Presentation]
+        let hasResolvedConnectableControlRouteByDeviceId: [UUID: Bool]
+        let effectiveStatusByDeviceId: [UUID: OnlineDeviceStatus]
+        let resolvedTrustRecordByDeviceId: [UUID: TrustRecord]
+        let liveProtocolIdentityByDeviceId: [UUID: DeviceDiscoveryResolvedProtocolIdentity]
+        let crossNetworkActiveTrustedGroupIds: Set<String>
+        let presenceOnlinePeerDeviceIds: Set<String>
+    }
+
+    static func buildPresentationSnapshot(input: Input) -> DeviceDiscoveryPresentationSnapshot {
+        let nonLocalDevices = input.onlineDevices.filter { !$0.isLocalDevice }
+        let connectedCandidates = nonLocalDevices
+            .filter { effectiveConnectionStatus(for: $0, input: input) == .connected }
+        let connected = presentationDedupeOnlineDevices(
+            connectedCandidates,
+            trustedGroups: input.trustedGroups,
+            input: input
+        )
+            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+        let activeCandidates = nonLocalDevices
+            .filter { effectiveConnectionStatus(for: $0, input: input) == .online }
+            .filter { candidate in
+                !hasHigherPriorityPresentation(
+                    for: candidate,
+                    representedDevices: connected,
+                    trustedGroups: input.trustedGroups,
+                    input: input
+                )
+            }
+        let active = presentationDedupeOnlineDevices(
+            activeCandidates,
+            trustedGroups: input.trustedGroups,
+            input: input
+        )
+        let recent = groupedRecentlyConnectedDevices(
+            from: input.onlineDevices,
+            connectedDevices: connected,
+            activeDevices: active,
+            trustedGroups: input.trustedGroups,
+            input: input
+        )
+
+        let filteredBase = active.filter { device in
+            if input.showConnectableDevicesOnly && !device.isConnectable {
+                return false
+            }
+            return true
+        }
+        let filtered: [OnlineDevice]
+        if input.searchText.isEmpty {
+            filtered = filteredBase
+        } else {
+            filtered = filteredBase.filter {
+                $0.name.localizedCaseInsensitiveContains(input.searchText) ||
+                $0.ipv4?.contains(input.searchText) == true ||
+                $0.ipv6?.contains(input.searchText) == true
+            }
+        }
+
+        let representedDevices = connected + active + recent
+        let displayedTrusted = input.trustedGroups
+            .filter { !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input) }
+            .map { group in
+                TrustedRecordCardPresentation(
+                    group: group,
+                    subtitle: trustedRecordSubtitle(group, input: input),
+                    status: trustedRecordStatus(
+                        group,
+                        liveCandidates: nonLocalDevices,
+                        recentCandidates: recent,
+                        input: input
+                    )
+                )
+            }
+
+        var identityByDeviceId: [UUID: String] = [:]
+        for device in input.onlineDevices {
+            identityByDeviceId[device.id] = computeResolvedPresentationIdentityKey(
+                for: device,
+                trustedGroups: input.trustedGroups,
+                input: input
+            )
+        }
+
+        return DeviceDiscoveryPresentationSnapshot(
+            connectedOnlineDevicesNonLocal: connected,
+            activeOnlineDevicesNonLocal: active,
+            filteredOnlineDevicesNonLocal: filtered,
+            groupedRecentlyConnectedDevices: recent,
+            displayedTrustedRecords: displayedTrusted,
+            accessibilityIdentityByDeviceId: identityByDeviceId,
+            hasResolvedConnectableControlRouteByDeviceId: input.hasResolvedConnectableControlRouteByDeviceId
+        )
+    }
+
+    private static func groupedRecentlyConnectedDevices(
+        from onlineDevices: [OnlineDevice],
+        connectedDevices: [OnlineDevice],
+        activeDevices: [OnlineDevice],
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> [OnlineDevice] {
+        let liveRepresentations = connectedDevices + activeDevices
+        let candidates = onlineDevices
+            .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus == .offline }
+            .filter { device in
+                !hasHigherPriorityPresentation(
+                    for: device,
+                    representedDevices: liveRepresentations,
+                    trustedGroups: trustedGroups,
+                    input: input
+                )
+            }
+        guard !candidates.isEmpty else { return [] }
+
+        var grouped: [String: OnlineDevice] = [:]
+        for device in candidates {
+            let groupingKey: String
+            if let trustRecord = resolvedTrustRecord(for: device, trustedGroups: trustedGroups, input: input) {
+                groupingKey = "trusted:\(trustRecord.deviceId)"
+            } else {
+                groupingKey = "device:\(device.id.uuidString)"
+            }
+
+            if let existing = grouped[groupingKey] {
+                grouped[groupingKey] = preferredRecentDisplayDevice(existing, device)
+            } else {
+                grouped[groupingKey] = device
+            }
+        }
+
+        let presentationDevices = presentationDedupeOnlineDevices(
+            Array(grouped.values),
+            trustedGroups: trustedGroups,
+            input: input
+        )
+        return presentationDevices.sorted { lhs, rhs in
+            if statusPriority(lhs.connectionStatus) != statusPriority(rhs.connectionStatus) {
+                return statusPriority(lhs.connectionStatus) > statusPriority(rhs.connectionStatus)
+            }
+            let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+            let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+            if lhsConnected != rhsConnected {
+                return lhsConnected > rhsConnected
+            }
+            if lhs.lastSeen != rhs.lastSeen {
+                return lhs.lastSeen > rhs.lastSeen
+            }
+            return lhs.name < rhs.name
+        }
+    }
+
+    private static func presentationDedupeOnlineDevices(
+        _ devices: [OnlineDevice],
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> [OnlineDevice] {
+        var passthrough: [OnlineDevice] = []
+        var appleMobileGroups: [[OnlineDevice]] = []
+
+        for device in devices {
+            guard appleMobilePresentationFamily(for: device) != nil,
+                  !appleMobileStrongPresentationTokens(for: device, trustedGroups: trustedGroups, input: input).isEmpty else {
+                passthrough.append(device)
+                continue
+            }
+
+            let matchingIndices = appleMobileGroups.indices.filter { index in
+                let group = appleMobileGroups[index]
+                return group.contains { existing in
+                    shouldCoalesceAppleMobilePresentation(existing, device, trustedGroups: trustedGroups, input: input)
+                }
+            }
+            if let firstIndex = matchingIndices.first {
+                var mergedGroup = appleMobileGroups[firstIndex]
+                mergedGroup.append(device)
+                for index in matchingIndices.dropFirst().reversed() {
+                    mergedGroup.append(contentsOf: appleMobileGroups.remove(at: index))
+                }
+                appleMobileGroups[firstIndex] = mergedGroup
+            } else {
+                appleMobileGroups.append([device])
+            }
+        }
+
+        let coalescedAppleMobile = appleMobileGroups.flatMap { group -> [OnlineDevice] in
+            guard group.count > 1,
+                  let winner = group.max(by: {
+                      preferredOnlinePresentationOrder($1, $0, input: input)
+                  }) else {
+                return group
+            }
+            return [winner]
+        }
+
+        return (passthrough + coalescedAppleMobile).sorted {
+            preferredOnlinePresentationOrder($0, $1, input: input)
+        }
+    }
+
+    private static func hasHigherPriorityPresentation(
+        for candidate: OnlineDevice,
+        representedDevices: [OnlineDevice],
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> Bool {
+        let candidateIdentity = computeResolvedPresentationIdentityKey(
+            for: candidate,
+            trustedGroups: trustedGroups,
+            input: input
+        )
+        return representedDevices.contains { represented in
+            represented.id == candidate.id
+                || represented.uniqueIdentifier == candidate.uniqueIdentifier
+                || computeResolvedPresentationIdentityKey(for: represented, trustedGroups: trustedGroups, input: input) == candidateIdentity
+                || shouldCoalesceAppleMobilePresentation(candidate, represented, trustedGroups: trustedGroups, input: input)
+        }
+    }
+
+    private static func shouldCoalesceAppleMobilePresentation(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice,
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> Bool {
+        guard let lhsFamily = appleMobilePresentationFamily(for: lhs),
+              let rhsFamily = appleMobilePresentationFamily(for: rhs),
+              lhsFamily == rhsFamily else {
+            return false
+        }
+
+        guard appleMobilePresentationMetadataCompatible(lhs.modelName, rhs.modelName, family: lhsFamily),
+              appleMobilePresentationPlatformCompatible(lhs.platformName, rhs.platformName) else {
+            return false
+        }
+
+        let lhsRoutes = appleMobilePresentationRouteTokens(for: lhs)
+        let rhsRoutes = appleMobilePresentationRouteTokens(for: rhs)
+        if !lhsRoutes.isEmpty, !lhsRoutes.isDisjoint(with: rhsRoutes) {
+            return true
+        }
+
+        let lhsTokens = appleMobileStrongPresentationTokens(for: lhs, trustedGroups: trustedGroups, input: input)
+        let rhsTokens = appleMobileStrongPresentationTokens(for: rhs, trustedGroups: trustedGroups, input: input)
+        return !lhsTokens.isEmpty && !rhsTokens.isEmpty && !lhsTokens.isDisjoint(with: rhsTokens)
+    }
+
+    private static func appleMobilePresentationFamily(for device: OnlineDevice) -> String? {
+        let haystack = [
+            device.name,
+            device.modelName ?? "",
+            device.platformName ?? ""
+        ].joined(separator: " ").lowercased()
+        if haystack.contains("ipad") || haystack.contains("ipados") {
+            return "ipad"
+        }
+        if haystack.contains("iphone") || haystack.contains("ios") {
+            return "iphone"
+        }
+        return nil
+    }
+
+    private static func appleMobilePresentationMetadataCompatible(
+        _ lhs: String?,
+        _ rhs: String?,
+        family: String
+    ) -> Bool {
+        let lhs = normalizedSmokeToken(lhs ?? "")
+        let rhs = normalizedSmokeToken(rhs ?? "")
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        if lhs == rhs { return true }
+        return lhs == family && rhs.hasPrefix(family)
+            || rhs == family && lhs.hasPrefix(family)
+    }
+
+    private static func appleMobilePresentationPlatformCompatible(_ lhs: String?, _ rhs: String?) -> Bool {
+        let lhs = normalizedSmokeToken(lhs ?? "")
+        let rhs = normalizedSmokeToken(rhs ?? "")
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        if lhs == rhs { return true }
+        let mobilePlatforms: Set<String> = ["ios", "ipados"]
+        return mobilePlatforms.contains(lhs) && mobilePlatforms.contains(rhs)
+    }
+
+    private static func appleMobilePresentationRouteTokens(for device: OnlineDevice) -> Set<String> {
+        var tokens = Set<String>()
+        let rawValues: [String?] = [Optional.some(device.uniqueIdentifier)] + device.routeIdentifiers.map(Optional.some)
+        for raw in rawValues {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else {
+                continue
+            }
+            let normalized = raw.lowercased()
+            guard normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:") else {
+                continue
+            }
+            if let routeToken = appleMobileCanonicalBonjourRouteToken(from: raw) {
+                tokens.insert(routeToken)
+            }
+        }
+        return tokens
+    }
+
+    private static func appleMobileCanonicalBonjourRouteToken(from raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        let lowercased = raw.lowercased()
+        let payload: String
+        if lowercased.hasPrefix("recent:bonjour:") {
+            payload = String(raw.dropFirst("recent:bonjour:".count))
+        } else if lowercased.hasPrefix("bonjour:") {
+            payload = String(raw.dropFirst("bonjour:".count))
+        } else {
+            return nil
+        }
+
+        let parts = payload.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let rawServiceName = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawServiceName.isEmpty else {
+            return nil
+        }
+
+        let rawDomain = parts.count > 1
+            ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            : "local."
+        let domain: String
+        if rawDomain.isEmpty {
+            domain = "local."
+        } else if rawDomain.hasSuffix(".") {
+            domain = rawDomain.lowercased()
+        } else {
+            domain = "\(rawDomain.lowercased())."
+        }
+
+        return "bonjour:\(rawServiceName.lowercased())@\(domain)"
+    }
+
+    private static func appleMobileStrongPresentationTokens(
+        for device: OnlineDevice,
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> Set<String> {
+        var tokens = appleMobilePresentationRouteTokens(for: device)
+
+        if let identityToken = appleMobilePresentationIdentityToken(from: device.uniqueIdentifier) {
+            tokens.insert(identityToken)
+        }
+        for routeIdentifier in device.routeIdentifiers {
+            if let identityToken = appleMobilePresentationIdentityToken(from: routeIdentifier) {
+                tokens.insert(identityToken)
+            }
+        }
+
+        if let trustRecord = resolvedTrustRecord(for: device, trustedGroups: trustedGroups, input: input) {
+            let stableDeviceId = trustRecord.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !stableDeviceId.isEmpty {
+                tokens.insert("trust:\(stableDeviceId)")
+            }
+        }
+
+        return tokens
+    }
+
+    private static func appleMobilePresentationIdentityToken(from raw: String?) -> String? {
+        guard var normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalized.isEmpty else {
+            return nil
+        }
+        if normalized.hasPrefix("recent:") {
+            normalized = String(normalized.dropFirst("recent:".count))
+        }
+
+        if normalized.hasPrefix("id:") {
+            let payload = String(normalized.dropFirst("id:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !payload.isEmpty else { return nil }
+            if let uuid = UUID(uuidString: payload) {
+                return "id:\(uuid.uuidString.lowercased())"
+            }
+            return payload.count >= 8 ? "id:\(payload)" : nil
+        }
+
+        if normalized.hasPrefix("fp:") {
+            let payload = String(normalized.dropFirst("fp:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return payload.count >= 16 ? "fp:\(payload)" : nil
+        }
+
+        if let uuid = UUID(uuidString: normalized) {
+            return "id:\(uuid.uuidString.lowercased())"
+        }
+
+        return nil
+    }
+
+    private static func trustedRecordSubtitle(_ group: TrustRecordDisplayGroup, input: Input) -> String {
+        let normalized = trustedRecordPresentation(group, input: input)
+
+        var parts: [String] = []
+        if let modelName = normalized.modelName { parts.append(modelName) }
+        if let chip = normalized.chip { parts.append(chip) }
+        if let platform = normalized.platform, let osVersion = normalized.osVersion {
+            parts.append("\(platform) \(osVersion)")
+        } else if let platform = normalized.platform {
+            parts.append(platform)
+        }
+        return parts.isEmpty ? group.displayRecord.deviceId : parts.joined(separator: " · ")
+    }
+
+    private static func trustedRecordPresentation(
+        _ group: TrustRecordDisplayGroup,
+        input: Input
+    ) -> ApplePeerDeviceMetadataNormalizer.Presentation {
+        let record = group.displayRecord
+        let c = trustedRecordCaps(record)
+        let fallback = ApplePeerDeviceMetadataNormalizer.normalize(
+            modelName: c["modelName"],
+            chip: c["chip"],
+            platform: c["platform"],
+            osVersion: c["osVersion"]
+        )
+        let live = input.trustedMetadata[group.id] ?? input.trustedLiveMetadata[group.id]
+        var merged = ApplePeerDeviceMetadataNormalizer.mergedPresentation(
+            preferred: live,
+            fallback: fallback
+        )
+        if live == nil {
+            merged = ApplePeerDeviceMetadataNormalizer.normalize(
+                modelName: merged.modelName,
+                chip: merged.chip,
+                platform: merged.platform,
+                osVersion: nil
+            )
+        }
+        return merged
+    }
+
+    private static func trustedRecordStatus(
+        _ group: TrustRecordDisplayGroup,
+        liveCandidates: [OnlineDevice],
+        recentCandidates: [OnlineDevice],
+        input: Input
+    ) -> OnlineDeviceStatus {
+        let resolvedStatus = trustedPresentationOnlineDevices(
+            for: group,
+            liveCandidates: liveCandidates,
+            recentCandidates: recentCandidates,
+            input: input
+        )
+            .map(\.connectionStatus)
+            .max(by: { statusPriority($0) < statusPriority($1) })
+            ?? .offline
+        if input.crossNetworkActiveTrustedGroupIds.contains(group.id) { return .connected }
+        if resolvedStatus == .offline, trustedGroupIsPresenceOnline(group, input: input) { return .online }
+        return resolvedStatus
+    }
+
+    private static func trustedGroupIsPresenceOnline(_ group: TrustRecordDisplayGroup, input: Input) -> Bool {
+        guard !input.presenceOnlinePeerDeviceIds.isEmpty else { return false }
+        for record in trustedLookupRecords(for: group) {
+            if input.presenceOnlinePeerDeviceIds.contains(record.deviceId) ||
+                input.presenceOnlinePeerDeviceIds.contains(record.currentDeviceId) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func trustedPresentationOnlineDevices(
+        for group: TrustRecordDisplayGroup,
+        liveCandidates: [OnlineDevice],
+        recentCandidates: [OnlineDevice],
+        input: Input
+    ) -> [OnlineDevice] {
+        let records = trustedLookupRecords(for: group)
+        let context = trustedDeviceMatchContext(for: group)
+
+        var mergedByIdentity: [String: (score: Int, device: OnlineDevice)] = [:]
+        for device in liveCandidates + recentCandidates {
+            let resolvedTrustRecord = resolvedTrustRecord(for: device, among: records, input: input)
+            let fallbackScore = trustedDeviceMatchScore(device, context: context)
+            let matchScore: Int
+            let mergeKey: String
+
+            if let resolvedTrustRecord {
+                matchScore = 20_000 + fallbackScore
+                mergeKey = "trusted:\(resolvedTrustRecord.deviceId)"
+            } else {
+                guard fallbackScore > 0 else { continue }
+                matchScore = fallbackScore
+                mergeKey = "device:\(device.id.uuidString)"
+            }
+
+            if let existing = mergedByIdentity[mergeKey] {
+                if existing.score == matchScore {
+                    mergedByIdentity[mergeKey] = (
+                        score: matchScore,
+                        device: preferredRecentDisplayDevice(existing.device, device)
+                    )
+                } else if existing.score < matchScore {
+                    mergedByIdentity[mergeKey] = (score: matchScore, device: device)
+                }
+            } else {
+                mergedByIdentity[mergeKey] = (score: matchScore, device: device)
+            }
+        }
+
+        return mergedByIdentity.values.sorted { lhs, rhs in
+            let lhsScore = lhs.score
+            let rhsScore = rhs.score
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            return trustedPresentationPriority(lhs.device) > trustedPresentationPriority(rhs.device)
+        }
+        .map(\.device)
+    }
+
+    private static func hasVisibleOnlineRepresentation(
+        for group: TrustRecordDisplayGroup,
+        representedDevices: [OnlineDevice],
+        input: Input
+    ) -> Bool {
+        let records = trustedLookupRecords(for: group)
+        return representedDevices.contains { device in
+            resolvedTrustRecord(for: device, among: records, input: input) != nil
+        }
+    }
+
+    private static func trustedLookupRecords(for group: TrustRecordDisplayGroup) -> [TrustRecord] {
+        let records = [group.displayRecord] + group.relatedRecords
+        var ordered: [TrustRecord] = []
+        var seen = Set<String>()
+
+        for record in records {
+            let key = "\(record.deviceId)|\(record.updatedAt)"
+            if seen.insert(key).inserted {
+                ordered.append(record)
+            }
+        }
+        return ordered
+    }
+
+    private static func resolvedTrustRecord(
+        for device: OnlineDevice,
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> TrustRecord? {
+        let records = trustedGroups.flatMap { trustedLookupRecords(for: $0) }
+        return resolvedTrustRecord(for: device, among: records, input: input)
+    }
+
+    private static func resolvedTrustRecord(
+        for device: OnlineDevice,
+        among records: [TrustRecord],
+        input: Input
+    ) -> TrustRecord? {
+        guard let resolved = input.resolvedTrustRecordByDeviceId[device.id] else {
+            return nil
+        }
+        let acceptedIds = Set(records.map(\.deviceId))
+        return acceptedIds.contains(resolved.deviceId) ? resolved : nil
+    }
+
+    private static func trustedRecordCaps(_ record: TrustRecord) -> [String: String] {
+        var dict: [String: String] = [:]
+        for item in record.capabilities {
+            let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                dict[parts[0]] = parts[1]
+            }
+        }
+        return dict
+    }
+
+    private static func trustedDeviceMatchContext(
+        for group: TrustRecordDisplayGroup
+    ) -> (identityTokens: Set<String>, nameTokens: Set<String>) {
+        let records = trustedLookupRecords(for: group)
+        var identityTokens = Set<String>()
+        var nameTokens = Set<String>()
+
+        for record in records {
+            for raw in [record.deviceId, record.currentDeviceId, record.deviceName] + record.knownDeviceIds {
+                trustedDeviceTokens(from: raw).forEach { token in
+                    if token.hasPrefix("name:") {
+                        nameTokens.insert(token)
+                    } else {
+                        identityTokens.insert(token)
+                    }
+                }
+            }
+
+            let caps = trustedRecordCaps(record)
+            for raw in [caps["declaredDeviceId"], caps["peerEndpoint"]] {
+                trustedDeviceTokens(from: raw).forEach { token in
+                    if token.hasPrefix("name:") {
+                        nameTokens.insert(token)
+                    } else {
+                        identityTokens.insert(token)
+                    }
+                }
+            }
+        }
+
+        return (identityTokens, nameTokens)
+    }
+
+    private static func trustedDeviceMatchScore(
+        _ device: OnlineDevice,
+        context: (identityTokens: Set<String>, nameTokens: Set<String>)
+    ) -> Int {
+        let deviceTokens = trustedDeviceTokens(for: device)
+        let identityMatches = deviceTokens.intersection(context.identityTokens)
+        if !identityMatches.isEmpty {
+            return 10_000 + identityMatches.count * 100
+        }
+
+        if context.identityTokens.isEmpty {
+            let nameMatches = deviceTokens.intersection(context.nameTokens)
+            if !nameMatches.isEmpty {
+                return 1_000 + nameMatches.count * 10
+            }
+        }
+
+        return 0
+    }
+
+    private static func trustedDeviceTokens(for device: OnlineDevice) -> Set<String> {
+        var tokens = Set<String>()
+        for raw in [device.uniqueIdentifier, device.ipv4, device.ipv6, device.name] {
+            tokens.formUnion(trustedDeviceTokens(from: raw))
+        }
+        return tokens
+    }
+
+    private static func trustedDeviceTokens(from raw: String?) -> Set<String> {
+        guard let raw = normalizedDiscoveryToken(raw) else { return [] }
+
+        var tokens = Set<String>()
+        tokens.insert(raw)
+
+        if raw.hasPrefix("id:") {
+            tokens.insert(String(raw.dropFirst("id:".count)))
+            return tokens
+        }
+
+        if raw.hasPrefix("bonjour:") {
+            tokens.insert("host:\(raw)")
+            if let name = raw.split(separator: "@", maxSplits: 1).first {
+                tokens.insert("name:\(String(name.dropFirst("bonjour:".count)))")
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("host:") {
+            let payload = String(raw.dropFirst("host:".count))
+            tokens.insert(payload)
+            if payload.hasPrefix("bonjour:") {
+                tokens.insert(payload)
+            }
+            if payload.hasPrefix("id:") {
+                tokens.insert(String(payload.dropFirst("id:".count)))
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("recent:") {
+            let payload = String(raw.dropFirst("recent:".count))
+            tokens.insert(payload)
+            if payload.hasPrefix("peer:") {
+                tokens.insert(String(payload.dropFirst("peer:".count)))
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("peer:") {
+            tokens.insert(String(raw.dropFirst("peer:".count)))
+            return tokens
+        }
+
+        if raw.range(
+            of: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            tokens.insert(raw)
+            tokens.insert("id:\(raw)")
+            return tokens
+        }
+
+        if raw.contains(".") || raw.contains(":") {
+            tokens.insert("host:\(raw)")
+            return tokens
+        }
+
+        tokens.insert("name:\(raw)")
+        return tokens
+    }
+
+    private static func normalizedDiscoveryToken(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return token.isEmpty ? nil : token
+    }
+
+    private static func effectiveConnectionStatus(for device: OnlineDevice, input: Input) -> OnlineDeviceStatus {
+        input.effectiveStatusByDeviceId[device.id] ?? device.connectionStatus
+    }
+
+    private static func preferredOnlinePresentationOrder(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice,
+        input: Input
+    ) -> Bool {
+        let lhsConnectable = input.hasResolvedConnectableControlRouteByDeviceId[lhs.id] ?? false
+        let rhsConnectable = input.hasResolvedConnectableControlRouteByDeviceId[rhs.id] ?? false
+        if lhsConnectable != rhsConnectable {
+            return lhsConnectable
+        }
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable
+        }
+        if lhs.lastSeen != rhs.lastSeen {
+            return lhs.lastSeen > rhs.lastSeen
+        }
+        return lhs.name < rhs.name
+    }
+
+    private static func trustedPresentationPriority(_ device: OnlineDevice) -> Int {
+        var score = statusPriority(device.connectionStatus) * 1_000
+        if device.isConnectable { score += 150 }
+        if !(device.uniqueIdentifier.hasPrefix("recent:")) { score += 250 }
+        if device.modelName?.isEmpty == false { score += 400 }
+        if device.chip?.isEmpty == false { score += 300 }
+        if device.platformName?.isEmpty == false { score += 200 }
+        if device.osVersion?.isEmpty == false { score += 600 }
+        if device.ipv4 != nil || device.ipv6 != nil { score += 100 }
+        score += Int(device.lastSeen.timeIntervalSince1970)
+        return score
+    }
+
+    private static func preferredRecentDisplayDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
+        if statusPriority(lhs.connectionStatus) != statusPriority(rhs.connectionStatus) {
+            return statusPriority(lhs.connectionStatus) > statusPriority(rhs.connectionStatus) ? lhs : rhs
+        }
+
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable ? lhs : rhs
+        }
+
+        let lhsLooksLikeIP = isIPAddressLikeLabel(lhs.name)
+        let rhsLooksLikeIP = isIPAddressLikeLabel(rhs.name)
+        if lhsLooksLikeIP != rhsLooksLikeIP {
+            return lhsLooksLikeIP ? rhs : lhs
+        }
+
+        let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+        let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+        if lhsConnected != rhsConnected {
+            return lhsConnected > rhsConnected ? lhs : rhs
+        }
+
+        if lhs.lastSeen != rhs.lastSeen {
+            return lhs.lastSeen > rhs.lastSeen ? lhs : rhs
+        }
+
+        return lhs.name.count >= rhs.name.count ? lhs : rhs
+    }
+
+    private static func isIPAddressLikeLabel(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.contains(":") { return true }
+        let parts = trimmed.split(separator: ".")
+        return parts.count == 4 && parts.allSatisfy { Int($0) != nil }
+    }
+
+    private static func statusPriority(_ status: OnlineDeviceStatus) -> Int {
+        switch status {
+        case .connected:
+            return 3
+        case .online:
+            return 2
+        case .offline:
+            return 1
+        }
+    }
+
+    private static func computeResolvedPresentationIdentityKey(
+        for device: OnlineDevice,
+        trustedGroups: [TrustRecordDisplayGroup],
+        input: Input
+    ) -> String {
+        let liveProtocolIdentity = input.liveProtocolIdentityByDeviceId[device.id]
+        let protocolIdentity: (authorityDeviceId: String?, protocolDeviceId: String?)
+        if let trustRecord = resolvedTrustRecord(for: device, trustedGroups: trustedGroups, input: input) {
+            let authorityDeviceId = liveProtocolIdentity?.deviceId ?? nonEmptySmokeIdentity(trustRecord.deviceId)
+            let protocolDeviceId = liveProtocolIdentity?.deviceId
+                ?? nonEmptySmokeIdentity(trustRecord.currentDeviceId)
+                ?? authorityDeviceId
+            protocolIdentity = (authorityDeviceId, protocolDeviceId)
+        } else {
+            let deviceId = liveProtocolIdentity?.deviceId
+                ?? stableSmokeDeviceId(from: device.uniqueIdentifier)
+                ?? device.routeIdentifiers.lazy.compactMap { stableSmokeDeviceId(from: $0) }.first
+            protocolIdentity = (deviceId, deviceId)
+        }
+
+        if let stableDeviceId = protocolIdentity.protocolDeviceId ?? protocolIdentity.authorityDeviceId {
+            return stableIdentityKey(for: stableDeviceId)
+        }
+        return device.uniqueIdentifier
+    }
+
+    private static func stableIdentityKey(for stableDeviceId: String) -> String {
+        let payload = stableIdentityPayload(from: stableDeviceId)
+        if stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("id:") {
+            return stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "id:\(payload)"
+    }
+
+    private static func stableIdentityPayload(from raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.lowercased().hasPrefix("id:") {
+            value = String(value.dropFirst("id:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
+    }
+
+    private static func stableSmokeDeviceId(from raw: String?) -> String? {
+        guard var value = nonEmptySmokeIdentity(raw) else { return nil }
+        if value.lowercased().hasPrefix("recent:") {
+            value = String(value.dropFirst("recent:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard value.lowercased().hasPrefix("id:") else { return nil }
+        let payload = String(value.dropFirst("id:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload
+    }
+
+    private static func nonEmptySmokeIdentity(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private static func normalizedSmokeToken(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 }
 
 @MainActor
@@ -97,6 +963,8 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var cachedTrustedRecordGroups: [TrustRecordDisplayGroup] = []
     @State private var cachedPresentationSnapshot: DeviceDiscoveryPresentationSnapshot = .empty
     @State private var cachedTrustedBonjourRefreshKey = ""
+    @State private var presentationRefreshGeneration: UInt64 = 0
+    @State private var presentationRefreshTask: Task<Void, Never>?
 
 
 
@@ -179,9 +1047,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             cachedTrustedRecordGroups = groups
             refreshPresentationState(trustedGroups: groups)
         }
-        // 节流：发现扫描时 onlineDevices 会高频突发更新，而 buildPresentationSnapshot 是主线程上的
-        // O(n²) 去重/分组。不节流会让每次突发都触发一次重算 → 主线程过载 → 沙滩球。合并为最多每 300ms
-        // 一次重算（latest: true 保证最终状态仍会渲染）。
+        // 节流：发现扫描时 onlineDevices 会高频突发更新。主线程只采集事实快照，
+        // O(n²) 去重/分组交给后台 projector，并用 generation 防止旧结果覆盖新 UI。
         .onReceive(
             unifiedDeviceManager.$onlineDevices
                 .throttle(for: .milliseconds(300), scheduler: DispatchQueue.main, latest: true)
@@ -214,6 +1081,10 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
         .task(id: trustedBonjourRefreshKey) {
             trustedBonjourMetadata.scheduleRefresh(for: trustedRecordsForUI)
+        }
+        .onDisappear {
+            presentationRefreshTask?.cancel()
+            presentationRefreshTask = nil
         }
         .sheet(item: $selectedTrustedGroupSelection) { selection in
             if let group = trustedRecordGroup(for: selection.id) {
@@ -664,17 +1535,87 @@ public struct EnhancedDeviceDiscoveryView: View {
         let groups = trustedGroups ?? cachedTrustedRecordGroups
         let query = searchText ?? self.searchText
         let metadata = trustedMetadata ?? trustedBonjourMetadata.metadataByGroupId
-
-        cachedPresentationSnapshot = buildPresentationSnapshot(
+        let input = makePresentationProjectorInput(
             onlineDevices: devices,
             trustedGroups: groups,
             searchText: query,
-            showConnectableDevicesOnly: SettingsManager.shared.showConnectableDevicesOnly,
             trustedMetadata: metadata
         )
-        cachedTrustedBonjourRefreshKey = buildTrustedBonjourRefreshKey(
+        let refreshKey = buildTrustedBonjourRefreshKey(
             trustedGroups: groups,
             onlineDevices: devices
+        )
+        presentationRefreshGeneration &+= 1
+        let generation = presentationRefreshGeneration
+        presentationRefreshTask?.cancel()
+        presentationRefreshTask = Task(priority: .userInitiated) {
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                DeviceDiscoveryPresentationProjector.buildPresentationSnapshot(input: input)
+            }.value
+
+            guard !Task.isCancelled, presentationRefreshGeneration == generation else { return }
+            cachedPresentationSnapshot = snapshot
+            cachedTrustedBonjourRefreshKey = refreshKey
+            presentationRefreshTask = nil
+        }
+    }
+
+    private func makePresentationProjectorInput(
+        onlineDevices: [OnlineDevice],
+        trustedGroups: [TrustRecordDisplayGroup],
+        searchText: String,
+        trustedMetadata: [String: ApplePeerDeviceMetadataNormalizer.Presentation]
+    ) -> DeviceDiscoveryPresentationProjector.Input {
+        let allTrustRecords = trustedGroups.flatMap { trustedLookupRecords(for: $0) }
+        var hasResolvedConnectableControlRouteByDeviceId: [UUID: Bool] = [:]
+        var effectiveStatusByDeviceId: [UUID: OnlineDeviceStatus] = [:]
+        var resolvedTrustRecordByDeviceId: [UUID: TrustRecord] = [:]
+        var liveProtocolIdentityByDeviceId: [UUID: DeviceDiscoveryResolvedProtocolIdentity] = [:]
+
+        for device in onlineDevices {
+            hasResolvedConnectableControlRouteByDeviceId[device.id] =
+                unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)
+            effectiveStatusByDeviceId[device.id] = effectiveConnectionStatus(for: device)
+            if let trustRecord = unifiedDeviceManager.resolvedTrustRecord(for: device, among: allTrustRecords) {
+                resolvedTrustRecordByDeviceId[device.id] = trustRecord
+            }
+            let liveProtocolIdentity = resolvedLiveProtocolIdentity(for: device)
+            liveProtocolIdentityByDeviceId[device.id] = DeviceDiscoveryResolvedProtocolIdentity(
+                deviceId: liveProtocolIdentity.deviceId,
+                pubKeyFP: liveProtocolIdentity.pubKeyFP
+            )
+        }
+
+        let trustedLiveMetadata = Dictionary(
+            uniqueKeysWithValues: trustedGroups.map { group in
+                (
+                    group.id,
+                    unifiedDeviceManager.resolvedApplePeerMetadata(for: trustedLookupRecords(for: group))
+                )
+            }
+            .compactMap { key, value in
+                value.map { (key, $0) }
+            }
+        )
+        let crossNetworkActiveTrustedGroupIds = Set(
+            trustedGroups
+                .filter(isCrossNetworkSessionActive(for:))
+                .map(\.id)
+        )
+
+        return DeviceDiscoveryPresentationProjector.Input(
+            onlineDevices: onlineDevices,
+            trustedGroups: trustedGroups,
+            searchText: searchText,
+            showConnectableDevicesOnly: SettingsManager.shared.showConnectableDevicesOnly,
+            trustedMetadata: trustedMetadata,
+            trustedLiveMetadata: trustedLiveMetadata,
+            hasResolvedConnectableControlRouteByDeviceId: hasResolvedConnectableControlRouteByDeviceId,
+            effectiveStatusByDeviceId: effectiveStatusByDeviceId,
+            resolvedTrustRecordByDeviceId: resolvedTrustRecordByDeviceId,
+            liveProtocolIdentityByDeviceId: liveProtocolIdentityByDeviceId,
+            crossNetworkActiveTrustedGroupIds: crossNetworkActiveTrustedGroupIds,
+            presenceOnlinePeerDeviceIds: presence.onlinePeerDeviceIds
         )
     }
 
@@ -682,99 +1623,6 @@ public struct EnhancedDeviceDiscoveryView: View {
         cachedTrustedBonjourRefreshKey = buildTrustedBonjourRefreshKey(
             trustedGroups: cachedTrustedRecordGroups,
             onlineDevices: unifiedDeviceManager.onlineDevices
-        )
-    }
-
-    private func buildPresentationSnapshot(
-        onlineDevices: [OnlineDevice],
-        trustedGroups: [TrustRecordDisplayGroup],
-        searchText: String,
-        showConnectableDevicesOnly: Bool,
-        trustedMetadata: [String: ApplePeerDeviceMetadataNormalizer.Presentation]
-    ) -> DeviceDiscoveryPresentationSnapshot {
-        let nonLocalDevices = onlineDevices.filter { !$0.isLocalDevice }
-        let hasResolvedConnectableControlRouteByDeviceId = Dictionary(
-            uniqueKeysWithValues: onlineDevices.map { device in
-                (device.id, unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device))
-            }
-        )
-        let connectedCandidates = nonLocalDevices
-            .filter { effectiveConnectionStatus(for: $0) == .connected }
-        let connected = presentationDedupeOnlineDevices(
-            connectedCandidates,
-            trustedGroups: trustedGroups,
-            hasResolvedConnectableControlRouteByDeviceId: hasResolvedConnectableControlRouteByDeviceId
-        )
-            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
-        let activeCandidates = nonLocalDevices
-            .filter { effectiveConnectionStatus(for: $0) == .online }
-            .filter { candidate in
-                !hasHigherPriorityPresentation(
-                    for: candidate,
-                    representedDevices: connected,
-                    trustedGroups: trustedGroups
-                )
-            }
-        let active = presentationDedupeOnlineDevices(
-            activeCandidates,
-            trustedGroups: trustedGroups,
-            hasResolvedConnectableControlRouteByDeviceId: hasResolvedConnectableControlRouteByDeviceId
-        )
-        let recent = groupedRecentlyConnectedDevices(
-            from: onlineDevices,
-            connectedDevices: connected,
-            activeDevices: active,
-            trustedGroups: trustedGroups
-        )
-
-        let filteredBase = active.filter { device in
-            if showConnectableDevicesOnly && !device.isConnectable {
-                return false
-            }
-            return true
-        }
-        let filtered: [OnlineDevice]
-        if searchText.isEmpty {
-            filtered = filteredBase
-        } else {
-            filtered = filteredBase.filter {
-                $0.name.localizedCaseInsensitiveContains(searchText) ||
-                $0.ipv4?.contains(searchText) == true ||
-                $0.ipv6?.contains(searchText) == true
-            }
-        }
-
-        let representedDevices = connected + active + recent
-        let displayedTrusted = trustedGroups
-            .filter { !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices) }
-            .map { group in
-                TrustedRecordCardPresentation(
-                    group: group,
-                    subtitle: trustedRecordSubtitle(group, metadataByGroupId: trustedMetadata),
-                    status: trustedRecordStatus(
-                        group,
-                        liveCandidates: nonLocalDevices,
-                        recentCandidates: recent
-                    )
-                )
-            }
-
-        var identityByDeviceId: [UUID: String] = [:]
-        for device in onlineDevices {
-            identityByDeviceId[device.id] = computeResolvedPresentationIdentityKey(
-                for: device,
-                trustedGroups: trustedGroups
-            )
-        }
-
-        return DeviceDiscoveryPresentationSnapshot(
-            connectedOnlineDevicesNonLocal: connected,
-            activeOnlineDevicesNonLocal: active,
-            filteredOnlineDevicesNonLocal: filtered,
-            groupedRecentlyConnectedDevices: recent,
-            displayedTrustedRecords: displayedTrusted,
-            accessibilityIdentityByDeviceId: identityByDeviceId,
-            hasResolvedConnectableControlRouteByDeviceId: hasResolvedConnectableControlRouteByDeviceId
         )
     }
 

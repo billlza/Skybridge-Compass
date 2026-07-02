@@ -5,7 +5,7 @@ use skybridge_agent::run_agent;
 
 mod smoke;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use crate::CrossnetSubcommand;
 use crate::auth_commands::{login, logout};
 use crate::connectivity_check::check_connectivity;
@@ -53,14 +53,20 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             }
         },
         Commands::Connect(args) => crate::connection_code::connect_code(cli.state_dir, args).await,
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         Commands::Crossnet(crossnet) => match crossnet.command {
+            CrossnetSubcommand::Preflight(output) => {
+                crate::crossnet_commands::preflight(output.json).await
+            }
             CrossnetSubcommand::Host(args) => crate::crossnet_commands::host(args).await,
             CrossnetSubcommand::Connect(args) => crate::crossnet_commands::connect(args).await,
             CrossnetSubcommand::Disconnect(output) => {
                 crate::crossnet_commands::disconnect(output.json).await
             }
             CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
+            CrossnetSubcommand::Settings(output) => {
+                crate::crossnet_commands::settings(output.json).await
+            }
         },
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,

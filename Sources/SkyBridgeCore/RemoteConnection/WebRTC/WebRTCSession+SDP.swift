@@ -51,6 +51,178 @@ extension WebRTCSession {
         return hasTrailingNewline ? rendered + newline : rendered
     }
 
+    /// Reorders the native-screen video m-line so a Constrained-Baseline H264 payload
+    /// (`profile-level-id` starting `42`) is selected before a High one (`640c`).
+    ///
+    /// The macOS-host WebRTC VideoToolbox encoder will not bring up Constrained-High,
+    /// so if the negotiated SDP lists `640c1f` first the encoder stays at
+    /// framesEncoded=0. This makes Baseline the first/preferred payload type while
+    /// keeping the High payload in the set (we never delete payloads — that would
+    /// risk breaking the offer/answer payload contract). Only the m-line payload
+    /// order changes; every `a=rtpmap`/`a=fmtp`/`a=rtcp-fb` attribute line is left
+    /// byte-identical (their order within a section is not significant per RFC 4566).
+    /// If both profiles are not present, or only one H264 entry exists, the SDP is
+    /// returned unchanged.
+    static func sdpWithNativeScreenH264BaselineFirst(_ sdp: String) -> String {
+        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
+        let hasTrailingNewline = sdp.hasSuffix("\r\n") || sdp.hasSuffix("\n")
+        var lines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]?
+        for line in lines {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+            } else if currentSection != nil {
+                currentSection?.append(line)
+            } else {
+                prefix.append(line)
+            }
+        }
+        if let currentSection {
+            sections.append(currentSection)
+        }
+
+        let rewrittenSections = sections.map { sdpSectionWithNativeScreenH264BaselineFirst($0) }
+        let renderedLines = prefix + rewrittenSections.flatMap { $0 }
+        let rendered = renderedLines.joined(separator: newline)
+        return hasTrailingNewline ? rendered + newline : rendered
+    }
+
+    private static func sdpSectionWithNativeScreenH264BaselineFirst(_ section: [String]) -> [String] {
+        guard let header = section.first, header.hasPrefix("m=video ") else { return section }
+
+        // Map payload -> H264 profile rank from a=rtpmap (H264) + a=fmtp (profile-level-id).
+        var isH264Payload = Set<String>()
+        for line in section {
+            guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=rtpmap:") else { continue }
+            let codecName = parsed.value
+                .split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+            if codecName == "h264" || codecName == "avc" {
+                isH264Payload.insert(parsed.payload)
+            }
+        }
+        guard !isH264Payload.isEmpty else { return section }
+
+        var profileRankByPayload: [String: Int] = [:]
+        for line in section {
+            guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=fmtp:"),
+                  isH264Payload.contains(parsed.payload) else { continue }
+            let profileLevelID = h264ProfileLevelIDValue(fromFmtp: parsed.value)
+            profileRankByPayload[parsed.payload] = WebRTCNativeScreenVideoValuePolicy
+                .h264ProfilePreferenceRank(profileLevelID: profileLevelID)
+        }
+
+        // Only reorder when BOTH a Baseline (rank 0, profile-idc 0x42) and a
+        // High (rank 2, profile-idc 0x64) H264 payload are present.
+        let ranks = Set(profileRankByPayload.values)
+        guard ranks.contains(0), ranks.contains(2) else { return section }
+
+        // Parse the m= header: "m=video <port> <proto> <pt1> <pt2> ...".
+        let headerParts = header.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard headerParts.count > 3 else { return section }
+        let headerLead = headerParts.prefix(3)
+        let payloadOrder = Array(headerParts.dropFirst(3))
+
+        // Stable sort: H264 payloads by profile rank (Baseline first), everything
+        // else keeps original position. Non-H264 and unranked H264 payloads keep
+        // their relative order; only High vs Baseline H264 are reordered.
+        let indexed = payloadOrder.enumerated()
+        let reordered = indexed.sorted { lhs, rhs in
+            let lhsRank = profileRankByPayload[lhs.element]
+            let rhsRank = profileRankByPayload[rhs.element]
+            // Only impose ordering between two ranked H264 payloads.
+            if let lhsRank, let rhsRank, lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+
+        guard reordered != payloadOrder else { return section }
+        let newHeader = (headerLead + reordered).joined(separator: " ")
+        var newSection = section
+        newSection[0] = newHeader
+        return newSection
+    }
+
+    /// Returns the `profile-level-id` of the first H264 payload listed on the video
+    /// m-line (i.e. the selected/preferred codec), or `nil` if there is no H264 video
+    /// payload. Diagnostic helper for confirming the negotiated profile on-device.
+    static func selectedH264ProfileLevelID(fromVideoMLineOf sdp: String) -> String? {
+        let normalized = sdp.replacingOccurrences(of: "\r\n", with: "\n")
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]?
+        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+            } else if currentSection != nil {
+                currentSection?.append(line)
+            } else {
+                prefix.append(line)
+            }
+        }
+        if let currentSection {
+            sections.append(currentSection)
+        }
+
+        guard let videoSection = sections.first(where: { $0.first?.hasPrefix("m=video ") == true }),
+              let header = videoSection.first else { return nil }
+
+        var isH264Payload = Set<String>()
+        var fmtpByPayload: [String: String] = [:]
+        for line in videoSection {
+            if let rtpmap = sdpAttributePayloadAndValue(line, prefix: "a=rtpmap:") {
+                let codecName = rtpmap.value
+                    .split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+                    .first
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+                if codecName == "h264" || codecName == "avc" {
+                    isH264Payload.insert(rtpmap.payload)
+                }
+            } else if let fmtp = sdpAttributePayloadAndValue(line, prefix: "a=fmtp:") {
+                fmtpByPayload[fmtp.payload] = fmtp.value
+            }
+        }
+        guard !isH264Payload.isEmpty else { return nil }
+
+        let headerParts = header.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard headerParts.count > 3 else { return nil }
+        for payload in headerParts.dropFirst(3) where isH264Payload.contains(payload) {
+            if let fmtp = fmtpByPayload[payload],
+               let profileLevelID = h264ProfileLevelIDValue(fromFmtp: fmtp) {
+                return profileLevelID
+            }
+        }
+        return nil
+    }
+
+    private static func h264ProfileLevelIDValue(fromFmtp fmtp: String) -> String? {
+        for entry in fmtp.split(separator: ";", omittingEmptySubsequences: true) {
+            let parts = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = parts.first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+            guard key == "profile-level-id",
+                  let value = parts.dropFirst().first else { continue }
+            return String(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
     private static func sdpSectionWithNativeScreenH264LevelSupport(
         _ section: [String],
         requiredLevelHex: String,

@@ -103,8 +103,120 @@ extension CrossNetworkWebRTCManager {
         try JSONDecoder().decode(DynamicQRCodeData.self, from: jsonData)
     }
 
+    /// 解码 macOS 侧 `generateDynamicQRCode` 发出的服务端背书邀请（version 8，无 PQC 公钥材料）。
+    /// CodingKeys 与 macOS 的 `CompactServerBackedDynamicQRCodeInvite`(`{v,s,q,r,d,n,y,o,a,f,e}`) 逐字节一致。
+    nonisolated static func decodeServerBackedQRCodeInvite(from jsonData: Data) throws -> ServerBackedDynamicQRCodeInvite {
+        try JSONDecoder().decode(ServerBackedDynamicQRCodeInvite.self, from: jsonData)
+    }
+
     nonisolated static func extractConnectPayloadString(from raw: String) -> String? {
         CrossNetworkConnectPayloadParserCompat.extractPayload(from: raw)
+    }
+}
+
+/// 服务端背书动态二维码邀请（version >= 8）。镜像 macOS
+/// `Sources/SkyBridgeCore/RemoteConnection/CrossNetworkQRCodePayload.swift` 的同名结构，
+/// 不携带 PQC 公钥材料；redeem 流程后由握手/pinning 完成设备来源认证。
+@available(iOS 17.0, *)
+struct ServerBackedDynamicQRCodeInvite: Codable {
+    let version: Int
+    let sessionID: String
+    let qrBootstrapToken: String
+    let signalingServerOrigin: String
+    let deviceID: String
+    let deviceName: String
+    let deviceType: String
+    let osVersion: String
+    let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let protocolPublicKeyFingerprint: String
+    let expiresAt: Date
+
+    init(
+        version: Int,
+        sessionID: String,
+        qrBootstrapToken: String,
+        signalingServerOrigin: String,
+        deviceID: String,
+        deviceName: String,
+        deviceType: String,
+        osVersion: String,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        expiresAt: Date
+    ) {
+        self.version = version
+        self.sessionID = sessionID
+        self.qrBootstrapToken = qrBootstrapToken
+        self.signalingServerOrigin = (try? CurrentPathSecurityCompat.canonicalOrigin(signalingServerOrigin)) ?? signalingServerOrigin
+        self.deviceID = deviceID
+        self.deviceName = deviceName.precomposedStringWithCanonicalMapping
+        self.deviceType = deviceType.precomposedStringWithCanonicalMapping
+        self.osVersion = osVersion.precomposedStringWithCanonicalMapping
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint.lowercased()
+        self.expiresAt = expiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let compact = try CompactServerBackedDynamicQRCodeInvite(from: decoder)
+        self = try compact.expanded()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try CompactServerBackedDynamicQRCodeInvite(from: self).encode(to: encoder)
+    }
+}
+
+/// 紧凑线缆形态：键名 `{v,s,q,r,d,n,y,o,a,f,e}` 与 macOS
+/// `CompactServerBackedDynamicQRCodeInvite` 完全一致，保证解码同一份 JSON。
+@available(iOS 17.0, *)
+struct CompactServerBackedDynamicQRCodeInvite: Codable {
+    let v: Int
+    let s: String
+    let q: String
+    let r: String
+    let d: String
+    let n: String
+    let y: String
+    let o: String
+    let a: String
+    let f: String
+    let e: Int64
+
+    init(from invite: ServerBackedDynamicQRCodeInvite) {
+        self.v = invite.version
+        self.s = invite.sessionID
+        self.q = invite.qrBootstrapToken
+        self.r = invite.signalingServerOrigin
+        self.d = invite.deviceID
+        self.n = invite.deviceName.precomposedStringWithCanonicalMapping
+        self.y = invite.deviceType.precomposedStringWithCanonicalMapping
+        self.o = invite.osVersion.precomposedStringWithCanonicalMapping
+        self.a = invite.protocolSigningAlgorithm.rawValue
+        self.f = invite.protocolPublicKeyFingerprint.lowercased()
+        self.e = Int64(invite.expiresAt.timeIntervalSince1970 * 1000)
+    }
+
+    func expanded() throws -> ServerBackedDynamicQRCodeInvite {
+        guard v >= 8 else {
+            throw NSError(domain: "CrossNetworkWebRTCManager", code: 26, userInfo: [NSLocalizedDescriptionKey: "server-backed QR invite requires v8"])
+        }
+        guard let algorithm = ProtocolSigningAlgorithm(rawValue: a) else {
+            throw NSError(domain: "CrossNetworkWebRTCManager", code: 10, userInfo: [NSLocalizedDescriptionKey: "unknown protocol signing algorithm"])
+        }
+        return ServerBackedDynamicQRCodeInvite(
+            version: v,
+            sessionID: s,
+            qrBootstrapToken: q,
+            signalingServerOrigin: r,
+            deviceID: d,
+            deviceName: n,
+            deviceType: y,
+            osVersion: o,
+            protocolSigningAlgorithm: algorithm,
+            protocolPublicKeyFingerprint: f,
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(e) / 1000.0)
+        )
     }
 }
 

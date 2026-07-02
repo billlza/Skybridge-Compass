@@ -64,6 +64,33 @@ final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
         XCTAssertFalse(source.contains("private struct WeatherEffectsBackgroundLayer"))
     }
 
+    func testMacCinematicWeatherEffectsDoNotWriteStateEveryFrame() throws {
+        let effectSources = try [
+            "Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicClearSkyEffectView.swift",
+            "Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicSnowEffectView.swift"
+        ].map(repositorySource)
+
+        for source in effectSources {
+            XCTAssertTrue(source.contains("TimelineView(.animation"))
+            XCTAssertTrue(
+                source.contains("timeIntervalSince(Self.animationEpoch)"),
+                "Mac cinematic weather effects should render from a stable epoch and avoid huge reference-date phase values."
+            )
+            XCTAssertFalse(
+                source.contains(".onChange(of: time"),
+                "TimelineView-backed effects must derive animation from timeline.date without mutating SwiftUI state every frame."
+            )
+            XCTAssertFalse(
+                source.contains("Timer.scheduledTimer"),
+                "Per-effect timers compete with scroll tracking and duplicate TimelineView's cadence."
+            )
+            XCTAssertFalse(
+                source.contains("Task { @MainActor"),
+                "Frame paths should not enqueue MainActor work; all per-frame rendering must be pure Canvas computation."
+            )
+        }
+    }
+
     private static func countOccurrences(of needle: String, in haystack: String) -> Int {
         haystack.components(separatedBy: needle).count - 1
     }

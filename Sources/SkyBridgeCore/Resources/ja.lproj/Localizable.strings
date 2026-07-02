@@ -186,6 +186,11 @@
 "settings.general.dataManagement" = "データ管理";
 "settings.general.clearCache" = "キャッシュを削除";
 "settings.general.cacheSize" = "現在のキャッシュ：%@";
+"settings.general.cacheSize.unavailable" = "計算できません";
+"settings.general.cache.clearing" = "キャッシュを削除中...";
+"settings.general.cache.clearComplete" = "キャッシュを削除しました。%@ を解放しました。";
+"settings.general.cache.clearFailed" = "キャッシュの削除に失敗しました：%@";
+"settings.general.cache.sizeFailed" = "キャッシュサイズを取得できません：%@";
 "settings.general.exportSettings" = "設定をエクスポート";
 "settings.general.importSettings" = "設定をインポート";
 "settings.general.resetSettings" = "デフォルトにリセット";

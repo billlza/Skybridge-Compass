@@ -342,13 +342,18 @@ public actor HandshakeContext {
             initiatorContribution = nil
         }
 
+        let messageACapabilities = Self.messageACapabilities(
+            localCapabilities,
+            for: supportedSuites
+        )
+
         let messageA = HandshakeMessageA(
             version: HandshakeConstants.protocolVersion,
             supportedSuites: supportedSuites,
             keyShares: keyShares,
             clientNonce: nonceData,
             policy: policy,
-            capabilities: localCapabilities,
+            capabilities: messageACapabilities,
             signature: Data(),
             identityPublicKey: identityPublicKey,
             extensionsRaw: extensionsRaw,
@@ -418,6 +423,41 @@ public actor HandshakeContext {
             secureEnclaveSignature: seSignature,
             initiatorContribution: messageA.initiatorContribution
         )
+    }
+
+    private static func messageACapabilities(
+        _ capabilities: CryptoCapabilities,
+        for supportedSuites: [CryptoSuite]
+    ) -> CryptoCapabilities {
+        guard supportedSuites.contains(where: { $0.wireId == CryptoSuite.qperiaptContextBound.wireId }) else {
+            return capabilities
+        }
+
+        return CryptoCapabilities(
+            supportedKEM: prependIfMissing(
+                P2PCryptoAlgorithm.qperiaptContextBound.rawValue,
+                to: capabilities.supportedKEM
+            ),
+            supportedSignature: prependIfMissing(
+                P2PCryptoAlgorithm.mlDSA65.rawValue,
+                to: capabilities.supportedSignature
+            ),
+            supportedAuthProfiles: prependIfMissing(
+                QPeriaptPlatformPolicy.authProfile,
+                to: capabilities.supportedAuthProfiles
+            ),
+            supportedAEAD: capabilities.supportedAEAD,
+            pqcAvailable: true,
+            platformVersion: capabilities.platformVersion,
+            providerType: .qPeriapt
+        )
+    }
+
+    private static func prependIfMissing(_ value: String, to values: [String]) -> [String] {
+        if values.contains(value) {
+            return values
+        }
+        return [value] + values
     }
 
  /// 处理 MessageA（响应方调用）
@@ -1274,6 +1314,23 @@ extension HandshakeContext {
 @available(macOS 14.0, iOS 17.0, *)
 extension HandshakeContext {
     private func providerForSuite(_ suite: CryptoSuite) -> (any CryptoProvider)? {
+ // 可加性新增（Q-Periapt ContextBound, beta）：
+ // 这是 Q-Periapt 套件在本握手层（`CryptoProvider` / `CryptoSuite` 抽象）的
+ // 路由挂载点。`QPeriaptCryptoProvider`（本仓库新增）是一个完整的 `CryptoProvider`
+ // 适配器：KEM = Q-Periapt 混合 (ML-KEM-768 + X25519)，DEM/签名与 `OQSPQCProvider`
+ // 逐字节一致。仅当显式请求且本机 macOS/iOS 26+ CQPeriapt self-test 通过时挂载；否则与今天对该套件的
+ // 行为完全一致（返回 nil → 后续 fall-through 也不会命中既有 provider，逐字节不变）。
+ // 注意 `QPeriaptKEMProvider` 实现的是 `KEMProvider` 协议（见 CryptoProviderSelector.swift），
+ // 与本函数返回的 `CryptoProvider` 协议面不同；二者各自服务于不同的接入层。
+        if suite.rawValue == P2PCryptoAlgorithm.qperiaptContextBound.rawValue {
+            #if canImport(CQPeriapt)
+            if QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
+                return QPeriaptCryptoProvider()
+            }
+            #endif
+            return nil
+        }
+
  // 显式按能力路由，避免 provider 同时支持多套件时的隐含假设
         if let hybridProvider, hybridProvider.supportsSuite(suite) {
             return hybridProvider
@@ -1285,6 +1342,17 @@ extension HandshakeContext {
             return classicProvider
         }
         return nil
+    }
+
+    /// Q-Periapt ContextBound (beta) 是否启用。
+    ///
+    /// 默认 OFF。镜像 `CryptoProviderSelector.isQPeriaptBetaEnabled()` 的判定逻辑：
+    /// - 环境变量 `SB_ENABLE_QPERIAPT` 为真值（1/true/yes/on）；或
+    /// - UserDefaults 中 `SettingsStorageKeys.preferQPeriaptBeta` 为 true。
+    ///
+    /// 仅当本机 macOS/iOS 26+、CQPeriapt 模块可导入、且 runtime self-test 通过时才可能为真。
+    nonisolated static func isQPeriaptBetaEnabled() -> Bool {
+        QPeriaptPlatformPolicy.isEnabledForLocalRuntime()
     }
 
     private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
@@ -1513,6 +1581,10 @@ extension HandshakeContext {
                 if !suiteMeetsHandshakePolicy(suite, policy: localPolicy) { return false }
                 if !suiteMeetsLocalCryptoPolicy(suite) { return false }
                 if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) { return false }
+                if suite.wireId == CryptoSuite.qperiaptContextBound.wireId,
+                   !QPeriaptPlatformPolicy.isHandshakePeerEligible(messageA.capabilities) {
+                    return false
+                }
                 if role == .initiator, peerKEMPublicKey(for: suite) == nil { return false }
                 if !messageA.keyShares.contains(where: { $0.suite == suite }) { return false }
                 if suite.requiresV2EphemeralContribution, messageA.initiatorContribution == nil { return false }
@@ -1530,6 +1602,9 @@ extension HandshakeContext {
                 reason = "local_policy_rejected"
             } else if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) {
                 reason = "peer_policy_rejected"
+            } else if suite.wireId == CryptoSuite.qperiaptContextBound.wireId,
+                      !QPeriaptPlatformPolicy.isHandshakePeerEligible(messageA.capabilities) {
+                reason = "qperiapt_peer_capability_invalid"
             } else if role == .initiator, suite.isPQC && peerKEMPublicKey(for: suite) == nil {
                 reason = "missing_peer_kem_key"
             } else if !messageA.keyShares.contains(where: { $0.suite == suite }) {

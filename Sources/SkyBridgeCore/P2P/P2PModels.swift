@@ -2504,7 +2504,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if bootstrapCacheEnabled {
             await PeerKEMBootstrapStore.shared.upsert(
                 deviceIds: bootstrapIds,
-                kemPublicKeys: payload.kemPublicKeys
+                kemPublicKeys: payload.kemPublicKeys,
+                platform: payload.platform,
+                osVersion: payload.osVersion
             )
         }
 

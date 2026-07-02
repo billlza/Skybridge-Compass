@@ -6,6 +6,11 @@ import WebRTC
 #endif
 
 enum CrossNetworkWebRTCNativeVideoPolicy {
+    struct VisibleFrameNormalization: Equatable {
+        let visibleSize: CGSize
+        let usedEvenPadding: Bool
+    }
+
 #if canImport(WebRTC)
     static func remoteVideoTracksShareNativeBacking(_ lhs: RTCVideoTrack?, _ rhs: RTCVideoTrack?) -> Bool {
         switch (lhs, rhs) {
@@ -26,6 +31,34 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
             return nil
         }
         return CGSize(width: CGFloat(width), height: CGFloat(height))
+    }
+
+    static func normalizedVisibleFrameSize(
+        forCodedSize codedSize: CGSize,
+        expectedVisibleSize: CGSize?
+    ) -> VisibleFrameNormalization {
+        guard let expectedVisibleSize else {
+            return VisibleFrameNormalization(visibleSize: codedSize, usedEvenPadding: false)
+        }
+        let expectedWidth = Int(expectedVisibleSize.width)
+        let expectedHeight = Int(expectedVisibleSize.height)
+        guard expectedWidth > 0, expectedHeight > 0 else {
+            return VisibleFrameNormalization(visibleSize: codedSize, usedEvenPadding: false)
+        }
+        let codedWidth = Int(codedSize.width)
+        let codedHeight = Int(codedSize.height)
+        let expectedCodedWidth = evenNativeVideoBackingDimension(expectedWidth)
+        let expectedCodedHeight = evenNativeVideoBackingDimension(expectedHeight)
+        if codedWidth == expectedCodedWidth, codedHeight == expectedCodedHeight {
+            return VisibleFrameNormalization(
+                visibleSize: expectedVisibleSize,
+                usedEvenPadding: expectedCodedWidth != expectedWidth || expectedCodedHeight != expectedHeight
+            )
+        }
+        if codedWidth == expectedWidth, codedHeight == expectedHeight {
+            return VisibleFrameNormalization(visibleSize: expectedVisibleSize, usedEvenPadding: false)
+        }
+        return VisibleFrameNormalization(visibleSize: codedSize, usedEvenPadding: false)
     }
 
     static func evenNativeVideoBackingDimension(_ visibleDimension: Int) -> Int {

@@ -10,6 +10,8 @@ pub(crate) struct CrossnetCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CrossnetSubcommand {
+    /// Check whether the running Mac app is ready for GUI-bound crossnet mutations.
+    Preflight(OutputOptions),
     /// Host a cross-network connection code via the SkyBridge app control socket.
     Host(CrossnetHostArgs),
     /// Connect to a hosted cross-network code.
@@ -18,6 +20,8 @@ pub(crate) enum CrossnetSubcommand {
     Disconnect(OutputOptions),
     /// Show (or watch) cross-network control status.
     Status(CrossnetStatusArgs),
+    /// Show the running Mac app's read-only settings projection.
+    Settings(OutputOptions),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -88,17 +88,17 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
-      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.5"
-      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F42"
-      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.2"
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Select Xcode 26.5 / Swift 6.3.2 Toolchain
+      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
         run: |
-          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.5 is missing at $DEVELOPER_DIR"; exit 1; }
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
 
@@ -121,17 +121,17 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
-      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.5"
-      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F42"
-      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.2"
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Verify Stable Xcode 26.5 Toolchain
+      - name: Verify Stable Xcode 26.6 Toolchain
         run: |
-          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.5 is missing at $DEVELOPER_DIR"; exit 1; }
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
           bash Scripts/verify_xcode_toolchain.sh
 
       - name: Run OS27 Source Contracts
@@ -147,10 +147,10 @@ jobs:
       actions: read
 
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
-      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.5"
-      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F42"
-      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.2"
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
       - name: Require Successful Preflight and OS27 Source Contracts
@@ -162,10 +162,10 @@ jobs:
       - uses: actions/checkout@v6
         if: needs.macos-preflight.result == 'success'
 
-      - name: Select Xcode 26.5 / Swift 6.3.2 Toolchain
+      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
         if: needs.macos-preflight.result == 'success'
         run: |
-          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.5 is missing at $DEVELOPER_DIR"; exit 1; }
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
 

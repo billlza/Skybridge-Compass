@@ -554,6 +554,69 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionScopedSignalingURLRejectsUnsafeWebSocketPaths() {
+        for unsafePath in [
+            "/../ws",
+            "/tenant//ws",
+            "/%2e%2e/ws",
+            "/%2F/ws",
+            "/tenant\\ws",
+            "/租户/ws",
+            "/" + String(repeating: "a", count: CurrentPathSignalingWebSocketPolicyCompat.maxWebSocketPathLength)
+        ] {
+            XCTAssertNil(
+                CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+                    signalingOrigin: "https://signal.example.com:8443",
+                    signalingWebSocketPath: unsafePath
+                ),
+                "expected unsafe websocket path to fail closed: \(unsafePath)"
+            )
+        }
+    }
+
+    @MainActor
+    func testCurrentPathSignalingQueryTokenModeKeepsSessionCredentialsOutOfHeaders() throws {
+        let url = try XCTUnwrap(
+            CurrentPathSignalingWebSocketPolicyCompat.webSocketURL(
+                signalingServerOrigin: "https://signal.example.com:8443",
+                wsPath: "/tenant/ws",
+                sessionID: "session-1",
+                sessionToken: "token-1",
+                clientVersion: "1.2.3",
+                protocolVersion: "2",
+                credentialTransport: .queryToken
+            )
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let queryItems = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(url.scheme, "wss")
+        XCTAssertEqual(components.path, "/tenant/ws")
+        XCTAssertEqual(queryItems["shard"], "SESSION-1")
+        XCTAssertEqual(queryItems["st"], "token-1")
+        XCTAssertEqual(queryItems["cv"], "1.2.3")
+        XCTAssertEqual(queryItems["pv"], "2")
+
+        let headers = try XCTUnwrap(
+            CurrentPathSignalingWebSocketPolicyCompat.webSocketHeaders(
+                sessionID: "session-1",
+                sessionToken: "token-1",
+                clientVersion: "1.2.3",
+                protocolVersion: "2",
+                credentialTransport: .queryToken
+            )
+        )
+        XCTAssertEqual(headers["X-SkyBridge-Client-Version"], "1.2.3")
+        XCTAssertEqual(headers["X-SkyBridge-Protocol-Version"], "2")
+        XCTAssertNil(headers["X-SkyBridge-Session-Id"])
+        XCTAssertNil(headers["X-SkyBridge-Session"])
+    }
+
+    @MainActor
     func testCurrentPathWebSocketPathValidationDistinguishesMissingFromInvalid() {
         XCTAssertThrowsError(
             try CrossNetworkWebRTCManager.instance.validateCurrentPathWebSocketPath(nil)

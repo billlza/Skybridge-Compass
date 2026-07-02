@@ -463,9 +463,7 @@ async fn resolve_pqc_initiator_with_two_attempt_fallback(
             // downgrade decision; anything else just propagates the original error.
             let signing_identity = match two_attempt_connect::signing_identity_from_device(identity)
             {
-                Ok(signing_identity)
-                    if control.role == RuntimeSessionRole::Initiator =>
-                {
+                Ok(signing_identity) if control.role == RuntimeSessionRole::Initiator => {
                     signing_identity
                 }
                 _ => return Err(pqc_error),

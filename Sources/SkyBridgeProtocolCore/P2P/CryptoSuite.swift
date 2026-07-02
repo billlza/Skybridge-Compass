@@ -17,6 +17,8 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
     public init?(rawValue: String) {
         switch rawValue {
         case Self.xwingMLDSA.rawValue, "X-Wing+ML-DSA-65": self = .xwingMLDSA
+        // Additive (Q-Periapt ContextBound, beta): mirrors the ML-KEM-768 hybrid family.
+        case Self.qperiaptContextBound.rawValue: self = .qperiaptContextBound
         case Self.mlkem768MLDSA65.rawValue, "ML-KEM-768+ML-DSA-65": self = .mlkem768MLDSA65
         case Self.mlkem768MLDSA65FS.rawValue, "ML-KEM-768-FS+ML-DSA-65": self = .mlkem768MLDSA65FS
         case Self.x25519Ed25519.rawValue, "X25519+Ed25519": self = .x25519Ed25519
@@ -26,6 +28,11 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
     }
 
     public static let xwingMLDSA = CryptoSuite(rawValue: "X-Wing", wireId: 0x0001)
+    /// Additive (Q-Periapt ContextBound, beta): ML-KEM-768 + X25519 hybrid.
+    /// Lives in the hybrid tier (`0x00xx`), so `isPQC`/`isHybrid` resolve to true
+    /// automatically — same family semantics as the X-Wing hybrid suite.
+    /// rawValue matches `P2PCryptoAlgorithm.qperiaptContextBound.rawValue`.
+    public static let qperiaptContextBound = CryptoSuite(rawValue: "Q-Periapt-ContextBound", wireId: 0x0011)
     public static let mlkem768MLDSA65 = CryptoSuite(rawValue: "ML-KEM-768", wireId: 0x0101)
     public static let mlkem768MLDSA65FS = CryptoSuite(rawValue: "ML-KEM-768-FS", wireId: 0x0102)
     public static let x25519Ed25519 = CryptoSuite(rawValue: "X25519", wireId: 0x1001)
@@ -38,6 +45,8 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
     public init(wireId: UInt16) {
         switch wireId {
         case 0x0001: self = .xwingMLDSA
+        // Additive (Q-Periapt ContextBound, beta): mirrors the hybrid family.
+        case 0x0011: self = .qperiaptContextBound
         case 0x0101: self = .mlkem768MLDSA65
         case 0x0102: self = .mlkem768MLDSA65FS
         case 0x1001: self = .x25519Ed25519
@@ -106,6 +115,7 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
 }
 
 public enum CryptoTier: String, Sendable, Codable {
+    case qperiaptPQC = "qperiaptPQC"
     case nativePQC = "nativePQC"
     case liboqsPQC = "liboqsPQC"
     case classic = "classic"

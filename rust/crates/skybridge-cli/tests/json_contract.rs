@@ -2,6 +2,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::net::UnixListener;
+#[cfg(target_os = "macos")]
+use std::thread;
+
 use serde_json::Value;
 use skybridge_agent::{
     load_file_transfer_request_registry, observe_file_transfer_requests_for_established_session,
@@ -37,6 +46,12 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
 
     let payload: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(payload["schema_version"], 1);
+    assert_eq!(payload["ios_runtime_control_supported"], false);
+    assert_eq!(payload["mac_gui_control_protocol"], "crossnet-control/1");
+    assert_eq!(
+        payload["mac_gui_control_release_gate"],
+        "signed_mac_app_socket_smoke_required"
+    );
 
     let capabilities = payload["capabilities"]
         .as_array()
@@ -50,6 +65,8 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
         for field in [
             "id",
             "status",
+            "runtime_target",
+            "control_effect",
             "command",
             "owner_module",
             "authority_boundary",
@@ -66,6 +83,24 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     }
 
     assert_eq!(
+        capability_status(capabilities, "crossnet.preflight")?,
+        "read_only"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "crossnet.preflight")?,
+        "mac_app_runtime"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.preflight")?,
+        "read_only"
+    );
+    let preflight_command = capability_command(capabilities, "crossnet.preflight")?;
+    assert!(
+        preflight_command.contains("crossnet preflight"),
+        "crossnet preflight capability must name the Mac app readiness command"
+    );
+
+    assert_eq!(
         capability_status(capabilities, "session.disconnect")?,
         "available"
     );
@@ -73,7 +108,117 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
         capability_status(capabilities, "remote_desktop.media.doctor")?,
         "read_only"
     );
+    assert_eq!(
+        capability_status(capabilities, "crossnet.status.snapshot")?,
+        "read_only"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "crossnet.status.snapshot")?,
+        "mac_app_runtime"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.status.snapshot")?,
+        "read_only"
+    );
+    let status_snapshot_boundary =
+        capability_authority_boundary(capabilities, "crossnet.status.snapshot")?;
+    assert!(
+        status_snapshot_boundary.contains("redacted session_ref")
+            && status_snapshot_boundary.contains("does not")
+            && status_snapshot_boundary.contains("iOS runtime"),
+        "crossnet.status.snapshot must stay read-only, Mac-only, and redacted"
+    );
+    assert_eq!(
+        capability_status(capabilities, "crossnet.settings.snapshot")?,
+        "read_only"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "crossnet.settings.snapshot")?,
+        "mac_app_runtime"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.settings.snapshot")?,
+        "read_only"
+    );
+    let settings_snapshot_boundary =
+        capability_authority_boundary(capabilities, "crossnet.settings.snapshot")?;
+    assert!(
+        settings_snapshot_boundary.contains("allowlisted")
+            && settings_snapshot_boundary.contains("non-secret")
+            && settings_snapshot_boundary.contains("does not write UserDefaults")
+            && settings_snapshot_boundary.contains("iOS runtime"),
+        "crossnet.settings.snapshot must stay read-only, allowlisted, and Mac-only"
+    );
+    assert_eq!(
+        capability_status(capabilities, "crossnet.settings.set")?,
+        "planned"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "crossnet.settings.set")?,
+        "mac_app_runtime"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.settings.set")?,
+        "mac_mutation_not_enabled"
+    );
+    let settings_set_boundary =
+        capability_authority_boundary(capabilities, "crossnet.settings.set")?;
+    assert!(
+        settings_set_boundary.contains("typed allowlist")
+            && settings_set_boundary.contains("runtime observation proof")
+            && settings_set_boundary.contains("fail closed"),
+        "crossnet.settings.set must remain planned until runtime mutation is proven"
+    );
+    assert_eq!(
+        capability_status(capabilities, "crossnet.status.watch")?,
+        "planned"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "crossnet.status.watch")?,
+        "mac_app_runtime"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.status.watch")?,
+        "planned_fail_closed"
+    );
+    let status_watch_boundary =
+        capability_authority_boundary(capabilities, "crossnet.status.watch")?;
+    assert!(
+        status_watch_boundary.contains("watch_not_supported")
+            && status_watch_boundary.contains("fail-closed"),
+        "crossnet.status.watch must keep the fail-closed stream gate visible"
+    );
+
+    for planned_crossnet in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+        assert_eq!(
+            capability_status(capabilities, planned_crossnet)?,
+            "planned",
+            "{planned_crossnet} must not claim end-to-end availability before signed Mac app socket smoke exists"
+        );
+        let boundary = capability_authority_boundary(capabilities, planned_crossnet)?;
+        assert_eq!(
+            capability_runtime_target(capabilities, planned_crossnet)?,
+            "mac_app_runtime",
+            "{planned_crossnet} must remain Mac-app scoped, not iOS or native-headless scoped"
+        );
+        let effect = capability_control_effect(capabilities, planned_crossnet)?;
+        assert_eq!(effect, "mac_mutation_not_enabled");
+        assert!(
+            boundary.contains("Mac-only")
+                && boundary.contains("signed Mac app")
+                && boundary.contains("live socket smoke"),
+            "{planned_crossnet} must keep the Mac-only signed-app smoke gate visible"
+        );
+    }
     let discovery_command = capability_command(capabilities, "device.discovery.nearby")?;
+    assert_eq!(
+        capability_runtime_target(capabilities, "device.discovery.nearby")?,
+        "agent_owned_registry"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "device.discovery.nearby")?,
+        "read_only"
+    );
     assert!(
         discovery_command.contains("device discover --nearby"),
         "nearby discovery capability must name the fail-closed CLI surface"
@@ -112,6 +257,14 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
         "request_only"
     );
     assert_eq!(
+        capability_runtime_target(capabilities, "file.transfer.send")?,
+        "agent_owned_registry"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "file.transfer.send")?,
+        "request_only"
+    );
+    assert_eq!(
         capability_status(capabilities, "file.transfer.receive")?,
         "planned"
     );
@@ -137,9 +290,317 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
             capability_status(capabilities, request_only)?,
             "request_only"
         );
+        assert_eq!(
+            capability_runtime_target(capabilities, request_only)?,
+            "agent_owned_registry"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, request_only)?,
+            "request_only"
+        );
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json()
+-> Result<(), Box<dyn std::error::Error>> {
+    let secret = "session-token-secret";
+
+    let preflight_home = make_crossnet_fake_home("preflight")?;
+    let preflight_server = spawn_crossnet_fake_server(
+        &preflight_home,
+        vec![FakeCrossnetResponse {
+            method: "crossnet.hello",
+            result: serde_json::json!({
+                "engine_version": "test-app",
+                "proto": 1,
+                "auth_loaded": false,
+                "tenant_bound": true
+            }),
+        }],
+    )?;
+    let preflight = run_skybridge_with_home(&preflight_home, ["crossnet", "preflight", "--json"])?;
+    assert_success_with_clean_stderr(&preflight, "crossnet preflight --json");
+    let preflight_payload: Value = serde_json::from_slice(&preflight.stdout)?;
+    assert_eq!(preflight_payload["preconditions_ready"], false);
+    assert_eq!(preflight_payload["mutation_methods_enabled"], false);
+    assert_eq!(preflight_payload["ready_for_mutation"], false);
+    assert_eq!(preflight_payload["failure_code"], "auth_required");
+    assert_eq!(preflight_payload["failure_class"], "operator_precondition");
+    assert_eq!(
+        preflight_payload["release_gate"],
+        "signed_mac_app_socket_smoke_required"
+    );
+    let preflight_requests = join_crossnet_fake_server(preflight_server)?;
+    assert_eq!(
+        request_method(&preflight_requests[0]),
+        Some("crossnet.hello")
+    );
+    let _ = std::fs::remove_dir_all(&preflight_home);
+
+    let status_home = make_crossnet_fake_home("status")?;
+    let status_server = spawn_crossnet_fake_server(
+        &status_home,
+        vec![FakeCrossnetResponse {
+            method: "crossnet.status",
+            result: serde_json::json!({
+                "connection_status": "failed",
+                "readiness": "idle",
+                "session_present": false,
+                "session_ref": null,
+                "suite": null,
+                "signaling_health": "degraded_fatal",
+                "failure_code": "runtime_failed",
+                "failure_class": "runtime_failure",
+                "auth_loaded": true,
+                "tenant_bound": true,
+                "raw_failure_reason": secret
+            }),
+        }],
+    )?;
+    let status = run_skybridge_with_home(&status_home, ["crossnet", "status", "--json"])?;
+    assert_success_with_clean_stderr(&status, "crossnet status --json");
+    assert_public_output_excludes_secret(&status.stdout, secret);
+    let status_payload: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status_payload["connection_status"], "failed");
+    assert_eq!(status_payload["failure_code"], "runtime_failed");
+    assert_eq!(status_payload["failure_class"], "runtime_failure");
+    let status_requests = join_crossnet_fake_server(status_server)?;
+    assert_eq!(request_method(&status_requests[0]), Some("crossnet.status"));
+    let _ = std::fs::remove_dir_all(&status_home);
+
+    let connect_home = make_crossnet_fake_home("connect-json")?;
+    let connect_server = spawn_crossnet_fake_server(
+        &connect_home,
+        vec![
+            FakeCrossnetResponse {
+                method: "crossnet.hello",
+                result: serde_json::json!({
+                    "engine_version": "test-app",
+                    "proto": 1,
+                    "auth_loaded": true,
+                    "tenant_bound": true
+                }),
+            },
+            FakeCrossnetResponse {
+                method: "crossnet.connect",
+                result: serde_json::json!({
+                    "session_id": secret,
+                    "session_ref": "sha256:connectref",
+                    "remote_device_name": "Test Mac",
+                    "readiness": "handshake_complete"
+                }),
+            },
+        ],
+    )?;
+    let connect =
+        run_skybridge_with_home(&connect_home, ["crossnet", "connect", "ABCDEFGH", "--json"])?;
+    assert_success_with_clean_stderr(&connect, "crossnet connect --json");
+    assert_public_output_excludes_secret(&connect.stdout, secret);
+    let connect_payload: Value = serde_json::from_slice(&connect.stdout)?;
+    assert_eq!(connect_payload["session_ref"], "sha256:connectref");
+    assert!(
+        connect_payload.get("session_id").is_none(),
+        "connect JSON must not expose raw session_id: {connect_payload:?}"
+    );
+    let connect_requests = join_crossnet_fake_server(connect_server)?;
+    assert_eq!(request_method(&connect_requests[0]), Some("crossnet.hello"));
+    assert_eq!(
+        request_method(&connect_requests[1]),
+        Some("crossnet.connect")
+    );
+    assert_eq!(
+        connect_requests[1]
+            .get("params")
+            .and_then(|params| params.get("code"))
+            .and_then(Value::as_str),
+        Some("ABCDEFGH")
+    );
+    let _ = std::fs::remove_dir_all(&connect_home);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn crossnet_cli_text_connect_uses_session_ref_without_raw_session_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let secret = "session-token-secret";
+    let home = make_crossnet_fake_home("connect-text")?;
+    let server = spawn_crossnet_fake_server(
+        &home,
+        vec![
+            FakeCrossnetResponse {
+                method: "crossnet.hello",
+                result: serde_json::json!({
+                    "engine_version": "test-app",
+                    "proto": 1,
+                    "auth_loaded": true,
+                    "tenant_bound": true
+                }),
+            },
+            FakeCrossnetResponse {
+                method: "crossnet.connect",
+                result: serde_json::json!({
+                    "session_id": secret,
+                    "session_ref": "sha256:textref",
+                    "remote_device_name": "Test Mac",
+                    "readiness": "handshake_complete"
+                }),
+            },
+        ],
+    )?;
+
+    let output = run_skybridge_with_home(&home, ["crossnet", "connect", "ABCDEFGH"])?;
+    assert_success_with_clean_stderr(&output, "crossnet connect");
+    assert_public_output_excludes_secret(&output.stdout, secret);
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        rendered.contains("Session Ref: sha256:textref"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Session ID:"), "{rendered}");
+    let requests = join_crossnet_fake_server(server)?;
+    assert_eq!(request_method(&requests[0]), Some("crossnet.hello"));
+    assert_eq!(request_method(&requests[1]), Some("crossnet.connect"));
+    let _ = std::fs::remove_dir_all(&home);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+struct FakeCrossnetResponse {
+    method: &'static str,
+    result: Value,
+}
+
+#[cfg(target_os = "macos")]
+type CrossnetFakeServerHandle = thread::JoinHandle<Result<Vec<Value>, String>>;
+
+#[cfg(target_os = "macos")]
+fn make_crossnet_fake_home(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let short_name: String = name.chars().take(4).collect();
+    let suffix = (nanos & 0xffff_ffff) as u64;
+    let home = PathBuf::from(format!(
+        "/tmp/sbcx-{}-{suffix:08x}-{short_name}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&home)?;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
+    let socket_dir = home.join("Library/Application Support/SkyBridge");
+    std::fs::create_dir_all(&socket_dir)?;
+    std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(home)
+}
+
+#[cfg(target_os = "macos")]
+fn crossnet_socket_path(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/SkyBridge/crossnet-control.sock")
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_crossnet_fake_server(
+    home: &Path,
+    responses: Vec<FakeCrossnetResponse>,
+) -> Result<CrossnetFakeServerHandle, Box<dyn std::error::Error>> {
+    let socket_path = crossnet_socket_path(home);
+    let listener = UnixListener::bind(&socket_path)?;
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for expected in responses {
+            let (stream, _) = listener.accept().map_err(|err| err.to_string())?;
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|err| err.to_string())?;
+            let request: Value = serde_json::from_str(&line).map_err(|err| err.to_string())?;
+            let id = request
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "request missing id".to_owned())?
+                .to_owned();
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "request missing method".to_owned())?;
+            if method != expected.method {
+                return Err(format!(
+                    "unexpected crossnet method: expected {} got {method}",
+                    expected.method
+                ));
+            }
+            let response = serde_json::json!({
+                "v": 1,
+                "id": id,
+                "ok": true,
+                "result": expected.result,
+            });
+            serde_json::to_writer(reader.get_mut(), &response).map_err(|err| err.to_string())?;
+            reader
+                .get_mut()
+                .write_all(b"\n")
+                .map_err(|err| err.to_string())?;
+            reader.get_mut().flush().map_err(|err| err.to_string())?;
+            requests.push(request);
+        }
+        Ok(requests)
+    });
+    Ok(handle)
+}
+
+#[cfg(target_os = "macos")]
+fn run_skybridge_with_home<const N: usize>(
+    home: &Path,
+    args: [&str; N],
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    Ok(Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .env("HOME", home)
+        .args(args)
+        .output()?)
+}
+
+#[cfg(target_os = "macos")]
+fn assert_success_with_clean_stderr(output: &std::process::Output, command: &str) {
+    assert!(
+        output.status.success(),
+        "{command} failed with status {:?}; stdout={}; stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{command} must keep stderr clean on success: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_public_output_excludes_secret(output: &[u8], secret: &str) {
+    let rendered = String::from_utf8_lossy(output);
+    assert!(
+        !rendered.contains(secret),
+        "public crossnet output leaked secret `{secret}`: {rendered}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn request_method(request: &Value) -> Option<&str> {
+    request.get("method").and_then(Value::as_str)
+}
+
+#[cfg(target_os = "macos")]
+fn join_crossnet_fake_server(
+    handle: thread::JoinHandle<Result<Vec<Value>, String>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    match handle.join() {
+        Ok(Ok(requests)) => Ok(requests),
+        Ok(Err(message)) => Err(message.into()),
+        Err(_) => Err("crossnet fake server panicked".into()),
+    }
 }
 
 #[test]
@@ -1477,6 +1938,28 @@ fn capability_command<'a>(
         .ok_or_else(|| format!("missing capability command for {id}").into())
 }
 
+fn capability_runtime_target<'a>(
+    capabilities: &'a [Value],
+    id: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    capabilities
+        .iter()
+        .find(|capability| capability["id"] == id)
+        .and_then(|capability| capability["runtime_target"].as_str())
+        .ok_or_else(|| format!("missing capability runtime target for {id}").into())
+}
+
+fn capability_control_effect<'a>(
+    capabilities: &'a [Value],
+    id: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    capabilities
+        .iter()
+        .find(|capability| capability["id"] == id)
+        .and_then(|capability| capability["control_effect"].as_str())
+        .ok_or_else(|| format!("missing capability control effect for {id}").into())
+}
+
 fn capability_verification_gate<'a>(
     capabilities: &'a [Value],
     id: &str,
@@ -1486,6 +1969,17 @@ fn capability_verification_gate<'a>(
         .find(|capability| capability["id"] == id)
         .and_then(|capability| capability["verification_gate"].as_str())
         .ok_or_else(|| format!("missing capability verification gate for {id}").into())
+}
+
+fn capability_authority_boundary<'a>(
+    capabilities: &'a [Value],
+    id: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    capabilities
+        .iter()
+        .find(|capability| capability["id"] == id)
+        .and_then(|capability| capability["authority_boundary"].as_str())
+        .ok_or_else(|| format!("missing capability authority boundary for {id}").into())
 }
 
 fn make_state_dir(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {

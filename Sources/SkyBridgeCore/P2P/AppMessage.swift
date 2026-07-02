@@ -108,7 +108,11 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public var normalizedBootstrapPayload: PairingIdentityExchangePayload? {
             let trimmedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedDeviceId.isEmpty else { return nil }
-            let validKEMKeys = KEMPublicKeyInfo.normalizedValidKeys(kemPublicKeys)
+            let validKEMKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                kemPublicKeys,
+                platform: platform,
+                osVersion: osVersion
+            )
             guard !validKEMKeys.isEmpty else { return nil }
             return .init(
                 deviceId: trimmedDeviceId,

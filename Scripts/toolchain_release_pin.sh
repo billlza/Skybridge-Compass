@@ -32,15 +32,16 @@ skybridge_release_pin_load() {
   local line="${1:-${SKYBRIDGE_RELEASE_TOOLCHAIN_LINE:-xcode26}}"
   case "${line}" in
     xcode26)
-      # Stable shipping line. Exact-match everything (good supply-chain hygiene).
+      # Stable shipping line. Exact-match the Xcode toolchain while keeping the
+      # macOS SDK pin on the SDK actually shipped with this Xcode line.
       SKYBRIDGE_PIN_LINE="xcode26"
-      SKYBRIDGE_PIN_XCODE_VERSION="26.5"
-      SKYBRIDGE_PIN_XCODE_BUILD="17F42"
-      SKYBRIDGE_PIN_SWIFT_VERSION="6.3.2"
+      SKYBRIDGE_PIN_XCODE_VERSION="26.6"
+      SKYBRIDGE_PIN_XCODE_BUILD="17F113"
+      SKYBRIDGE_PIN_SWIFT_VERSION="6.3.3"
       SKYBRIDGE_PIN_MACOS_SDK_VERSION="26.5"
       SKYBRIDGE_PIN_DT_SDK_NAME="macosx26.5"
-      SKYBRIDGE_PIN_DT_XCODE="2650"
-      SKYBRIDGE_PIN_DT_XCODE_BUILD="17F42"
+      SKYBRIDGE_PIN_DT_XCODE="2660"
+      SKYBRIDGE_PIN_DT_XCODE_BUILD="17F113"
       SKYBRIDGE_PIN_SWIFT_TARGET="arm64-apple-macosx26.0"
       SKYBRIDGE_PIN_MATCH_MODE="exact"
       SKYBRIDGE_PIN_ALLOW_BETA="0"

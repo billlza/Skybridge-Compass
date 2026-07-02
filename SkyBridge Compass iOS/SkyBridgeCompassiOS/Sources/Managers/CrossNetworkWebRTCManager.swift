@@ -1119,6 +1119,20 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         do {
             SkyBridgeLogger.shared.info("🌐 QR connect phase=start")
+            // 与 macOS 扫描器对齐：先尝试服务端背书邀请(version>=8，无 PQC 公钥)，失败/版本不符再回退到经典 QR 解码。
+            if let invite = decodeServerBackedConnectLinkIfPresent(normalized) {
+                SkyBridgeLogger.shared.info("🌐 QR connect phase=server_backed_invite session=\(invite.sessionID) device=\(invite.deviceID)")
+                try await redeemServerBackedQRCodeInvite(invite)
+                try await connect(
+                    sessionId: invite.sessionID,
+                    remoteName: invite.deviceName,
+                    remotePeerDeviceId: invite.deviceID,
+                    source: .qr,
+                    role: .answerer
+                )
+                SkyBridgeLogger.shared.info("🌐 QR connect phase=connect_dispatched session=\(invite.sessionID)")
+                return
+            }
             let payload = try await parseSkybridgeConnectLink(normalized)
             SkyBridgeLogger.shared.info("🌐 QR connect phase=payload_parsed session=\(payload.sessionID) device=\(payload.deviceID)")
             try await connect(from: payload)
@@ -2002,25 +2016,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private func normalizedNativeVideoVisibleFrameSize(
         forCodedSize codedSize: CGSize
     ) -> (visibleSize: CGSize, usedEvenPadding: Bool) {
-        guard let expectedVisibleSize = expectedNativeVideoVisibleFrameSize() else {
-            return (codedSize, false)
-        }
-        let expectedWidth = Int(expectedVisibleSize.width)
-        let expectedHeight = Int(expectedVisibleSize.height)
-        guard expectedWidth > 0, expectedHeight > 0 else {
-            return (codedSize, false)
-        }
-        let codedWidth = Int(codedSize.width)
-        let codedHeight = Int(codedSize.height)
-        let expectedCodedWidth = CrossNetworkWebRTCNativeVideoPolicy.evenNativeVideoBackingDimension(expectedWidth)
-        let expectedCodedHeight = CrossNetworkWebRTCNativeVideoPolicy.evenNativeVideoBackingDimension(expectedHeight)
-        if codedWidth == expectedCodedWidth, codedHeight == expectedCodedHeight {
-            return (expectedVisibleSize, expectedCodedWidth != expectedWidth || expectedCodedHeight != expectedHeight)
-        }
-        if codedWidth == expectedWidth, codedHeight == expectedHeight {
-            return (expectedVisibleSize, false)
-        }
-        return (codedSize, false)
+        let normalization = CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+            forCodedSize: codedSize,
+            expectedVisibleSize: expectedNativeVideoVisibleFrameSize()
+        )
+        return (normalization.visibleSize, normalization.usedEvenPadding)
     }
 
     @MainActor
@@ -2245,56 +2245,30 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
 
     private func signalingURL(shardKey: String? = nil) throws -> URL {
-        guard let baseWebSocketURLString = Self.resolvedSignalingWebSocketURLString(
-            signalingOrigin: shardKey.flatMap { currentPathSignalingOriginBySessionId[$0] },
-            signalingWebSocketPath: shardKey.flatMap { currentPathSignalingWebSocketPathBySessionId[$0] }
+        guard let shardKey = shardKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !shardKey.isEmpty else {
+            throw SignalingRetryControllerError.invalidWebSocketURL(
+                "missing current-path signaling endpoint"
+            )
+        }
+        guard let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            throw SignalingRetryControllerError.invalidWebSocketURL("missing current-path signaling token")
+        }
+        guard let wsURL = CurrentPathSignalingWebSocketPolicyCompat.webSocketURL(
+            signalingServerOrigin: currentPathSignalingOriginBySessionId[shardKey],
+            wsPath: currentPathSignalingWebSocketPathBySessionId[shardKey],
+            sessionID: shardKey,
+            sessionToken: token,
+            clientVersion: resolvedCurrentPathClientVersion(),
+            protocolVersion: resolvedCurrentPathProtocolVersion(),
+            credentialTransport: .headers
         ) else {
             throw SignalingRetryControllerError.invalidWebSocketURL(
                 "missing current-path signaling endpoint"
             )
         }
-        guard let wsURL = SignalingRetryController.validatedWebSocketURL(
-            baseWebSocketURLString
-        ) else {
-            throw SignalingRetryControllerError.invalidWebSocketURL(
-                baseWebSocketURLString
-            )
-        }
-        guard let shardKey = shardKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !shardKey.isEmpty else {
-            return wsURL
-        }
-        guard var components = URLComponents(url: wsURL, resolvingAgainstBaseURL: false) else {
-            return wsURL
-        }
-        var queryItems = components.queryItems ?? []
-        queryItems.removeAll { $0.name == "shard" }
-        queryItems.removeAll { $0.name == "st" }
-        queryItems.removeAll { $0.name == "cv" }
-        queryItems.removeAll { $0.name == "pv" }
-        queryItems.append(URLQueryItem(name: "shard", value: shardKey))
- // 会话令牌走 URL query(st)而非自定义头:像 Cloudflare 这类代理会在 WebSocket 升级时剥掉
- // 自定义请求头(X-SkyBridge-*),导致源站收不到令牌(missing_session_token);query 参数能穿过。
- // 服务端 allowLegacyQueryToken 已开启,这是官方为剥头代理保留的通道。令牌走 wss TLS、短时效、绑定即消耗。
-        if let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty {
-            queryItems.append(URLQueryItem(name: "st", value: token))
-        }
-        if let envVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !envVersion.isEmpty {
-            queryItems.append(URLQueryItem(name: "cv", value: envVersion))
-        } else if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-            let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                queryItems.append(URLQueryItem(name: "cv", value: trimmed))
-            }
-        }
-        let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
-        queryItems.append(URLQueryItem(name: "pv", value: protocolVersion.isEmpty ? "1" : protocolVersion))
-        components.queryItems = queryItems
-        return components.url ?? wsURL
+        return wsURL
     }
 
     private func signalingHeaders(shardKey: String) throws -> [String: String] {
@@ -2302,30 +2276,37 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
               !token.isEmpty else {
             throw SignalingRetryControllerError.invalidWebSocketURL("missing current-path signaling token")
         }
-        let clientVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedClientVersion: String
-        if let clientVersion, !clientVersion.isEmpty {
-            resolvedClientVersion = clientVersion
-        } else {
-            resolvedClientVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-        }
-        let rawProtocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
-        let protocolVersion = rawProtocolVersion.isEmpty ? "1" : rawProtocolVersion
-        guard var headers = Self.currentPathSignalingWebSocketHeaders(
+        guard let headers = CurrentPathSignalingWebSocketPolicyCompat.webSocketHeaders(
             sessionID: shardKey,
             sessionToken: token,
-            clientVersion: resolvedClientVersion,
-            protocolVersion: protocolVersion
+            clientVersion: resolvedCurrentPathClientVersion(),
+            protocolVersion: resolvedCurrentPathProtocolVersion(),
+            credentialTransport: .headers
         ) else {
             throw SignalingRetryControllerError.invalidWebSocketURL("invalid current-path signaling headers")
         }
- // 令牌改走 query(st)后,必须从请求头里移除会话凭据:服务端若同时看到"会话头 + query 令牌"
- // 会判为 conflicting_session_credentials。移除后只剩版本头(会被代理剥掉也无妨,版本同样在 query 的 cv/pv)。
-        headers.removeValue(forKey: "X-SkyBridge-Session-Id")
-        headers.removeValue(forKey: "X-SkyBridge-Session")
         return headers
+    }
+
+    private func resolvedCurrentPathClientVersion() -> String {
+        if let envVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envVersion.isEmpty {
+            return envVersion
+        }
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return "0.0.0"
+    }
+
+    private func resolvedCurrentPathProtocolVersion() -> String {
+        let rawProtocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
+        return rawProtocolVersion.isEmpty ? "1" : rawProtocolVersion
     }
 
     nonisolated static func currentPathSignalingWebSocketHeaders(
@@ -2334,29 +2315,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         clientVersion: String,
         protocolVersion: String
     ) -> [String: String]? {
-        let sessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let sessionToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clientVersion = clientVersion.trimmingCharacters(in: .whitespacesAndNewlines)
-        let protocolVersion = protocolVersion.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidWebSocketCredentialValue(sessionID, maxLength: 512),
-              isValidWebSocketCredentialValue(sessionToken, maxLength: 4096),
-              isValidWebSocketCredentialValue(clientVersion, maxLength: 64),
-              isValidWebSocketCredentialValue(protocolVersion, maxLength: 64) else {
-            return nil
-        }
-        return [
-            "X-SkyBridge-Session-Id": sessionID,
-            "X-SkyBridge-Session": sessionToken,
-            "X-SkyBridge-Client-Version": clientVersion,
-            "X-SkyBridge-Protocol-Version": protocolVersion
-        ]
-    }
-
-    nonisolated private static func isValidWebSocketCredentialValue(_ value: String, maxLength: Int) -> Bool {
-        guard !value.isEmpty, value.count <= maxLength else { return false }
-        return !value.unicodeScalars.contains { scalar in
-            scalar.value < 0x20 || scalar.value == 0x7F
-        }
+        CurrentPathSignalingWebSocketPolicyCompat.webSocketHeaders(
+            sessionID: sessionID,
+            sessionToken: sessionToken,
+            clientVersion: clientVersion,
+            protocolVersion: protocolVersion,
+            credentialTransport: .headers
+        )
     }
 
     private func ensureSignalingConnected(shardKey: String? = nil) async throws {
@@ -2652,13 +2617,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
 
     private func handleServerFrame(_ frame: WebSocketSignalingClient.SignalingServerFrame) {
+        let sessionLabel = Self.publicSignalingSessionLabel(frame.sessionId)
+        guard frame.isError else {
+            appendSmokeTrace(
+                "server-frame type=\(frame.type) session=\(sessionLabel) error_present=0 what_present=\(frame.what == nil ? 0 : 1)"
+            )
+            return
+        }
+
+        let rawReason = frame.error ?? "unknown_signaling_error"
+        let traceFailureClass = Self.classifySignalingFailureReason(rawReason)
+        let traceFailureCode = Self.publicSignalingFailureCode(traceFailureClass)
+        let tracePublicFailureClass = Self.publicSignalingFailureClass(traceFailureClass)
         appendSmokeTrace(
-            "server-frame type=\(frame.type) session=\(frame.sessionId ?? "-") error=\(frame.error ?? "-") what=\(frame.what ?? "-")"
+            "server-frame type=\(frame.type) session=\(sessionLabel) failure_code=\(traceFailureCode) failure_class=\(tracePublicFailureClass) what_present=\(frame.what == nil ? 0 : 1)"
         )
-        guard frame.isError else { return }
         let sessionId = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let reason = frame.error ?? "unknown_signaling_error"
-        let failureClass = Self.classifySignalingFailureReason(reason)
+        let reason = rawReason
+        let failureClass = traceFailureClass
+        let failureCode = traceFailureCode
+        let publicFailureClass = tracePublicFailureClass
 
         if sessionId == nil,
            reason == "server_error",
@@ -2668,8 +2646,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
 
         guard let sessionId else {
-            SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=- error=\(reason)")
-            lastError = "Signaling error: \(reason)"
+            SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=- failure_code=\(failureCode) failure_class=\(publicFailureClass)")
+            lastError = "Signaling error: \(failureCode)"
             state = .failed(lastError ?? "Signaling error")
             readiness = .idle
             return
@@ -2685,16 +2663,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             noteDetachedSignalingAfterTransportEstablished(
                 sessionId: sessionId,
                 source: "server_frame",
-                failure: reason,
+                failure: failureCode,
                 fatal: Self.isFatalPostTransportFailure(failureClass)
             )
             return
         }
 
-        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=\(sessionId) error=\(reason)")
+        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=present failure_code=\(failureCode) failure_class=\(publicFailureClass)")
         if Self.isFatalPreTransportFailure(failureClass) {
             applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
-            lastError = "Signaling error: \(reason)"
+            lastError = "Signaling error: \(failureCode)"
             state = .failed(lastError ?? "Signaling error")
             readiness = .idle
             return
@@ -2702,7 +2680,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         signalingHealth = .degradedRecoverable
         scheduleSignalingRecovery(for: sessionId, tokenExpired: failureClass == .tokenExpired)
-        lastError = "Signaling error: \(reason)"
+        lastError = "Signaling error: \(failureCode)"
     }
 
     private var isTransportEstablished: Bool {
@@ -2812,6 +2790,48 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         joinHeartbeatTask = nil
     }
 
+    /// Builds the strict-PQC `.join` bootstrap payload carrying this device's protocol identity
+    /// + KEM public keys, wire-identical to what the macOS offerer ingests in
+    /// `ingestWebRTCJoinBootstrapPayload`. Without this the Mac offerer waits for the joiner's
+    /// KEM, never receives it (payload was nil), and the PQC handshake fails (`handshake_failed`).
+    ///
+    /// Returns `nil` (best-effort, non-fatal) if identity/KEM material is unavailable — the macOS
+    /// side already tolerates a nil join payload, so we never regress the legacy best-effort join.
+    /// The self-asserted fingerprint is recomputed and validated on the macOS side, and the bound
+    /// KEM remains authenticated end-to-end by the strict-PQC MessageB transcript signature against
+    /// the pinned fingerprint, so populating these fields adds no trust.
+    private func makeWebRTCJoinBootstrapPayload() async -> WebRTCSignalingEnvelope.Payload? {
+        do {
+            let localBinding = try await currentPathLocalBinding()
+            let kemPublicKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            )
+            guard !kemPublicKeys.isEmpty else {
+                SkyBridgeLogger.shared.error("❌ WebRTC join bootstrap: no valid PQC KEM public keys")
+                return nil
+            }
+            return WebRTCSignalingEnvelope.Payload(
+                protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: localBinding.protocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
+                kemPublicKeys: kemPublicKeys.map {
+                    WebRTCSignalingEnvelope.Payload.BootstrapKEMPublicKey(
+                        suiteWireId: $0.suiteWireId,
+                        publicKey: $0.publicKey
+                    )
+                },
+                platform: "iOS",
+                osVersion: {
+                    let version = ProcessInfo.processInfo.operatingSystemVersion
+                    return "iOS \(version.majorVersion).\(version.minorVersion)"
+                }()
+            )
+        } catch {
+            SkyBridgeLogger.shared.error("❌ WebRTC join bootstrap material unavailable: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     private func startJoinHeartbeat(
         sessionId: String,
         localId: String,
@@ -2830,8 +2850,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 if self.isTransportEstablished(for: sessionId) {
                     break
                 }
+                // Re-deliver the strict-PQC identity + KEM bootstrap on every heartbeat so a dropped
+                // first join still hands the Mac offerer the KEM it needs to build HandshakeMessageA.
+                let heartbeatJoinPayload = await self.makeWebRTCJoinBootstrapPayload()
                 await self.sendEnvelope(
-                    WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil),
+                    WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: heartbeatJoinPayload),
                     retries: 2
                 )
                 remaining -= 1
@@ -3190,6 +3213,76 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         )
         SkyBridgeLogger.shared.debug("ℹ️ iOS QR 仅完成内容完整性校验；设备来源认证仍依赖后续握手/pinning")
         return qr
+    }
+
+    /// 尝试把 `skybridge://connect/...` 解码为服务端背书邀请(version>=8)。
+    /// 非该形态(经典 QR / 短码 / 版本<8 / 解码失败)时返回 nil，调用方回退到既有路径。
+    private func decodeServerBackedConnectLinkIfPresent(_ string: String) -> ServerBackedDynamicQRCodeInvite? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = Self.extractConnectPayloadString(from: trimmed),
+              let jsonData = Self.decodeConnectPayload(payload),
+              let invite = try? Self.decodeServerBackedQRCodeInvite(from: jsonData),
+              invite.version >= 8 else {
+            return nil
+        }
+        return invite
+    }
+
+    /// 兑换服务端背书邀请，复用 `connect(withCode:)` 同款 redeem/admission plumbing。
+    /// 邀请不携带 PQC 公钥材料；来源认证仍依赖后续握手/pinning。镜像 macOS `scanServerBackedQRCodeInvite`。
+    private func redeemServerBackedQRCodeInvite(_ invite: ServerBackedDynamicQRCodeInvite) async throws {
+        guard invite.expiresAt > Date() else { throw ConnectLinkError.expired }
+        let canonicalOrigin = try validateCurrentPathOrigin(invite.signalingServerOrigin)
+        SkyBridgeLogger.shared.info("🌐 QR parse phase=server_backed_decoded session=\(invite.sessionID) device=\(invite.deviceID)")
+
+        let rebindSource: CurrentPathRebindSource =
+            hasRecentVerifiedQRCodeAuthority(
+                deviceId: invite.deviceID,
+                protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint
+            )
+            ? .verifiedQRCode
+            : .verifiedConnectionCode
+        try enforceCurrentPathTrustBinding(
+            deviceId: invite.deviceID,
+            protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint,
+            rebindSource: rebindSource
+        )
+
+        let localBinding = try await currentPathLocalBinding()
+        SkyBridgeLogger.shared.info("🌐 QR parse phase=local_binding_ready device=\(localBinding.deviceId)")
+        let admission = try await requestAdmissionLease(for: localBinding)
+        SkyBridgeLogger.shared.info("🌐 QR parse phase=admission_ready")
+        let redeemed = try await signalServer.redeemSession(
+            admissionToken: admission.token,
+            sessionId: invite.sessionID,
+            qrBootstrapToken: invite.qrBootstrapToken,
+            idempotencyKey: "qr-redeem-\(invite.sessionID)-\(localBinding.deviceId)"
+        )
+        SkyBridgeLogger.shared.info("🌐 QR parse phase=redeem_ready session=\(redeemed.sessionID) initiator=\(redeemed.initiatorDeviceId)")
+        guard redeemed.initiatorDeviceId == invite.deviceID,
+              redeemed.initiatorProtocolSigningAlgorithm == invite.protocolSigningAlgorithm,
+              redeemed.initiatorProtocolPublicKeyFingerprint == invite.protocolPublicKeyFingerprint else {
+            throw ConnectLinkError.invalidSignature
+        }
+        let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+            origin: redeemed.signalingServerOrigin,
+            wsPath: redeemed.wsPath
+        )
+        _ = canonicalOrigin
+        webrtcSignalingAuthTokenBySessionId[invite.sessionID] = redeemed.sessionToken
+        webrtcTurnAdmissionTokenBySessionId[invite.sessionID] = redeemed.turnAdmissionToken
+        if let mediaAdmissionToken = redeemed.mediaAdmissionToken {
+            webrtcMediaAdmissionTokenBySessionId[invite.sessionID] = mediaAdmissionToken
+        }
+        setCurrentPathSignalingEndpoint(sessionId: invite.sessionID, endpoint: signalingEndpoint)
+        currentPathExpectedRemoteAuthorityBySessionId[invite.sessionID] = CurrentPathRemoteAuthorityCompat(
+            deviceId: invite.deviceID,
+            protocolSigningAlgorithm: invite.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: nil,
+            deviceName: invite.deviceName
+        )
+        SkyBridgeLogger.shared.debug("ℹ️ iOS 服务端背书 QR 仅完成 redeem；设备来源认证仍依赖后续握手/pinning")
     }
 
     nonisolated private static func normalizedNonEmptyToken(_ raw: String?) -> String? {
@@ -3578,9 +3671,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             )
         }
 
-        // 3) Join room + heartbeat to mask websocket timing jitters.
-        await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil), retries: 2)
-        SkyBridgeLogger.shared.info("🌐 cross-network phase=join_sent session=\(sessionId)")
+        // 3) Join room + heartbeat to mask websocket timing jitters. Carry this device's protocol
+        // identity + strict-PQC KEM public keys so the Mac offerer can ingest the bootstrap and build
+        // HandshakeMessageA (previously sent with payload: nil → offerer never got the KEM → handshake_failed).
+        let joinPayload = await makeWebRTCJoinBootstrapPayload()
+        await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: joinPayload), retries: 2)
+        SkyBridgeLogger.shared.info("🌐 cross-network phase=join_sent session=\(sessionId) bootstrap=\(joinPayload?.kemPublicKeys?.count ?? 0)")
         startJoinHeartbeat(sessionId: sessionId, localId: localId, signaling: signaling)
         if role == .offerer {
             startOfferResendLoop(sessionId: sessionId, localId: localId, signaling: signaling)

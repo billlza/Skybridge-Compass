@@ -2604,7 +2604,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 // because `peerKEMPublicKeys[suite] == nil`.
                                 await PeerKEMBootstrapStore.shared.upsert(
                                     deviceIds: [payload.deviceId, peer.deviceId],
-                                    kemPublicKeys: payload.kemPublicKeys
+                                    kemPublicKeys: payload.kemPublicKeys,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion
                                 )
                                 do {
                                     // Keep bootstrap metadata/KEM keys, but never wipe previously authenticated

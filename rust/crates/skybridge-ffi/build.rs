@@ -39,9 +39,7 @@ fn main() {
         Err(cbindgen::Error::ParseSyntaxError { .. }) => {
             // A transient/partial parse (e.g. during an incremental edit) must
             // not fail the build; the header already on disk stays valid.
-            println!(
-                "cargo:warning=cbindgen parse error; keeping existing skybridge_ffi.h"
-            );
+            println!("cargo:warning=cbindgen parse error; keeping existing skybridge_ffi.h");
         }
         Err(err) => {
             // Any other cbindgen failure is a hard error: a stale header is worse

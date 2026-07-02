@@ -692,17 +692,19 @@ run_reported_gate() {
 }
 
 run_source_contract_guardrail_scripts() {
-  bash Scripts/test_apple_pqc_sdk_probe_api.sh
-  bash Scripts/test_run_os27_beta_compatibility_diagnose.sh
-  bash Scripts/test_check_os27_compatibility_report.sh
-  bash Scripts/test_rust_cli_remote_desktop_contract_gate.sh
-  bash Scripts/test_lane_ios_device_privacy.sh
-  bash Scripts/test_check_macos_deps.sh
-  bash Scripts/test_check_ios_test_configuration.sh
-  bash Scripts/test_verify_xcode_toolchain.sh
-  bash Scripts/test_package_build_policy.sh
-  bash Scripts/test_validate_macos_release_artifact_run.sh
-  bash Scripts/check_ios_test_configuration.sh --static-only
+  bash Scripts/test_apple_pqc_sdk_probe_api.sh || return 1
+  bash Scripts/test_run_os27_beta_compatibility_diagnose.sh || return 1
+  bash Scripts/test_check_os27_compatibility_report.sh || return 1
+  bash Scripts/test_rust_cli_remote_desktop_contract_gate.sh || return 1
+  bash Scripts/test_lane_ios_device_privacy.sh || return 1
+  bash Scripts/test_check_macos_deps.sh || return 1
+  bash Scripts/test_build_freerdp_dylibs_policy.sh || return 1
+  bash Scripts/test_vendor_artifact_policy.sh || return 1
+  bash Scripts/test_check_ios_test_configuration.sh || return 1
+  bash Scripts/test_verify_xcode_toolchain.sh || return 1
+  bash Scripts/test_package_build_policy.sh || return 1
+  bash Scripts/test_validate_macos_release_artifact_run.sh || return 1
+  bash Scripts/check_ios_test_configuration.sh --static-only || return 1
 }
 
 # shellcheck source=Scripts/package_build_policy.sh

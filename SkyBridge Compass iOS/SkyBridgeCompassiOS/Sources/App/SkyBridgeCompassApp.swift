@@ -442,6 +442,9 @@ struct SkyBridgeCompassApp: App {
             }
             // 回到前台：重启在线心跳定时器（后台空闲时会被停掉以省电）。start() 幂等。
             ICloudDevicePresenceService.shared.start()
+            if !shouldSkipInteractiveStartup {
+                ICloudDevicePresenceService.shared.refreshNow()
+            }
             applyClipboardSettings()
 
         case .background:

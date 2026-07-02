@@ -2,6 +2,69 @@ import Foundation
 import AppKit
 import os.log
 
+private actor AvatarDiskCacheStore {
+    private let fileManager = FileManager.default
+    private let cacheDirectory: URL
+
+    init() {
+        let urls = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+        self.cacheDirectory = urls[0].appendingPathComponent("SkyBridge/Avatars", isDirectory: true)
+    }
+
+    func loadData(for userId: String) throws -> Data? {
+        let url = try cacheFileURL(for: userId)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    func writeData(_ data: Data, for userId: String) throws {
+        let url = try cacheFileURL(for: userId)
+        try ensureCacheDirectory()
+        try data.write(to: url)
+    }
+
+    func remove(for userId: String) throws {
+        let url = try cacheFileURL(for: userId)
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        try fileManager.removeItem(at: url)
+    }
+
+    func removeAll() throws {
+        try ensureCacheDirectory()
+        let cacheFiles = try fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)
+        for file in cacheFiles {
+            try fileManager.removeItem(at: file)
+        }
+    }
+
+    func cacheSize() throws -> Int {
+        try ensureCacheDirectory()
+        let cacheFiles = try fileManager.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        )
+        return try cacheFiles.reduce(into: 0) { totalSize, file in
+            let resourceValues = try file.resourceValues(forKeys: [.fileSizeKey])
+            totalSize += resourceValues.fileSize ?? 0
+        }
+    }
+
+    private func cacheFileURL(for userId: String) throws -> URL {
+        let trimmed = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("/"),
+              !trimmed.contains(":"),
+              !trimmed.contains("\0") else {
+            throw AvatarCacheError.invalidUserIdentifier
+        }
+        return cacheDirectory.appendingPathComponent("\(trimmed).jpg", isDirectory: false)
+    }
+
+    private func ensureCacheDirectory() throws {
+        try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+    }
+}
+
 /// 头像缓存管理器 - 负责头像的本地缓存和云端同步
 /// 采用Apple推荐的缓存策略，支持内存和磁盘双重缓存
 @MainActor
@@ -18,8 +81,8 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
  // MARK: - 私有属性
     
     private let logger = Logger(subsystem: "SkyBridgeCore", category: "AvatarCacheManager")
-    private let fileManager = FileManager.default
     private let urlSession = URLSession.shared
+    private let diskCacheStore = AvatarDiskCacheStore()
     
  // 内存缓存
     private var memoryCache: NSCache<NSString, NSImage> = {
@@ -27,17 +90,6 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
         cache.countLimit = 50 // 最多缓存50个头像
         cache.totalCostLimit = 50 * 1024 * 1024 // 50MB内存限制
         return cache
-    }()
-    
- // 缓存目录
-    private lazy var cacheDirectory: URL = {
-        let urls = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
-        let cacheDir = urls[0].appendingPathComponent("SkyBridge/Avatars")
-        
- // 确保缓存目录存在
-        try? fileManager.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        
-        return cacheDir
     }()
     
  // MARK: - 初始化
@@ -88,7 +140,7 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
     
  /// 获取头像图片
  /// - Parameter userId: 用户ID
- /// - Returns: 头像图片，如果不存在则返回nil
+ /// - Returns: 内存缓存中的头像图片，如果不存在则返回 nil。磁盘读取请使用 loadCachedAvatar(for:)。
     public func getAvatar(for userId: String) -> NSImage? {
         let cacheKey = NSString(string: userId)
         
@@ -97,20 +149,25 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
             logger.debug("从内存缓存获取头像: \(userId)")
             return cachedImage
         }
-        
- // 检查磁盘缓存
-        let diskCacheURL = cacheDirectory.appendingPathComponent("\(userId).jpg")
-        if fileManager.fileExists(atPath: diskCacheURL.path),
-           let imageData = try? Data(contentsOf: diskCacheURL),
-           let image = NSImage(data: imageData) {
-            
- // 将图片加载到内存缓存
-            memoryCache.setObject(image, forKey: cacheKey, cost: imageData.count)
-            logger.debug("从磁盘缓存获取头像: \(userId)")
-            return image
-        }
-        
+
         return nil
+    }
+
+    public func loadCachedAvatar(for userId: String) async throws -> NSImage? {
+        if let cachedImage = getAvatar(for: userId) {
+            return cachedImage
+        }
+
+        guard let imageData = try await diskCacheStore.loadData(for: userId) else {
+            return nil
+        }
+        guard let image = NSImage(data: imageData) else {
+            throw AvatarCacheError.invalidImageData
+        }
+
+        memoryCache.setObject(image, forKey: NSString(string: userId), cost: imageData.count)
+        logger.debug("从磁盘缓存获取头像: \(userId)")
+        return image
     }
     
  /// 缓存头像图片
@@ -181,10 +238,14 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
         memoryCache.removeObject(forKey: cacheKey)
         
  // 从磁盘缓存移除
-        let diskCacheURL = cacheDirectory.appendingPathComponent("\(userId).jpg")
-        try? fileManager.removeItem(at: diskCacheURL)
-        
-        logger.debug("清除头像缓存: \(userId)")
+        Task {
+            do {
+                try await diskCacheStore.remove(for: userId)
+                logger.debug("清除头像缓存: \(userId)")
+            } catch {
+                logger.error("清除头像缓存失败: \(userId), 错误: \(error.localizedDescription)")
+            }
+        }
     }
     
  /// 清除所有头像缓存
@@ -193,35 +254,20 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
         memoryCache.removeAllObjects()
         
  // 清除磁盘缓存
-        do {
-            let cacheFiles = try fileManager.contentsOfDirectory(at: cacheDirectory, 
-                                                               includingPropertiesForKeys: nil)
-            for file in cacheFiles {
-                try fileManager.removeItem(at: file)
+        Task {
+            do {
+                try await diskCacheStore.removeAll()
+                logger.info("清除所有头像缓存成功")
+            } catch {
+                logger.error("清除磁盘缓存失败: \(error.localizedDescription)")
             }
-            logger.info("清除所有头像缓存成功")
-        } catch {
-            logger.error("清除磁盘缓存失败: \(error.localizedDescription)")
         }
     }
     
  /// 获取缓存大小信息
  /// - Returns: 缓存大小（字节）
-    public func getCacheSize() -> Int {
-        var totalSize = 0
-        
-        do {
-            let cacheFiles = try fileManager.contentsOfDirectory(at: cacheDirectory, 
-                                                               includingPropertiesForKeys: [.fileSizeKey])
-            for file in cacheFiles {
-                let resourceValues = try file.resourceValues(forKeys: [.fileSizeKey])
-                totalSize += resourceValues.fileSize ?? 0
-            }
-        } catch {
-            logger.error("计算缓存大小失败: \(error.localizedDescription)")
-        }
-        
-        return totalSize
+    public func getCacheSize() async throws -> Int {
+        try await diskCacheStore.cacheSize()
     }
     
  // MARK: - 私有方法
@@ -232,7 +278,6 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
         memoryCache.name = "AvatarMemoryCache"
         
         logger.debug("头像缓存管理器初始化完成")
-        logger.debug("缓存目录: \(self.cacheDirectory.path)")
     }
     
  /// 设置内存警告观察者
@@ -260,10 +305,8 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
  /// - data: 图片数据
  /// - userId: 用户ID
     private func saveToDiskCache(_ data: Data, for userId: String) async {
-        let diskCacheURL = cacheDirectory.appendingPathComponent("\(userId).jpg")
-        
         do {
-            try data.write(to: diskCacheURL)
+            try await diskCacheStore.writeData(data, for: userId)
             logger.debug("头像保存到磁盘缓存: \(userId)")
         } catch {
             logger.error("头像磁盘缓存保存失败: \(userId), 错误: \(error.localizedDescription)")
@@ -273,11 +316,12 @@ public final class AvatarCacheManager: ObservableObject, Sendable {
 
 // MARK: - 错误定义
 
-public enum AvatarCacheError: LocalizedError {
+public enum AvatarCacheError: LocalizedError, Sendable {
     case invalidURL
     case downloadFailed
     case invalidImageData
     case cacheWriteFailed
+    case invalidUserIdentifier
     
     public var errorDescription: String? {
         switch self {
@@ -289,6 +333,8 @@ public enum AvatarCacheError: LocalizedError {
             return "无效的图片数据"
         case .cacheWriteFailed:
             return "缓存写入失败"
+        case .invalidUserIdentifier:
+            return "无效的用户ID"
         }
     }
 }

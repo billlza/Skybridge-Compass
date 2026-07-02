@@ -4,6 +4,34 @@ import Security
 import SkyBridgeCore
 import SkyBridgeSmokeSupport
 
+private func sanitizeLocalWebRTCSmokeStatusLine(_ value: String) -> String {
+    let lineSafe = value
+        .replacingOccurrences(of: "\n", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+    return localWebRTCSmokeStatusRedactionPatterns.reduce(lineSafe) { current, rule in
+        rule.regex.stringByReplacingMatches(
+            in: current,
+            range: NSRange(current.startIndex..<current.endIndex, in: current),
+            withTemplate: rule.replacement
+        )
+    }
+}
+
+private let localWebRTCSmokeStatusRedactionPatterns: [(regex: NSRegularExpression, replacement: String)] = [
+    (
+        try! NSRegularExpression(pattern: #"(session|sessionId|code|deviceId|peerId|fingerprint|from|to)=("[^"\s]+"|[^"\s]+)"#),
+        "$1=<redacted>"
+    ),
+    (
+        try! NSRegularExpression(pattern: #"(sessionId|code): "[^"]+""#),
+        "$1: \"<redacted>\""
+    ),
+    (
+        try! NSRegularExpression(pattern: #"\bcode [A-Za-z0-9_-]{6,}\b"#),
+        "code <redacted>"
+    )
+]
+
 @available(macOS 14.0, *)
 @MainActor
 @main
@@ -887,7 +915,7 @@ private struct SmokeStatusReporter {
 
     func append(_ line: String) {
         guard let statusURL else { return }
-        let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(sanitizeLocalWebRTCSmokeStatusLine(line))\n"
         if let data = sanitizedLine.data(using: .utf8) {
             try? SmokeStatusFileAppender.append(
                 data,

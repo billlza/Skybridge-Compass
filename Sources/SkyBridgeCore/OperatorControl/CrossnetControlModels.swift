@@ -1,0 +1,606 @@
+import Foundation
+import CryptoKit
+
+public enum CrossnetControlWire {
+    public static let protocolVersion = 1
+    public static let maxLineByteCount = 64 * 1024
+    public static let maxRequestIDLength = 128
+    public static let maxMethodLength = 64
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    public static func decodeRequest(line: Data) throws -> CrossnetControlRequest {
+        guard line.count <= maxLineByteCount else {
+            throw CrossnetControlFailure.requestTooLarge
+        }
+        let decoded = try JSONDecoder().decode(CrossnetControlRequestEnvelope.self, from: line)
+        guard decoded.v == protocolVersion else {
+            throw CrossnetControlFailure.protocolVersionMismatch
+        }
+        guard Self.isValidRequestID(decoded.id) else {
+            throw CrossnetControlFailure.malformedRequest("invalid request id")
+        }
+        guard Self.isValidMethod(decoded.method) else {
+            throw CrossnetControlFailure.malformedRequest("invalid method")
+        }
+        return CrossnetControlRequest(
+            id: decoded.id,
+            method: decoded.method,
+            params: decoded.params ?? CrossnetControlParams()
+        )
+    }
+
+    public static func successData<Result: Encodable>(
+        id: String,
+        result: Result
+    ) throws -> Data {
+        try encoder.encode(CrossnetControlSuccessEnvelope(
+            v: protocolVersion,
+            id: id,
+            result: result
+        ))
+    }
+
+    public static func failureData(
+        id: String?,
+        failure: CrossnetControlFailure
+    ) -> Data {
+        let envelope = CrossnetControlFailureEnvelope(
+            v: protocolVersion,
+            id: id,
+            error: CrossnetControlErrorBody(
+                code: failure.code,
+                message: failure.message
+            )
+        )
+        if let data = try? encoder.encode(envelope) {
+            return data
+        }
+        return Data(#"{"v":1,"ok":false,"error":{"code":"internal","message":"failed to encode control error"}}"#.utf8)
+    }
+
+    public static func strictConnectionCode(_ raw: String?) throws -> String {
+        guard let raw else {
+            throw CrossnetControlFailure.invalidCode
+        }
+        guard raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              CrossnetControlConnectionCode.isSupportedLength(raw.count),
+              raw.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && CrossnetControlConnectionCode.allowedScalars.contains(scalar)
+              }) else {
+            throw CrossnetControlFailure.invalidCode
+        }
+        return raw
+    }
+
+    private static func isValidRequestID(_ id: String) -> Bool {
+        !id.isEmpty
+            && id.count <= maxRequestIDLength
+            && id.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII
+                    && scalar.value >= 0x21
+                    && scalar.value <= 0x7E
+            }
+    }
+
+    private static func isValidMethod(_ method: String) -> Bool {
+        !method.isEmpty
+            && method.count <= maxMethodLength
+            && method.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII
+                    && (
+                        CharacterSet.lowercaseLetters.contains(scalar)
+                        || CharacterSet.decimalDigits.contains(scalar)
+                        || scalar == "."
+                        || scalar == "_"
+                    )
+            }
+    }
+}
+
+private enum CrossnetControlConnectionCode {
+    private static let legacyLength = 6
+    private static let preferredLength = 8
+    private static let maximumLength = 16
+    static let allowedScalars = Set("ABCDEFGHJKLMNPQRSTUVWXYZ23456789".unicodeScalars)
+
+    static func isSupportedLength(_ count: Int) -> Bool {
+        count == legacyLength || (preferredLength...maximumLength).contains(count)
+    }
+}
+
+public struct CrossnetControlRequest: Equatable, Sendable {
+    public let id: String
+    public let method: String
+    public let params: CrossnetControlParams
+}
+
+public struct CrossnetControlParams: Equatable, Sendable, Decodable {
+    private let values: [String: CrossnetControlJSONValue]
+
+    public init(_ values: [String: CrossnetControlJSONValue] = [:]) {
+        self.values = values
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.values = try container.decode([String: CrossnetControlJSONValue].self)
+    }
+
+    public subscript(_ key: String) -> CrossnetControlJSONValue? {
+        values[key]
+    }
+
+    public func contains(_ key: String) -> Bool {
+        values[key] != nil
+    }
+
+    public func string(_ key: String) -> String? {
+        guard case .string(let value) = values[key] else { return nil }
+        return value
+    }
+
+    public func bool(_ key: String) -> Bool? {
+        guard case .bool(let value) = values[key] else { return nil }
+        return value
+    }
+}
+
+public enum CrossnetControlJSONValue: Equatable, Sendable, Codable {
+    case string(String)
+    case bool(Bool)
+    case int(Int)
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "unsupported crossnet-control JSON value"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .int(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
+}
+
+public enum CrossnetControlFailure: Error, Equatable, Sendable {
+    case malformedRequest(String)
+    case protocolVersionMismatch
+    case methodNotFound
+    case methodNotEnabled
+    case watchNotSupported
+    case invalidCode
+    case invalidLeaseMode
+    case authRequired
+    case tenantRequired
+    case requestTooLarge
+    case internalError(String)
+
+    public var code: String {
+        switch self {
+        case .malformedRequest:
+            return "malformed_request"
+        case .protocolVersionMismatch:
+            return "protocol_version_mismatch"
+        case .methodNotFound:
+            return "method_not_found"
+        case .methodNotEnabled:
+            return "method_not_enabled"
+        case .watchNotSupported:
+            return "watch_not_supported"
+        case .invalidCode:
+            return "invalid_code"
+        case .invalidLeaseMode:
+            return "invalid_lease_mode"
+        case .authRequired:
+            return "auth_required"
+        case .tenantRequired:
+            return "tenant_required"
+        case .requestTooLarge:
+            return "request_too_large"
+        case .internalError:
+            return "internal"
+        }
+    }
+
+    public var message: String {
+        switch self {
+        case .malformedRequest(let detail):
+            return "malformed crossnet-control request: \(Self.sanitized(detail))"
+        case .protocolVersionMismatch:
+            return "crossnet-control protocol version mismatch"
+        case .methodNotFound:
+            return "unknown crossnet-control method"
+        case .methodNotEnabled:
+            return "crossnet-control method is not enabled in this Mac app build"
+        case .watchNotSupported:
+            return "crossnet.status watch is not implemented yet"
+        case .invalidCode:
+            return "invalid connection code"
+        case .invalidLeaseMode:
+            return "invalid host lease mode"
+        case .authRequired:
+            return "Mac app auth session is not loaded"
+        case .tenantRequired:
+            return "Mac app tenant binding is unavailable"
+        case .requestTooLarge:
+            return "crossnet-control request line is too large"
+        case .internalError(let detail):
+            return "crossnet-control internal error: \(Self.sanitized(detail))"
+        }
+    }
+
+    private static func sanitized(_ value: String) -> String {
+        String(
+            value
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .prefix(160)
+        )
+    }
+}
+
+public enum CrossnetControlHostLeaseMode: String, Codable, Equatable, Sendable {
+    case short
+    case long
+
+    public static func parse(params: CrossnetControlParams) throws -> CrossnetControlHostLeaseMode {
+        guard params.contains("lease_mode") else { return .short }
+        guard let raw = params.string("lease_mode") else {
+            throw CrossnetControlFailure.invalidLeaseMode
+        }
+        return try parse(raw)
+    }
+
+    public static func parse(_ raw: String?) throws -> CrossnetControlHostLeaseMode {
+        guard let raw else { return .short }
+        guard raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+              let mode = CrossnetControlHostLeaseMode(rawValue: raw) else {
+            throw CrossnetControlFailure.invalidLeaseMode
+        }
+        return mode
+    }
+}
+
+public struct CrossnetControlHelloResult: Codable, Equatable, Sendable {
+    public let engineVersion: String
+    public let proto: Int
+    public let authLoaded: Bool
+    public let tenantBound: Bool
+
+    public init(
+        engineVersion: String,
+        proto: Int = CrossnetControlWire.protocolVersion,
+        authLoaded: Bool,
+        tenantBound: Bool
+    ) {
+        self.engineVersion = engineVersion
+        self.proto = proto
+        self.authLoaded = authLoaded
+        self.tenantBound = tenantBound
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case engineVersion = "engine_version"
+        case proto
+        case authLoaded = "auth_loaded"
+        case tenantBound = "tenant_bound"
+    }
+}
+
+public struct CrossnetControlHostResult: Codable, Equatable, Sendable {
+    public let code: String
+    public let sessionRef: String?
+    public let expiresAt: String?
+    public let leaseMode: CrossnetControlHostLeaseMode
+
+    public init(
+        code: String,
+        sessionRef: String?,
+        expiresAt: String?,
+        leaseMode: CrossnetControlHostLeaseMode
+    ) {
+        self.code = code
+        self.sessionRef = sessionRef
+        self.expiresAt = expiresAt
+        self.leaseMode = leaseMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case sessionRef = "session_ref"
+        case expiresAt = "expires_at"
+        case leaseMode = "lease_mode"
+    }
+}
+
+public struct CrossnetControlStatusResult: Codable, Equatable, Sendable {
+    public let connectionStatus: String
+    public let readiness: String
+    public let sessionPresent: Bool
+    public let sessionRef: String?
+    public let suite: String?
+    public let signalingHealth: String?
+    public let failureCode: CrossnetControlStatusFailureCode?
+    public let failureClass: CrossnetControlStatusFailureClass?
+    public let authLoaded: Bool
+    public let tenantBound: Bool
+
+    public init(
+        connectionStatus: String,
+        readiness: String,
+        sessionPresent: Bool,
+        sessionRef: String?,
+        suite: String?,
+        signalingHealth: String?,
+        failureCode: CrossnetControlStatusFailureCode? = nil,
+        failureClass: CrossnetControlStatusFailureClass? = nil,
+        authLoaded: Bool,
+        tenantBound: Bool
+    ) {
+        self.connectionStatus = connectionStatus
+        self.readiness = readiness
+        self.sessionPresent = sessionPresent
+        self.sessionRef = sessionRef
+        self.suite = suite
+        self.signalingHealth = signalingHealth
+        self.failureCode = failureCode
+        self.failureClass = failureClass
+        self.authLoaded = authLoaded
+        self.tenantBound = tenantBound
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case connectionStatus = "connection_status"
+        case readiness
+        case sessionPresent = "session_present"
+        case sessionRef = "session_ref"
+        case suite
+        case signalingHealth = "signaling_health"
+        case failureCode = "failure_code"
+        case failureClass = "failure_class"
+        case authLoaded = "auth_loaded"
+        case tenantBound = "tenant_bound"
+    }
+}
+
+public enum CrossnetControlStatusFailureCode: String, Codable, Equatable, Sendable {
+    case authRequired = "auth_required"
+    case tenantRequired = "tenant_required"
+    case runtimeFailed = "runtime_failed"
+}
+
+public enum CrossnetControlStatusFailureClass: String, Codable, Equatable, Sendable {
+    case operatorPrecondition = "operator_precondition"
+    case runtimeFailure = "runtime_failure"
+}
+
+public struct CrossnetControlSettingSnapshot: Codable, Equatable, Sendable {
+    public let id: String
+    public let valueType: String
+    public let value: CrossnetControlJSONValue
+    public let mutable: Bool
+    public let note: String?
+
+    public init(
+        id: String,
+        valueType: String,
+        value: CrossnetControlJSONValue,
+        mutable: Bool,
+        note: String? = nil
+    ) {
+        self.id = id
+        self.valueType = valueType
+        self.value = value
+        self.mutable = mutable
+        self.note = note
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case valueType = "value_type"
+        case value
+        case mutable
+        case note
+    }
+}
+
+public struct CrossnetControlSettingsSnapshotResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let settings: [CrossnetControlSettingSnapshot]
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "read_only",
+        settings: [CrossnetControlSettingSnapshot]
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.settings = settings
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case settings
+    }
+}
+
+enum CrossnetControlSettingsProjectionPolicy {
+    static let allowedSettingIDs: Set<String> = [
+        "logging.verbose",
+        "logging.level",
+        "ui.show_realtime_fps",
+        "ui.top_bar_ip_location",
+        "ui.top_bar_network_speed",
+        "ui.top_bar_network_latency",
+        "pqc.prefer_xwing_hybrid",
+        "pqc.signature_algorithm"
+    ]
+
+    static func validate(
+        _ snapshot: CrossnetControlSettingsSnapshotResult
+    ) throws -> CrossnetControlSettingsSnapshotResult {
+        guard snapshot.runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("settings_projection_invalid_runtime")
+        }
+        guard snapshot.controlEffect == "read_only" else {
+            throw CrossnetControlFailure.internalError("settings_projection_not_read_only")
+        }
+
+        var seenSettingIDs = Set<String>()
+        for setting in snapshot.settings {
+            guard seenSettingIDs.insert(setting.id).inserted else {
+                throw CrossnetControlFailure.internalError("settings_projection_duplicate_id")
+            }
+            guard allowedSettingIDs.contains(setting.id) else {
+                throw CrossnetControlFailure.internalError("settings_projection_not_allowlisted")
+            }
+            guard setting.mutable == false else {
+                throw CrossnetControlFailure.internalError("settings_projection_mutable")
+            }
+            guard setting.valueType == setting.value.valueType else {
+                throw CrossnetControlFailure.internalError("settings_projection_value_type_mismatch")
+            }
+            try validateValueDomain(setting)
+        }
+
+        return snapshot
+    }
+
+    private static func validateValueDomain(_ setting: CrossnetControlSettingSnapshot) throws {
+        switch setting.id {
+        case "logging.verbose",
+             "ui.show_realtime_fps",
+             "ui.top_bar_ip_location",
+             "ui.top_bar_network_speed",
+             "ui.top_bar_network_latency":
+            guard case .bool = setting.value else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote(nil, for: setting)
+        case "pqc.prefer_xwing_hybrid":
+            guard case .bool = setting.value else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote("policy_preference_not_runtime_proof", for: setting)
+        case "logging.level":
+            guard case .string(let value) = setting.value,
+                  isValidLoggingLevel(value) else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote(nil, for: setting)
+        case "pqc.signature_algorithm":
+            guard case .string(let value) = setting.value,
+                  isValidPQCSignatureAlgorithm(value) else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote("policy_preference_not_runtime_proof", for: setting)
+        default:
+            throw CrossnetControlFailure.internalError("settings_projection_not_allowlisted")
+        }
+    }
+
+    private static func validateNote(
+        _ expectedNote: String?,
+        for setting: CrossnetControlSettingSnapshot
+    ) throws {
+        guard setting.note == expectedNote else {
+            throw CrossnetControlFailure.internalError("settings_projection_invalid_note")
+        }
+    }
+
+    private static func isValidLoggingLevel(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return [
+            "trace",
+            "debug",
+            "info",
+            "warning",
+            "warn",
+            "error",
+            "critical",
+            "fault"
+        ].contains(normalized)
+    }
+
+    private static func isValidPQCSignatureAlgorithm(_ value: String) -> Bool {
+        value == "ML-DSA-65" || value == "ML-DSA-87"
+    }
+}
+
+public enum CrossnetControlSessionRef {
+    public static func redacted(_ sessionID: String) -> String {
+        let digest = SHA256.hash(data: Data(sessionID.utf8))
+        return "sha256:" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+extension CrossnetControlJSONValue {
+    var valueType: String {
+        switch self {
+        case .string:
+            return "string"
+        case .bool:
+            return "bool"
+        case .int:
+            return "int"
+        case .null:
+            return "null"
+        }
+    }
+}
+
+private struct CrossnetControlRequestEnvelope: Decodable {
+    let v: Int
+    let id: String
+    let method: String
+    let params: CrossnetControlParams?
+}
+
+private struct CrossnetControlSuccessEnvelope<Result: Encodable>: Encodable {
+    let v: Int
+    let id: String
+    let ok = true
+    let result: Result
+}
+
+private struct CrossnetControlFailureEnvelope: Encodable {
+    let v: Int
+    let id: String?
+    let ok = false
+    let error: CrossnetControlErrorBody
+}
+
+private struct CrossnetControlErrorBody: Encodable {
+    let code: String
+    let message: String
+}

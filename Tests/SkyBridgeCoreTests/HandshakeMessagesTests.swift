@@ -106,6 +106,61 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
         XCTAssertEqual(decoded.keyShares.count, 2)
     }
 
+    func testMessageAQPeriaptProviderTypeRoundTrip() throws {
+        let capabilities = CryptoCapabilities(
+            supportedKEM: [P2PCryptoAlgorithm.qperiaptContextBound.rawValue],
+            supportedSignature: ["ML-DSA-65"],
+            supportedAuthProfiles: [QPeriaptPlatformPolicy.authProfile],
+            supportedAEAD: ["AES-GCM"],
+            pqcAvailable: true,
+            platformVersion: "Android 16 / API 36",
+            providerType: .qPeriapt
+        )
+        let message = HandshakeMessageA(
+            supportedSuites: [.qperiaptContextBound],
+            keyShares: [
+                HandshakeKeyShare(
+                    suite: .qperiaptContextBound,
+                    shareBytes: Data(repeating: 0x31, count: 1_120)
+                )
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: HandshakePolicy(requirePQC: true, allowClassicFallback: false, minimumTier: .qperiaptPQC),
+            capabilities: capabilities,
+            signature: Data(repeating: 0xA1, count: 64),
+            identityPublicKey: Data(repeating: 0xB2, count: 32),
+            initiatorContribution: Data(repeating: 0x5A, count: 32)
+        )
+
+        let decoded = try HandshakeMessageA.decode(from: message.encoded)
+        XCTAssertEqual(decoded.capabilities.providerType, CryptoProviderType.qPeriapt)
+        XCTAssertEqual(decoded.capabilities.supportedKEM, [P2PCryptoAlgorithm.qperiaptContextBound.rawValue])
+        XCTAssertEqual(decoded.policy.minimumTier, .qperiaptPQC)
+        XCTAssertEqual(decoded.supportedSuites, [CryptoSuite.qperiaptContextBound])
+    }
+
+    func testMessageBQPeriaptAllowsEmptyResponderShare() throws {
+        let sealedBox = HPKESealedBox(
+            encapsulatedKey: Data(),
+            nonce: Data(repeating: 0x44, count: 12),
+            ciphertext: Data(repeating: 0x55, count: 16),
+            tag: Data(repeating: 0x66, count: 16)
+        )
+        let message = HandshakeMessageB(
+            selectedSuite: .qperiaptContextBound,
+            responderShare: Data(),
+            serverNonce: Data(repeating: 0x88, count: 32),
+            encryptedPayload: sealedBox,
+            signature: Data(repeating: 0xC3, count: 3_309),
+            identityPublicKey: Data(repeating: 0xD4, count: 1_952)
+        )
+
+        let decoded = try HandshakeMessageB.decode(from: message.encoded)
+        XCTAssertEqual(decoded.selectedSuite, .qperiaptContextBound)
+        XCTAssertEqual(decoded.responderShare.count, 0)
+        XCTAssertEqual(decoded.encryptedPayload.encapsulatedKey.count, 0)
+    }
+
     func testMessageBV2RejectsMissingResponderContribution() throws {
         let sealedBox = HPKESealedBox(
             encapsulatedKey: Data(),

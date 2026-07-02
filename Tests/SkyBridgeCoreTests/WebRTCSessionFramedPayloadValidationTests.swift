@@ -358,7 +358,8 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(hostSource.contains("isMediaAdmissionLeaseRefreshable"))
         #expect(hostSource.contains("media_admission_token_expired"))
         #expect(hostSource.contains("media_admission_token_lease_limit"))
-        #expect(hostSource.contains("status == 429 && body.contains(\"media_admission_token_lease_limit\")"))
+        #expect(hostSource.contains("let errorCode = mediaAdmissionLeaseErrorCode(from: body)"))
+        #expect(hostSource.contains("status == 429 && errorCode == \"media_admission_token_lease_limit\""))
         #expect(hostSource.contains("WebRTC PQC media audio config received"))
         #expect(hostSource.contains("reason=missingViewerEndpoint"))
         #expect(hostSource.contains("audioTxCaptured="))
@@ -387,7 +388,8 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(viewerWebRTCRefreshSources.contains("refreshLeaseSuperseded"))
         #expect(viewerWebRTCRefreshSources.contains("media_admission_token_expired"))
         #expect(viewerWebRTCRefreshSources.contains("media_admission_token_lease_limit"))
-        #expect(viewerWebRTCRefreshSources.contains("status == 429 && body.contains(\"media_admission_token_lease_limit\")"))
+        #expect(viewerWebRTCRefreshSources.contains("let errorCode = mediaAdmissionLeaseErrorCode(from: body)"))
+        #expect(viewerWebRTCRefreshSources.contains("status == 429 && errorCode == \"media_admission_token_lease_limit\""))
     }
 
     @Test("registry WebRTC smoke rejects compat JWTs before hitting Supabase")

@@ -797,6 +797,8 @@ public struct ProtocolSignatureProviderSelector {
  /// - Returns: 用于 sigA/sigB 的签名 Provider
     public static func select(for tier: CryptoTier) -> any ProtocolSignatureProvider {
         switch tier {
+        case .qperiaptPQC:
+            return PQCSignatureProvider(backend: .applePQC)
         case .nativePQC:
             return PQCSignatureProvider(backend: .applePQC)
         case .liboqsPQC:

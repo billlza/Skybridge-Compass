@@ -1250,7 +1250,9 @@ public class DeviceDiscoveryManager: BaseManager {
                                 recordRemoteControlSecurityIdentity(from: payload)
                                 await PeerKEMBootstrapStore.shared.upsert(
                                     deviceIds: [payload.deviceId, peerDeviceId],
-                                    kemPublicKeys: payload.kemPublicKeys
+                                    kemPublicKeys: payload.kemPublicKeys,
+                                    platform: payload.platform ?? info?.platform,
+                                    osVersion: payload.osVersion ?? info?.osVersion ?? info?.version
                                 )
                                 logger.info(
                                     "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"

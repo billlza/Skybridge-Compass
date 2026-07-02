@@ -63,6 +63,31 @@ source "${PROJECT_ROOT}/Scripts/notarytool_helpers.sh"
 source "${PROJECT_ROOT}/Scripts/signing_entitlements_helpers.sh"
 source "${PROJECT_ROOT}/Scripts/package_build_policy.sh"
 
+validate_core_metal_shader_sources() {
+  local core_module_resources_dir="$1"
+  local shader_file=""
+  local -a shader_files=(
+    RemoteDesktopShaders.metal
+    RemoteDesktopPassthrough.metal
+    RemoteDesktopHDR.metal
+    Metal4Shaders.metal
+    AuroraShaders.metal
+    WeatherParticleShaders.metal
+    WeatherShaders.metal
+    RainShaders.metal
+    HazeShaders.metal
+    HazeParticleShaders.metal
+  )
+
+  [[ -d "${core_module_resources_dir}" ]] \
+    || fail "missing SkyBridgeCore resource directory: ${core_module_resources_dir}"
+
+  for shader_file in "${shader_files[@]}"; do
+    [[ -f "${core_module_resources_dir}/${shader_file}" ]] \
+      || fail "missing SkyBridgeCore Metal shader source: ${core_module_resources_dir}/${shader_file}"
+  done
+}
+
 APP_PATH="${PROJECT_ROOT}/dist/SkyBridge Compass Pro.app"
 DMG_PATH=""
 SOURCE_INFO_PLIST="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Info.plist"
@@ -529,7 +554,7 @@ attach_dmg_readonly() {
   local dmg_path="$1"
   local attach_plist="${TMP_DIR}/dmg-attach.plist"
 
-  hdiutil attach -readonly -nobrowse -noautoopen -plist "${dmg_path}" >"${attach_plist}" \
+  diskutil image attach --readOnly --mountOptions nobrowse --plist "${dmg_path}" >"${attach_plist}" \
     || fail "could not mount DMG for content validation: ${dmg_path}"
 
   python3 - "${attach_plist}" <<'PY'
@@ -1285,8 +1310,7 @@ CORE_MODULE_RESOURCES_DIR="${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCor
   || fail "missing compiled App Assets.car inside SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; asset catalogs were not packaged as a release resource bundle"
 [[ -f "${APP_MODULE_RESOURCES_DIR}/default.metallib" ]] \
   || fail "missing compiled App default.metallib inside SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; Metal shaders were not packaged as a release resource bundle"
-[[ -f "${CORE_MODULE_RESOURCES_DIR}/default.metallib" ]] \
-  || fail "missing compiled SkyBridgeCore default.metallib inside SkyBridgeCompassApp_SkyBridgeCore.bundle; Metal shaders were not packaged as a release resource bundle"
+validate_core_metal_shader_sources "${CORE_MODULE_RESOURCES_DIR}"
 [[ -f "${APP_HELPER_PLIST_PATH}" ]] || fail "missing PowerMetricsHelper launchd plist: ${APP_HELPER_PLIST_PATH}"
 [[ -x "${APP_HELPER_BIN_PATH}" ]] || fail "PowerMetricsHelper binary is missing or not executable: ${APP_HELPER_BIN_PATH}"
 APP_HELPER_VERSION="$(extract_helper_version "${APP_HELPER_BIN_PATH}")"

@@ -159,6 +159,8 @@ pub async fn ensure_rust_pqc_identity(paths: &AgentPaths) -> Result<RustPqcIdent
     let protocol_signing = ensure_mldsa65_signing_key(paths).await?;
     let mlkem_identity = ensure_kem_identity_key(paths, 0x0101).await?;
     let xwing_identity = ensure_kem_identity_key(paths, 0x0001).await?;
+    #[cfg(feature = "q-periapt")]
+    let qperiapt_identity = ensure_kem_identity_key(paths, 0x0011).await?;
     Ok(RustPqcIdentityMaterial {
         signing_algorithm: ProtocolSigningAlgorithm::MlDsa65,
         signing_public_key: protocol_signing.public_key_bytes(),
@@ -169,6 +171,10 @@ pub async fn ensure_rust_pqc_identity(paths: &AgentPaths) -> Result<RustPqcIdent
         mlkem768_secret_key: mlkem_identity.1,
         xwing_public_key: xwing_identity.0,
         xwing_secret_key: xwing_identity.1,
+        #[cfg(feature = "q-periapt")]
+        qperiapt_public_key: qperiapt_identity.0,
+        #[cfg(feature = "q-periapt")]
+        qperiapt_secret_key: qperiapt_identity.1,
     })
 }
 
@@ -1086,6 +1092,8 @@ async fn ensure_kem_identity_key(
     let (public_key, secret_key) = match suite_wire_id {
         0x0101 => skybridge_core::mlkem768_generate_keypair(),
         0x0001 => xwing_generate_keypair(),
+        #[cfg(feature = "q-periapt")]
+        0x0011 => skybridge_core::qperiapt_contextbound_generate_keypair(),
         _ => bail!("unsupported KEM identity suite {suite_wire_id:#06x}"),
     };
     let stored = StoredKemIdentityKey {

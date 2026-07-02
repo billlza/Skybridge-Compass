@@ -143,6 +143,7 @@ public actor WebSocketSignalingClient {
     }
 
     private let logger = Logger(subsystem: "com.skybridge.signal", category: "WebRTCSignalingWS")
+    nonisolated private static let redactedServerErrorReasonDescription = "<redacted-server-error>"
     nonisolated private static let redactedTransportErrorDescription = "<redacted-transport-error>"
     nonisolated private static let sensitiveLogRedaction = "<redacted>"
     private let url: URL
@@ -623,8 +624,10 @@ public actor WebSocketSignalingClient {
             }
             if frame.isError {
                 let reason = frame.error ?? "unknown"
- // 暴露真实服务器错误原因（协议级诊断码，非敏感），便于诊断跨网连接失败的真正卡点。
-                let error = SignalingError.serverRejected(reason)
+ // 服务器错误原因仅用于本地分类/重连决策，绝不写入 .public 日志或对外可见的错误描述（隐私合规）。
+                let failureClass = Self.classifyServerError(reason)
+                let redactedReason = Self.redactedServerErrorReasonDescription
+                let error = SignalingError.serverRejected(redactedReason)
                 terminalErrorsByHandle[handleId] = error
                 if currentHandle == handleId {
                     isBound = false
@@ -633,11 +636,11 @@ public actor WebSocketSignalingClient {
                 emitLifecycle(
                     phase: .failed,
                     handleId: handleId,
-                    errorDescription: reason,
-                    failureClass: Self.classifyServerError(reason),
+                    errorDescription: redactedReason,
+                    failureClass: failureClass,
                     serverFrameType: frame.type
                 )
-                logger.error("❌ signaling server error: \(reason, privacy: .public)")
+                logger.error("❌ signaling server error: \(redactedReason, privacy: .public)")
             }
         case .unknown:
             onTrace?("recv-unknown bytes=\(text.utf8.count)")
@@ -659,9 +662,9 @@ public actor WebSocketSignalingClient {
             failureClass: .transientNetwork,
             serverFrameType: nil
         )
- // 把真实关闭码/原因打到设备日志（协议级诊断码，非敏感），用于诊断"websocket未连接"卡在服务器哪道关卡。
-        logger.warning("🔌 signaling websocket closed: \(errorDescription, privacy: .public)")
-        onTrace?("closed backend=\(handleId.backend.rawValue) \(errorDescription)")
+ // 真实关闭码/原因仅供重连/诊断的非日志路径使用；.public 日志只暴露已打码的会话标识，绝不写原始 reason。
+        logger.info("🔌 signaling websocket closed: session=\(Self.sensitiveLogRedaction, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+        onTrace?("closed backend=\(handleId.backend.rawValue)")
     }
 
     private func handleErrored(handleId: SignalingHandleID, error: Error) async {

@@ -14,6 +14,7 @@ struct UserProfileView: View {
     @State private var showingImagePicker = false
     @State private var isUploading = false
     @State private var uploadError: String?
+    @State private var cachedAvatar: NSImage?
  // 复制提示显示状态（短暂显示）
     @State private var showCopyToast = false
 
@@ -96,7 +97,7 @@ struct UserProfileView: View {
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     } else if let userId = authModel.currentSession?.userIdentifier,
-                              let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+                              let cachedAvatar = cachedAvatar ?? AvatarCacheManager.shared.getAvatar(for: userId) {
  // 显示缓存的真实头像
                         Image(nsImage: cachedAvatar)
                             .resizable()
@@ -324,13 +325,18 @@ struct UserProfileView: View {
  // 尝试从缓存加载用户头像
         if let userId = authModel.currentSession?.userIdentifier {
             Task { @MainActor in
-                if let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+                do {
+                    if let cachedAvatar = try await AvatarCacheManager.shared.loadCachedAvatar(for: userId) {
+                        self.cachedAvatar = cachedAvatar
  // 将NSImage转换为Data以便在UI中显示
-                    if let tiffData = cachedAvatar.tiffRepresentation,
-                       let bitmapRep = NSBitmapImageRep(data: tiffData),
-                       let jpegData = bitmapRep.representation(using: .jpeg, properties: [:]) {
-                        selectedImageData = jpegData
+                        if let tiffData = cachedAvatar.tiffRepresentation,
+                           let bitmapRep = NSBitmapImageRep(data: tiffData),
+                           let jpegData = bitmapRep.representation(using: .jpeg, properties: [:]) {
+                            selectedImageData = jpegData
+                        }
                     }
+                } catch {
+                    SkyBridgeLogger.ui.error("加载头像缓存失败: \(error.localizedDescription, privacy: .private)")
                 }
             }
         }

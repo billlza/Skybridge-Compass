@@ -1,6 +1,7 @@
 import Foundation
 
 public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
+    case qPeriapt = "Q-Periapt-ContextBound"
     case cryptoKitPQC = "CryptoKit-PQC"
     case liboqs = "liboqs"
     case swiftCrypto = "SwiftCrypto"
@@ -8,7 +9,7 @@ public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
 
     public var supportsPQC: Bool {
         switch self {
-        case .cryptoKitPQC, .liboqs:
+        case .qPeriapt, .cryptoKitPQC, .liboqs:
             return true
         case .swiftCrypto, .classic:
             return false
@@ -17,6 +18,7 @@ public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
+        case .qPeriapt: return "Q-Periapt ContextBound (Beta)"
         case .cryptoKitPQC: return "CryptoKit PQC (iOS 26+)"
         case .liboqs: return "liboqs (Fallback)"
         case .swiftCrypto: return "Swift Crypto"
@@ -26,6 +28,7 @@ public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
 
     public var securityLevel: String {
         switch self {
+        case .qPeriapt: return "量子安全 (Q-Periapt beta)"
         case .cryptoKitPQC: return "量子安全 (原生)"
         case .liboqs: return "量子安全 (第三方)"
         case .swiftCrypto, .classic: return "经典安全"

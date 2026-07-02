@@ -73,6 +73,36 @@ final class P2PCryptoProviderTests: XCTestCase {
         XCTAssertFalse(kemProvider.algorithmName.isEmpty,
                        "KEM algorithm name must not be empty")
     }
+
+    func testNegotiatedQPeriaptKEMProviderDoesNotFallbackWhenRuntimeUnavailable() async {
+        let selector = CryptoProviderSelector.shared
+        await selector.clearCache()
+
+        if QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
+            do {
+                let provider = try await selector.getKEMProvider(
+                    forNegotiatedSuite: P2PCryptoAlgorithm.qperiaptContextBound.rawValue
+                )
+                XCTAssertEqual(provider.algorithmName, P2PCryptoAlgorithm.qperiaptContextBound.rawValue)
+            } catch {
+                XCTFail("Q-Periapt runtime is enabled but provider routing failed: \(error)")
+            }
+        } else {
+            do {
+                _ = try await selector.getKEMProvider(
+                    forNegotiatedSuite: P2PCryptoAlgorithm.qperiaptContextBound.rawValue
+                )
+                XCTFail("Negotiated Q-Periapt provider must fail closed when runtime admission is unavailable")
+            } catch let error as CryptoProviderError {
+                guard case .providerNotAvailable(.qPeriapt) = error else {
+                    XCTFail("Expected Q-Periapt providerNotAvailable, got \(error)")
+                    return
+                }
+            } catch {
+                XCTFail("Expected CryptoProviderError.providerNotAvailable(.qPeriapt), got \(error)")
+            }
+        }
+    }
     
  /// Test that Signature provider is consistent with selected crypto provider
     func testSignatureProviderConsistency() async {

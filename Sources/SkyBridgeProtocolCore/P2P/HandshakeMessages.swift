@@ -1368,6 +1368,7 @@ private enum HandshakeEncoding {
 
     static func expectedKeyShareLength(for suite: CryptoSuite) -> Int? {
         switch suite.wireId {
+        case 0x0011: return 1120   // Q-Periapt ContextBound ciphertext: ML-KEM-768(1088) + X25519(32)
         case 0x0001: return 1120   // X-Wing ciphertext: X25519(32) + ML-KEM-768(1088)
         case 0x0101: return 1088   // ML-KEM-768
         case 0x0102: return 1088   // ML-KEM-768-FS (same KEM ciphertext as v1)
@@ -1381,7 +1382,7 @@ private enum HandshakeEncoding {
         switch suite.wireId {
         case 0x0102:
             return 32 // v2: responder ephemeral contribution is mandatory
-        case 0x0001, 0x0101:
+        case 0x0011, 0x0001, 0x0101:
             return 0
         default:
             return expectedKeyShareLength(for: suite)

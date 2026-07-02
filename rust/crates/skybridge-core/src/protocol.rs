@@ -52,6 +52,11 @@ pub struct CryptoSuite {
 
 impl CryptoSuite {
     pub const XWING_MLDSA: Self = Self { wire_id: 0x0001 };
+    /// EXPERIMENTAL, DEFAULT-OFF (built only with the `q-periapt` feature on
+    /// skybridge-core): Q-Periapt ContextBound `ML-KEM-768 + X25519` hybrid KEM
+    /// with ML-DSA-65 signatures. The constant itself is always defined (it is a
+    /// plain wire id); only the KEM dispatch is feature-gated.
+    pub const QPERIAPT_CONTEXTBOUND_MLDSA65: Self = Self { wire_id: 0x0011 };
     pub const MLKEM768_MLDSA65: Self = Self { wire_id: 0x0101 };
     pub const MLKEM768_MLDSA65_FS: Self = Self { wire_id: 0x0102 };
     pub const X25519_ED25519: Self = Self { wire_id: 0x1001 };
@@ -65,6 +70,11 @@ impl CryptoSuite {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "x-wing" | "x-wing+mldsa65" | "x-wing+ml-dsa-65" | "xwing" => Some(Self::XWING_MLDSA),
+            "q-periapt"
+            | "qperiapt"
+            | "qperiapt-contextbound"
+            | "q-periapt-contextbound"
+            | "q-periapt+ml-dsa-65" => Some(Self::QPERIAPT_CONTEXTBOUND_MLDSA65),
             "ml-kem-768" | "ml-kem-768+mldsa65" | "ml-kem-768+ml-dsa-65" => {
                 Some(Self::MLKEM768_MLDSA65)
             }
@@ -80,6 +90,7 @@ impl CryptoSuite {
     pub fn as_known_name(self) -> Option<&'static str> {
         match self.wire_id {
             0x0001 => Some("X-Wing"),
+            0x0011 => Some("Q-Periapt-ContextBound"),
             0x0101 => Some("ML-KEM-768"),
             0x0102 => Some("ML-KEM-768-FS"),
             0x1001 => Some("X25519"),

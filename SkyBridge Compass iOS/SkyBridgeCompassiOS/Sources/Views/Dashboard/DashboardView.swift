@@ -36,6 +36,9 @@ public struct DashboardView: View {
     @State private var showingDeviceDetail: DiscoveredDevice?
     @State private var showingConnectionSheet = false
     @State private var crossNetworkAlertMessage: String?
+    /// 扫码连接进行中：让 `.onChange(of: state)` 跳过失败弹窗，
+    /// 改由 `handleScannedConnectLink` 在扫码 sheet 完全收起后单点呈现，避免双重 present。
+    @State private var isHandlingScannedConnectLink = false
     
     @Namespace private var animation
 
@@ -150,7 +153,8 @@ public struct DashboardView: View {
             }
         }
         .onChange(of: crossNetworkManager.state) { _, newValue in
-            guard !showingQRScanner else { return }
+            // 扫码连接的失败弹窗由 handleScannedConnectLink 在 sheet 收起后单点呈现，这里不再插手，避免双重 present。
+            guard !showingQRScanner, !isHandlingScannedConnectLink else { return }
             if case .failed(let msg) = newValue,
                !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 crossNetworkAlertMessage = msg
@@ -1006,9 +1010,19 @@ private struct QuantumStarLayer: View {
 
     private func handleScannedConnectLink(_ link: String) {
         Task { @MainActor in
+            isHandlingScannedConnectLink = true
+            defer { isHandlingScannedConnectLink = false }
             showingQRScanner = false
             await crossNetworkManager.connect(fromScannedString: link)
-            if case .failed(let message) = crossNetworkManager.state {
+            // 失败弹窗只在此处单点呈现，且必须等扫码 sheet 完全收起后再 present，
+            // 否则会在 sheet 收起动画期间叠加 present，触发 "already presenting" 警告。
+            if case .failed(let message) = crossNetworkManager.state,
+               !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                while showingQRScanner {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                // 让 sheet 的收起动画跑完（SwiftUI 默认约 0.35s）再呈现 alert。
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 crossNetworkAlertMessage = message
             }
         }

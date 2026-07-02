@@ -70,6 +70,52 @@ extension CrossNetworkConnectionManager {
         }
     }
 
+    internal static func publicSignalingFailureClass(
+        _ failureClass: WebSocketSignalingClient.SignalingFailureClass
+    ) -> String {
+        switch failureClass {
+        case .authBindRejected:
+            return "auth_bind_rejected"
+        case .invalidShardOrSessionMismatch:
+            return "invalid_shard_or_session_mismatch"
+        case .tokenExpired:
+            return "token_expired"
+        case .transientNetwork:
+            return "transient_network"
+        case .transientServer:
+            return "transient_server"
+        case .protocolViolation:
+            return "protocol_violation"
+        }
+    }
+
+    internal static func publicSignalingFailureCode(
+        _ failureClass: WebSocketSignalingClient.SignalingFailureClass
+    ) -> String {
+        switch failureClass {
+        case .authBindRejected:
+            return "signaling_auth_rejected"
+        case .invalidShardOrSessionMismatch:
+            return "signaling_session_scope_mismatch"
+        case .tokenExpired:
+            return "signaling_token_expired"
+        case .transientNetwork:
+            return "signaling_network_unavailable"
+        case .transientServer:
+            return "signaling_server_error"
+        case .protocolViolation:
+            return "signaling_protocol_violation"
+        }
+    }
+
+    internal static func publicSignalingSessionLabel(_ sessionID: String?) -> String {
+        guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionID.isEmpty else {
+            return "-"
+        }
+        return "present"
+    }
+
     nonisolated static func shouldWakeOffererFromRemoteJoin(
         hasLocalSession: Bool,
         pendingOfferStart: Bool,

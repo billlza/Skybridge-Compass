@@ -12,7 +12,8 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
             using: provider,
-            appleXWingAvailable: true
+            appleXWingAvailable: true,
+            qPeriaptEnabled: false
         )
         XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101, 0x0102])
     }
@@ -26,7 +27,8 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
             using: provider,
-            appleXWingAvailable: true
+            appleXWingAvailable: true,
+            qPeriaptEnabled: false
         )
         XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101, 0x0102])
     }
@@ -40,9 +42,141 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
             using: provider,
-            appleXWingAvailable: false
+            appleXWingAvailable: false,
+            qPeriaptEnabled: false
         )
         XCTAssertEqual(suites.map(\.wireId), [0x0101, 0x0102])
+    }
+
+    func testQPeriaptSuiteIsAdvertisedOnlyWhenExplicitGateIsEnabled() {
+        let provider = MockCryptoProvider(
+            tier: .liboqsPQC,
+            activeSuite: .mlkem768MLDSA65,
+            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+        )
+
+        let disabled = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: false,
+            qPeriaptEnabled: false
+        )
+        XCTAssertEqual(disabled.map(\.wireId), [0x0101, 0x0102])
+
+        let enabled = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: false,
+            qPeriaptEnabled: true
+        )
+        XCTAssertEqual(enabled.map(\.wireId), [0x0011, 0x0101, 0x0102])
+    }
+
+    func testKEMPublicKeyInfoAcceptsOnlyValidQPeriaptBootstrapKeyLength() {
+        let normalized = KEMPublicKeyInfo.normalizedValidKeys([
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                publicKey: Data(repeating: 0x11, count: QPeriaptPlatformPolicy.publicKeyLength)
+            ),
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                publicKey: Data(repeating: 0x12, count: 1_184)
+            )
+        ])
+
+        XCTAssertEqual(normalized.count, 1)
+        XCTAssertEqual(normalized.first?.suiteWireId, CryptoSuite.qperiaptContextBound.wireId)
+        XCTAssertEqual(normalized.first?.publicKey.count, QPeriaptPlatformPolicy.publicKeyLength)
+    }
+
+    func testQPeriaptPolicySeparatesRequestFromRuntimeSupport() {
+        let suiteName = "QPeriaptPolicyTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(QPeriaptPlatformPolicy.isRequested(environment: [:], userDefaults: defaults))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isRequested(environment: ["SB_ENABLE_QPERIAPT": "true"], userDefaults: defaults))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isRequested(environment: ["SKYBRIDGE_PQC_PREFERRED_SUITE": "q-periapt"], userDefaults: defaults))
+
+        defaults.set(true, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+        XCTAssertTrue(QPeriaptPlatformPolicy.isRequested(environment: [:], userDefaults: defaults))
+
+        XCTAssertEqual(
+            QPeriaptPlatformPolicy.isEnabledForLocalRuntime(
+                environment: ["SB_ENABLE_QPERIAPT": "1"],
+                userDefaults: defaults
+            ),
+            QPeriaptPlatformPolicy.isLocalRuntimeSupported
+        )
+    }
+
+    func testQPeriaptPeerPolicyRequiresExplicitSupportedPlatformVersion() {
+        XCTAssertTrue(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "macOS", osVersion: "macOS 26.0"))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "iOS", osVersion: "26.1"))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "Android 16 (API 36)"))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "Android 17 (API 37)"))
+
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "macOS", osVersion: "macOS 25.9"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "iOS", osVersion: "iOS 25.9"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "Android 16 (API 35)"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "Android 15 (API 36)"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: nil, osVersion: "26.0"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: nil, osVersion: "iOS 26.0"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Windows", osVersion: "Windows 26"))
+    }
+
+    func testQPeriaptHandshakePeerPolicyRequiresQProviderAndAuthProfile() {
+        let eligible = qPeriaptCapabilities()
+        XCTAssertTrue(QPeriaptPlatformPolicy.isHandshakePeerEligible(eligible))
+        XCTAssertTrue(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(platformVersion: "iOS 26.0")
+        ))
+
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(providerType: .cryptoKitPQC)
+        ))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(authProfiles: [AuthProfile.pqc.displayName])
+        ))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(signatures: [P2PCryptoAlgorithm.p256.rawValue])
+        ))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(platformVersion: "Android 16 (API 35)")
+        ))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            qPeriaptCapabilities(platformVersion: "26.0")
+        ))
+    }
+
+    func testPairingIdentityNormalizationGatesQPeriaptByPeerPlatform() {
+        let qKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+            publicKey: Data(repeating: 0x51, count: QPeriaptPlatformPolicy.publicKeyLength)
+        )
+        let xWingKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+            publicKey: Data(repeating: 0x52, count: 1_216)
+        )
+
+        let ambiguous = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-q",
+            kemPublicKeys: [qKey, xWingKey],
+            platform: nil,
+            osVersion: "26.0"
+        ).normalizedBootstrapPayload
+
+        XCTAssertEqual(ambiguous?.kemPublicKeys.map(\.suiteWireId), [CryptoSuite.xwingMLDSA.wireId])
+
+        let eligible = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-q",
+            kemPublicKeys: [qKey, xWingKey],
+            platform: "Android",
+            osVersion: "Android 16 (API 36)"
+        ).normalizedBootstrapPayload
+
+        XCTAssertEqual(eligible?.kemPublicKeys.map(\.suiteWireId), [
+            CryptoSuite.xwingMLDSA.wireId,
+            CryptoSuite.qperiaptContextBound.wireId
+        ])
     }
 
     func testLiboqsTierKeepsProviderSuites() {
@@ -65,6 +199,23 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: provider)
         XCTAssertTrue(suites.isEmpty)
+    }
+
+    private func qPeriaptCapabilities(
+        providerType: CryptoProviderType = .qPeriapt,
+        authProfiles: [String] = [QPeriaptPlatformPolicy.authProfile],
+        signatures: [String] = [P2PCryptoAlgorithm.mlDSA65.rawValue],
+        platformVersion: String = "Android 16 (API 36)"
+    ) -> CryptoCapabilities {
+        CryptoCapabilities(
+            supportedKEM: [P2PCryptoAlgorithm.qperiaptContextBound.rawValue],
+            supportedSignature: signatures,
+            supportedAuthProfiles: authProfiles,
+            supportedAEAD: [P2PCryptoAlgorithm.aes256GCM.rawValue],
+            pqcAvailable: true,
+            platformVersion: platformVersion,
+            providerType: providerType
+        )
     }
 
     func testPairingIdentityCarriesCanonicalProtocolIdentityFingerprints() throws {

@@ -27,6 +27,9 @@ public struct FileTransferView: View {
     @State private var showingThreatAlert = false
     @State private var threatAlertResult: FileScanResult?
 
+    private var hasActiveTransfers: Bool {
+        !fileTransferManager.activeTransfers.isEmpty
+    }
 
     public init() {}
 
@@ -142,18 +145,18 @@ public struct FileTransferView: View {
 
             HStack {
                 Circle()
-                    .fill(fileTransferManager.isTransferring ? Color.green : Color.gray)
+                    .fill(hasActiveTransfers ? Color.green : Color.gray)
                     .frame(width: 10, height: 10)
-                    .scaleEffect(fileTransferManager.isTransferring ? 1.2 : 1.0)
-                    .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: fileTransferManager.isTransferring)
+                    .scaleEffect(hasActiveTransfers ? 1.2 : 1.0)
+                    .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: hasActiveTransfers)
 
-                Text(LocalizationManager.shared.localizedString(fileTransferManager.isTransferring ? "status.transferring" : "status.idle"))
+                Text(LocalizationManager.shared.localizedString(hasActiveTransfers ? "status.transferring" : "status.idle"))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .animation(.easeInOut(duration: 0.3), value: fileTransferManager.isTransferring)
+                    .animation(.easeInOut(duration: 0.3), value: hasActiveTransfers)
             }
 
-            if fileTransferManager.isTransferring {
+            if hasActiveTransfers {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(LocalizationManager.shared.localizedString("fileTransfer.totalProgress"))
@@ -174,7 +177,7 @@ public struct FileTransferView: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: fileTransferManager.isTransferring)
+        .animation(.easeInOut(duration: 0.3), value: hasActiveTransfers)
     }
 
  // MARK: - 快速操作卡片
@@ -816,9 +819,14 @@ private struct ModernFileCard: View {
 }
 
 private struct ModernTransferRowView: View {
-    let transfer: FileTransfer
+    @ObservedObject private var transfer: FileTransfer
     let onCancel: () -> Void
     @State private var isAnimating = false
+
+    init(transfer: FileTransfer, onCancel: @escaping () -> Void) {
+        self.transfer = transfer
+        self.onCancel = onCancel
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

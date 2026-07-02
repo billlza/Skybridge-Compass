@@ -408,6 +408,9 @@ struct SkyBridgeCompassApp: App {
         }
         macOnlineIPadSmokeHarness.appendAppBootIfNeeded(uiRole: "app-init")
         VolatileSwiftUIAutosaveDefaultsPruner.schedule()
+        #if os(macOS)
+        OperatorControlServerBootstrap.shared.startIfNeeded()
+        #endif
 
         Self.runTrafficPaddingBootSelfTestIfRequested()
 

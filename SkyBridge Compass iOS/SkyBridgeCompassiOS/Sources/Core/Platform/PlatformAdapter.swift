@@ -149,17 +149,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 return
             }
 
-            // 存量身份密钥自检失败：常见于跨 App / OS 版本升级后，旧后端（或收紧验签前）
-            // 生成的 ML-DSA 密钥在当前验签路径下不再被接受。旧密钥已不可用，继续抛错会让本机
-            // 永久无法建立连接、也无法生成连接码（UI 表现为长时间卡住后报错）。这里改为轮换出
-            // 一把新身份密钥并持久化（对端需重新建立信任），实现自愈而非永久失败。
-            SkyBridgeLogger.shared.warning(
-                "⚠️ 存量 \(algorithm.rawValue) 身份密钥自检失败，轮换为新密钥（对端需重新信任本机）"
+            throw SkyBridgeError.invalidKeyData(
+                reason: "Stored identity key failed self-test for \(algorithm.rawValue)"
             )
-            let rotated = try await regenerateAndStoreIdentityKey(algorithm: algorithm)
-            identityKeyHandle = rotated.keyHandle
-            identityPublicKey = rotated.publicKey
-            return
         }
 
         // 创建新密钥
@@ -171,29 +163,6 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         try saveIdentityKeyToKeychain(keyHandle: newKey.keyHandle, publicKey: newKey.publicKey, algorithm: algorithm)
     }
 
-    /// 轮换并持久化一把新的身份密钥；对新密钥再做一次自检以避免无限轮换：
-    /// 若新密钥仍不可用，说明 PQC 后端本身不可用，此时才抛错。
-    private func regenerateAndStoreIdentityKey(
-        algorithm: ProtocolSigningAlgorithm
-    ) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
-        let fresh = try await generateIdentityKey(algorithm: algorithm)
-        guard await isSigningKeyUsable(
-            keyHandle: fresh.keyHandle,
-            publicKey: fresh.publicKey,
-            algorithm: algorithm
-        ) else {
-            throw SkyBridgeError.invalidKeyData(
-                reason: "Freshly generated \(algorithm.rawValue) identity key failed self-test; PQC backend unavailable"
-            )
-        }
-        try saveIdentityKeyToKeychain(
-            keyHandle: fresh.keyHandle,
-            publicKey: fresh.publicKey,
-            algorithm: algorithm
-        )
-        return fresh
-    }
-    
     /// 生成身份密钥
     private func generateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
         switch algorithm {
@@ -240,14 +209,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 return existingKey
             }
 
-            // 存量身份密钥自检失败：轮换为新密钥并持久化，避免本机被永久卡死（详见 loadOrCreateIdentityKey）。
-            SkyBridgeLogger.shared.warning(
-                "⚠️ 存量 \(algorithm.rawValue) 身份密钥自检失败，轮换为新密钥（对端需重新信任本机）"
+            throw SkyBridgeError.invalidKeyData(
+                reason: "Stored identity key failed self-test for \(algorithm.rawValue)"
             )
-            let rotated = try await regenerateAndStoreIdentityKey(algorithm: algorithm)
-            identityKeyHandle = rotated.keyHandle
-            identityPublicKey = rotated.publicKey
-            return rotated
         }
 
         let newKey = try await generateIdentityKey(algorithm: algorithm)

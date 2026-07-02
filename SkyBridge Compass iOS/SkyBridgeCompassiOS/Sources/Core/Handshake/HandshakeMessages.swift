@@ -31,7 +31,11 @@ public enum SignatureAlgorithm: String, Sendable, Codable {
 // MARK: - ProtocolSigningAlgorithm
 
 /// 协议签名算法（类型层面排除 P-256）
-public enum ProtocolSigningAlgorithm: String, Sendable {
+///
+/// `Codable` 与 macOS `SkyBridgeProtocolCore.ProtocolSigningAlgorithm` 一致：
+/// `String` 原始值（"Ed25519" / "ML-DSA-65"）按默认 JSON 编解码，wire 字节相同，
+/// 使 `WebRTCSignalingEnvelope.Payload` 能继续合成 `Codable` 并承载 join 引导身份。
+public enum ProtocolSigningAlgorithm: String, Sendable, Codable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
     

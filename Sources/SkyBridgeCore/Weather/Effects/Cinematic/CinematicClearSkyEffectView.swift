@@ -47,29 +47,15 @@ struct GlowParticle: Identifiable {
 
 @available(macOS 14.0, *)
 public struct CinematicClearSkyEffectView: View {
+    private static let animationEpoch = Date()
+
  // 🌈 光效粒子
     @State private var lightSpots: [LightSpot] = []
     @State private var causticRays: [CausticRay] = []
     @State private var glowParticles: [GlowParticle] = []
     
- // ⏱️ 时间状态
-    @State private var timeOffset: Double = 0
-    @State private var lastFrameTime: TimeInterval = 0
-    
- // 🎨 动态参数
-    @State private var ambientBrightness: Double = 1.0
-    @State private var refractionPhase: Double = 0
  // 🛰️ 远程桌面门控（统一暂停/恢复）
     @State private var isRemoteDesktopActive: Bool = false
- // ⏱️ 计时器统一持有
-    @State private var ambientTimer: Timer?
-    @State private var reflectionFlickerTimer: Timer?
- // ✨ 镜面反射/光晕闪烁调制因子
-    @State private var reflectionFlickerFactor: Double = 1.0
- // 统一时间累加器（替换原有 Timer），借助 TimelineView 的帧节拍触发
-    @State private var lastTick: Date = .now
-    @State private var ambientAcc: TimeInterval = 0
-    @State private var reflectionAcc: TimeInterval = 0
     
  // 🖱️ 交互式驱散（由统一入口 WeatherEffectView 注入；避免重复创建/重复监听）
     @ObservedObject private var clearManager: InteractiveClearManager
@@ -79,17 +65,18 @@ public struct CinematicClearSkyEffectView: View {
     }
     
     public var body: some View {
-        GeometryReader { geometry in
+        GeometryReader { _ in
             ZStack {
  // 1️⃣ 天空渐变背景（柔和的蓝到金）
                 skyGradientBackground()
                 
  // 2️⃣ 主效果层
                 TimelineView(.animation(minimumInterval: 1.0/60.0)) { timeline in
-                    let time = timeline.date.timeIntervalSinceReferenceDate
-                    let _ = scheduleTickClearSky(remoteActive: isRemoteDesktopActive, now: timeline.date)
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
                     
                     Canvas { context, size in
+                        guard !isRemoteDesktopActive else { return }
+
  // 🌊 焦散效应（水波纹状光投影）
                         drawCausticPatterns(context: &context, size: size, time: time)
                         
@@ -102,12 +89,6 @@ public struct CinematicClearSkyEffectView: View {
  // 🎭 镜头光晕（柔和的光晕效果）
                         drawLensFlare(context: &context, size: size, time: time)
                     }
-                    .onChange(of: time) { _, newTime in
- // ⚠️ 避免在视图更新过程中直接修改状态，移入主线程
-                        Task { @MainActor in
-                            updateParticlePhysics(time: newTime, screenSize: geometry.size)
-                        }
-                    }
                 }
             }
             .opacity(clearManager.globalOpacity)  // 🔥 驱散效果应用到整个 ZStack
@@ -115,27 +96,13 @@ public struct CinematicClearSkyEffectView: View {
         .ignoresSafeArea()
         .onAppear {
             initializeParticles()
- // 不再启动 Timer，所有系统由 TimelineView 的累加器统一调度
  // 🔥 启动交互式清空管理器
-            Task {
  // start() 为同步方法，直接调用；移除不必要的 await。
             clearManager.start()
-            }
-        }
-        .onDisappear {
- // 🛑 统一暂停所有特效系统并释放计时器
-            pauseAllEffectSystems()
         }
  // 📡 远程桌面会话指标：用于统一暂停/恢复所有系统
         .onReceive(RemoteDesktopManager.shared.metrics) { snapshot in
             isRemoteDesktopActive = snapshot.activeSessions > 0
-        }
-        .onChange(of: isRemoteDesktopActive) { oldValue, newValue in
-            if newValue {
-                pauseAllEffectSystems()
-            } else {
-                resumeAllEffectSystems()
-            }
         }
     }
     
@@ -160,6 +127,8 @@ public struct CinematicClearSkyEffectView: View {
  // MARK: - 粒子初始化
     
     private func initializeParticles() {
+        guard lightSpots.isEmpty, causticRays.isEmpty, glowParticles.isEmpty else { return }
+
  // 创建 15 个动态光斑（大小不一，缓慢移动）
         for i in 0..<15 {
             lightSpots.append(LightSpot(
@@ -199,51 +168,6 @@ public struct CinematicClearSkyEffectView: View {
                     velocityY: CGFloat.random(in: -3...3),
                     layer: layer
                 ))
-            }
-        }
-    }
-    
- // MARK: - 粒子更新
-    
-    private func updateParticlePhysics(time: TimeInterval, screenSize: CGSize) {
-        let deltaTime: CGFloat = lastFrameTime > 0 ? CGFloat(time - lastFrameTime) : 0.016
-        lastFrameTime = time
-        timeOffset = time
-        
- // 更新光斑位置
-        for i in 0..<lightSpots.count {
-            lightSpots[i].x += lightSpots[i].velocityX * deltaTime / screenSize.width
-            lightSpots[i].y += lightSpots[i].velocityY * deltaTime / screenSize.height
-            
- // 边界循环
-            if lightSpots[i].x < -0.2 || lightSpots[i].x > 1.2 {
-                lightSpots[i].x = CGFloat.random(in: 0...1)
-            }
-            if lightSpots[i].y < -0.2 || lightSpots[i].y > 1.2 {
-                lightSpots[i].y = CGFloat.random(in: 0...1)
-            }
-            
- // 脉动效果
-            lightSpots[i].pulsePhase += Double(deltaTime)
-        }
-        
- // 更新焦散光线
-        for i in 0..<causticRays.count {
-            causticRays[i].phase += Double(deltaTime) * 0.5
-            causticRays[i].x += sin(causticRays[i].phase) * 0.01
-        }
-        
- // 更新光晕粒子
-        for i in 0..<glowParticles.count {
-            glowParticles[i].x += glowParticles[i].velocityX * deltaTime / screenSize.width
-            glowParticles[i].y += glowParticles[i].velocityY * deltaTime / screenSize.height
-            
- // 边界循环
-            if glowParticles[i].x < -0.1 || glowParticles[i].x > 1.1 {
-                glowParticles[i].x = CGFloat.random(in: 0...1)
-            }
-            if glowParticles[i].y < -0.1 || glowParticles[i].y > 1.1 {
-                glowParticles[i].y = CGFloat.random(in: 0...1)
             }
         }
     }
@@ -384,8 +308,9 @@ public struct CinematicClearSkyEffectView: View {
         
  // 动态强度
         let baseIntensity = sin(time * 0.3) * 0.1 + 0.15
- // ✨ 引入微弱闪烁调制（保持在 0.9-1.1 范围内）
-        let flicker = max(0.9, min(1.1, reflectionFlickerFactor))
+ // ✨ 纯时间驱动微弱闪烁（保持在 0.85-1.05 范围内），避免每帧写 @State。
+        let flickerSignal = sin(time * 2.4) * 0.5 + sin(time * 3.8 + 1.2) * 0.3
+        let flicker = 0.95 + max(-0.1, min(0.1, flickerSignal))
         let intensity = baseIntensity * flicker
         
  // 主光晕
@@ -441,76 +366,4 @@ public struct CinematicClearSkyEffectView: View {
         )
     }
     
- // MARK: - 动画控制
-    
-    private func startAmbientAnimation() {
- // 环境光照变化
-        ambientTimer?.invalidate()
-        ambientTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            Task { @MainActor in
- // 在主线程读取状态以满足并发模型
-                guard !isRemoteDesktopActive else { return }
-                let time = Date().timeIntervalSinceReferenceDate
-                ambientBrightness = sin(time * 0.2) * 0.1 + 0.9
-            }
-        }
-    }
-
- /// 启动镜面反射/光晕闪烁系统（细微的强度抖动）
-    private func startReflectionFlickerSystem() {
-        reflectionFlickerTimer?.invalidate()
-        reflectionFlickerTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
-            Task { @MainActor in
- // 在主线程读取状态以满足并发模型
-                guard !isRemoteDesktopActive else { return }
-                let t = Date().timeIntervalSinceReferenceDate
- // 两组较快的正弦叠加，产生细微闪烁（范围约 0.9 - 1.1）
-                let s = sin(t * 2.4) * 0.5 + sin(t * 3.8 + 1.2) * 0.3
-                reflectionFlickerFactor = 0.95 + max(-0.1, min(0.1, s))
-            }
-        }
-    }
-
- /// 统一暂停所有特效系统（释放计时器）
-    private func pauseAllEffectSystems() {
-        ambientTimer?.invalidate(); ambientTimer = nil
-        reflectionFlickerTimer?.invalidate(); reflectionFlickerTimer = nil
-    }
-
- /// 统一恢复所有特效系统（重新启动计时器）
-    private func resumeAllEffectSystems() {
- // 采用 TimelineView 帧驱动，无需恢复任何 Timer
-    }
-    
- // MARK: - 统一调度用的更新方法（替代原 Timer 回调）
-    private func scheduleTickClearSky(remoteActive: Bool, now: Date) {
-        Task { @MainActor in
-            let dt = max(0, now.timeIntervalSince(lastTick))
-            lastTick = now
-            guard !remoteActive else { return }
-            ambientAcc += dt
-            if ambientAcc >= 0.1 {
-                updateAmbient()
-                ambientAcc = 0
-            }
-            reflectionAcc += dt
-            if reflectionAcc >= 0.08 {
-                updateReflectionFlickerClearSky()
-                reflectionAcc = 0
-            }
-        }
-    }
-    
-    private func updateAmbient() {
- // 环境亮度按时间缓慢变化，范围约 0.8-1.0
-        let time = Date().timeIntervalSinceReferenceDate
-        ambientBrightness = sin(time * 0.2) * 0.1 + 0.9
-    }
-    
-    private func updateReflectionFlickerClearSky() {
- // 两组正弦叠加产生细微闪烁（范围约 0.9 - 1.1）
-        let t = Date().timeIntervalSinceReferenceDate
-        let s = sin(t * 2.4) * 0.5 + sin(t * 3.8 + 1.2) * 0.3
-        reflectionFlickerFactor = 0.95 + max(-0.1, min(0.1, s))
-    }
 }

@@ -138,7 +138,7 @@ public enum AIAdvisoryRedactor {
                 ),
                 AIAdvisoryFactDTO(
                     name: "selected_tier",
-                    value: allowedValue(snapshot.selected_tier, allowed: ["classic", "nativePQC", "liboqsPQC"])
+                    value: allowedValue(snapshot.selected_tier, allowed: ["classic", "nativePQC", "liboqsPQC", "qperiaptPQC"])
                 ),
                 AIAdvisoryFactDTO(name: "selected_suite_wire_id", value: String(snapshot.selected_suite_wire_id)),
                 AIAdvisoryFactDTO(name: "fallback_allowed", value: snapshot.fallback_allowed ? "true" : "false"),
@@ -269,7 +269,7 @@ private enum AIAdvisoryFactValidation {
         case "policy":
             return ["classic", "prefer", "strict", "unknown"].contains(fact.value)
         case "selected_tier":
-            return ["classic", "nativePQC", "liboqsPQC", "unknown"].contains(fact.value)
+            return ["classic", "nativePQC", "liboqsPQC", "qperiaptPQC", "unknown"].contains(fact.value)
         case "selected_suite_wire_id":
             return UInt32(fact.value) != nil
         case "fallback_allowed":

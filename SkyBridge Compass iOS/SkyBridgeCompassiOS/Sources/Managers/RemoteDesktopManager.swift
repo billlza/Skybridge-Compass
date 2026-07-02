@@ -1307,27 +1307,10 @@ public class RemoteDesktopManager: ObservableObject {
 
     @MainActor
     private func normalizedCrossNetworkNativeVideoVisibleFrameSize(forCodedSize codedSize: CGSize) -> CGSize {
-        guard let expectedVisibleSize = expectedCrossNetworkNativeVideoVisibleFrameSize() else {
-            return codedSize
-        }
-        let expectedWidth = Int(expectedVisibleSize.width)
-        let expectedHeight = Int(expectedVisibleSize.height)
-        let codedWidth = Int(codedSize.width)
-        let codedHeight = Int(codedSize.height)
-        let expectedCodedWidth = Self.evenNativeVideoBackingDimension(expectedWidth)
-        let expectedCodedHeight = Self.evenNativeVideoBackingDimension(expectedHeight)
-        if codedWidth == expectedCodedWidth, codedHeight == expectedCodedHeight {
-            return expectedVisibleSize
-        }
-        if codedWidth == expectedWidth, codedHeight == expectedHeight {
-            return expectedVisibleSize
-        }
-        return codedSize
-    }
-
-    private static func evenNativeVideoBackingDimension(_ visibleDimension: Int) -> Int {
-        let sanitized = max(1, visibleDimension)
-        return sanitized.isMultiple(of: 2) ? sanitized : sanitized + 1
+        CrossNetworkWebRTCNativeVideoPolicy.normalizedVisibleFrameSize(
+            forCodedSize: codedSize,
+            expectedVisibleSize: expectedCrossNetworkNativeVideoVisibleFrameSize()
+        ).visibleSize
     }
 
     @MainActor

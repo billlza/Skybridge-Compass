@@ -1403,7 +1403,7 @@ public class FileTransferManager: BaseManager {
         }()
 
         transfer.resumeOffset = acceptedOffset
-        transfer.updateProgress(transferredBytes: acceptedOffset)
+        publishActiveTransferProgress(transfer, transferredBytes: acceptedOffset)
 
         try await sendResumeAcknowledgment(
             transferId: request.transferId,
@@ -1677,7 +1677,7 @@ public class FileTransferManager: BaseManager {
             from: connection
         )
         transfer.resumeOffset = acceptedOffset
-        transfer.updateProgress(transferredBytes: acceptedOffset)
+        publishActiveTransferProgress(transfer, transferredBytes: acceptedOffset)
 
         // 从断点继续分块传输
         try await sendFileInChunks(
@@ -2150,9 +2150,7 @@ public class FileTransferManager: BaseManager {
             sentBytes += Int64(chunkData.count)
             chunkIndex += 1
 
- // 使用新的统计功能更新进度
-            transfer.updateProgress(transferredBytes: sentBytes)
-            postTransferProgressNotification(for: transfer)
+            publishActiveTransferProgress(transfer, transferredBytes: sentBytes)
 
             logger.debug("📤 发送块 \(chunkIndex): \(chunkData.count) 字节")
         }
@@ -2231,9 +2229,7 @@ public class FileTransferManager: BaseManager {
             // receivedBytes 以“原始字节数”推进（chunk.size 是未压缩大小；与 fileSize 对齐）
             receivedBytes += Int64(chunk.size)
 
- // 使用新的统计功能更新进度
-            transfer.updateProgress(transferredBytes: receivedBytes)
-            postTransferProgressNotification(for: transfer)
+            publishActiveTransferProgress(transfer, transferredBytes: receivedBytes)
 
             logger.debug("📥 接收块 \(chunk.index): \(chunk.size) 字节")
         }
@@ -2780,10 +2776,7 @@ public class FileTransferManager: BaseManager {
     public func updateExternalInboundProgress(transferId: String, transferredBytes: Int64) {
         guard let transfer = activeTransfers[transferId] else { return }
         transfer.status = .transferring
-        transfer.updateProgress(transferredBytes: transferredBytes)
-        lastTransferActivityAt = Date()
-        postTransferProgressNotification(for: transfer)
-        updateTransferringStatus()
+        publishActiveTransferProgress(transfer, transferredBytes: transferredBytes)
     }
 
     /// WebRTC 入站：完成并落盘后调用。
@@ -2837,10 +2830,7 @@ public class FileTransferManager: BaseManager {
     public func updateExternalOutboundProgress(transferId: String, transferredBytes: Int64) {
         guard let transfer = activeTransfers[transferId] else { return }
         transfer.status = .transferring
-        transfer.updateProgress(transferredBytes: transferredBytes)
-        lastTransferActivityAt = Date()
-        postTransferProgressNotification(for: transfer)
-        updateTransferringStatus()
+        publishActiveTransferProgress(transfer, transferredBytes: transferredBytes)
     }
 
     public func completeExternalOutboundTransfer(transferId: String) {
@@ -2875,6 +2865,15 @@ public class FileTransferManager: BaseManager {
     private func registerActiveTransfer(_ transfer: FileTransfer) {
         activeTransfers[transfer.id] = transfer
         updateTransferPowerAssertion()
+        updateTransferringStatus()
+    }
+
+    private func publishActiveTransferProgress(_ transfer: FileTransfer, transferredBytes: Int64) {
+        transfer.updateProgress(transferredBytes: transferredBytes)
+        activeTransfers[transfer.id] = transfer
+        lastTransferActivityAt = Date()
+        updateTransferringStatus()
+        postTransferProgressNotification(for: transfer)
     }
 
     private func updateTransferPowerAssertion() {
@@ -2918,9 +2917,12 @@ public class FileTransferManager: BaseManager {
             "transferId": transfer.id,
             "fileName": transfer.fileName,
             "progress": progress,
-            "speed": 0.0,
+            "speed": transfer.transferSpeed,
+            "speedBytesPerSecond": transfer.transferSpeed,
             "transferredBytes": transferredBytes,
             "fileSize": transfer.fileSize,
+            "totalBytes": transfer.fileSize,
+            "direction": transfer.direction == .outgoing ? "outgoing" : "incoming",
             "deviceName": transfer.deviceName ?? transfer.deviceId
         ]
         NotificationCenter.default.post(
@@ -3040,8 +3042,17 @@ public class FileTransferManager: BaseManager {
         if activeTransfers.isEmpty {
             totalProgress = 0.0
         } else {
-            let totalProgress = activeTransfers.values.reduce(0.0) { $0 + $1.progress }
-            self.totalProgress = totalProgress / Double(activeTransfers.count)
+            let totalBytes = activeTransfers.values.reduce(Int64(0)) { total, transfer in
+                total + max(0, transfer.fileSize)
+            }
+            if totalBytes > 0 {
+                let transferredBytes = activeTransfers.values.reduce(Int64(0)) { total, transfer in
+                    total + max(0, min(transfer.transferredBytes, transfer.fileSize))
+                }
+                totalProgress = Double(transferredBytes) / Double(totalBytes)
+            } else {
+                totalProgress = activeTransfers.values.allSatisfy { $0.progress >= 1.0 } ? 1.0 : 0.0
+            }
         }
     }
 }

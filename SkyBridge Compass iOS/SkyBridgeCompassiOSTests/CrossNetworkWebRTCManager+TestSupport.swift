@@ -53,6 +53,10 @@ extension CrossNetworkWebRTCManager {
         mediaRelayLeaseFailureReasonAfterRefresh(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
     }
 
+    nonisolated internal static func testOnlyIsMediaAdmissionTokenRefreshable(status: Int, body: String) -> Bool {
+        isMediaAdmissionTokenRefreshable(SignalServerClientCompat.ClientError.serverRejected(status, body))
+    }
+
     nonisolated internal static func testOnlyMediaAdmissionRefreshFailureReason(status: Int, body: String) -> String {
         mediaAdmissionRefreshFailureReason(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
     }

@@ -167,7 +167,8 @@ skybridge_assert_release_stable_toolchain() {
 
   # The verifier policy follows the selected release toolchain line (single
   # source of truth in toolchain_release_pin.sh). Default line xcode26 ->
-  # stable-release (exact 26.5); line xcode27 -> os27-release (major-tolerant).
+  # stable-release (exact Xcode 26.6 + macOS SDK 26.5); line xcode27 ->
+  # os27-release (major-tolerant).
   # shellcheck source=Scripts/toolchain_release_pin.sh
   source "${SKYBRIDGE_PACKAGE_BUILD_POLICY_DIR}/toolchain_release_pin.sh"
   local verify_policy
@@ -189,7 +190,7 @@ skybridge_assert_release_app_stable_platform_metadata() {
   fi
 
   # Build-provenance (DT*) expectations come from the selected release toolchain
-  # line. Default line xcode26 -> exact macosx26.5 / 2650 / 17F42. Line xcode27 ->
+  # line. Default line xcode26 -> exact macosx26.5 / 2660 / 17F113. Line xcode27 ->
   # major-tolerant macosx27.x / 27xx with the rotating beta build id unasserted.
   # shellcheck source=Scripts/toolchain_release_pin.sh
   source "${SKYBRIDGE_PACKAGE_BUILD_POLICY_DIR}/toolchain_release_pin.sh"
@@ -213,8 +214,8 @@ with info_path.open("rb") as fh:
 
 match_mode = os.environ.get("SKYBRIDGE_PIN_MATCH_MODE", "exact")
 exp_sdk_name = os.environ.get("SKYBRIDGE_PIN_DT_SDK_NAME", "macosx26.5")
-exp_dtxcode = os.environ.get("SKYBRIDGE_PIN_DT_XCODE", "2650")
-exp_dtxcode_build = os.environ.get("SKYBRIDGE_PIN_DT_XCODE_BUILD", "17F42")
+exp_dtxcode = os.environ.get("SKYBRIDGE_PIN_DT_XCODE", "2660")
+exp_dtxcode_build = os.environ.get("SKYBRIDGE_PIN_DT_XCODE_BUILD", "17F113")
 
 errors = []
 
@@ -445,10 +446,10 @@ skybridge_app_binary_candidates() {
   local frameworks_dir="${app_bundle}/Contents/Frameworks"
 
   if [[ -d "${macos_dir}" ]]; then
-    find "${macos_dir}" -type f -perm -111 -print 2>/dev/null
+    find "${macos_dir}" -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print 2>/dev/null
   fi
   if [[ -d "${frameworks_dir}" ]]; then
-    find "${frameworks_dir}" -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) -print 2>/dev/null
+    find "${frameworks_dir}" -type f \( -perm -100 -o -perm -010 -o -perm -001 -o -name "*.dylib" -o -name "*.so" \) -print 2>/dev/null
   fi
 }
 

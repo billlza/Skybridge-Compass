@@ -140,9 +140,8 @@ where
 /// signature before logging so a mis-signed record is surfaced loudly.
 fn emit_signed_downgrade(session_id: &str, peer: &str, signed: &SignedDowngradeEvent) {
     let verified = signed.verify().is_ok();
-    let json = serde_json::to_string(signed).unwrap_or_else(|error| {
-        format!("{{\"serialize_error\":\"{}\"}}", error)
-    });
+    let json = serde_json::to_string(signed)
+        .unwrap_or_else(|error| format!("{{\"serialize_error\":\"{}\"}}", error));
     if verified {
         warn!(
             kind = "agent.session.crypto_downgrade",
@@ -209,7 +208,9 @@ mod tests {
             FallbackReason::PqcProviderUnavailable
         );
         assert_eq!(
-            classify_agent_handshake_error(&anyhow!("no mutually supported PQC suite found in MessageA")),
+            classify_agent_handshake_error(&anyhow!(
+                "no mutually supported PQC suite found in MessageA"
+            )),
             FallbackReason::SuiteNegotiationFailed
         );
         // BLOCKED: timeouts, auth failures, and ambiguous errors all map to a
@@ -241,7 +242,11 @@ mod tests {
             CryptoSuite::MLKEM768_MLDSA65,
             AGENT_CLASSIC_FALLBACK_SUITE,
             Some(vec![0x01, 0x02]),
-            || Err(anyhow!("no peer PQC KEM public keys available for preferred suites")),
+            || {
+                Err(anyhow!(
+                    "no peer PQC KEM public keys available for preferred suites"
+                ))
+            },
             || {
                 classic_calls += 1;
                 Ok("classic")

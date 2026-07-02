@@ -237,6 +237,52 @@ public enum CryptoProviderFactory {
         return baseProvider
     }
 
+    /// Outbound (offerer/initiator) analogue of `makeInboundPQCResponderProvider`.
+    ///
+    /// The initial WebRTC offerer used to elect its provider purely from local capability via
+    /// `make(policy:)`. When the local default is `AppleXWingCryptoProvider` (X-Wing-only) and the
+    /// peer is an ML-KEM-768-only responder (liboqs / Android / Windows / Linux / older iOS), the
+    /// X-Wing-only provider cannot encapsulate the only mutually-supported family → suiteNegotiation
+    /// failure even though both sides share ML-KEM-768. This mirrors the inbound responder's
+    /// peer-aware selection so the outbound active provider can encapsulate the shared suites.
+    ///
+    /// Selection is a LATERAL choice among `.nativePQC` providers (ApplePQC <-> AppleXWing), never a
+    /// downgrade: when the peer advertises BOTH X-Wing and ML-KEM (two OS27 native devices) it falls
+    /// through to the base provider so the local X-Wing preference is honored and the pair still
+    /// negotiates X-Wing. `peerAdvertisedSuites` MUST come from the authority-bound/signed trust store.
+    public static func makeOutboundPQCInitiatorProvider(
+        policy: SelectionPolicy,
+        peerAdvertisedSuites: [CryptoSuite],
+        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
+    ) -> any CryptoProvider {
+        let baseProvider = make(policy: policy, environment: environment)
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
+            let peerSupportsXWing = peerAdvertisedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.xwingMLDSA.providerCompatibilitySuite.wireId
+            }
+            let peerSupportsMLKEM = peerAdvertisedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.mlkem768MLDSA65.providerCompatibilitySuite.wireId
+            }
+
+            switch (peerSupportsXWing, peerSupportsMLKEM) {
+            case (true, false):
+                guard isAppleXWingAvailable() else {
+                    return UnavailablePQCProvider()
+                }
+                return AppleXWingCryptoProvider()
+            case (false, true):
+                return ApplePQCCryptoProvider()
+            default:
+                return baseProvider
+            }
+        }
+        #endif
+
+        return baseProvider
+    }
+
     public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
         provider.supportedSuites.filter { $0.isPQCGroup }
     }
@@ -260,6 +306,8 @@ public enum CryptoProviderFactory {
         let fallbackFromPreferred: Bool
 
         switch selectedTier {
+        case .qperiaptPQC:
+            fallbackFromPreferred = false
         case .nativePQC:
             fallbackFromPreferred = false
         case .liboqsPQC:

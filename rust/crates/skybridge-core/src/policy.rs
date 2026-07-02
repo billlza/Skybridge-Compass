@@ -576,6 +576,15 @@ mod base64_standard {
     }
 }
 
+/// Encode a policy posture's `requirePQC` flag into the legacy on-wire policy byte
+/// (`pqc_policy_bytes` emits `0x01`; `classic_policy_bytes` emits `0x00`).
+///
+/// Kept here so the handshake codecs and the policy layer agree on the meaning of
+/// the first policy byte without changing the wire format.
+pub(crate) fn encode_policy_wire_byte(policy: DowngradePolicy) -> u8 {
+    if policy.requires_pqc() { 0x01 } else { 0x00 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,13 +944,4 @@ mod tests {
         );
         assert_eq!(encode_policy_wire_byte(DowngradePolicy::Default), 0x00);
     }
-}
-
-/// Encode a policy posture's `requirePQC` flag into the legacy on-wire policy byte
-/// (`pqc_policy_bytes` emits `0x01`; `classic_policy_bytes` emits `0x00`).
-///
-/// Kept here so the handshake codecs and the policy layer agree on the meaning of
-/// the first policy byte without changing the wire format.
-pub(crate) fn encode_policy_wire_byte(policy: DowngradePolicy) -> u8 {
-    if policy.requires_pqc() { 0x01 } else { 0x00 }
 }

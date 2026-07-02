@@ -40,33 +40,30 @@ struct SnowPile: Identifiable {
 
 @available(macOS 14.0, *)
 public struct CinematicSnowEffectView: View {
+    private static let animationEpoch = Date()
+
  // 物理粒子状态
     @State private var snowflakes: [PhysicsSnowflake] = []
     @State private var snowPiles: [SnowPile] = []
     
  // 天气状态
-    @State private var windSpeed: CGFloat = 0
-    @State private var windDirection: CGFloat = 0
-    @State private var lastFrameTime: TimeInterval = 0
     @State private var isRemoteDesktopActive: Bool = false
-    @State private var windTimer: Timer?
-    @State private var windNoiseTimer: Timer?
-    @State private var ambientWindNoiseLevel: Double = 0.0
     
  // 交互式驱散管理器（由统一入口 WeatherEffectView 注入；避免重复创建/重复监听）
     @ObservedObject private var clearManager: InteractiveClearManager
-    private let physicsActor = SnowPhysicsActor()
     
     public init(clearManager: InteractiveClearManager) {
         self.clearManager = clearManager
     }
     
     public var body: some View {
-        GeometryReader { geometry in
+        GeometryReader { _ in
             ZStack {
  // 主雪天效果层
                 TimelineView(.animation(minimumInterval: 1.0/60.0)) { timeline in
-                    let time = timeline.date.timeIntervalSinceReferenceDate
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
+                    let remoteActive = isRemoteDesktopActive
+                    let clearZones = clearManager.clearZones
                     
                     ZStack {
  // 1️⃣ 电影级天空背景 - 应用驱散效果，露出底层主题壁纸
@@ -79,14 +76,16 @@ public struct CinematicSnowEffectView: View {
                         
  // 3️⃣ 雪花渲染层
                         Canvas { context, size in
+                            guard !remoteActive else { return }
+
  // 先绘制远景模糊雪花（Bokeh效果）
-                            drawBackgroundSnowflakes(context: &context, size: size, time: time)
+                            drawBackgroundSnowflakes(context: &context, size: size, time: time, clearZones: clearZones)
                             
  // 再绘制中景雪花
-                            drawMidgroundSnowflakes(context: &context, size: size, time: time)
+                            drawMidgroundSnowflakes(context: &context, size: size, time: time, clearZones: clearZones)
                             
  // 最后绘制近景清晰雪花
-                            drawForegroundSnowflakes(context: &context, size: size, time: time)
+                            drawForegroundSnowflakes(context: &context, size: size, time: time, clearZones: clearZones)
                         }
                         .opacity(clearManager.globalOpacity)
                         
@@ -105,123 +104,19 @@ public struct CinematicSnowEffectView: View {
                         SnowVignette()
                             .opacity(0.4 * clearManager.globalOpacity)
                     }
-                    .onChange(of: time) { _, newTime in
- // 🔧 Swift 6.2.1 并发安全：在主线程同步更新雪花物理状态
- // 移除 .detached，改为同步更新，避免 struct 中 self 捕获问题
-                        let capturedSize = geometry.size
-                        let flakes = snowflakes
-                        let wind = windSpeed
-                        let noise = ambientWindNoiseLevel
-                        let delta: CGFloat = lastFrameTime > 0 ? CGFloat(newTime - lastFrameTime) : 0.016
-                        let zones = clearManager.clearZones
-                        
- // 同步更新雪花物理状态（轻量计算，无需异步）
-                        var updatedFlakes = flakes
-                        for i in updatedFlakes.indices {
-                            var flake = updatedFlakes[i]
-                            
- // 根据层次调整物理参数
-                            let layerFactor = CGFloat(1.0 - Double(flake.layer) * 0.2)
-                            
- // 🌟 计算鼠标驱散力
-                            let flakeScreenX = flake.x * capturedSize.width
-                            let flakeScreenY = flake.y * capturedSize.height
-                            var disperseForceX: CGFloat = 0
-                            var disperseForceY: CGFloat = 0
-                            
-                            for zone in zones {
-                                let dx = flakeScreenX - zone.center.x
-                                let dy = flakeScreenY - zone.center.y
-                                let distanceSquared = dx * dx + dy * dy
-                                let radiusSquared = zone.radius * zone.radius
-                                
-                                if distanceSquared < radiusSquared && distanceSquared > 0.01 {
-                                    let distance = sqrt(distanceSquared)
-                                    let normalizedDist = distance / zone.radius
-                                    let falloff = (1.0 - normalizedDist * normalizedDist)
-                                    let strength = CGFloat(zone.strength) * falloff
-                                    let dirX = dx / distance
-                                    let dirY = dy / distance
-                                    let disperseStrength: CGFloat = 800 * strength
-                                    disperseForceX += dirX * disperseStrength
-                                    disperseForceY += dirY * disperseStrength
-                                }
-                            }
-                            
- // 重力加速度
-                            flake.velocityY += flake.acceleration * delta * layerFactor
-                            
- // 风力影响
-                            let windFactor = 0.05 * (1.0 + CGFloat(flake.layer) * 0.3)
-                            flake.velocityX += (wind * layerFactor - flake.velocityX) * windFactor
-                            
- // 应用驱散力
-                            flake.velocityX += disperseForceX * delta
-                            flake.velocityY += disperseForceY * delta
-                            
- // 空气阻力
-                            let drag: CGFloat = 0.01 * (1.0 + CGFloat(2 - flake.layer) * 0.2)
-                            let speedSquared = flake.velocityY * flake.velocityY
-                            let dragForce = drag * speedSquared / flake.mass
-                            flake.velocityY -= dragForce * delta
-                            
- // 摇摆运动
-                            let swayMod = 0.8 + 0.4 * CGFloat(noise)
-                            let swayAmount = sin(CGFloat(newTime) * 2 + flake.swayPhase) * 0.002 * swayMod * layerFactor
-                            
- // 更新位置
-                            flake.x += (flake.velocityX * delta + swayAmount) / 800
-                            flake.y += flake.velocityY * delta / 800
-                            
- // 旋转
-                            flake.rotation += flake.rotationSpeed * delta
-                            if flake.rotation > 360 { flake.rotation -= 360 }
-                            else if flake.rotation < 0 { flake.rotation += 360 }
-                            
- // 边界检查
-                            if flake.y > 1.1 {
-                                flake.y = -0.1
-                                flake.x = CGFloat.random(in: 0...1)
-                                flake.velocityY = CGFloat.random(in: 30...80)
-                                flake.velocityX = CGFloat.random(in: -20...20)
-                            }
-                            if flake.x < -0.1 || flake.x > 1.1 {
-                                flake.x = CGFloat.random(in: 0...1)
-                            }
-                            
-                            updatedFlakes[i] = flake
-                        }
-                        
-                        snowflakes = updatedFlakes
-                        lastFrameTime = newTime
-                    }
                 }
             }
         }
         .ignoresSafeArea()
         .onAppear {
             initializeEnhancedParticles()
-            startWindSystem()
-            startWindNoiseSystem()
             clearManager.start()
-        }
-        .onDisappear {
-            pauseAllEffectSystems()
         }
         .onReceive(RemoteDesktopManager.shared.metrics) { snapshot in
             isRemoteDesktopActive = snapshot.activeSessions > 0
         }
-        .onChange(of: isRemoteDesktopActive) { oldValue, newValue in
-            if newValue {
-                pauseAllEffectSystems()
-            } else {
-                resumeAllEffectSystems()
-            }
-        }
  // 🔧 系统唤醒后恢复雪花效果
         .onReceive(NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)) { _ in
- // 系统从睡眠/锁屏唤醒后，Timer 可能失效，需要重新启动
-            resumeAllEffectSystems()
  // 如果雪花数组为空，重新初始化
             if snowflakes.isEmpty {
                 initializeEnhancedParticles()
@@ -229,8 +124,6 @@ public struct CinematicSnowEffectView: View {
         }
  // 🔧 屏幕解锁后恢复雪花效果
         .onReceive(NotificationCenter.default.publisher(for: NSWorkspace.screensDidWakeNotification)) { _ in
- // 屏幕唤醒后恢复效果系统
-            resumeAllEffectSystems()
             if snowflakes.isEmpty {
                 initializeEnhancedParticles()
             }
@@ -238,9 +131,6 @@ public struct CinematicSnowEffectView: View {
  // 🔧 应用激活时检查并恢复效果
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
  // 应用从后台切换到前台时，检查并恢复效果
-            if windTimer == nil {
-                resumeAllEffectSystems()
-            }
             if snowflakes.isEmpty {
                 initializeEnhancedParticles()
             }
@@ -250,6 +140,8 @@ public struct CinematicSnowEffectView: View {
  // MARK: - 增强版粒子初始化
     
     private func initializeEnhancedParticles() {
+        guard snowflakes.isEmpty, snowPiles.isEmpty else { return }
+
  // 远景雪花（模糊、小、密集）- Bokeh 效果
         for _ in 0..<80 {
             snowflakes.append(PhysicsSnowflake(
@@ -321,50 +213,63 @@ public struct CinematicSnowEffectView: View {
         }
     }
     
- // MARK: - 风力系统
-    
-    private func startWindSystem() {
-        windTimer?.invalidate()
-        windTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] _ in
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                let time = Date().timeIntervalSinceReferenceDate
-                windSpeed = sin(time * 0.3) * 100 + cos(time * 0.15) * 30
-                windDirection = sin(time * 0.1)
-            }
-        }
-    }
-    
-    private func startWindNoiseSystem() {
-        windNoiseTimer?.invalidate()
-        windNoiseTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [self] _ in
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                let t = Date().timeIntervalSinceReferenceDate
-                let base = (sin(t * 0.33) + sin(t * 0.19 + 0.8)) * 0.5
-                let windScale = min(1.0, max(0.0, Double(abs(windSpeed) / 150.0)))
-                ambientWindNoiseLevel = min(1.0, max(0.0, (base * 0.5 + 0.5) * windScale))
-            }
-        }
-    }
-
-    private func pauseAllEffectSystems() {
-        windTimer?.invalidate(); windTimer = nil
-        windNoiseTimer?.invalidate(); windNoiseTimer = nil
-    }
-
-    private func resumeAllEffectSystems() {
-        startWindSystem()
-        startWindNoiseSystem()
-    }
-    
  // MARK: - 分层渲染方法
+
+    private func positiveModulo(_ value: CGFloat, _ modulus: CGFloat) -> CGFloat {
+        let result = value.truncatingRemainder(dividingBy: modulus)
+        return result >= 0 ? result : result + modulus
+    }
+
+    private func renderedSnowflake(
+        _ flake: PhysicsSnowflake,
+        size: CGSize,
+        time: TimeInterval,
+        clearZones: [DynamicClearZone]
+    ) -> (x: CGFloat, y: CGFloat, rotation: CGFloat) {
+        let t = CGFloat(time)
+        let layerFactor = CGFloat(1.0 - Double(flake.layer) * 0.2)
+        let wind = sin(t * 0.30) * 100 + cos(t * 0.15) * 30
+        let windNoise = (sin(t * 0.33) + sin(t * 0.19 + 0.8)) * 0.5
+        let windScale = min(1.0, max(0.0, abs(wind) / 150.0))
+        let swayMod = 0.8 + 0.4 * max(0.0, min(1.0, (windNoise * 0.5 + 0.5) * windScale))
+        let drift = (flake.velocityX + wind * layerFactor * 0.08) * t / 800.0
+        let sway = sin(t * 2 + flake.swayPhase) * 0.018 * swayMod * layerFactor
+        let normalizedX = positiveModulo(flake.x + drift + sway + 0.1, 1.2) - 0.1
+        let normalizedY = positiveModulo(flake.y + flake.velocityY * layerFactor * t / 800.0 + 0.15, 1.3) - 0.15
+
+        var x = normalizedX * size.width
+        var y = normalizedY * size.height
+
+        for zone in clearZones {
+            let dx = x - zone.center.x
+            let dy = y - zone.center.y
+            let distanceSquared = dx * dx + dy * dy
+            let radiusSquared = zone.radius * zone.radius
+            guard distanceSquared < radiusSquared, distanceSquared > 0.01 else { continue }
+
+            let distance = sqrt(distanceSquared)
+            let normalizedDistance = distance / zone.radius
+            let falloff = 1.0 - normalizedDistance * normalizedDistance
+            let displacement = zone.radius * CGFloat(zone.strength) * falloff * 0.18
+            x += dx / distance * displacement
+            y += dy / distance * displacement
+        }
+
+        let rotation = flake.rotation + flake.rotationSpeed * t
+        return (x, y, rotation)
+    }
     
  /// 远景雪花 - Bokeh 效果
-    private func drawBackgroundSnowflakes(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+    private func drawBackgroundSnowflakes(
+        context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        clearZones: [DynamicClearZone]
+    ) {
         for flake in snowflakes where flake.layer == 0 {
-            let x = flake.x * size.width
-            let y = flake.y * size.height
+            let rendered = renderedSnowflake(flake, size: size, time: time, clearZones: clearZones)
+            let x = rendered.x
+            let y = rendered.y
             
  // 大光圈 Bokeh 效果
             let bokehSize = flake.size * 3
@@ -393,14 +298,20 @@ public struct CinematicSnowEffectView: View {
     }
     
  /// 中景雪花 - 半清晰带光晕
-    private func drawMidgroundSnowflakes(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+    private func drawMidgroundSnowflakes(
+        context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        clearZones: [DynamicClearZone]
+    ) {
         for flake in snowflakes where flake.layer == 1 {
-            let x = flake.x * size.width
-            let y = flake.y * size.height
+            let rendered = renderedSnowflake(flake, size: size, time: time, clearZones: clearZones)
+            let x = rendered.x
+            let y = rendered.y
             
             var transform = CGAffineTransform.identity
             transform = transform.translatedBy(x: x, y: y)
-            transform = transform.rotated(by: flake.rotation * .pi / 180)
+            transform = transform.rotated(by: rendered.rotation * .pi / 180)
             
  // 先绘制光晕
             let glowSize = flake.size * 2
@@ -436,14 +347,20 @@ public struct CinematicSnowEffectView: View {
     }
     
  /// 近景雪花 - 高清晰度 + 强光晕
-    private func drawForegroundSnowflakes(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+    private func drawForegroundSnowflakes(
+        context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        clearZones: [DynamicClearZone]
+    ) {
         for flake in snowflakes where flake.layer == 2 {
-            let x = flake.x * size.width
-            let y = flake.y * size.height
+            let rendered = renderedSnowflake(flake, size: size, time: time, clearZones: clearZones)
+            let x = rendered.x
+            let y = rendered.y
             
             var transform = CGAffineTransform.identity
             transform = transform.translatedBy(x: x, y: y)
-            transform = transform.rotated(by: flake.rotation * .pi / 180)
+            transform = transform.rotated(by: rendered.rotation * .pi / 180)
             
  // 强光晕效果
             let glowSize = flake.size * 2.5
@@ -933,100 +850,3 @@ struct SnowVignette: View {
         }
     }
 }
-
-// MARK: - 粒子物理 Actor
-
-private actor SnowPhysicsActor {
-    func update(
-        snowflakes: [PhysicsSnowflake],
-        windSpeed: CGFloat,
-        ambientWindNoiseLevel: Double,
-        deltaTime: CGFloat,
-        time: TimeInterval,
-        clearZones: [DynamicClearZone] = [],
-        screenSize: CGSize = CGSize(width: 1920, height: 1080)
-    ) -> [PhysicsSnowflake] {
-        var flakes = snowflakes
-        for i in flakes.indices {
-            var flake = flakes[i]
-            
- // 根据层次调整物理参数
-            let layerFactor = CGFloat(1.0 - Double(flake.layer) * 0.2)
-            
- // 🌟 计算鼠标驱散力
-            let flakeScreenX = flake.x * screenSize.width
-            let flakeScreenY = flake.y * screenSize.height
-            var disperseForceX: CGFloat = 0
-            var disperseForceY: CGFloat = 0
-            
-            for zone in clearZones {
-                let dx = flakeScreenX - zone.center.x
-                let dy = flakeScreenY - zone.center.y
-                let distanceSquared = dx * dx + dy * dy
-                let radiusSquared = zone.radius * zone.radius
-                
-                if distanceSquared < radiusSquared && distanceSquared > 0.01 {
-                    let distance = sqrt(distanceSquared)
- // 驱散力随距离衰减（二次衰减）
-                    let normalizedDist = distance / zone.radius
-                    let falloff = (1.0 - normalizedDist * normalizedDist)
-                    let strength = CGFloat(zone.strength) * falloff
-                    
- // 计算驱散方向（从清除区域中心向外）
-                    let dirX = dx / distance
-                    let dirY = dy / distance
-                    
- // 驱散力强度（像素/秒）
-                    let disperseStrength: CGFloat = 800 * strength
-                    disperseForceX += dirX * disperseStrength
-                    disperseForceY += dirY * disperseStrength
-                }
-            }
-            
- // 重力加速度
-            flake.velocityY += flake.acceleration * deltaTime * layerFactor
-            
- // 风力影响
-            let windFactor = 0.05 * (1.0 + CGFloat(flake.layer) * 0.3)
-            flake.velocityX += (windSpeed * layerFactor - flake.velocityX) * windFactor
-            
- // 🌟 应用驱散力（转换为归一化速度）
-            flake.velocityX += disperseForceX * deltaTime
-            flake.velocityY += disperseForceY * deltaTime
-            
- // 空气阻力
-            let drag: CGFloat = 0.01 * (1.0 + CGFloat(2 - flake.layer) * 0.2)
-            let speedSquared = flake.velocityY * flake.velocityY
-            let dragForce = drag * speedSquared / flake.mass
-            flake.velocityY -= dragForce * deltaTime
-            
- // 摇摆运动
-            let swayMod = 0.8 + 0.4 * CGFloat(ambientWindNoiseLevel)
-            let swayAmount = sin(CGFloat(time) * 2 + flake.swayPhase) * 0.002 * swayMod * layerFactor
-            
- // 更新位置
-            flake.x += (flake.velocityX * deltaTime + swayAmount) / 800
-            flake.y += flake.velocityY * deltaTime / 800
-            
- // 旋转
-            flake.rotation += flake.rotationSpeed * deltaTime
-            if flake.rotation > 360 { flake.rotation -= 360 }
-            else if flake.rotation < 0 { flake.rotation += 360 }
-            
- // 边界检查
-            if flake.y > 1.1 {
-                flake.y = -0.1
-                flake.x = CGFloat.random(in: 0...1)
-                flake.velocityY = CGFloat.random(in: 30...80)
-                flake.velocityX = CGFloat.random(in: -20...20)
-            }
-            if flake.x < -0.1 || flake.x > 1.1 {
-                flake.x = CGFloat.random(in: 0...1)
-            }
-            
-            flakes[i] = flake
-        }
-        return flakes
-    }
-}
-

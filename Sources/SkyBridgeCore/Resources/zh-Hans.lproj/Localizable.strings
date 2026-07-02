@@ -209,6 +209,11 @@
 "settings.general.dataManagement" = "数据管理";
 "settings.general.clearCache" = "清理缓存";
 "settings.general.cacheSize" = "当前缓存：%@";
+"settings.general.cacheSize.unavailable" = "无法计算";
+"settings.general.cache.clearing" = "正在清理缓存...";
+"settings.general.cache.clearComplete" = "缓存已清理，释放 %@。";
+"settings.general.cache.clearFailed" = "缓存清理失败：%@";
+"settings.general.cache.sizeFailed" = "缓存大小不可用：%@";
 "settings.general.exportSettings" = "导出设置";
 "settings.general.importSettings" = "导入设置";
 "settings.general.resetSettings" = "恢复默认设置";

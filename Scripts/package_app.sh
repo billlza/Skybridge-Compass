@@ -457,6 +457,36 @@ function normalize_resource_bundle_to_macos_layout() {
   mv "${tmp_dir}" "${bundle}"
 }
 
+function copy_resource_bundle_into_app_resources() {
+  local source_bundle="$1"
+  local dest_bundle="${RES_DIR}/$(basename "${source_bundle}")"
+  local tmp_parent=""
+  local tmp_bundle=""
+  local has_info_plist=0
+
+  tmp_parent="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-resourcebundle-copy.XXXXXX")"
+  tmp_bundle="${tmp_parent}/$(basename "${source_bundle}")"
+  ditto "${source_bundle}" "${tmp_bundle}"
+
+  if [[ -f "${tmp_bundle}/Info.plist" || -f "${tmp_bundle}/Contents/Info.plist" ]]; then
+    has_info_plist=1
+    normalize_resource_bundle_to_macos_layout "${tmp_bundle}"
+  fi
+
+  if [[ -d "${dest_bundle}" ]]; then
+    if [[ "${has_info_plist}" -eq 1 && \
+          ( -f "${dest_bundle}/Info.plist" || -f "${dest_bundle}/Contents/Info.plist" ) ]]; then
+      normalize_resource_bundle_to_macos_layout "${dest_bundle}"
+    fi
+    ditto "${tmp_bundle}" "${dest_bundle}"
+  else
+    mkdir -p "$(dirname "${dest_bundle}")"
+    mv "${tmp_bundle}" "${dest_bundle}"
+  fi
+
+  rm -rf "${tmp_parent}"
+}
+
 function copy_compiled_native_app_resource() {
   local native_resources_dir="$1"
   local module_resources_dir="$2"
@@ -511,6 +541,35 @@ function copy_xcode_app_compiled_resources_to_main_bundle() {
     if [[ -e "${native_resources_dir}/${resource_name}" ]]; then
       rm -rf "${RES_DIR}/${resource_name}"
       ditto "${native_resources_dir}/${resource_name}" "${RES_DIR}/${resource_name}"
+    fi
+  done
+}
+
+function validate_core_metal_shader_sources() {
+  local core_module_resources_dir="$1"
+  local shader_file=""
+  local -a shader_files=(
+    RemoteDesktopShaders.metal
+    RemoteDesktopPassthrough.metal
+    RemoteDesktopHDR.metal
+    Metal4Shaders.metal
+    AuroraShaders.metal
+    WeatherParticleShaders.metal
+    WeatherShaders.metal
+    RainShaders.metal
+    HazeShaders.metal
+    HazeParticleShaders.metal
+  )
+
+  if [[ ! -d "${core_module_resources_dir}" ]]; then
+    echo "错误：缺少 SkyBridgeCore 资源目录：${core_module_resources_dir}" >&2
+    exit 1
+  fi
+
+  for shader_file in "${shader_files[@]}"; do
+    if [[ ! -f "${core_module_resources_dir}/${shader_file}" ]]; then
+      echo "错误：缺少 SkyBridgeCore Metal shader 源文件：${core_module_resources_dir}/${shader_file}" >&2
+      exit 1
     fi
   done
 }
@@ -1058,12 +1117,26 @@ done <<< "${linked_frameworks}"
 FREERDP_DYLIB_DIR="${ROOT_DIR}/Sources/Vendor/FreeRDPDylibs"
 freerdp_dylibs=("${FREERDP_DYLIB_DIR}"/*.dylib(N))
 if (( ${#freerdp_dylibs} )); then
+  if is_release_distribution_context; then
+    for required_dylib in libfreerdp3.dylib libfreerdp-client3.dylib libwinpr3.dylib libssl.3.dylib libcrypto.3.dylib; do
+      if [[ ! -f "${FREERDP_DYLIB_DIR}/${required_dylib}" ]]; then
+        echo "错误：release_dmg 打包缺少必要的 FreeRDP 动态库：${FREERDP_DYLIB_DIR}/${required_dylib}" >&2
+        echo "请先运行 Scripts/build_freerdp_dylibs.sh 生成完整自包含 dylib closure。" >&2
+        exit 1
+      fi
+    done
+  fi
   log "嵌入 FreeRDP 动态库到 Frameworks/（自包含 RDP，无需 Homebrew）：${#freerdp_dylibs} 个"
   for dylib in "${freerdp_dylibs[@]}"; do
     cp -f "${dylib}" "${FW_DIR}/"
     chmod u+w "${FW_DIR}/$(basename "${dylib}")"
   done
 else
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包缺少预构建 FreeRDP 动态库目录：${FREERDP_DYLIB_DIR}" >&2
+    echo "请先运行 Scripts/build_freerdp_dylibs.sh；正式 DMG 禁止回退用户机器上的 Homebrew libfreerdp3。" >&2
+    exit 1
+  fi
   log "ℹ️ 未找到预构建 FreeRDP 动态库（${FREERDP_DYLIB_DIR}）；RDP 将回退 Homebrew libfreerdp3。运行 Scripts/build_freerdp_dylibs.sh 可使其自包含。"
 fi
 
@@ -1114,14 +1187,23 @@ fi
 
 log "拷贝 Swift 运行时 dylib 到 .app/Contents/Frameworks/"
 if xcrun -f swift-stdlib-tool >/dev/null 2>&1; then
-  xcrun swift-stdlib-tool --copy --verbose \
+  if ! xcrun swift-stdlib-tool --copy --verbose \
     --platform macosx \
     --scan-executable "${APP_BIN}" \
     --destination "${FW_DIR}" \
-    >/dev/null 2>&1 || {
-      log "swift-stdlib-tool 执行失败（开发阶段可忽略，但发布包可能缺 Swift dylib）"
-    }
+    >/dev/null 2>&1; then
+    if is_release_distribution_context; then
+      echo "错误：release_dmg 打包中 swift-stdlib-tool 执行失败，禁止发布可能缺 Swift runtime 的 App。" >&2
+      exit 1
+    fi
+
+    log "swift-stdlib-tool 执行失败（开发阶段可忽略，但发布包可能缺 Swift dylib）"
+  fi
 else
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包缺少 swift-stdlib-tool，禁止发布无法证明 Swift runtime 完整性的 App。" >&2
+    exit 1
+  fi
   log "未找到 swift-stdlib-tool，跳过 Swift dylib 拷贝"
 fi
 
@@ -1138,8 +1220,7 @@ for bundle_dir in "${resource_bundle_dirs[@]}"; do
   for bundle in "${bundle_dir}"/*.bundle(N); do
     [[ -d "${bundle}" ]] || continue
     found_bundle=1
-    rm -rf "${RES_DIR}/$(basename "${bundle}")"
-    ditto "${bundle}" "${RES_DIR}/$(basename "${bundle}")"
+    copy_resource_bundle_into_app_resources "${bundle}"
   done
 done
 if [[ "${found_bundle}" -eq 0 ]]; then
@@ -1165,10 +1246,7 @@ if [[ ! -f "${APP_RESOURCE_BUNDLE}/Contents/Resources/default.metallib" ]]; then
   echo "错误：缺少编译后的 App default.metallib；禁止发布未经过 Xcode Metal 编译的资源 bundle。" >&2
   exit 1
 fi
-if [[ ! -f "${CORE_RESOURCE_BUNDLE}/Contents/Resources/default.metallib" ]]; then
-  echo "错误：缺少编译后的 SkyBridgeCore default.metallib；禁止发布未经过 Xcode Metal 编译的资源 bundle。" >&2
-  exit 1
-fi
+validate_core_metal_shader_sources "${CORE_RESOURCE_BUNDLE}/Contents/Resources"
 
 # 额外拷贝源资源目录，供 LaunchServices app icon 与运行态 Dock 图标按主 bundle 解析。
 SRC_RES_DIR="${ROOT_DIR}/Sources/SkyBridgeCompassApp/Resources"
@@ -1186,7 +1264,7 @@ fi
 plutil -replace SkyBridgePackagingBuildSource -string "${BUILD_SOURCE}" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildScheme -string "SkyBridgeCompassApp" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildConfiguration -string "Release" "${INFO_PLIST_DST}"
-plutil -replace SkyBridgePackagingBuildProductPath -string "${BUILD_DIR}/${EXECUTABLE}" "${INFO_PLIST_DST}"
+plutil -replace SkyBridgePackagingBuildProductPath -string "<redacted:${BUILD_SOURCE}>/${EXECUTABLE}" "${INFO_PLIST_DST}"
 skybridge_stamp_apple_pqc_sdk_packaging_metadata "${INFO_PLIST_DST}" "${APP_DIR}" "${PACKAGE_CONTEXT}"
 log "记录打包构建来源: ${BUILD_SOURCE}"
 if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then

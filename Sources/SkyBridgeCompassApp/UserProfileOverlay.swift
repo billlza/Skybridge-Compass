@@ -21,6 +21,7 @@ struct UserProfileOverlay: View {
     @State private var uploadError: String?
     @State private var saveSuccess = false
     @State private var showingSaveResult = false
+    @State private var cachedAvatar: NSImage?
 
  // 动画状态
     @State private var overlayOpacity: Double = 0
@@ -83,6 +84,9 @@ struct UserProfileOverlay: View {
             setupInitialValues()
             showOverlay()
         }
+        .task(id: authModel.currentSession?.userIdentifier) {
+            await loadCachedAvatar(for: authModel.currentSession?.userIdentifier)
+        }
         .fileImporter(
             isPresented: $showingImagePicker,
             allowedContentTypes: [.image],
@@ -134,7 +138,7 @@ struct UserProfileOverlay: View {
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     } else if let userId = authModel.currentSession?.userIdentifier,
-                              let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+                              let cachedAvatar = cachedAvatar ?? AvatarCacheManager.shared.getAvatar(for: userId) {
  // 显示缓存的真实头像
                         Image(nsImage: cachedAvatar)
                             .resizable()
@@ -557,6 +561,16 @@ struct UserProfileOverlay: View {
         editedDisplayName = authModel.currentSession?.displayName ?? ""
         editedPhoneNumber = getPhoneNumber()
         editedEmailAddress = getEmailAddress()
+    }
+
+    private func loadCachedAvatar(for userId: String?) async {
+        cachedAvatar = nil
+        guard let userId else { return }
+        do {
+            cachedAvatar = try await AvatarCacheManager.shared.loadCachedAvatar(for: userId)
+        } catch {
+            SkyBridgeLogger.ui.error("加载头像缓存失败: \(error.localizedDescription, privacy: .private)")
+        }
     }
 
  /// 获取用户邮箱地址 - 修复邮箱显示逻辑

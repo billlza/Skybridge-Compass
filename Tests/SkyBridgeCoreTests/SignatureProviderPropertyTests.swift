@@ -38,12 +38,12 @@ struct SignatureProviderPropertyTests {
  // MARK: - Property: Tier-based Provider Selection
     
     @Test("ProtocolSignatureProviderSelector selects correct provider for tier",
-          arguments: [CryptoTier.nativePQC, .liboqsPQC, .classic])
+          arguments: [CryptoTier.qperiaptPQC, .nativePQC, .liboqsPQC, .classic])
     func testProviderSelectionByTier(tier: CryptoTier) {
         let provider = ProtocolSignatureProviderSelector.select(for: tier)
         
         switch tier {
-        case .nativePQC, .liboqsPQC:
+        case .qperiaptPQC, .nativePQC, .liboqsPQC:
             #expect(provider.signatureAlgorithm == .mlDSA65,
                    "PQC tier should select ML-DSA-65 provider")
         case .classic:

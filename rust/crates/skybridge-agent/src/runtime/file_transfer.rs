@@ -269,8 +269,11 @@ async fn run_file_send_transfer(
         while in_flight(next_seq, acked_through) >= WINDOW_CHUNKS {
             match wait_for_inbound(&mut inbox, cancel).await? {
                 InboundSignal::Ack(seq) => acked_through = Some(seq as u64),
-                InboundSignal::Receipt { ok, matches } => {
-                    return finalize_receipt(ok, matches, sent_bytes);
+                InboundSignal::Receipt {
+                    ok,
+                    computed_sha256,
+                } => {
+                    return finalize_receipt(ok, &computed_sha256, &expected_sha256, sent_bytes);
                 }
             }
         }
@@ -310,8 +313,11 @@ async fn run_file_send_transfer(
     loop {
         match wait_for_inbound(&mut inbox, cancel).await? {
             InboundSignal::Ack(_) => {}
-            InboundSignal::Receipt { ok, matches } => {
-                return finalize_receipt(ok, matches, sent_bytes);
+            InboundSignal::Receipt {
+                ok,
+                computed_sha256,
+            } => {
+                return finalize_receipt(ok, &computed_sha256, &expected_sha256, sent_bytes);
             }
         }
     }
@@ -322,17 +328,23 @@ fn in_flight(next_seq: u64, acked_through: Option<u64>) -> u64 {
     next_seq.saturating_sub(acked_count)
 }
 
-fn finalize_receipt(ok: bool, matches: bool, sent_bytes: u64) -> Result<u64> {
-    if ok && matches {
+fn finalize_receipt(
+    ok: bool,
+    computed_sha256: &[u8; 32],
+    expected_sha256: &[u8; 32],
+    sent_bytes: u64,
+) -> Result<u64> {
+    if ok && computed_sha256 == expected_sha256 {
         Ok(sent_bytes)
     } else {
         bail!("receiver rejected transfer: receipt sha256 mismatch")
     }
 }
 
+#[derive(Debug)]
 enum InboundSignal {
     Ack(u32),
-    Receipt { ok: bool, matches: bool },
+    Receipt { ok: bool, computed_sha256: [u8; 32] },
 }
 
 async fn wait_for_inbound(
@@ -347,12 +359,10 @@ async fn wait_for_inbound(
                     Ok(InboundSignal::Ack(acked_through_seq))
                 }
                 Some(FileAppFrame::Receipt { ok, computed_sha256, .. }) => {
-                    // The match flag is computed by the receiver and re-asserted
-                    // here against the source digest is not possible (we only
-                    // have the receiver's computed digest); trust the receiver's
-                    // ok flag, which it sets only on a verified match.
-                    let matches = ok && computed_sha256 != [0u8; 32];
-                    Ok(InboundSignal::Receipt { ok, matches })
+                    Ok(InboundSignal::Receipt {
+                        ok,
+                        computed_sha256,
+                    })
                 }
                 Some(_) => Ok(InboundSignal::Ack(0)),
                 None => bail!("inbound receipt channel closed"),
@@ -705,6 +715,53 @@ mod tests {
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
+    }
+
+    #[test]
+    fn sender_receipt_requires_exact_source_digest() {
+        let expected = sha256(b"source bytes");
+        let forged = sha256(b"forged bytes");
+
+        assert_eq!(
+            finalize_receipt(true, &expected, &expected, 12).expect("matching receipt"),
+            12
+        );
+        assert!(
+            finalize_receipt(true, &forged, &expected, 12).is_err(),
+            "ok=true with a different digest must not complete the transfer"
+        );
+        assert!(
+            finalize_receipt(false, &expected, &expected, 12).is_err(),
+            "receiver rejection must stay a failed transfer even if the digest matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_inbound_receipt_preserves_receiver_digest_for_local_validation() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let computed_sha256 = sha256(b"receiver bytes");
+        tx.send(FileAppFrame::Receipt {
+            transfer_id: [1u8; 16],
+            ok: true,
+            computed_sha256,
+            reason: String::new(),
+        })
+        .await
+        .expect("send receipt");
+
+        match wait_for_inbound(&mut rx, &CancellationToken::new())
+            .await
+            .expect("receipt signal")
+        {
+            InboundSignal::Receipt {
+                ok,
+                computed_sha256: observed,
+            } => {
+                assert!(ok);
+                assert_eq!(observed, computed_sha256);
+            }
+            other => panic!("expected receipt signal, got {other:?}"),
+        }
     }
 
     #[test]

@@ -91,6 +91,13 @@ extension CrossNetworkConnectionManager {
         }
     }
 
+    public struct IssuedConnectionCode: Sendable, Equatable {
+        public let code: String
+        public let sessionID: String
+        public let expiresAt: Date?
+        public let leaseMode: ConnectionCodeLeaseMode
+    }
+
     /// 跨网络连接状态 - 符合 Swift 6.2.3 的 Sendable 要求和严格并发控制。
     /// 注意：这是 CrossNetworkConnectionManager 专用的连接状态，与全局 ConnectionStatus 不同。
     /// 论文口径：`connected` 必须与 `readiness == .handshakeComplete` 对齐。

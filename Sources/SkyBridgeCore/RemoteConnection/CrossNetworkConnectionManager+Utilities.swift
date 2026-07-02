@@ -89,7 +89,7 @@ extension CrossNetworkConnectionManager {
         return "id:\(normalized)"
     }
 
-    nonisolated static func deriveTenantIdentifier(accessToken: String?) -> String {
+    public nonisolated static func deriveTenantIdentifier(accessToken: String?) -> String {
         CrossNetworkTenantIdentifierPolicy.derive(accessToken: accessToken)
     }
 

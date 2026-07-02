@@ -40,7 +40,7 @@ SKYBRIDGE_XCODE_TOOLCHAIN_POLICY=os27-release \
 
 ### Release toolchain pinning — single knob
 
-The stable release line stays pinned to Xcode **26.5** by exact literal (defense-in-depth,
+The stable release line stays pinned to Xcode **26.6** by exact literal (defense-in-depth,
 enforced by `AppUpdateManifestTests`/`ApplePQCSDKGateSourceContractTests`). An **additive**
 `os27-release` line was introduced:
 
@@ -50,7 +50,7 @@ enforced by `AppUpdateManifestTests`/`ApplePQCSDKGateSourceContractTests`). An *
 - `Scripts/toolchain_release_pin.sh` (new) — single source of truth for the line constants
   + match helpers, consumed by `package_build_policy.sh`'s app-bundle metadata gate.
 - `Scripts/package_build_policy.sh` — the `DTSDKName`/`DTXcode`/`DTXcodeBuild` app-bundle
-  gate is line-aware: default (xcode26) requires exact `macosx26.5/2650/17F42`; selecting
+  gate is line-aware: default (xcode26) requires exact `macosx26.5/2660/17F113`; selecting
   the xcode27 line accepts `macosx27.x` / `27xx` while still asserting the `LSMinimumSystemVersion 14.0` floor exactly.
 
 To cut a **27 release** once Xcode 27 is GA (or to test the path now on the beta):
@@ -64,7 +64,7 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # GA: poi
 
 > **Deferred on purpose:** the update-manifest publishing path
 > (`Scripts/generate_macos_update_manifest.swift`, `Scripts/publish_macos_update_release.sh`)
-> stays pinned to the 26.5 Apple-PQC-SDK attestation. Its source-contract tests intentionally
+> stays pinned to the Xcode 26.6 / macOS SDK 26.5 Apple-PQC-SDK attestation. Its source-contract tests intentionally
 > require an explicit, reviewed migration before a 27 manifest can be published — migrate those
 > literals deliberately when you flip the shipping line to 27 GA, not before.
 

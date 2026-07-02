@@ -15,8 +15,8 @@ fail() {
 write_release_platform_metadata_plist() {
   local plist_path="$1"
   local sdk_name="${2:-macosx26.5}"
-  local dtxcode="${3:-2650}"
-  local dtxcode_build="${4:-17F42}"
+  local dtxcode="${3:-2660}"
+  local dtxcode_build="${4:-17F113}"
   local min_system="${5:-14.0}"
   local platform_name="${6:-macosx}"
 
@@ -224,19 +224,19 @@ fi
 platform_metadata_plist="/tmp/skybridge-release-platform-metadata-test.plist"
 write_release_platform_metadata_plist "${platform_metadata_plist}"
 skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test release app" \
-  || fail "release platform metadata helper should accept stable Xcode 26.5 app metadata"
+  || fail "release platform metadata helper should accept stable Xcode 26.6 app metadata"
 
 write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx27.0"
 if skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test release app" >/dev/null 2>&1; then
   fail "release platform metadata helper must reject Xcode 27 beta SDK metadata"
 fi
 
-write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2650" "27A5194q"
+write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2660" "27A5194q"
 if skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test release app" >/dev/null 2>&1; then
   fail "release platform metadata helper must reject Xcode 27 beta build metadata"
 fi
 
-write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2650" "17F42" "15.0"
+write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2660" "17F113" "15.0"
 if skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test release app" >/dev/null 2>&1; then
   fail "release platform metadata helper must reject deployment target drift"
 fi
@@ -364,9 +364,9 @@ app_bundle="/tmp/skybridge-pqc-marker-test.app"
 rm -rf "${app_bundle}"
 mkdir -p "${app_bundle}/Contents/MacOS"
 printf '#!/bin/sh\n# %s\nexit 0\n' "${SKYBRIDGE_APPLE_PQC_COMPILE_MARKER}" > "${app_bundle}/Contents/MacOS/SkyBridgeCompassApp"
-chmod +x "${app_bundle}/Contents/MacOS/SkyBridgeCompassApp"
+chmod 700 "${app_bundle}/Contents/MacOS/SkyBridgeCompassApp"
 skybridge_assert_bundle_has_apple_pqc_compile_marker "${app_bundle}" "test app" \
-  || fail "Apple PQC compile marker helper should accept marker-bearing app bundles"
+  || fail "Apple PQC compile marker helper should accept owner-executable marker-bearing app bundles"
 
 printf '#!/bin/sh\n# %s\nexit 0\n' "${SKYBRIDGE_APPLE_PQC_MISSING_COMPILE_MARKER}" > "${app_bundle}/Contents/MacOS/SkyBridgeCompassApp"
 if skybridge_assert_bundle_has_apple_pqc_compile_marker "${app_bundle}" "test app" >/dev/null 2>&1; then
@@ -437,7 +437,7 @@ write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx27.3" 
   skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test os27 point release app" ) \
   || fail "xcode27 line should accept 27.x point-release provenance without re-pinning"
 
-write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2650" "17F42"
+write_release_platform_metadata_plist "${platform_metadata_plist}" "macosx26.5" "2660" "17F113"
 if ( export SKYBRIDGE_RELEASE_TOOLCHAIN_LINE=xcode27
      skybridge_assert_release_app_stable_platform_metadata "${platform_metadata_plist}" "test os27 wrong major" ) >/dev/null 2>&1; then
   fail "xcode27 line must reject macOS 26.5 build provenance"

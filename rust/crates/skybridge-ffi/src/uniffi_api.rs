@@ -145,8 +145,9 @@ pub struct FfiDowngradeOutcome {
 /// agent state store; this entry point proves the generation surface.)
 #[uniffi::export]
 pub fn generate_public_identity() -> Result<FfiPublicIdentity, SkyBridgeFfiError> {
-    let material = RustPqcIdentityMaterial::generate()
-        .map_err(|e| SkyBridgeFfiError::Core { message: e.to_string() })?;
+    let material = RustPqcIdentityMaterial::generate().map_err(|e| SkyBridgeFfiError::Core {
+        message: e.to_string(),
+    })?;
     Ok(FfiPublicIdentity {
         signing_public_key: material.signing_public_key,
         mlkem768_public_key: material.mlkem768_public_key,
@@ -202,10 +203,9 @@ impl FfiPolicyGate {
         reason: FfiFallbackReason,
         transcript_anchor: Option<Vec<u8>>,
     ) -> Result<FfiDowngradeOutcome, SkyBridgeFfiError> {
-        let mut gate = self
-            .inner
-            .lock()
-            .map_err(|_| SkyBridgeFfiError::Core { message: "policy gate poisoned".into() })?;
+        let mut gate = self.inner.lock().map_err(|_| SkyBridgeFfiError::Core {
+            message: "policy gate poisoned".into(),
+        })?;
         let decision = gate.authorize_downgrade(
             &peer,
             CryptoSuite::from_wire_id(from_suite_wire),

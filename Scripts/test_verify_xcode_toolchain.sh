@@ -22,7 +22,7 @@ cat >"${TMP_DIR}/bin/xcodebuild" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "-version" ]]; then
-  printf 'Xcode %s\nBuild version %s\n' "${STUB_XCODE_VERSION:-26.5}" "${STUB_XCODE_BUILD:-17F42}"
+  printf 'Xcode %s\nBuild version %s\n' "${STUB_XCODE_VERSION:-26.6}" "${STUB_XCODE_BUILD:-17F113}"
   exit 0
 fi
 exit 64
@@ -32,7 +32,7 @@ cat >"${TMP_DIR}/bin/xcrun" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "swift" && "${2:-}" == "--version" ]]; then
-  printf 'Apple Swift version %s (swiftlang-test clang-test)\n' "${STUB_SWIFT_VERSION:-6.3.2}"
+  printf 'Apple Swift version %s (swiftlang-test clang-test)\n' "${STUB_SWIFT_VERSION:-6.3.3}"
   exit 0
 fi
 if [[ "${1:-}" == "--sdk" && "${2:-}" == "macosx" && "${3:-}" == "--show-sdk-version" ]]; then
@@ -75,7 +75,7 @@ run_verify env DEVELOPER_DIR="${TMP_DIR}/Xcode.app/Contents/Developer" >/dev/nul
 
 expect_failure_contains \
   "stable release rejects Xcode 27" \
-  "expected Xcode 26.5" \
+  "expected Xcode 26.6" \
   run_verify env \
     DEVELOPER_DIR="${TMP_DIR}/Xcode.app/Contents/Developer" \
     STUB_XCODE_VERSION=27.0 \
@@ -126,9 +126,9 @@ expect_failure_contains \
   run_verify env \
     SKYBRIDGE_XCODE_TOOLCHAIN_POLICY=os27-release \
     DEVELOPER_DIR="${TMP_DIR}/Xcode-beta.app/Contents/Developer" \
-    STUB_XCODE_VERSION=26.5 \
-    STUB_XCODE_BUILD=17F42 \
-    STUB_SWIFT_VERSION=6.3.2 \
+    STUB_XCODE_VERSION=26.6 \
+    STUB_XCODE_BUILD=17F113 \
+    STUB_SWIFT_VERSION=6.3.3 \
     STUB_MACOS_SDK_VERSION=26.5
 
 echo "[test-xcode-toolchain] passed"

@@ -14,7 +14,7 @@ mod connection_code;
 mod connection_code_snapshot;
 mod connectivity_check;
 mod control_plane_doctor;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod crossnet_commands;
 mod device_commands;
 mod doctor_commands;

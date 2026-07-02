@@ -117,6 +117,33 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(source.contains("skybridge_require_apple_pqc_sdk_symbol_probe()"))
     }
 
+    func testQPeriaptBootstrapExportRequiresRuntimeProbeAndPlatformMetadata() throws {
+        let policy = try readSource("Sources/SkyBridgeCore/P2P/QPeriaptPlatformPolicy.swift")
+        XCTAssertTrue(policy.contains("#available(macOS 26.0, iOS 26.0, *)"))
+        XCTAssertTrue(policy.contains("QPeriaptCryptoProvider.quickRuntimeProbe()"))
+        XCTAssertTrue(policy.contains("SB_ENABLE_QPERIAPT"))
+        XCTAssertTrue(policy.contains("SKYBRIDGE_PQC_PREFERRED_SUITE"))
+
+        let deviceIdentity = try readSource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+        XCTAssertTrue(deviceIdentity.contains("QPeriaptPlatformPolicy.isEnabledForLocalRuntime()"))
+        XCTAssertTrue(deviceIdentity.contains("QPeriaptCryptoProvider()"))
+        XCTAssertTrue(deviceIdentity.contains("requiredWireIds.insert(CryptoSuite.qperiaptContextBound.wireId)"))
+        XCTAssertTrue(deviceIdentity.contains("case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength"))
+        XCTAssertTrue(deviceIdentity.contains("case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength"))
+
+        let keyInfo = try readSource("Sources/SkyBridgeCore/P2P/KEMIdentityModels.swift")
+        XCTAssertTrue(keyInfo.contains("case CryptoSuite.qperiaptContextBound.wireId"))
+        XCTAssertTrue(keyInfo.contains("QPeriaptPlatformPolicy.publicKeyLength"))
+
+        let signaling = try readSource("Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/WebRTCSignalingEnvelope.swift")
+        XCTAssertTrue(signaling.contains("public var platform: String?"))
+        XCTAssertTrue(signaling.contains("public var osVersion: String?"))
+
+        let crossNetwork = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        XCTAssertTrue(crossNetwork.contains("platform: QPeriaptPlatformPolicy.localPlatformName()"))
+        XCTAssertTrue(crossNetwork.contains("osVersion: QPeriaptPlatformPolicy.localOSVersionString()"))
+    }
+
     func testOSVersionOrHardwareChecksDoNotAdvertisePQCWithoutCryptoEvidence() throws {
         let forbiddenClaims = [
             "启用后量子加密",
@@ -682,6 +709,45 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(manifest.contains(#"metalResource("GlobalHazeShaders.metal")"#))
     }
 
+    func testReleasePackagingGatesMatchCopiedCoreMetalResourcePolicy() throws {
+        let packageScript = try readSource("Scripts/package_app.sh")
+        let readinessScript = try readSource("Scripts/check_macos_release_readiness.sh")
+        let expectedCoreShaders = [
+            "RemoteDesktopShaders",
+            "RemoteDesktopPassthrough",
+            "RemoteDesktopHDR",
+            "Metal4Shaders",
+            "AuroraShaders",
+            "WeatherParticleShaders",
+            "WeatherShaders",
+            "RainShaders",
+            "HazeShaders",
+            "HazeParticleShaders"
+        ]
+
+        XCTAssertTrue(packageScript.contains("validate_core_metal_shader_sources"))
+        XCTAssertTrue(readinessScript.contains("validate_core_metal_shader_sources"))
+        XCTAssertFalse(
+            packageScript.contains("缺少编译后的 SkyBridgeCore default.metallib"),
+            "SkyBridgeCore Metal resources are copied source shaders and loaded through SkyBridgeMetalShaderLibrary."
+        )
+        XCTAssertFalse(
+            readinessScript.contains("missing compiled SkyBridgeCore default.metallib"),
+            "Release readiness must match the copied-source SkyBridgeCore Metal resource contract."
+        )
+
+        for shaderName in expectedCoreShaders {
+            XCTAssertTrue(
+                packageScript.contains("\(shaderName).metal"),
+                "package_app.sh must validate \(shaderName).metal before release packaging succeeds."
+            )
+            XCTAssertTrue(
+                readinessScript.contains("\(shaderName).metal"),
+                "check_macos_release_readiness.sh must validate \(shaderName).metal after packaging."
+            )
+        }
+    }
+
     func testOS27DiagnosisModeIsReadOnlyAndNotValidationProof() throws {
         let source = try readSource("Scripts/run_os27_beta_compatibility.sh")
 
@@ -750,6 +816,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(source.contains("Scripts/test_check_os27_compatibility_report.sh"))
         XCTAssertTrue(source.contains("Scripts/test_lane_ios_device_privacy.sh"))
         XCTAssertTrue(source.contains("Scripts/test_check_macos_deps.sh"))
+        XCTAssertTrue(source.contains("Scripts/test_build_freerdp_dylibs_policy.sh"))
         XCTAssertTrue(source.contains("Scripts/test_check_ios_test_configuration.sh"))
         XCTAssertTrue(source.contains("Scripts/test_verify_xcode_toolchain.sh"))
         XCTAssertTrue(source.contains("Scripts/test_package_build_policy.sh"))
@@ -776,6 +843,23 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(source.contains("source_contracts=verified full_validation=false compatibility=not_validated release_eligible=false"))
         XCTAssertTrue(source.contains("OS27_REPORT_SOURCE_CONTRACTS_STATUS=\"passed\""))
         XCTAssertTrue(source.contains("OS27_REPORT_STATUS=\"source_contracts_verified\""))
+
+        guard
+            let guardrailRange = source.range(of: "run_source_contract_guardrail_scripts()"),
+            let packagePolicySourceRange = source.range(of: "# shellcheck source=Scripts/package_build_policy.sh")
+        else {
+            return XCTFail("OS27 script must keep the source-contract guardrail list explicit and source package policy after it.")
+        }
+
+        let guardrailBody = source[guardrailRange.lowerBound..<packagePolicySourceRange.lowerBound]
+        let bareGuardrailCommands = guardrailBody
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("bash Scripts/") && !$0.contains("|| return 1") }
+        XCTAssertTrue(
+            bareGuardrailCommands.isEmpty,
+            "Source-contract guardrails must explicitly return failure per child command; outer if/errexit must not be trusted: \(bareGuardrailCommands.joined(separator: ", "))"
+        )
 
         guard
             let sourceContractsRange = source.range(of: "run_source_contracts()"),
@@ -1144,7 +1228,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         }
 
         let sourceContractsJob = workflow[sourceContractsRange.lowerBound..<signedReleaseRange.lowerBound]
-        XCTAssertTrue(sourceContractsJob.contains("DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer"))
+        XCTAssertTrue(sourceContractsJob.contains("DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer"))
         XCTAssertTrue(sourceContractsJob.contains("bash Scripts/verify_xcode_toolchain.sh"))
         XCTAssertFalse(
             sourceContractsJob.contains("sudo xcode-select"),
@@ -1441,6 +1525,14 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
             of: "skybridge_assert_release_app_stable_platform_metadata \"${INFO_PLIST_DST}\" \"release_dmg packaged app\""
         )
         let packageBuildSourceRange = packageApp.range(of: "plutil -replace SkyBridgePackagingBuildSource")
+        XCTAssertFalse(
+            packageApp.contains("SkyBridgePackagingBuildProductPath -string \"${BUILD_DIR}/${EXECUTABLE}\""),
+            "Release package provenance must not write local build product paths into Info.plist."
+        )
+        XCTAssertTrue(
+            packageApp.contains("SkyBridgePackagingBuildProductPath -string \"<redacted:${BUILD_SOURCE}>/${EXECUTABLE}\""),
+            "Release package provenance should keep a stable build-source label without leaking local paths."
+        )
         XCTAssertNotNil(packageMetadataStampRange)
         XCTAssertNotNil(packageMetadataGateRange)
         XCTAssertNotNil(packageBuildSourceRange)

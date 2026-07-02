@@ -93,10 +93,11 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+        # Apple CryptoKit PQC symbols are enabled only after Scripts/apple_pqc_sdk_probe.sh
+        # proves the selected toolchain can typecheck them. The default stays empty so
+        # stable iOS 17+ build lanes remain portable and fail closed.
         SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
-        # Apple PQC SDK branches are enabled only by probe-verified build lanes that
-        # pass SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK explicitly.
       configs:
         Debug:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSDebug.entitlements

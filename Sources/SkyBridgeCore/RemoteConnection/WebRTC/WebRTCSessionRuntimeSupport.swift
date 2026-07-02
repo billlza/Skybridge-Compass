@@ -47,10 +47,14 @@ enum WebRTCPeerConnectionFactoryProvider {
     nonisolated(unsafe) private static var sharedFactoryWithCustomAudioDevice: RTCPeerConnectionFactory?
 
     private static func makeDefaultFactory() -> RTCPeerConnectionFactory {
+        // Do NOT pin `encoderFactory.preferredCodec` here. The negotiated outgoing
+        // screen-video stream is H264, but `preferredHardwareVideoEncoderCodec()`
+        // resolves to HEVC — pinning it to HEVC for an H264 stream contributed to the
+        // macOS-host VideoToolbox encoder never starting (framesEncoded=0). SDP
+        // codec-preference reordering (see WebRTCNativeScreenVideoValuePolicy
+        // .codecPreferences) already controls negotiation, and the custom-audio bridge
+        // factory (SBWebRTCPeerConnectionFactoryBridge) likewise sets no preferredCodec.
         let encoderFactory = RTCDefaultVideoEncoderFactory()
-        if let preferredCodec = WebRTCNativeScreenVideoValuePolicy.preferredHardwareVideoEncoderCodec() {
-            encoderFactory.preferredCodec = preferredCodec
-        }
         return RTCPeerConnectionFactory(
             encoderFactory: encoderFactory,
             decoderFactory: RTCDefaultVideoDecoderFactory()

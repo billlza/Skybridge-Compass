@@ -11,6 +11,12 @@ rust-version.workspace = true
 # See src/platform.rs and ROADMAP.md.
 apple-platform-ffi = []
 
+# EXPERIMENTAL, DEFAULT-OFF: enables the Q-Periapt ContextBound PQ/T hybrid KEM
+# suite (wire_id 0x0011) alongside the shipping X-Wing / ML-KEM-768 suites. Pulls
+# in the three `q-periapt-*` crates by path. The production handshake path is
+# unchanged when this feature is off (`cargo build` with no features). See pqc.rs.
+q-periapt = ["dep:q-periapt-kem", "dep:q-periapt-backends", "dep:q-periapt-core"]
+
 [dependencies]
 anyhow.workspace = true
 aes-gcm.workspace = true
@@ -42,3 +48,10 @@ uuid.workspace = true
 webrtc.workspace = true
 webbrowser.workspace = true
 x25519-dalek.workspace = true
+
+# EXPERIMENTAL, DEFAULT-OFF (gated by the `q-periapt` feature): the Q-Periapt PQ/T
+# hybrid KEM crates, depended on by path. Relative path computed via
+# os.path.relpath from this crate dir to /Users/bill/Desktop/pqt_hybrid_suite/crates.
+q-periapt-core = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-core", optional = true }
+q-periapt-kem = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-kem", optional = true }
+q-periapt-backends = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-backends", optional = true }

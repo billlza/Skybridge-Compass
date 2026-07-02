@@ -159,6 +159,96 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         XCTAssertEqual(loaded, [CryptoSuite.mlkem768MLDSA65.wireId: validMLKEM])
     }
 
+    func testQPeriaptUpsertRequiresEligiblePeerPlatformMetadata() async throws {
+        let suiteName = "PeerKEMBootstrapStoreQGateTests.\(UUID().uuidString)"
+        guard let cleanupDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        cleanupDefaults.removePersistentDomain(forName: suiteName)
+
+        guard let writerDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        let store = PeerKEMBootstrapStore(defaults: writerDefaults)
+        let qKey = Data(repeating: 0x51, count: QPeriaptPlatformPolicy.publicKeyLength)
+        let xWingKey = Data(repeating: 0x52, count: 1_216)
+        let qInfo = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+            publicKey: qKey
+        )
+        let xWingInfo = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+            publicKey: xWingKey
+        )
+
+        await store.upsert(
+            deviceIds: ["peer-q"],
+            kemPublicKeys: [qInfo, xWingInfo],
+            platform: nil,
+            osVersion: "26.0"
+        )
+
+        var stored = await store.mergedKEMPublicKeys(forCandidates: ["peer-q"])
+        XCTAssertNil(stored[CryptoSuite.qperiaptContextBound.wireId])
+        XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], xWingKey)
+
+        await store.upsert(
+            deviceIds: ["peer-q"],
+            kemPublicKeys: [qInfo],
+            platform: "Android",
+            osVersion: "Android 16 (API 36)"
+        )
+
+        stored = await store.mergedKEMPublicKeys(forCandidates: ["peer-q"])
+        XCTAssertEqual(stored[CryptoSuite.qperiaptContextBound.wireId], qKey)
+        XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], xWingKey)
+
+        guard let readerDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        let reloaded = PeerKEMBootstrapStore(defaults: readerDefaults)
+        let loaded = await reloaded.mergedKEMPublicKeys(forCandidates: ["peer-q"])
+        XCTAssertEqual(loaded[CryptoSuite.qperiaptContextBound.wireId], qKey)
+        XCTAssertEqual(loaded[CryptoSuite.xwingMLDSA.wireId], xWingKey)
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+    }
+
+    func testLoadPurgesLegacyQPeriaptKEMWithoutPeerPlatformMetadata() async throws {
+        let suiteName = "PeerKEMBootstrapStoreLegacyQGateTests.\(UUID().uuidString)"
+        guard let seedDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        seedDefaults.removePersistentDomain(forName: suiteName)
+
+        let validMLKEM = Data(repeating: 0x44, count: 1_184)
+        let snapshot = LegacyBootstrapKEMSnapshot(entries: [
+            "peer-legacy-q": LegacyBootstrapKEMEntry(
+                kemPublicKeys: [
+                    CryptoSuite.qperiaptContextBound.wireId: Data(
+                        repeating: 0x51,
+                        count: QPeriaptPlatformPolicy.publicKeyLength
+                    ),
+                    CryptoSuite.mlkem768MLDSA65.wireId: validMLKEM
+                ],
+                updatedAt: Date()
+            )
+        ])
+        seedDefaults.set(
+            try JSONEncoder().encode(snapshot),
+            forKey: "com.skybridge.p2p.bootstrap_kem_store.v1"
+        )
+
+        let store = PeerKEMBootstrapStore(defaults: seedDefaults)
+        let loaded = await store.mergedKEMPublicKeys(forCandidates: ["peer-legacy-q"])
+
+        XCTAssertEqual(loaded, [CryptoSuite.mlkem768MLDSA65.wireId: validMLKEM])
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+    }
+
     func testClearRemovesOnlyRequestedBootstrapAliases() async throws {
         let store = PeerKEMBootstrapStore.shared
         await store.clearForTesting()

@@ -24,3 +24,8 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[features]
+# Experimental, default-off: advertise + negotiate the Q-Periapt ContextBound hybrid suite
+# (forwards to skybridge-core/q-periapt). Off by default, so the shipping build is unchanged.
+q-periapt = ["skybridge-core/q-periapt"]
