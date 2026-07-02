@@ -38,6 +38,20 @@ assert_no_large_vendor_files() {
     || fail "vendor artifact is too large for ordinary GitHub push safety: ${first_large_file}"
 }
 
+assert_no_user_home_paths_in_static_library() {
+  local path="$1"
+  local first_match
+  first_match="$(
+    strings -a "${ROOT_DIR}/${path}" \
+      | grep -E '/Users/[^[:space:]]+' \
+      | grep -Ev '^/Users/runner/work/rust/rust/' \
+      | head -n 1 \
+      || true
+  )"
+  [[ -z "${first_match}" ]] \
+    || fail "${path} leaks a non-toolchain local user path into the vendored binary: ${first_match}"
+}
+
 if grep -Fq "/Users/" "${ROOT_DIR}/Scripts/build_qperiapt_xcframework.sh"; then
   fail "build_qperiapt_xcframework.sh must not hard-code a local user path; use QPERIAPT_REPO or External/pqt_hybrid_suite"
 fi
@@ -60,6 +74,8 @@ done
 for slice in macos-arm64 ios-arm64 ios-arm64-simulator; do
   require_file_not_ignored "Sources/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
   require_file_not_ignored "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
+  assert_no_user_home_paths_in_static_library "Sources/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
+  assert_no_user_home_paths_in_static_library "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
 done
 
 assert_no_large_vendor_files

@@ -81,20 +81,33 @@ skybridge_resolve_swiftpm_release_build_dir() {
   local project_root="$1"
   local build_arch="$2"
   local product_name="$3"
+  local scratch_path="${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}"
   local raw_output=""
   local nonempty_output=""
   local line_count=""
   local resolved_path=""
+  local swiftpm_args=()
 
   if [[ -z "${project_root}" || -z "${build_arch}" || -z "${product_name}" ]]; then
     echo "错误：SwiftPM Release 路径解析缺少 project root、build arch 或 product name。" >&2
     return 1
   fi
 
+  if [[ -n "${scratch_path}" && "${scratch_path}" != /* ]]; then
+    scratch_path="${project_root}/${scratch_path#./}"
+  fi
+
+  swiftpm_args=(
+    -c release
+    --arch "${build_arch}"
+  )
+  if [[ -n "${scratch_path}" ]]; then
+    swiftpm_args+=(--scratch-path "${scratch_path}")
+  fi
+
   if ! raw_output="$(
     cd "${project_root}" && swift build \
-      -c release \
-      --arch "${build_arch}" \
+      "${swiftpm_args[@]}" \
       --show-bin-path \
       --product "${product_name}" \
       --disable-automatic-resolution
@@ -113,6 +126,19 @@ skybridge_resolve_swiftpm_release_build_dir() {
   resolved_path="${nonempty_output}"
   if [[ "${resolved_path}" != /* ]]; then
     resolved_path="${project_root}/${resolved_path#./}"
+  fi
+
+  if [[ -n "${scratch_path}" ]]; then
+    case "${resolved_path}" in
+      "${scratch_path}"|"${scratch_path}/"*)
+        printf '%s\n' "${resolved_path}"
+        return 0
+        ;;
+      *)
+        echo "错误：SwiftPM Release bin path 不在配置的 scratch path 内：${resolved_path}" >&2
+        return 1
+        ;;
+    esac
   fi
 
   case "${resolved_path}" in

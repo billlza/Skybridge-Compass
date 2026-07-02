@@ -898,6 +898,9 @@ EXECUTABLE="SkyBridgeCompassApp"
 SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/${BUILD_ARCH}-apple-macosx/release"
 BUILD_DIR="${XCODE_BUILD_DIR}"
 MAIN_BUILD_SYSTEM="${SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM:-swiftpm}"
+if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" && -z "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
+  export SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH="/tmp/skybridge-swiftpm-release-${BUILD_ARCH}"
+fi
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
 XCODE_PROJECT="${ROOT_DIR}/SkyBridgeWidgets.xcodeproj"
@@ -987,9 +990,15 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
 
   if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" ]]; then
     log "使用 SwiftPM Release 构建主可执行文件（product=SkyBridgeCompassApp, arch=${BUILD_ARCH}）"
+    SWIFTPM_BUILD_ARGS=(
+      -c release
+      --arch "${BUILD_ARCH}"
+    )
+    if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
+      SWIFTPM_BUILD_ARGS+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
+    fi
     swift build \
-      -c release \
-      --arch "${BUILD_ARCH}" \
+      "${SWIFTPM_BUILD_ARGS[@]}" \
       --product SkyBridgeCompassApp \
       --disable-automatic-resolution
   elif [[ "${USE_XCODE_WORKSPACE}" -eq 0 ]]; then
@@ -1387,7 +1396,14 @@ helper_binary_needs_rebuild() {
 
 build_power_metrics_helper() {
   cd "${ROOT_DIR}"
-  swift build -c release --arch "${BUILD_ARCH}" --product "${HELPER_EXECUTABLE}"
+  local swiftpm_build_args=(
+    -c release
+    --arch "${BUILD_ARCH}"
+  )
+  if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
+    swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
+  fi
+  swift build "${swiftpm_build_args[@]}" --product "${HELPER_EXECUTABLE}"
 }
 
 HELPER_BIN_PATH="$(resolve_helper_bin_path)"

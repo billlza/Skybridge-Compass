@@ -57,6 +57,23 @@ fi
 
 mkdir -p "$BUILD_ROOT" "$HEADERS_DIR"
 
+QPERIAPT_CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS:-}"
+
+append_qperiapt_rustflag() {
+  local flag="$1"
+  if [[ -n "$QPERIAPT_CARGO_ENCODED_RUSTFLAGS" ]]; then
+    QPERIAPT_CARGO_ENCODED_RUSTFLAGS+=$'\x1f'
+  fi
+  QPERIAPT_CARGO_ENCODED_RUSTFLAGS+="$flag"
+}
+
+append_qperiapt_rustflag "--remap-path-prefix=${QPERIAPT_REPO}=qperiapt-src"
+append_qperiapt_rustflag "--remap-path-prefix=${ROOT_DIR}=skybridge-src"
+if [[ -n "${HOME:-}" ]]; then
+  append_qperiapt_rustflag "--remap-path-prefix=${HOME}/.cargo/registry/src=cargo-registry"
+  append_qperiapt_rustflag "--remap-path-prefix=${HOME}/.rustup/toolchains=rust-toolchain"
+fi
+
 # Stage ONLY the C ABI header. Deliberately do NOT stage a module.modulemap.
 #
 # Why (mirror liboqs/OQSRAII): liboqs.xcframework already ships a module.modulemap into the
@@ -76,7 +93,7 @@ log "Synced CQPeriapt vendored header: $CQPERIAPT_HEADER_OUT"
 build_one() {
   local triple="$1"
   log "Building q-periapt-ffi for $triple..."
-  cargo build --release -p q-periapt-ffi \
+  CARGO_ENCODED_RUSTFLAGS="$QPERIAPT_CARGO_ENCODED_RUSTFLAGS" cargo build --release -p q-periapt-ffi \
     --manifest-path "$QPERIAPT_MANIFEST" \
     --target "$triple"
 }

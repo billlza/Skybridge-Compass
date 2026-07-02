@@ -518,6 +518,70 @@ validate_release_rpaths() {
   fi
 }
 
+validate_release_binary_provenance_strings() {
+  local executable_path="$1"
+  local context="${2:-release executable}"
+  local leaked_user_path=""
+
+  leaked_user_path="$(
+    strings -a "${executable_path}" \
+      | grep -E '/Users/[^[:space:]]+' \
+      | grep -Ev '^/Users/runner/work/rust/rust/' \
+      | head -n 1 \
+      || true
+  )"
+
+  if [[ -n "${leaked_user_path}" ]]; then
+    fail "${context} leaks a non-toolchain local user path: $(skybridge_sanitize_log_value "${leaked_user_path}")"
+  fi
+}
+
+is_macho_binary_file() {
+  local file_path="$1"
+  [[ -f "${file_path}" ]] || return 1
+  file -b "${file_path}" 2>/dev/null | grep -Eq 'Mach-O'
+}
+
+release_app_binary_candidates() {
+  local app_path="$1"
+  local root=""
+  local roots=(
+    "${app_path}/Contents/MacOS"
+    "${app_path}/Contents/Frameworks"
+    "${app_path}/Contents/PlugIns"
+    "${app_path}/Contents/Library"
+    "${app_path}/Contents/XPCServices"
+  )
+
+  for root in "${roots[@]}"; do
+    [[ -d "${root}" ]] || continue
+    find "${root}" -type f -print 2>/dev/null
+  done
+}
+
+validate_release_app_binary_provenance_strings() {
+  local app_path="$1"
+  local binary_path=""
+  local relative_path=""
+  local scanned_count=0
+
+  while IFS= read -r binary_path; do
+    [[ -n "${binary_path}" ]] || continue
+    if ! is_macho_binary_file "${binary_path}"; then
+      continue
+    fi
+    scanned_count=$((scanned_count + 1))
+    relative_path="${binary_path#"${app_path}/"}"
+    validate_release_binary_provenance_strings "${binary_path}" "release app binary ${relative_path}"
+  done < <(release_app_binary_candidates "${app_path}" | sort -u)
+
+  if (( scanned_count == 0 )); then
+    fail "release app bundle contains no Mach-O binaries to scan for local path provenance"
+  fi
+
+  log_info "Release binary provenance string gate scanned ${scanned_count} Mach-O binaries"
+}
+
 extract_helper_version() {
   local bin_path="$1"
   if [[ -x "${bin_path}" ]]; then
@@ -1296,6 +1360,7 @@ fi
 [[ -n "${APP_BUNDLE_IDENTIFIER}" ]] || fail "app Info.plist is missing CFBundleIdentifier"
 [[ -x "${APP_EXECUTABLE_PATH}" ]] || fail "main executable is missing or not executable: ${APP_EXECUTABLE_PATH}"
 validate_release_rpaths "${APP_EXECUTABLE_PATH}"
+validate_release_app_binary_provenance_strings "${APP_PATH}"
 if otool -L "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
   [[ -e "${APP_FRAMEWORKS_DIR}/WebRTC.framework/WebRTC" ]] || fail "main executable links WebRTC.framework, but the app bundle is missing WebRTC.framework"
   if ! otool -l "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then

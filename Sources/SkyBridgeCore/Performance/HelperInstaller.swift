@@ -282,14 +282,6 @@ enum HelperInstaller {
         let cwd = FileManager.default.currentDirectoryPath
         candidates.append("\(cwd)/Sources/PowerMetricsHelper/\(helperServiceName).plist")
 
-        let packageRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // Performance
-            .deletingLastPathComponent() // SkyBridgeCore
-            .deletingLastPathComponent() // Sources
-            .deletingLastPathComponent() // package root
-            .path
-        candidates.append("\(packageRoot)/Sources/PowerMetricsHelper/\(helperServiceName).plist")
-
         return deduplicated(candidates)
     }
 
@@ -309,15 +301,6 @@ enum HelperInstaller {
         let cwd = FileManager.default.currentDirectoryPath
         candidates.append("\(cwd)/.build/xcode/Build/Products/Release/PowerMetricsHelper")
         candidates.append("\(cwd)/.build/xcode/Build/Products/Debug/PowerMetricsHelper")
-
-        let packageRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // Performance
-            .deletingLastPathComponent() // SkyBridgeCore
-            .deletingLastPathComponent() // Sources
-            .deletingLastPathComponent() // package root
-            .path
-        candidates.append("\(packageRoot)/.build/xcode/Build/Products/Release/PowerMetricsHelper")
-        candidates.append("\(packageRoot)/.build/xcode/Build/Products/Debug/PowerMetricsHelper")
 
         return deduplicated(candidates)
     }

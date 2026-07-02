@@ -175,27 +175,27 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testStrictPQCBlocksClassicFallbackOnPQCFailure() async throws {
         let tracker = AttemptTracker()
+        let emitter = SecurityEventEmitter.createForTesting()
         let deviceId = "test-device-strict-\(UUID().uuidString)"
         let noFallbackEvent = expectation(description: "No fallback event should be emitted")
         noFallbackEvent.isInverted = true
         
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            // Filter strictly to this test's deviceId to avoid cross-test event interference
-            // from detached emissions in other suites.
-            if event.type == .cryptoDowngrade, event.context["deviceId"] == deviceId {
+        let subscriptionId = await emitter.subscribe { event in
+            if event.type == .cryptoDowngrade {
                 noFallbackEvent.fulfill()
             }
         }
         
         defer {
-            Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) }
+            Task { await emitter.unsubscribe(subscriptionId) }
         }
         
         do {
             _ = try await TwoAttemptHandshakeManager.performHandshake(
                 deviceId: deviceId,
                 preferPQC: true,
-                policy: .strictPQC
+                policy: .strictPQC,
+                securityEventEmitter: emitter
             ) { strategy, sigAAlgorithm in
                 _ = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
                 throw HandshakeError.failed(.suiteNegotiationFailed)
@@ -213,24 +213,27 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testDefaultPolicyAllowsFallbackAndEmitsEvent() async throws {
         let tracker = AttemptTracker()
+        let emitter = SecurityEventEmitter.createForTesting()
+        let eventBox = HandshakeDowngradeEventBox()
         let deviceId = "test-device-default-\(UUID().uuidString)"
         let fallbackEvent = expectation(description: "Fallback event should be emitted")
         
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            // Filter strictly to this test's deviceId to avoid cross-test event interference.
-            if event.type == .cryptoDowngrade, event.context["deviceId"] == deviceId {
+        let subscriptionId = await emitter.subscribe { event in
+            if event.type == .cryptoDowngrade {
+                await eventBox.set(event)
                 fallbackEvent.fulfill()
             }
         }
         
         defer {
-            Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) }
+            Task { await emitter.unsubscribe(subscriptionId) }
         }
         
         _ = try await TwoAttemptHandshakeManager.performHandshake(
             deviceId: deviceId,
             preferPQC: true,
-            policy: .default
+            policy: .default,
+            securityEventEmitter: emitter
         ) { strategy, sigAAlgorithm in
             let count = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
             if count == 1 {
@@ -243,6 +246,13 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         XCTAssertEqual(count, 2, "default policy should allow classic fallback")
         
         await fulfillment(of: [fallbackEvent], timeout: 0.5)
+
+        let capturedEvent = await eventBox.get()
+        XCTAssertEqual(capturedEvent?.context["deviceId"], SkyBridgeDiagnosticRedaction.redacted)
+        XCTAssertNotEqual(capturedEvent?.context["deviceId"], deviceId)
+        XCTAssertEqual(capturedEvent?.context["reason"], HandshakeFailureReason.suiteNegotiationFailed.diagnosticReasonCode)
+        XCTAssertEqual(capturedEvent?.context["fromStrategy"], HandshakeAttemptStrategy.pqcOnly.rawValue)
+        XCTAssertEqual(capturedEvent?.context["toStrategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
     }
     
  // MARK: - Property 2.1.5: isPQCUnavailableError classification
@@ -303,5 +313,17 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         case .empty:
             return []
         }
+    }
+}
+
+private actor HandshakeDowngradeEventBox {
+    private var event: SecurityEvent?
+
+    func set(_ value: SecurityEvent) {
+        event = value
+    }
+
+    func get() -> SecurityEvent? {
+        event
     }
 }

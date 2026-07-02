@@ -251,6 +251,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
         preferPQC: Bool = true,
         policy: HandshakePolicy = .default,
         cryptoProvider: any CryptoProvider,
+        securityEventEmitter: SecurityEventEmitter = .shared,
         executor: PreparedHandshakeExecutor,
         enforceFallbackRateLimit: Bool = true,
         enablePQCBridgeRetry: Bool = true
@@ -278,6 +279,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                             reason: .pqcProviderUnavailable,
                             policy: policy,
                             cryptoProvider: cryptoProvider,
+                            securityEventEmitter: securityEventEmitter,
                             executor: executor
                        ) {
                         return bridged
@@ -290,6 +292,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: .pqcProviderUnavailable,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
+                        securityEventEmitter: securityEventEmitter,
                         executor: executor,
                         enforceFallbackRateLimit: enforceFallbackRateLimit
                     )
@@ -305,6 +308,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                                 reason: reason,
                                 policy: policy,
                                 cryptoProvider: cryptoProvider,
+                                securityEventEmitter: securityEventEmitter,
                                 executor: executor
                             ) {
                                 return bridged
@@ -312,7 +316,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         } catch {
                             // Bridge retry is best-effort. If the policy still allows
                             // Classic fallback, continue into the normal downgrade path.
-                            SecurityEventEmitter.emitDetached(SecurityEvent(
+                            await securityEventEmitter.emit(SecurityEvent(
                                 type: .handshakeFailed,
                                 severity: .warning,
                                 message: "PQC bridge retry failed; evaluating classic fallback",
@@ -336,6 +340,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: reason,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
+                        securityEventEmitter: securityEventEmitter,
                         executor: executor,
                         enforceFallbackRateLimit: enforceFallbackRateLimit
                     )
@@ -365,6 +370,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
         reason: HandshakeFailureReason,
         policy: HandshakePolicy,
         cryptoProvider: any CryptoProvider,
+        securityEventEmitter: SecurityEventEmitter,
         executor: PreparedHandshakeExecutor
     ) async throws -> SessionKeys? {
         guard shouldAttemptPQCBridgeRetry(reason) else {
@@ -386,7 +392,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return nil
         }
 
-        SecurityEventEmitter.emitDetached(SecurityEvent(
+        await securityEventEmitter.emit(SecurityEvent(
             type: .cryptoProviderSelected,
             severity: .info,
             message: "Retrying PQC handshake with compatibility suite",
@@ -408,6 +414,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
         reason: HandshakeFailureReason,
         policy: HandshakePolicy,
         cryptoProvider: any CryptoProvider,
+        securityEventEmitter: SecurityEventEmitter,
         executor: PreparedHandshakeExecutor,
         enforceFallbackRateLimit: Bool
     ) async throws -> SessionKeys {
@@ -426,7 +433,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
  // 9.4: 发射 fallback 事件
         let cooldownSeconds = TwoAttemptHandshakeManager.fallbackCooldownSeconds
-        SecurityEventEmitter.emitDetached(SecurityEvent(
+        await securityEventEmitter.emit(SecurityEvent(
             type: .cryptoDowngrade,
             severity: .warning,
             message: "PQC handshake failed, falling back to Classic",
@@ -470,6 +477,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
         deviceId: String,
         preferPQC: Bool = true,
         policy: HandshakePolicy = .default,
+        securityEventEmitter: SecurityEventEmitter = .shared,
         executor: HandshakeExecutor
     ) async throws -> SessionKeys {
         let provider = CompatibilityPreparationProvider()
@@ -479,6 +487,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             preferPQC: preferPQC,
             policy: policy,
             cryptoProvider: provider,
+            securityEventEmitter: securityEventEmitter,
             executor: { preparation in
                 return try await executor(preparation.strategy, preparation.sigAAlgorithm.wire)
             },
