@@ -234,7 +234,7 @@ cleanup_tmp() {
   local mounted_dir=""
   for mounted_dir in "${MOUNTED_DMG_DIRS[@]:-}"; do
     [[ -n "${mounted_dir}" ]] || continue
-    hdiutil detach "${mounted_dir}" >/dev/null 2>&1 || true
+    diskutil eject "${mounted_dir}" >/dev/null 2>&1 || true
   done
   rm -rf "${TMP_DIR}"
 }
@@ -251,6 +251,11 @@ log_warn() {
 
 log_error() {
   echo "[macos-release-readiness] ERROR: $1" >&2
+}
+
+eject_mounted_volume() {
+  local mount_dir="$1"
+  diskutil eject "${mount_dir}" >/dev/null
 }
 
 fail() {
@@ -725,7 +730,7 @@ validate_dmg_embedded_app() {
   compare_required_privacy_usage_descriptions "${expected_app_path}/Contents/Info.plist" "${dmg_info_plist}" "DMG app Info.plist" \
     || fail "DMG app Info.plist privacy usage descriptions drifted from dist app"
 
-  hdiutil detach "${mount_dir}" >/dev/null
+  eject_mounted_volume "${mount_dir}"
 }
 
 pid_in_list() {
