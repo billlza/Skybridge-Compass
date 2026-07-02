@@ -3,12 +3,12 @@ options:
   bundleIdPrefix: com.skybridge.compass
   deploymentTarget:
     macOS: "14.0"
-  xcodeVersion: "26.5"
+  xcodeVersion: "26.6"
   developmentLanguage: zh-Hans
 
 settings:
   base:
-    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is determined by the selected stable Xcode 26.5+ toolchain.
+    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is determined by the selected stable Xcode 26.6+ toolchain.
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     SWIFT_STRICT_CONCURRENCY: complete

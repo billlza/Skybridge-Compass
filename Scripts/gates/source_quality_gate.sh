@@ -8,6 +8,19 @@ source "$(cd "$(dirname "$0")" && pwd)/_gate_common.sh"
 IOS_PROJECT="${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_TEST_LANE="${ROOT_DIR}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
+SOURCE_QUALITY_TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-source-quality-home.XXXXXX")"
+
+cleanup_source_quality_tmp() {
+  rm -rf "${SOURCE_QUALITY_TEST_HOME}"
+  cleanup_gate_tmp
+}
+trap cleanup_source_quality_tmp EXIT
+
+run_check_strict_no_warnings \
+  "release-no-print-guard" \
+  "code" \
+  "source-quality" \
+  env SRCROOT="${ROOT_DIR}" zsh "${ROOT_DIR}/Scripts/release_no_print_guard.zsh"
 
 run_check_strict_no_warnings \
   "swift-build" \
@@ -19,13 +32,13 @@ run_check_strict_no_warnings \
   "swift-test-localization-notification-isolation" \
   "code" \
   "source-quality" \
-  swift test --filter SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests
+  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 swift test --filter SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests
 
 run_check_strict_no_warnings \
   "swift-test" \
   "code" \
   "source-quality" \
-  swift test
+  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 swift test --filter '.*'
 
 run_check_strict_no_warnings \
   "ios-debug-build" \

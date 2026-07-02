@@ -179,9 +179,9 @@ public actor TrafficPaddingStats {
 
         if printHintOnce && !didPrintPathHint {
             didPrintPathHint = true
-            print("\(hintPrefix): \(url.path)")
+            SkyBridgeLogger.p2p.info("\(hintPrefix, privacy: .public): \(url.path, privacy: .public)")
         } else if !printHintOnce {
-            print("\(hintPrefix): \(url.path)")
+            SkyBridgeLogger.p2p.info("\(hintPrefix, privacy: .public): \(url.path, privacy: .public)")
         }
 
         let data = buildCSVSnapshot().data(using: .utf8) ?? Data()
@@ -239,5 +239,4 @@ public actor TrafficPaddingStats {
         return s
     }
 }
-
 

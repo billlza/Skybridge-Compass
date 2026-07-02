@@ -51,6 +51,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
  // MARK: - 私有属性
 
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "CrossNetwork")
+    nonisolated private static let smokeLogger = Logger(
+        subsystem: "com.skybridge.connection",
+        category: "CrossNetworkSmoke"
+    )
     private let signalServer: SignalServerClient
     private let iceServers: [String] = [SkyBridgeServerConfig.stunURL]
         + SkyBridgeServerConfig.turnURLs
@@ -65,6 +69,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     nonisolated static let qrCodeConnectLinkMaximumByteCount = 1_800
     nonisolated static let webRTCStartupJoinHeartbeatAttempts = 60
     nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
+    nonisolated private static func emitSmokeLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        smokeLogger.info("\(message, privacy: .public)")
+    }
     nonisolated private static func streamRefreshTokenLogState(_ token: UInt64?) -> String {
         token == nil ? "missing" : "present"
     }
@@ -3646,14 +3654,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     self.lastRekeyEvent = "messageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)"
                 }
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 WebRTC rekey tx MessageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)")
+                    Self.emitSmokeLog("🧪 WebRTC rekey tx MessageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)")
                 }
             } else if (try? HandshakeFinished.decode(from: rawHandshake)) != nil {
                 await MainActor.run {
                     self.lastRekeyEvent = "finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)"
                 }
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 WebRTC rekey tx Finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)")
+                    Self.emitSmokeLog("🧪 WebRTC rekey tx Finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)")
                 }
             }
             try await sendFramed(tunedHandshake)
@@ -4085,7 +4093,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             trigger: String
         ) async {
             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                print("🧪 mac maybeStartPQCRekey trigger=\(trigger) deviceId=\(pairingPayload.deviceId) keys=\(pairingPayload.kemPublicKeys.count)")
+                Self.emitSmokeLog("🧪 mac maybeStartPQCRekey trigger=\(trigger) deviceId=\(pairingPayload.deviceId) keys=\(pairingPayload.kemPublicKeys.count)")
             }
             guard let establishedKeys = handshakeState.sessionKeys else { return }
             guard !establishedKeys.negotiatedSuite.isPQCGroup else { return }
@@ -4150,7 +4158,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let capability = CryptoProviderFactory.detectCapability()
             guard capability.hasApplePQC || capability.hasLiboqs else {
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac skip PQC rekey: no local PQC provider")
+                    Self.emitSmokeLog("🧪 mac skip PQC rekey: no local PQC provider")
                 }
                 logger.info(
                     "⚠️ WebRTC skip PQC rekey: local PQC provider unavailable. session=\(sessionID, privacy: .public) event=pqcRekeyFailed trigger=\(trigger, privacy: .public)"
@@ -4206,7 +4214,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     let localSuitesSummary = candidateLocalSuites.map(\.rawValue).joined(separator: ",")
-                    print(
+                    Self.emitSmokeLog(
                         "🧪 mac PQC candidates=\(candidateIds.joined(separator: ",")) " +
                         "provider=\(candidate.label) localSuites=\(localSuitesSummary)"
                     )
@@ -4250,7 +4258,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 )).sorted()
                 let missingSummary = missingCanonicalSuites.joined(separator: ",")
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac skip PQC rekey: missing peer KEM suites=\(missingSummary)")
+                    Self.emitSmokeLog("🧪 mac skip PQC rekey: missing peer KEM suites=\(missingSummary)")
                 }
                 self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) missing=\(missingSummary)"
                 logger.info(
@@ -4297,7 +4305,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                 let offeredSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print(
+                    Self.emitSmokeLog(
                         "🧪 mac start PQC rekey peer=\(selectedPeerId) offered=\(offeredSummary) " +
                         "provider=\(String(describing: type(of: cryptoProvider))) source=\(selectedProviderLabel)"
                     )
@@ -4313,7 +4321,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                            with: PeerIdentifier(deviceId: selectedPeerId)
 	                        )
 	                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-	                            print("🧪 mac PQC rekey task completed suite=\(rekeyed.negotiatedSuite.rawValue)")
+	                            Self.emitSmokeLog("🧪 mac PQC rekey task completed suite=\(rekeyed.negotiatedSuite.rawValue)")
 	                        }
 	                        let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup
 	                            ? "pqcRekeyComplete"
@@ -4354,7 +4362,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         startScreenStreamingIfNeeded(keys: rekeyed)
                     } catch {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                            print("🧪 mac PQC rekey task failed err=\(error.localizedDescription)")
+                            Self.emitSmokeLog("🧪 mac PQC rekey task failed err=\(error.localizedDescription)")
                         }
                         guard handshakeState.driver === outboundDriver else { return }
 
@@ -7161,7 +7169,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 let payload = try await receiveExactly(Int(totalLen))
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac rx frame totalLen=\(Int(totalLen))")
+                    Self.emitSmokeLog("🧪 mac rx frame totalLen=\(Int(totalLen))")
                 }
 
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
@@ -7192,29 +7200,29 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                                 switch msg {
                                 case .pairingIdentityExchange(let payload):
-                                    print("🧪 mac app message=pairingIdentityExchange deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
+                                    Self.emitSmokeLog("🧪 mac app message=pairingIdentityExchange deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
                                 case .kemRefreshRequest(let payload):
-                                    print("🧪 mac app message=kemRefreshRequest target=\(payload.targetDeviceId)")
+                                    Self.emitSmokeLog("🧪 mac app message=kemRefreshRequest target=\(payload.targetDeviceId)")
                                 case .signedKEMRefresh(let payload):
-                                    print("🧪 mac app message=signedKEMRefresh deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
+                                    Self.emitSmokeLog("🧪 mac app message=signedKEMRefresh deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
                                 case .kemRefreshFailure(let payload):
-                                    print("🧪 mac app message=kemRefreshFailure reasonCode=\(payload.reasonCode)")
+                                    Self.emitSmokeLog("🧪 mac app message=kemRefreshFailure reasonCode=\(payload.reasonCode)")
                                 case .protocolIdentityBindingRequest(let payload):
-                                    print("🧪 mac app message=protocolIdentityBindingRequest target=\(payload.targetDeviceId)")
+                                    Self.emitSmokeLog("🧪 mac app message=protocolIdentityBindingRequest target=\(payload.targetDeviceId)")
                                 case .signedProtocolIdentityBinding(let payload):
-                                    print("🧪 mac app message=signedProtocolIdentityBinding deviceId=\(payload.deviceId)")
+                                    Self.emitSmokeLog("🧪 mac app message=signedProtocolIdentityBinding deviceId=\(payload.deviceId)")
                                 case .heartbeat:
-                                    print("🧪 mac app message=heartbeat")
+                                    Self.emitSmokeLog("🧪 mac app message=heartbeat")
                                 case .clipboard:
-                                    print("🧪 mac app message=clipboard")
+                                    Self.emitSmokeLog("🧪 mac app message=clipboard")
                                 case .textMessage(let payload):
-                                    print("🧪 mac app message=textMessage id=\(payload.id)")
+                                    Self.emitSmokeLog("🧪 mac app message=textMessage id=\(payload.id)")
                                 case .peerDisconnecting(let payload):
-                                    print("🧪 mac app message=peerDisconnecting deviceId=\(payload.deviceId ?? "nil")")
+                                    Self.emitSmokeLog("🧪 mac app message=peerDisconnecting deviceId=\(payload.deviceId ?? "nil")")
                                 case .ping(let payload):
-                                    print("🧪 mac app message=ping id=\(payload.id)")
+                                    Self.emitSmokeLog("🧪 mac app message=ping id=\(payload.id)")
                                 case .pong(let payload):
-                                    print("🧪 mac app message=pong id=\(payload.id)")
+                                    Self.emitSmokeLog("🧪 mac app message=pong id=\(payload.id)")
 	                                }
 	                            }
                             if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID) {
@@ -7318,7 +7326,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
                                 )
                                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                                    print("🧪 mac pairing decision=\(decision.rawValue)")
+                                    Self.emitSmokeLog("🧪 mac pairing decision=\(decision.rawValue)")
                                 }
                                 guard decision != PairingTrustApprovalService.Decision.reject else { break }
                                 let sendPairingReply = sendFramed
@@ -7391,8 +7399,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     }
                                     let reply = AppMessage.pairingIdentityExchange(replyPayload)
                                     if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                                        print("🧪 mac pairing reply deviceId=\(localId) keys=\(kemKeys.count)")
-                                        print("🧪 mac pairing reply provider=\(String(describing: type(of: provider)))")
+                                        Self.emitSmokeLog("🧪 mac pairing reply deviceId=\(localId) keys=\(kemKeys.count)")
+                                        Self.emitSmokeLog("🧪 mac pairing reply provider=\(String(describing: type(of: provider)))")
                                         let digests = kemKeys
                                             .sorted { $0.suiteWireId < $1.suiteWireId }
                                             .map { key in
@@ -7402,7 +7410,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                                 return String(format: "0x%04x:%@", key.suiteWireId, digest)
                                             }
                                             .joined(separator: ",")
-                                        print("🧪 mac pairing reply KEM digests=\(digests)")
+                                        Self.emitSmokeLog("🧪 mac pairing reply KEM digests=\(digests)")
                                     }
                                     self.appendSmokeStatus(
                                         "app-pairing-send session=\(sessionID) deviceId=\(localId) keys=\(kemKeys.count)"
@@ -7682,14 +7690,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                                 let digest = SHA256.hash(data: plaintext)
                                 let fingerprint = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-                                print("🧪 mac app unknown payload length=\(plaintext.count) sha256Prefix=\(fingerprint)")
+                                Self.emitSmokeLog("🧪 mac app unknown payload length=\(plaintext.count) sha256Prefix=\(fingerprint)")
                             }
                             logger.debug("ℹ️ WebRTC 业务消息解密成功但未匹配已知消息类型")
                             continue
                         }
                     } catch {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                            print("🧪 mac app decrypt/parse failed err=\(error.localizedDescription)")
+                            Self.emitSmokeLog("🧪 mac app decrypt/parse failed err=\(error.localizedDescription)")
                         }
                         logger.debug("ℹ️ WebRTC 业务消息解密/解析失败（继续尝试按握手包处理）：\(error.localizedDescription, privacy: .public)")
                     }
@@ -7701,7 +7709,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         do {
                             decodedMessageA = try HandshakeMessageA.decode(from: frame)
                         } catch {
-                            print("🧪 mac MessageA decode failed: \(error.localizedDescription)")
+                            Self.emitSmokeLog("🧪 mac MessageA decode failed: \(error.localizedDescription)")
                             decodedMessageA = nil
                         }
                     } else {
@@ -7710,13 +7718,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     if let messageA = decodedMessageA {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
-                            print("🧪 mac rx MessageA bytes=\(frame.count) suites=\(suiteSummary)")
+                            Self.emitSmokeLog("🧪 mac rx MessageA bytes=\(frame.count) suites=\(suiteSummary)")
                             let preimageDigest = SHA256.hash(data: messageA.signaturePreimage)
                                 .map { String(format: "%02x", $0) }
                                 .joined()
                                 .prefix(16)
                             let identitySummary = try? IdentityPublicKeys.decodeWithLegacyFallback(from: messageA.identityPublicKey)
-                            print(
+                            Self.emitSmokeLog(
                                 "🧪 mac rx MessageA sigAlg=\(identitySummary?.protocolAlgorithm.rawValue ?? "unknown") " +
                                 "pubBytes=\(identitySummary?.protocolPublicKey.count ?? messageA.identityPublicKey.count) " +
                                 "sigBytes=\(messageA.signature.count) " +
@@ -7853,7 +7861,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             trustProvider: inboundTrustProvider
                         )
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                            print("🧪 mac driver init sigA=\(sigAAlgorithm.rawValue) requirePQC=\(handshakePolicy.requirePQC) provider=\(String(describing: type(of: cryptoProvider)))")
+                            Self.emitSmokeLog("🧪 mac driver init sigA=\(sigAAlgorithm.rawValue) requirePQC=\(handshakePolicy.requirePQC) provider=\(String(describing: type(of: cryptoProvider)))")
                         }
                         if handshakeState.previousSessionKeysBeforeRekey != nil, self.lastRekeyEvent == nil {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
@@ -7876,7 +7884,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 let st = await activeDriver.getCurrentState()
                 lastHandshakeDriverState = String(describing: st)
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac driver state=\(String(describing: st))")
+                    Self.emitSmokeLog("🧪 mac driver state=\(String(describing: st))")
                 }
                 switch st {
                 case .waitingFinished(_, let keys, _):

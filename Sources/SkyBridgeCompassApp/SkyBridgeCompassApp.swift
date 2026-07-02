@@ -1,12 +1,17 @@
 import SwiftUI
 import WidgetKit
 import UserNotifications
-import os.log
+import OSLog
 import AppKit
 import Darwin
 import SkyBridgeCore
 import SkyBridgeSmokeSupport
 import SkyBridgeUI
+
+private let remoteControlNoticePanelProbeLogger = Logger(
+    subsystem: "com.skybridge.compass",
+    category: "RemoteControlNoticePanelProbe"
+)
 
 enum MacSmokeStatusFailClosedWriter {
     static func append(_ data: Data, to statusURL: URL, context: String) {
@@ -1088,20 +1093,20 @@ private final class RemoteControlNoticePanelProbeHarness {
         }
 
         try? await Task.sleep(nanoseconds: 350_000_000)
-        print("remote control notice panel probe approving")
+        remoteControlNoticePanelProbeLogger.info("remote control notice panel probe approving")
         RemoteControlSecurityNoticeCenter.shared.approveCurrentNotice()
         let decision = await approvalTask.value
         guard decision == .approved else {
-            print("remote control notice panel probe rejected: \(decision.rawValue)")
+            remoteControlNoticePanelProbeLogger.error("remote control notice panel probe rejected: \(decision.rawValue, privacy: .public)")
             NSApplication.shared.terminate(nil)
             return
         }
 
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-        print("remote control notice panel probe disconnecting")
+        remoteControlNoticePanelProbeLogger.info("remote control notice panel probe disconnecting")
         RemoteControlSecurityNoticeCenter.shared.disconnectCurrentNotice()
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-        print("remote control notice panel probe complete")
+        remoteControlNoticePanelProbeLogger.info("remote control notice panel probe complete")
         exit(EXIT_SUCCESS)
     }
 }

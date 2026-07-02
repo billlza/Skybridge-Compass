@@ -81,6 +81,11 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
 
     var onEncodedFrame: ((Data, Int, Int, RemoteFrameType) -> Void)?
 
+    private func emitSmokeLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        logger.info("\(message, privacy: .public)")
+    }
+
     private final class CompressionCallbackContext {
         private let lock = NSLock()
         weak var encoder: WebRTCCGDisplayVideoEncoder?
@@ -124,9 +129,7 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
 
         try setupCompressionSession(width: width, height: height, codec: codecType)
         started = true
-        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-            print("🧪 cg-vt start codec=\(preferredCodec) size=\(width)x\(height) fps=\(configuredFPS)")
-        }
+        emitSmokeLog("🧪 cg-vt start codec=\(preferredCodec) size=\(width)x\(height) fps=\(configuredFPS)")
     }
 
     func stop() {
@@ -157,9 +160,7 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
         encodeQueue.async { [weak self] in
             guard let self else { return }
             guard let pixelBuffer = self.makePixelBuffer(from: image) else {
-                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 cg-vt pixel-buffer-failed")
-                }
+                self.emitSmokeLog("🧪 cg-vt pixel-buffer-failed")
                 self.finishEncodeCycle()
                 return
             }
@@ -181,9 +182,7 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
             )
             if status != noErr {
                 self.logger.error("❌ CGDisplay VT encode failed status=\(status, privacy: .public)")
-                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 cg-vt encode-status=\(status)")
-                }
+                self.emitSmokeLog("🧪 cg-vt encode-status=\(status)")
                 self.finishEncodeCycle()
             }
         }
@@ -335,18 +334,14 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
 
         if bitstreamFormat == .annexB {
             guard let annexBPayload = annexBPayload(from: sampleBuffer, payload: payload) else {
-                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 cg-vt annexb-failed")
-                }
+                emitSmokeLog("🧪 cg-vt annexb-failed")
                 return
             }
             payload = annexBPayload
         }
 
         let type: RemoteFrameType = codecType == kCMVideoCodecType_HEVC ? .hevc : .h264
-        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-            print("🧪 cg-vt encoded bytes=\(payload.count) codec=\(type)")
-        }
+        emitSmokeLog("🧪 cg-vt encoded bytes=\(payload.count) codec=\(type)")
         onEncodedFrame?(payload, width, height, type)
     }
 

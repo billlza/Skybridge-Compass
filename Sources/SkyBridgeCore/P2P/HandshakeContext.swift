@@ -373,13 +373,13 @@ public actor HandshakeContext {
             let suiteSummary = supportedSuites.map(\.rawValue).joined(separator: ",")
             let preimageDigest = SHA256.hash(data: dataToSign).map { String(format: "%02x", $0) }.joined().prefix(16)
             let identitySummary = (try? IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey))
-            print(
+            let smokeMessage =
                 "🧪 mac tx MessageA suites=\(suiteSummary) " +
                 "sigAlg=\(identitySummary?.protocolAlgorithm.rawValue ?? "unknown") " +
                 "pubBytes=\(identitySummary?.protocolPublicKey.count ?? identityPublicKey.count) " +
                 "sigBytes=\(signature.count) " +
                 "preimageSha256=\(preimageDigest)"
-            )
+            SkyBridgeLogger.p2p.info("\(smokeMessage, privacy: .public)")
         }
         let seSigPreimage = messageA.secureEnclaveSignaturePreimage
         var seSignature: Data?

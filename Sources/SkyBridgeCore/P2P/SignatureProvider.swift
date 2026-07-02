@@ -445,7 +445,7 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
 
     private func emitSmokeBackendLog(_ message: String) {
         guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
-        print("🧪 mac MLDSA \(message)")
+        SkyBridgeLogger.p2p.info("🧪 mac MLDSA \(message, privacy: .public)")
     }
 }
 

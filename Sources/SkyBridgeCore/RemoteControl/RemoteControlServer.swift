@@ -35,6 +35,10 @@ public final class RemoteControlServer: ObservableObject {
     }
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteControlServer")
+    nonisolated private static let smokeLog = Logger(
+        subsystem: "com.skybridge.compass",
+        category: "RemoteControlSmoke"
+    )
     
     private let manager: RemoteControlManager
     private let preferredPort: UInt16
@@ -47,6 +51,10 @@ public final class RemoteControlServer: ObservableObject {
     private nonisolated static let remoteRoutePreflightProbePayload = Data(
         "SKYBRIDGE_REMOTE_ROUTE_PROBE_V1\n".utf8
     )
+    nonisolated private static func emitSmokeLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        smokeLog.info("\(message, privacy: .public)")
+    }
     private var netService: NetService?
     public private(set) var activePort: UInt16?
     public private(set) var isBonjourPublished = false
@@ -399,17 +407,13 @@ public final class RemoteControlServer: ObservableObject {
         let endpointDescription = String(describing: connection.endpoint)
         RemoteControlSmokeStatusWriter.append("mac-remote-inbound accepted endpoint=\(endpointDescription)")
 
-        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-            print("🧪 mac remote server incoming endpoint=\(endpointDescription)")
-        }
+        Self.emitSmokeLog("🧪 mac remote server incoming endpoint=\(endpointDescription)")
 
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let connection else { return }
             let rendered = Self.renderConnectionState(state)
 
-            if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                print("🧪 mac remote server state endpoint=\(endpointDescription) state=\(rendered)")
-            }
+            Self.emitSmokeLog("🧪 mac remote server state endpoint=\(endpointDescription) state=\(rendered)")
             RemoteControlSmokeStatusWriter.append(
                 "mac-remote-inbound state=\(rendered.replacingOccurrences(of: " ", with: "_")) endpoint=\(endpointDescription)"
             )
@@ -427,9 +431,7 @@ public final class RemoteControlServer: ObservableObject {
                 guard let self else { return }
                 let deviceId = self.resolveInboundPeerIdentifier(for: connection.endpoint)
                 self.log.info("🔐 RemoteControlServer connection state: peer=\(deviceId, privacy: .public) state=\(rendered, privacy: .public)")
-                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac remote server state peer=\(deviceId) state=\(rendered)")
-                }
+                Self.emitSmokeLog("🧪 mac remote server state peer=\(deviceId) state=\(rendered)")
             }
         }
         

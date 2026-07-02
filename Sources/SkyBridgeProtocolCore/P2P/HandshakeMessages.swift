@@ -12,6 +12,12 @@
 
 import Foundation
 import CryptoKit
+import OSLog
+
+private let handshakeMessagesLogger = Logger(
+    subsystem: "com.skybridge.protocol",
+    category: "HandshakeMessages"
+)
 
 private enum HandshakeSignatureDomain {
     static let protocolA = "SkyBridge-A"
@@ -1086,7 +1092,7 @@ public struct HandshakeMessageB: Sendable {
             let seSigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
             guard offset + Int(seSigLen) <= data.count else {
                 if smokeDecodeLoggingEnabled {
-                    print(
+                    handshakeMessagesLogger.info(
                         "🧪 MessageB decode seSig truncated total=\(data.count) suite=\(selectedSuite.rawValue) share=\(shareLen) payload=\(payloadLen) id=\(idKeyLen) sig=\(sigLen) se=\(seSigLen) offset=\(offset)"
                     )
                 }
@@ -1103,7 +1109,7 @@ public struct HandshakeMessageB: Sendable {
         }
         if smokeDecodeLoggingEnabled {
             let seLen = secureEnclaveSignature?.count ?? 0
-            print(
+            handshakeMessagesLogger.info(
                 "🧪 MessageB decode fields total=\(data.count) suite=\(selectedSuite.rawValue) share=\(shareLen) payload=\(payloadLen) id=\(idKeyLen) sig=\(sigLen) se=\(seLen)"
             )
         }

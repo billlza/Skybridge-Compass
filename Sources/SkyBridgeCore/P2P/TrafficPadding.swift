@@ -148,12 +148,10 @@ public enum TrafficPadding {
             "standard(enabled=\(obj(defaults, "sb_traffic_padding_enabled")) debug=\(obj(defaults, "sb_traffic_padding_debug_log"))) " +
             "group(enabled=\(obj(group, "sb_traffic_padding_enabled")) debug=\(obj(group, "sb_traffic_padding_debug_log")))"
 
-        print(diag)
         SkyBridgeLogger.p2p.info("\(diag, privacy: .public)")
 
         if !cfg.enabled {
             let hint = "🧪 Enable SBP2: defaults write group.com.skybridge.compass sb_traffic_padding_enabled -bool true  (or env SB_TRAFFIC_PADDING_ENABLED=1)"
-            print(hint)
             SkyBridgeLogger.p2p.info("\(hint, privacy: .public)")
         }
     }
@@ -164,7 +162,7 @@ public enum TrafficPadding {
             enterLogLock.lock()
             if !didPrintEnterWrap {
                 didPrintEnterWrap = true
-                print("🧪 ENTER TrafficPadding.wrapIfEnabled label=\(label ?? "traffic") bytes=\(payload.count)")
+                SkyBridgeLogger.p2p.info("🧪 ENTER TrafficPadding.wrapIfEnabled label=\(label ?? "traffic", privacy: .public) bytes=\(payload.count, privacy: .public)")
             }
             enterLogLock.unlock()
         }
@@ -186,7 +184,6 @@ public enum TrafficPadding {
             let name = label ?? "traffic"
             let msg = "🧪 TrafficPadding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue))"
             SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
-            print(msg)
         }
 
         // Phase C3: stats (best-effort, non-blocking)
@@ -204,7 +201,7 @@ public enum TrafficPadding {
             enterLogLock.lock()
             if !didPrintEnterUnwrap {
                 didPrintEnterUnwrap = true
-                print("🧪 ENTER TrafficPadding.unwrapIfNeeded label=\(label ?? "traffic") bytes=\(data.count)")
+                SkyBridgeLogger.p2p.info("🧪 ENTER TrafficPadding.unwrapIfNeeded label=\(label ?? "traffic", privacy: .public) bytes=\(data.count, privacy: .public)")
             }
             enterLogLock.unlock()
         }
@@ -222,7 +219,6 @@ public enum TrafficPadding {
             let name = label ?? "traffic"
             let msg = "🧪 TrafficUnwrap[\(name)]: total=\(data.count)B -> raw=\(payload.count)B"
             SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
-            print(msg)
         }
 
         // Phase C3: stats (best-effort, non-blocking)

@@ -615,11 +615,22 @@ extension KeychainManager {
         try deleteAPIKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
 
+    private nonisolated static let authSessionService = "com.skybridge.compass.authsession"
+    private nonisolated static let authSessionAccount = "primary"
+
     public nonisolated func storeAuthSession(_ session: AuthSession) throws {
         let data = try JSONEncoder().encode(session)
+        if Self.useInMemoryKeychain {
+            let key = Self.authSessionService + "|" + Self.authSessionAccount
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[key] = data
+            Self.inMemoryLock.unlock()
+            return
+        }
+
         let status = upsertGenericPassword(
-            service: "com.skybridge.compass.authsession",
-            account: "primary",
+            service: Self.authSessionService,
+            account: Self.authSessionAccount,
             data: data,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         )
@@ -634,8 +645,8 @@ extension KeychainManager {
 
     public nonisolated func loadAuthSessionStrict() throws -> AuthSession? {
         guard let data = try loadKeyDataStrict(
-            service: "com.skybridge.compass.authsession",
-            account: "primary"
+            service: Self.authSessionService,
+            account: Self.authSessionAccount
         ) else {
             return nil
         }
@@ -651,7 +662,7 @@ extension KeychainManager {
     }
 
     public nonisolated func deleteAuthSession() throws {
-        try deleteAPIKey(service: "com.skybridge.compass.authsession", account: "primary")
+        try deleteAPIKey(service: Self.authSessionService, account: Self.authSessionAccount)
     }
 }
 @available(macOS 14.0, *)
