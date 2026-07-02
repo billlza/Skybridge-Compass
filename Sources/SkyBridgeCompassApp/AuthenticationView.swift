@@ -37,6 +37,9 @@ struct AuthenticationView: View {
     @State private var pendingSupabaseTurnstileContext: SupabaseTurnstileChallengeContext?
     @State private var pendingSupabaseTurnstileAction: SupabaseTurnstileAction?
     @State private var pendingAppleAuthorization: ASAuthorization?
+    @State private var nativeAppleSignInRequestID = UUID()
+    @State private var isNativeAppleSignInRequestPending = false
+    @State private var isAuthenticationSubmitInFlight = false
 
     private func t(_ key: String) -> String {
         localizationManager.localizedString(key)
@@ -68,6 +71,12 @@ struct AuthenticationView: View {
             }
         }
         .ignoresSafeArea()
+        .onSubmit {
+            submitSelectedLoginMethod()
+        }
+        .overlay(alignment: .topLeading) {
+            defaultAuthenticationSubmitButton
+        }
         .onAppear {
  // 使用Apple 2025推荐的弹性动画
             withAnimation(.interactiveSpring(response: 0.6, dampingFraction: 0.8)) {
@@ -88,26 +97,21 @@ struct AuthenticationView: View {
             }
             .presentationDetents([.medium])
         }
-        .sheet(item: $pendingSupabaseTurnstileContext) { context in
+        .sheet(item: $pendingSupabaseTurnstileContext, onDismiss: {
+            if pendingSupabaseTurnstileAction != nil || pendingAppleAuthorization != nil {
+                cancelSupabaseTurnstileChallenge()
+            }
+        }) { context in
             SupabaseTurnstileSheet(
                 context: context,
                 onToken: { token in
-                    guard let action = pendingSupabaseTurnstileAction else { return }
-                    pendingSupabaseTurnstileAction = nil
-                    pendingSupabaseTurnstileContext = nil
-                    runSupabaseTurnstileAction(action, token: token)
+                    completeSupabaseTurnstileChallenge(token: token)
                 },
                 onCancel: {
-                    pendingSupabaseTurnstileAction = nil
-                    pendingSupabaseTurnstileContext = nil
-                    pendingAppleAuthorization = nil
-                    viewModel.errorMessage = t("auth.turnstile.cancelled")
+                    cancelSupabaseTurnstileChallenge()
                 },
                 onError: { message in
-                    pendingSupabaseTurnstileAction = nil
-                    pendingSupabaseTurnstileContext = nil
-                    pendingAppleAuthorization = nil
-                    viewModel.errorMessage = formatted("auth.turnstile.failed", message)
+                    failSupabaseTurnstileChallenge(message)
                 }
             )
             .presentationDetents([.medium])
@@ -411,16 +415,19 @@ struct AuthenticationView: View {
             switch viewModel.appleSignInPresentationMode {
             case .native:
  // Apple登录按钮 - 彩色液态玻璃风格
-                NativeAppleSignInButton {
-                    request in
+                NativeAppleSignInButton(
+                    nativeAppleSignInRequestID: nativeAppleSignInRequestID,
+                    configureRequest: { request in
                     request.requestedScopes = [
                         ASAuthorization.Scope.fullName,
                         ASAuthorization.Scope.email
                     ]
                     viewModel.configureAppleSignInRequest(request)
-                } onCompletion: { result in
+                }, onRequestStarted: {
+                    isNativeAppleSignInRequestPending = true
+                }, onCompletion: { result in
                     handleAppleSignInResult(result)
-                }
+                })
                 .frame(height: 50)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay {
@@ -437,7 +444,7 @@ struct AuthenticationView: View {
                 .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
             case .webSession, .disabled:
                 Button {
-                    beginSupabaseTurnstileAction(.signInWithApple)
+                    submitSelectedLoginMethod()
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "applelogo")
@@ -507,26 +514,14 @@ struct AuthenticationView: View {
                     primaryColor: .purple,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isNebulaRegistrationMode {
-                            await viewModel.registerWithNebula()
-                        } else {
-                            await viewModel.loginWithNebula()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
                 } else {
                     ModernButton(
                     title: viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.action.register") : t("auth.nebula.browser.action.login"),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isNebulaRegistrationMode {
-                            await viewModel.registerWithNebula()
-                        } else {
-                            await viewModel.loginWithNebula()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             }
             
@@ -563,18 +558,14 @@ struct AuthenticationView: View {
                         primaryColor: .purple,
                         isLoading: viewModel.isProcessing
                     ) {
-                        Task {
-                            await viewModel.verifyMFA()
-                        }
+                        submitSelectedLoginMethod()
                     }
                 } else {
                     ModernButton(
                         title: LocalizationManager.shared.localizedString("auth.mfa.verify"),
                         isLoading: viewModel.isProcessing
                     ) {
-                        Task {
-                            await viewModel.verifyMFA()
-                        }
+                        submitSelectedLoginMethod()
                     }
                 }
             }
@@ -734,17 +725,7 @@ struct AuthenticationView: View {
                     primaryColor: .green,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isPhoneCodeSent {
-                            if viewModel.isPhoneRegistrationMode {
-                                await viewModel.completePhoneRegistration()
-                            } else {
-                                await viewModel.loginWithPhone()
-                            }
-                        } else {
-                            beginSupabaseTurnstileAction(.sendPhoneOTP)
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             } else {
                 ModernButton(
@@ -757,17 +738,7 @@ struct AuthenticationView: View {
                     }(),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isPhoneCodeSent {
-                            if viewModel.isPhoneRegistrationMode {
-                                await viewModel.completePhoneRegistration()
-                            } else {
-                                await viewModel.loginWithPhone()
-                            }
-                        } else {
-                            beginSupabaseTurnstileAction(.sendPhoneOTP)
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             }
             
@@ -960,14 +931,14 @@ struct AuthenticationView: View {
                     primaryColor: .blue,
                     isLoading: viewModel.isProcessing
                 ) {
-                    beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
+                    submitSelectedLoginMethod()
                 }
             } else {
                 ModernButton(
                     title: viewModel.isRegistrationMode ? LocalizationManager.shared.localizedString("auth.email.register") : LocalizationManager.shared.localizedString("auth.email.login"),
                     isLoading: viewModel.isProcessing
                 ) {
-                    beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
+                    submitSelectedLoginMethod()
                 }
             }
             
@@ -1060,13 +1031,97 @@ struct AuthenticationView: View {
         .contentShape(Rectangle())
     }
 
+    private var canSubmitSelectedLoginMethod: Bool {
+        !viewModel.isProcessing
+            && !viewModel.showCaptchaView
+            && !isNativeAppleSignInRequestPending
+            && !isAuthenticationSubmitInFlight
+            && pendingSupabaseTurnstileContext == nil
+            && pendingSupabaseTurnstileAction == nil
+    }
+
+    private var defaultAuthenticationSubmitButton: some View {
+        Button(action: submitSelectedLoginMethod) {
+            EmptyView()
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.defaultAction)
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+        .disabled(!canSubmitSelectedLoginMethod)
+    }
+
+    private func submitSelectedLoginMethod() {
+        guard canSubmitSelectedLoginMethod else { return }
+
+        switch viewModel.selectedMethod {
+        case .apple:
+            submitAppleLoginForm()
+        case .nebula:
+            submitNebulaLoginForm()
+        case .phone:
+            submitPhoneLoginForm()
+        case .email:
+            beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
+        }
+    }
+
+    private func submitAppleLoginForm() {
+        switch viewModel.appleSignInPresentationMode {
+        case .native:
+            isNativeAppleSignInRequestPending = true
+            nativeAppleSignInRequestID = UUID()
+        case .webSession, .disabled:
+            beginSupabaseTurnstileAction(.signInWithApple)
+        }
+    }
+
+    private func submitNebulaLoginForm() {
+        isAuthenticationSubmitInFlight = true
+
+        if viewModel.showMFAInput {
+            Task { @MainActor in
+                defer { isAuthenticationSubmitInFlight = false }
+                await viewModel.verifyMFA()
+            }
+            return
+        }
+
+        Task { @MainActor in
+            defer { isAuthenticationSubmitInFlight = false }
+            if viewModel.isNebulaRegistrationMode {
+                await viewModel.registerWithNebula()
+            } else {
+                await viewModel.loginWithNebula()
+            }
+        }
+    }
+
+    private func submitPhoneLoginForm() {
+        if viewModel.isPhoneCodeSent {
+            isAuthenticationSubmitInFlight = true
+            Task { @MainActor in
+                defer { isAuthenticationSubmitInFlight = false }
+                if viewModel.isPhoneRegistrationMode {
+                    await viewModel.completePhoneRegistration()
+                } else {
+                    await viewModel.loginWithPhone()
+                }
+            }
+            return
+        }
+
+        beginSupabaseTurnstileAction(.sendPhoneOTP)
+    }
+
     private func beginSupabaseTurnstileAction(_ action: SupabaseTurnstileAction) {
         pendingAppleAuthorization = nil
 
         guard let originURL =
                 SupabaseConfiguration.shared.resolvedConfiguration?.url
                     ?? SupabaseService.Configuration.fromEnvironment()?.url else {
-            runSupabaseTurnstileAction(action, token: nil)
+            failSupabaseTurnstileChallenge("turnstile_origin_missing")
             return
         }
 
@@ -1092,7 +1147,7 @@ struct AuthenticationView: View {
         guard let originURL =
                 SupabaseConfiguration.shared.resolvedConfiguration?.url
                     ?? SupabaseService.Configuration.fromEnvironment()?.url else {
-            Task { await viewModel.handleAppleAuthorization(authorization) }
+            failSupabaseTurnstileChallenge("turnstile_origin_missing")
             return
         }
 
@@ -1116,6 +1171,8 @@ struct AuthenticationView: View {
     }
 
     private func handleAppleSignInResult(_ result: Result<ASAuthorization, Error>) {
+        isNativeAppleSignInRequestPending = false
+
         switch result {
         case .success(let authorization):
             beginAppleSignInFlow(with: authorization)
@@ -1125,6 +1182,31 @@ struct AuthenticationView: View {
             }
             viewModel.errorMessage = error.localizedDescription
         }
+    }
+
+    private func completeSupabaseTurnstileChallenge(token: String) {
+        guard let action = pendingSupabaseTurnstileAction else {
+            failSupabaseTurnstileChallenge("turnstile_action_missing")
+            return
+        }
+
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        runSupabaseTurnstileAction(action, token: token)
+    }
+
+    private func cancelSupabaseTurnstileChallenge() {
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        pendingAppleAuthorization = nil
+        viewModel.errorMessage = t("auth.turnstile.cancelled")
+    }
+
+    private func failSupabaseTurnstileChallenge(_ message: String) {
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        pendingAppleAuthorization = nil
+        viewModel.errorMessage = formatted("auth.turnstile.failed", message)
     }
 
     private func runSupabaseTurnstileAction(_ action: SupabaseTurnstileAction, token: String?) {
@@ -1149,12 +1231,16 @@ struct AuthenticationView: View {
 }
 
 private struct NativeAppleSignInButton: NSViewRepresentable {
+    let nativeAppleSignInRequestID: UUID
     let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+    let onRequestStarted: @MainActor () -> Void
     let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            nativeAppleSignInRequestID: nativeAppleSignInRequestID,
             configureRequest: configureRequest,
+            onRequestStarted: onRequestStarted,
             onCompletion: onCompletion
         )
     }
@@ -1169,21 +1255,37 @@ private struct NativeAppleSignInButton: NSViewRepresentable {
         return button
     }
 
-    func updateNSView(_ nsView: ASAuthorizationAppleIDButton, context: Context) {}
+    func updateNSView(_ nsView: ASAuthorizationAppleIDButton, context: Context) {
+        context.coordinator.performRequestIfNeeded(for: nativeAppleSignInRequestID)
+    }
 
     final class Coordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+        private var nativeAppleSignInRequestID: UUID
         private let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+        private let onRequestStarted: @MainActor () -> Void
         private let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
 
         init(
+            nativeAppleSignInRequestID: UUID,
             configureRequest: @escaping @MainActor (ASAuthorizationAppleIDRequest) -> Void,
+            onRequestStarted: @escaping @MainActor () -> Void,
             onCompletion: @escaping @MainActor (Result<ASAuthorization, Error>) -> Void
         ) {
+            self.nativeAppleSignInRequestID = nativeAppleSignInRequestID
             self.configureRequest = configureRequest
+            self.onRequestStarted = onRequestStarted
             self.onCompletion = onCompletion
         }
 
+        @MainActor func performRequestIfNeeded(for requestID: UUID) {
+            guard requestID != nativeAppleSignInRequestID else { return }
+            nativeAppleSignInRequestID = requestID
+            performRequest()
+        }
+
         @objc @MainActor func performRequest() {
+            onRequestStarted()
+
             let request = ASAuthorizationAppleIDProvider().createRequest()
             configureRequest(request)
 

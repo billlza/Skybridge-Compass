@@ -42,6 +42,8 @@ struct SupabaseTurnstileSheet: View {
     let onCancel: @MainActor () -> Void
     let onError: @MainActor (String) -> Void
 
+    @State private var isChallengeReady = false
+
     var body: some View {
         VStack(spacing: 16) {
             VStack(spacing: 8) {
@@ -57,14 +59,30 @@ struct SupabaseTurnstileSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            MacTurnstileWebView(
-                siteKey: context.siteKey,
-                originURL: context.originURL,
-                action: context.action,
-                onToken: onToken,
-                onError: onError
-            )
+            ZStack {
+                if !isChallengeReady {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在加载安全检查...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                MacTurnstileWebView(
+                    siteKey: context.siteKey,
+                    originURL: context.originURL,
+                    action: context.action,
+                    onReady: {
+                        isChallengeReady = true
+                    },
+                    onToken: onToken,
+                    onError: onError
+                )
+            }
             .frame(width: 380, height: 220)
+            .background(.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
             HStack {
@@ -73,7 +91,7 @@ struct SupabaseTurnstileSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 420)
+        .frame(width: 420, height: 360)
     }
 }
 
@@ -82,11 +100,12 @@ private struct MacTurnstileWebView: NSViewRepresentable {
     let siteKey: String
     let originURL: URL
     let action: String
+    let onReady: @MainActor () -> Void
     let onToken: @MainActor (String) -> Void
     let onError: @MainActor (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onToken: onToken, onError: onError)
+        Coordinator(onReady: onReady, onToken: onToken, onError: onError)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -95,6 +114,7 @@ private struct MacTurnstileWebView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "turnstile")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.loadHTMLString(
             Self.html(siteKey: siteKey, action: action),
@@ -106,16 +126,15 @@ private struct MacTurnstileWebView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.invalidate()
+        nsView.stopLoading()
+        nsView.navigationDelegate = nil
         nsView.configuration.userContentController.removeScriptMessageHandler(forName: "turnstile")
     }
 
     private static func html(siteKey: String, action: String) -> String {
-        let escapedSiteKey = siteKey
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedAction = action
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        let siteKeyLiteral = javaScriptStringLiteral(siteKey)
+        let actionLiteral = javaScriptStringLiteral(action)
 
         return """
         <!doctype html>
@@ -123,7 +142,6 @@ private struct MacTurnstileWebView: NSViewRepresentable {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
           <style>
             body {
               margin: 0;
@@ -154,46 +172,142 @@ private struct MacTurnstileWebView: NSViewRepresentable {
               }
             }
 
+            var terminal = false;
+            var rendered = false;
+            var apiLoadTimer = null;
+            var apiReadyTimer = null;
+
+            function fail(message) {
+              if (terminal) {
+                return;
+              }
+              terminal = true;
+              if (apiLoadTimer) {
+                window.clearTimeout(apiLoadTimer);
+              }
+              if (apiReadyTimer) {
+                window.clearTimeout(apiReadyTimer);
+              }
+              post({ type: "error", message: message });
+            }
+
+            function succeed(token) {
+              if (terminal) {
+                return;
+              }
+              terminal = true;
+              if (apiLoadTimer) {
+                window.clearTimeout(apiLoadTimer);
+              }
+              if (apiReadyTimer) {
+                window.clearTimeout(apiReadyTimer);
+              }
+              post({ type: "success", token: token });
+            }
+
             function renderWidget() {
+              if (terminal || rendered) {
+                return;
+              }
+
               if (!window.turnstile) {
-                window.setTimeout(renderWidget, 60);
+                window.setTimeout(renderWidget, 80);
                 return;
               }
 
               try {
-                window.turnstile.render("#widget", {
-                  sitekey: "\(escapedSiteKey)",
-                  action: "\(escapedAction)",
+                var widgetId = window.turnstile.render("#widget", {
+                  sitekey: \(siteKeyLiteral),
+                  action: \(actionLiteral),
                   callback: function(token) {
-                    post({ type: "success", token: token });
+                    succeed(token);
                   },
                   "error-callback": function(code) {
-                    post({ type: "error", message: String(code || "turnstile_error") });
+                    fail(String(code || "turnstile_error"));
                   },
                   "expired-callback": function() {
-                    post({ type: "error", message: "turnstile_token_expired" });
+                    fail("turnstile_token_expired");
                   }
                 });
+
+                if (widgetId === undefined || widgetId === null) {
+                  fail("turnstile_render_failed");
+                  return;
+                }
+
+                rendered = true;
+                if (apiReadyTimer) {
+                  window.clearTimeout(apiReadyTimer);
+                }
+                post({ type: "ready" });
               } catch (error) {
-                post({ type: "error", message: String(error) });
+                fail("turnstile_render_exception");
               }
             }
 
-            window.addEventListener("load", renderWidget);
+            function loadAPI() {
+              if (terminal) {
+                return;
+              }
+
+              var apiScript = document.createElement("script");
+              apiScript.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+              apiScript.async = true;
+              apiScript.defer = true;
+              apiScript.onload = function() {
+                if (apiLoadTimer) {
+                  window.clearTimeout(apiLoadTimer);
+                }
+                apiReadyTimer = window.setTimeout(function() {
+                  fail("turnstile_api_ready_timeout");
+                }, 5000);
+                renderWidget();
+              };
+              apiScript.onerror = function() {
+                fail("turnstile_api_load_failed");
+              };
+
+              apiLoadTimer = window.setTimeout(function() {
+                fail("turnstile_api_load_timeout");
+              }, 15000);
+              document.head.appendChild(apiScript);
+            }
+
+            window.addEventListener("error", function() {
+              fail("turnstile_script_error");
+            });
+            window.addEventListener("unhandledrejection", function() {
+              fail("turnstile_script_rejection");
+            });
+
+            if (document.readyState === "loading") {
+              document.addEventListener("DOMContentLoaded", loadAPI);
+            } else {
+              loadAPI();
+            }
           </script>
         </body>
         </html>
         """
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler {
+    private static func javaScriptStringLiteral(_ value: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        return String(data: data, encoding: .utf8)!
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        private let onReady: @MainActor () -> Void
         private let onToken: @MainActor (String) -> Void
         private let onError: @MainActor (String) -> Void
+        private var didComplete = false
 
         init(
+            onReady: @escaping @MainActor () -> Void,
             onToken: @escaping @MainActor (String) -> Void,
             onError: @escaping @MainActor (String) -> Void
         ) {
+            self.onReady = onReady
             self.onToken = onToken
             self.onError = onError
         }
@@ -202,22 +316,60 @@ private struct MacTurnstileWebView: NSViewRepresentable {
             guard message.name == "turnstile",
                   let payload = message.body as? [String: Any],
                   let type = payload["type"] as? String else {
-                Task { @MainActor [onError] in
-                    onError("turnstile_message_invalid")
-                }
+                fail("turnstile_message_invalid")
+                return
+            }
+
+            if type == "ready" {
+                markReady()
                 return
             }
 
             if type == "success",
                let token = payload["token"] as? String,
                !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Task { @MainActor [onToken] in
-                    onToken(token)
-                }
+                succeed(token)
                 return
             }
 
             let message = (payload["message"] as? String) ?? "turnstile_failed"
+            fail(message)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            fail("turnstile_navigation_failed")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            fail("turnstile_navigation_failed")
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            fail("turnstile_web_content_process_terminated")
+        }
+
+        func invalidate() {
+            didComplete = true
+        }
+
+        private func markReady() {
+            guard !didComplete else { return }
+            Task { @MainActor [onReady] in
+                onReady()
+            }
+        }
+
+        private func succeed(_ token: String) {
+            guard !didComplete else { return }
+            didComplete = true
+            Task { @MainActor [onToken] in
+                onToken(token)
+            }
+        }
+
+        private func fail(_ message: String) {
+            guard !didComplete else { return }
+            didComplete = true
             Task { @MainActor [onError] in
                 onError(message)
             }
