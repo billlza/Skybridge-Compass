@@ -89,6 +89,46 @@ function Add-AuditItem {
     })
 }
 
+function Invoke-GitRaw {
+    param([string[]]$Arguments)
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = "git"
+    $startInfo.Arguments = ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+    $startInfo.WorkingDirectory = $RepoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    $textParts = @()
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        $textParts += $stdout.TrimEnd()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        $textParts += $stderr.TrimEnd()
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Text = ($textParts -join [Environment]::NewLine)
+    }
+}
+
 function Get-RemoteBranchHead {
     param(
         [string]$Branch,
@@ -104,20 +144,20 @@ function Get-RemoteBranchHead {
             $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
         }
 
-        $output = & git -C $RepoRoot ls-remote --heads origin $Branch 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        $remoteResult = Invoke-GitRaw -Arguments @("ls-remote", "--heads", "origin", $Branch)
+        if ($remoteResult.ExitCode -ne 0) {
             if ($AllowGitHubApiFallback) {
-                return Get-GitHubApiBranchHead -Branch $Branch -Repository $Repository -SshDetail (($output | Out-String).Trim())
+                return Get-GitHubApiBranchHead -Branch $Branch -Repository $Repository -SshDetail $remoteResult.Text
             }
 
             return [ordered]@{
                 status = "unavailable"
                 head = ""
-                detail = (($output | Out-String).Trim())
+                detail = $remoteResult.Text
             }
         }
 
-        $line = (($output | Select-Object -First 1) -as [string])
+        $line = (($remoteResult.Text -split "\r?\n") | Select-Object -First 1)
         if ([string]::IsNullOrWhiteSpace($line)) {
             return [ordered]@{
                 status = "missing"
