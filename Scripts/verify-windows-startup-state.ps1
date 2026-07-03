@@ -93,9 +93,10 @@ var runtimeVariables = new[]
 ClearRuntimeEnvironment();
 
 var dependencies = SessionViewModelDependencyFactory.CreateConfigured();
-AssertType<DummyEngineClient>(dependencies.EngineClient, "default engine");
+AssertType<FfiEngineClient>(dependencies.EngineClient, "default engine");
 AssertType<WindowsDiscoveryBrowserClient>(dependencies.DiscoveryBrowserClient, "default discovery browser");
 AssertNestedType<PendingWindowsDnsSdBrowseClient>(dependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+AssertNestedType<PendingWindowsTransportAdapterClient>(dependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
 AssertType<DeviceDiscoveryInputDefaultsClient>(dependencies.DeviceDiscoveryInputDefaultsClient, "default input provider");
 
 var startupBuilder = new WorkspaceStartupStateBuilder(

@@ -12,10 +12,16 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
     private const string ClientId = "skybridge-windows-client";
     private const ulong HeartbeatIntervalMs = 1_000;
 
+    private readonly object _disposeLock = new();
     private readonly SemaphoreSlim _mutex = new(1, 1);
     private nint _handle;
     private bool _disposed;
     private EngineConnectionState _state = EngineConnectionState.Disconnected;
+
+    static FfiEngineClient()
+    {
+        SkybridgeNativeLibraryResolver.Register();
+    }
 
     public EngineConnectionState State => _state;
 
@@ -30,6 +36,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
             throw new NotSupportedException("Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
         }
 
+        ThrowIfDisposed();
         await _mutex.WaitAsync();
         try
         {
@@ -126,6 +133,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
 
     public async Task<byte[]> GetLocalPublicKeyAsync()
     {
+        ThrowIfDisposed();
         await _mutex.WaitAsync();
         try
         {
@@ -141,6 +149,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
 
     public async Task DisconnectAsync()
     {
+        ThrowIfDisposed();
         await _mutex.WaitAsync();
         try
         {
@@ -162,6 +171,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
 
     public async Task SendHeartbeatAsync()
     {
+        ThrowIfDisposed();
         await _mutex.WaitAsync();
         try
         {
@@ -182,20 +192,40 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_disposeLock)
         {
-            return;
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
         }
 
-        if (_handle != nint.Zero)
+        SkybridgeErrorCode disconnectError = SkybridgeErrorCode.Ok;
+        _mutex.Wait();
+        try
         {
-            NativeMethods.EngineFree(_handle);
-            _handle = nint.Zero;
+            if (_handle != nint.Zero)
+            {
+                if (_state != EngineConnectionState.Disconnected)
+                {
+                    disconnectError = NativeMethods.EngineDisconnect(_handle);
+                    _state = EngineConnectionState.Disconnected;
+                }
+
+                NativeMethods.EngineFree(_handle);
+                _handle = nint.Zero;
+            }
+        }
+        finally
+        {
+            _mutex.Release();
+            _mutex.Dispose();
         }
 
-        _mutex.Dispose();
-        _disposed = true;
         GC.SuppressFinalize(this);
+        ThrowOnError(disconnectError, "dispose_disconnect");
     }
 
     private void EnsureHandle()

@@ -336,7 +336,7 @@ foreach ($compositionSignal in @(
     "SessionViewModelDependencyFactory.CreateConfigured()",
     "SessionViewModelDependencyFactory.CreateDefault()",
     "new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured())",
-    "WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested()"
+    "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()"
 )) {
     Assert-Contains -Text ($sessionViewModelDependencyFactory + $sessionViewModel + $mainWindowCode + $parityDoc) -Needle $compositionSignal -Message "Windows composition signal missing: $compositionSignal"
 }
@@ -2636,7 +2636,6 @@ foreach ($connectionLaunchSmokeSignal in @(
     "WebRtcInterop",
     "Apple-native channel mapping",
     "mac DNS-SD live adapter launch readiness",
-    "DummyEngineClient().ConnectAsync",
     "adapter pending",
     "digestLength: 31",
     "DefaultChannelMappings",

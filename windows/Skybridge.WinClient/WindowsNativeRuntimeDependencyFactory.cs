@@ -51,7 +51,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
         return new SessionViewModelDependencies(
             engineClient,
             discoveryClient,
-            new WindowsDiscoveryBrowserClient(discoveryClient, new NativeWindowsDnsSdBrowseClient()),
+            CreateDiscoveryBrowserClientFromEnvironment(discoveryClient),
             new DeviceDiscoveryInputDefaultsClient(),
             new ManualConnectionClient(),
             new CrossNetworkConnectionClient(),
@@ -80,6 +80,12 @@ internal static class WindowsNativeRuntimeDependencyFactory
         IsEnabled(SettingsSystemPreferencesVariable)
             ? new SettingsWorkspaceClient(new WindowsSystemPreferencesLauncher())
             : new SettingsWorkspaceClient();
+
+    private static WindowsDiscoveryBrowserClient CreateDiscoveryBrowserClientFromEnvironment(
+        IDiscoveryClient discoveryClient) =>
+        IsNativeRuntimeRequested()
+            ? new WindowsDiscoveryBrowserClient(discoveryClient, new NativeWindowsDnsSdBrowseClient())
+            : new WindowsDiscoveryBrowserClient(discoveryClient);
 
     private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment()
     {

@@ -96,7 +96,7 @@ public sealed class PairingMaterialClient : IPairingMaterialClient
                     "Discovery fingerprint",
                     material.VerifiedAgainstDiscoveryFingerprint ? "matched" : "not provided",
                     "Discovery pubKeyFP is verification input only; it is never used as the peer public key."),
-                new("Peer key provider", "available", "Pairing material can create IPeerPublicKeyProvider for FfiEngineClient when native DLL deployment is explicit."),
+                new("Peer key provider", "available", "Pairing material can create IPeerPublicKeyProvider for the default FfiEngineClient; live launch still requires adapter readiness."),
                 new("Source", material.Source, "Manual validation only; no connection attempt is started.")
             }));
     }

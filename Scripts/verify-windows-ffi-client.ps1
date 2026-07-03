@@ -27,6 +27,7 @@ function Assert-Contains {
 
 $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngineClient.cs"
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
+$nativeLibraryResolverPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
 $nativeDnsSdBrowsePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
@@ -87,12 +88,13 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
 $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
+$nativeLibraryResolver = Get-Content -Raw -LiteralPath $nativeLibraryResolverPath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
@@ -170,6 +172,20 @@ foreach ($entryPoint in @(
 )) {
     Assert-Contains -Text $client -Needle $entryPoint -Message "FfiEngineClient missing DllImport: $entryPoint"
 }
+
+foreach ($resolverSignal in @(
+    "internal static class SkybridgeNativeLibraryResolver",
+    "NativeLibrary.SetDllImportResolver",
+    "AppContext.BaseDirectory",
+    "SkyBridge native Core library was not found in the application directory",
+    "skybridge_core.dll",
+    "libskybridge_core.dylib",
+    "libskybridge_core.so"
+)) {
+    Assert-Contains -Text $nativeLibraryResolver -Needle $resolverSignal -Message "Native library resolver missing signal: $resolverSignal"
+}
+Assert-Contains -Text $client -Needle "SkybridgeNativeLibraryResolver.Register();" -Message "FfiEngineClient must register the app-directory native library resolver."
+Assert-Contains -Text $coreBridge -Needle "SkybridgeNativeLibraryResolver.Register();" -Message "CoreBridge must register the app-directory native library resolver."
 
 foreach ($signal in @(
     "public sealed class FfiEngineClient : IEngineClient, IDisposable",
@@ -255,6 +271,9 @@ foreach ($signal in @(
     "Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.",
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
     "new FfiEngineClient()",
+    "SkybridgeNativeLibraryResolver.cs",
+    "Copy-Item -LiteralPath `$nativeCoreDll",
+    "--no-build",
     "ffi smoke live adapter",
     "ffi live adapter state",
     "ffi heartbeat state",
@@ -277,7 +296,6 @@ foreach ($signal in @(
     "WebRtcInterop",
     "Apple-native channel mapping",
     "mac DNS-SD live adapter launch readiness",
-    "DummyEngineClient().ConnectAsync",
     "ExternalWindowsTransportAdapterClient",
     "WindowsExternalTransportAdapterOptions",
     "external adapter live readiness",
@@ -312,12 +330,10 @@ foreach ($signal in @(
 }
 Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured()" -Message "MainWindow should create SessionViewModel through the configured dependency factory."
 Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured()" -Message "Dependency factory should expose explicit configured runtime selection."
-Assert-Contains -Text $dependencyFactory -Needle "CreateDefault()" -Message "Dependency factory should retain the safe default runtime."
-Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested()" -Message "Dependency factory should require an explicit native runtime request."
-Assert-Contains -Text $dependencyFactory -Needle "new DummyEngineClient()" -Message "Default dependency factory should keep the dummy client until native DLL deployment is explicit."
-Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
-Assert-True -Condition (-not $dependencyFactory.Contains("new FfiEngineClient()")) -Message "Default dependency factory must not silently switch to FfiEngineClient before native DLL deployment."
-Assert-True -Condition (-not $dependencyFactory.Contains("new NativeWindowsDnsSdBrowseClient()")) -Message "Default dependency factory must not silently switch to the live DNS-SD provider before local-network acceptance."
+Assert-Contains -Text $dependencyFactory -Needle "CreateDefault()" -Message "Dependency factory should retain the product default runtime entrypoint."
+Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()" -Message "Dependency factory should route configured/default startup through the Windows runtime composition root."
+Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not bypass the configured lifecycle composition root."
+Assert-True -Condition (-not $dependencyFactory.Contains("new DummyEngineClient()")) -Message "Default dependency factory must not keep the old dummy lifecycle."
 foreach ($nativeRuntimeSignal in @(
     "WindowsNativeRuntimeDependencyFactory",
     "SKYBRIDGE_WINDOWS_RUNTIME",
@@ -841,8 +857,9 @@ foreach ($startupStateSmokeSignal in @(
     "windows-startup-state: ok",
     "WorkspaceStartupStateBuilder",
     "SessionViewModelDependencyFactory.CreateConfigured",
-    "DummyEngineClient",
+    "FfiEngineClient",
     "PendingWindowsDnsSdBrowseClient",
+    "PendingWindowsTransportAdapterClient",
     "DeviceDiscoveryInputDefaultsClient",
     "_skybridge._udp",
     "_skybridge._tcp",
@@ -921,30 +938,30 @@ Assert-Contains -Text $architecture -Needle 'final manual action surface is expl
 Assert-Contains -Text $architecture -Needle "WorkspaceActionCommandId.CancelManualConnection" -Message "Architecture doc missing manual Cancel command role."
 Assert-Contains -Text $architecture -Needle "verify-windows-startup-state.ps1" -Message "Architecture doc missing startup-state smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
-Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."
-Assert-Contains -Text $dependencyFactory -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "Default dependency factory should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
-Assert-Contains -Text $dependencyFactory -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "Default dependency factory should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
-Assert-Contains -Text $dependencyFactory -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "Default dependency factory should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
-Assert-Contains -Text $dependencyFactory -Needle "new ManualConnectionClient()" -Message "Default dependency factory should wire ManualConnectionClient for explicit manual target validation."
-Assert-Contains -Text $dependencyFactory -Needle "new CrossNetworkConnectionClient()" -Message "Default dependency factory should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
-Assert-Contains -Text $dependencyFactory -Needle "new PairingMaterialClient()" -Message "Default dependency factory should wire PairingMaterialClient for explicit manual pairing-code validation."
-Assert-Contains -Text $dependencyFactory -Needle "new ConnectionPreflightClient(coreBridge)" -Message "Default dependency factory should wire ConnectionPreflightClient for explicit connection preflight."
-Assert-Contains -Text $dependencyFactory -Needle "new ConnectionWorkspaceStateClient()" -Message "Default dependency factory should wire ConnectionWorkspaceStateClient for explicit connection state gates."
-Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceErrorStatusClient()" -Message "Default dependency factory should wire WorkspaceErrorStatusClient for explicit workspace error routing."
-Assert-Contains -Text $dependencyFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Default dependency factory should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceActionCatalogClient()" -Message "Default dependency factory should wire WorkspaceActionCatalogClient for explicit workspace action order."
-Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopProfileCatalogClient()" -Message "Default dependency factory should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
-Assert-Contains -Text $dependencyFactory -Needle "new SystemMonitorWorkspaceClient()" -Message "Default dependency factory should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "new UsbManagementWorkspaceClient()" -Message "Default dependency factory should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateSettingsWorkspaceClientFromEnvironment()" -Message "Default dependency factory should wire SettingsWorkspaceClient through the explicit Settings provider selector."
-Assert-Contains -Text $dependencyFactory -Needle "new DashboardMetricsClient()" -Message "Default dependency factory should wire DashboardMetricsClient for explicit dashboard metrics parity."
-Assert-Contains -Text $dependencyFactory -Needle "new FeatureCatalogClient()" -Message "Default dependency factory should wire FeatureCatalogClient for explicit navigation parity."
-Assert-Contains -Text $dependencyFactory -Needle "new TopBarStatusClient()" -Message "Default dependency factory should wire TopBarStatusClient for explicit top-bar status parity."
-Assert-Contains -Text $dependencyFactory -Needle "new SessionStatusClient()" -Message "Default dependency factory should wire SessionStatusClient for explicit session status text."
-Assert-Contains -Text $dependencyFactory -Needle "new SessionCommandStateClient()" -Message "Default dependency factory should wire SessionCommandStateClient for explicit session command enablement."
-Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceCommandStateClient()" -Message "Default dependency factory should wire WorkspaceCommandStateClient for explicit workspace command enablement."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "var coreBridge = new CoreBridge();" -Message "Runtime composition root should create one explicit CoreBridge for manual Core tools."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "Runtime composition root should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "Runtime composition root should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "Runtime composition root should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new ManualConnectionClient()" -Message "Runtime composition root should wire ManualConnectionClient for explicit manual target validation."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new CrossNetworkConnectionClient()" -Message "Runtime composition root should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new PairingMaterialClient()" -Message "Runtime composition root should wire PairingMaterialClient for explicit manual pairing-code validation."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new ConnectionPreflightClient(coreBridge, transportAdapterClient)" -Message "Runtime composition root should wire ConnectionPreflightClient for explicit adapter-aware connection preflight."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new ConnectionWorkspaceStateClient()" -Message "Runtime composition root should wire ConnectionWorkspaceStateClient for explicit connection state gates."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new WorkspaceErrorStatusClient()" -Message "Runtime composition root should wire WorkspaceErrorStatusClient for explicit workspace error routing."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Runtime composition root should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "Runtime composition root should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new WorkspaceActionCatalogClient()" -Message "Runtime composition root should wire WorkspaceActionCatalogClient for explicit workspace action order."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "Runtime composition root should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new RemoteDesktopProfileCatalogClient()" -Message "Runtime composition root should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new SystemMonitorWorkspaceClient()" -Message "Runtime composition root should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new UsbManagementWorkspaceClient()" -Message "Runtime composition root should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "CreateSettingsWorkspaceClientFromEnvironment()" -Message "Runtime composition root should wire SettingsWorkspaceClient through the explicit Settings provider selector."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new DashboardMetricsClient()" -Message "Runtime composition root should wire DashboardMetricsClient for explicit dashboard metrics parity."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new FeatureCatalogClient()" -Message "Runtime composition root should wire FeatureCatalogClient for explicit navigation parity."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new TopBarStatusClient()" -Message "Runtime composition root should wire TopBarStatusClient for explicit top-bar status parity."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new SessionStatusClient()" -Message "Runtime composition root should wire SessionStatusClient for explicit session status text."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new SessionCommandStateClient()" -Message "Runtime composition root should wire SessionCommandStateClient for explicit session command enablement."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "new WorkspaceCommandStateClient()" -Message "Runtime composition root should wire WorkspaceCommandStateClient for explicit workspace command enablement."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",

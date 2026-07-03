@@ -13,6 +13,11 @@ public sealed class CoreBridge
     private const int FrameHeaderLen = 20;
     private const int Sbp2HeaderLen = 8;
 
+    static CoreBridge()
+    {
+        SkybridgeNativeLibraryResolver.Register();
+    }
+
     public Task<bool> InitializeAsync()
     {
         return Task.Run(() =>

@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Windows.Input;
 using Microsoft.UI.Xaml.Media;
@@ -13,7 +14,7 @@ using Windows.Storage.Streams;
 
 namespace Skybridge.WinClient.ViewModels;
 
-public sealed class SessionViewModel : INotifyPropertyChanged
+public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
@@ -66,12 +67,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly AccountSessionCoordinator _accountSessionCoordinator;
     // Owns the live top-bar network telemetry loop (net speed / latency / IP+proxy) and its
     // own ITopBarNetworkStatusClient. Self-provisioned in the ctor; never routed through the
-    // DI composition root. Disposed via DisposeNetworkCoordinator on teardown.
+    // DI composition root. Disposed via Dispose on teardown.
     private readonly TopBarNetworkCoordinator _topBarNetworkCoordinator;
     // Owns the Settings page persistence + bindable surface (it self-provisions its own
     // SettingsService + SettingsStore writing %LOCALAPPDATA%\SkyBridge\settings.json). Exposed
     // publicly as Settings for {Binding Settings.<Prop>}. Self-provisioned in the ctor; never
-    // routed through the DI composition root. Disposed via DisposeNetworkCoordinator on teardown.
+    // routed through the DI composition root. Disposed via Dispose on teardown.
     private readonly SettingsCoordinator _settingsCoordinator;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
@@ -85,6 +86,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ConnectionWorkspaceActions _connectionWorkspaceActions;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
+    private readonly object _disposeLock = new();
+    private bool _disposed;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -531,7 +534,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // SettingsService + SettingsStore (plaintext JSON at %LOCALAPPDATA%\SkyBridge\settings.json)
         // internally, NOT via the DI root. The sinks route each REAL-FULL effect into the
         // subsystems this VM already owns — thin Action delegates, the same shape the TopBar /
-        // Weather / DashboardMetrics coordinators use. Disposed in DisposeNetworkCoordinator.
+        // Weather / DashboardMetrics coordinators use. Disposed in Dispose.
         _settingsCoordinator = new SettingsCoordinator(
             service: null,
             sinks: new SettingsEffectSinks
@@ -2442,14 +2445,55 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 
-    // Stop + dispose the live top-bar network telemetry loop (cancels its token, stops and
-    // releases the PeriodicTimer). Called from MainWindow's Closed handler so the background
-    // sampling task and timer don't outlive the window. Idempotent and non-throwing.
-    public void DisposeNetworkCoordinator()
+    // Stop + dispose every runtime owner created by the VM. Called from MainWindow's Closed handler
+    // so native Core handles, WebRTC adapters, settings timers, and telemetry loops do not outlive
+    // the window.
+    public void Dispose()
     {
-        _topBarNetworkCoordinator.Dispose();
-        // Flush any pending debounced settings write and release the SettingsService timer.
-        _settingsCoordinator.Dispose();
+        lock (_disposeLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+        }
+
+        _engineClient.ConnectionStateChanged -= OnEngineStateChanged;
+        List<Exception>? disposalErrors = null;
+
+        void DisposeOwner(Action dispose)
+        {
+            try
+            {
+                dispose();
+            }
+            catch (Exception ex)
+            {
+                disposalErrors ??= new List<Exception>();
+                disposalErrors.Add(ex);
+            }
+        }
+
+        DisposeOwner(_topBarNetworkCoordinator.Dispose);
+        DisposeOwner(_settingsCoordinator.Dispose);
+        if (_engineClient is IDisposable disposableEngine)
+        {
+            DisposeOwner(disposableEngine.Dispose);
+        }
+
+        if (disposalErrors is null)
+        {
+            return;
+        }
+
+        if (disposalErrors.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(disposalErrors[0]).Throw();
+        }
+
+        throw new AggregateException("One or more SkyBridge runtime owners failed during disposal.", disposalErrors);
     }
 
 }

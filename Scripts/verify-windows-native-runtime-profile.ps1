@@ -123,9 +123,9 @@ var runtimeVariables = new[]
 try
 {
     ClearRuntimeEnvironment();
-    AssertEqual(false, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "default native runtime flag");
+    AssertEqual(false, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "default native DNS-SD profile flag");
     var defaultDependencies = SessionViewModelDependencyFactory.CreateConfigured();
-    AssertType<DummyEngineClient>(defaultDependencies.EngineClient, "default engine");
+    AssertType<FfiEngineClient>(defaultDependencies.EngineClient, "default engine");
     AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(defaultDependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
     AssertType<SystemMonitorWorkspaceClient>(defaultDependencies.SystemMonitorClient, "default system monitor client");
@@ -269,23 +269,24 @@ try
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");
-    var transportEnvWithoutNative = SessionViewModelDependencyFactory.CreateConfigured();
-    AssertType<DummyEngineClient>(transportEnvWithoutNative.EngineClient, "transport env without native engine");
-    AssertNestedType<PendingWindowsTransportAdapterClient>(transportEnvWithoutNative.ConnectionPreflightClient, "_transportAdapterClient", "transport env without native adapter");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_ADAPTER_BINDING is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=external.");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES", "enabled");
     var systemPreferencesDependencies = SessionViewModelDependencyFactory.CreateConfigured();
-    AssertType<DummyEngineClient>(systemPreferencesDependencies.EngineClient, "system preferences env without native engine");
+    AssertType<FfiEngineClient>(systemPreferencesDependencies.EngineClient, "system preferences env engine");
+    AssertNestedType<PendingWindowsDnsSdBrowseClient>(systemPreferencesDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "system preferences DNS-SD provider");
     AssertType<SettingsWorkspaceClient>(systemPreferencesDependencies.SettingsClient, "system preferences settings client");
     AssertNestedType<WindowsSystemPreferencesLauncher>(systemPreferencesDependencies.SettingsClient, "_systemPreferencesLauncher", "enabled system preferences launcher");
     AssertEqual(true, systemPreferencesDependencies.SettingsClient.CanOpenSystemPreferences(), "enabled system preferences gate");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
-    AssertEqual(true, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "native runtime flag");
+    AssertEqual(true, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "native DNS-SD profile flag");
     var nativePendingDependencies = SessionViewModelDependencyFactory.CreateConfigured();
-    AssertType<FfiEngineClient>(nativePendingDependencies.EngineClient, "native engine");
+    AssertType<FfiEngineClient>(nativePendingDependencies.EngineClient, "native profile ffi engine");
     AssertNestedType<NativeWindowsDnsSdBrowseClient>(nativePendingDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "native DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(nativePendingDependencies.ConnectionPreflightClient, "_transportAdapterClient", "native pending adapter");
 

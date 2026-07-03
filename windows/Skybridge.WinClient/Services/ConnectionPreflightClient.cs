@@ -155,7 +155,7 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
             new(
                 "Peer key provider",
                 provider.GetType().Name,
-                "No connection attempt is started; FfiEngineClient remains behind explicit native DLL deployment.")
+                "No connection attempt is started; FfiEngineClient launch still requires live Windows adapter readiness.")
         };
         facts.AddRange(adapterSnapshot.Facts);
 

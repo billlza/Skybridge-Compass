@@ -58,8 +58,8 @@ public sealed partial class MainWindow : Window
             await ViewModel.HydrateFromStoreAsync();
         });
 
-        // Stop the live top-bar network telemetry loop (and release its PeriodicTimer) when the
-        // window closes so the background sampling task doesn't outlive the UI. Non-throwing.
+        // Stop the real runtime lifecycle when the window closes: native Core engine, WebRTC
+        // adapters, settings timers, and top-bar telemetry must not outlive the UI.
         Closed += OnWindowClosed;
     }
 
@@ -67,7 +67,7 @@ public sealed partial class MainWindow : Window
     {
         ViewModel.DarkModeEffectRequested -= OnDarkModeEffectRequested;
         ViewModel.AccentColorEffectRequested -= OnAccentColorEffectRequested;
-        ViewModel.DisposeNetworkCoordinator();
+        ViewModel.Dispose();
     }
 
     // 启用深色模式 live effect: set the root FrameworkElement.RequestedTheme. The app ships

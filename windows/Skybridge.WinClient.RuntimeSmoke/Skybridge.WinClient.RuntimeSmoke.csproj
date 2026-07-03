@@ -24,6 +24,7 @@
     <Compile Include="..\Skybridge.WinClient\Services\IEngineClient.cs" Link="Services\IEngineClient.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\ISkyBridgeDataPlane.cs" Link="Services\ISkyBridgeDataPlane.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\PairingMaterialClient.cs" Link="Services\PairingMaterialClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SkybridgeNativeLibraryResolver.cs" Link="Services\SkybridgeNativeLibraryResolver.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\SkyBridgeDataPlaneClient.cs" Link="Services\SkyBridgeDataPlaneClient.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\WebRtcAppControlBootstrapClient.cs" Link="Services\WebRtcAppControlBootstrapClient.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\WebRtcControlChannelCodec.cs" Link="Services\WebRtcControlChannelCodec.cs" />

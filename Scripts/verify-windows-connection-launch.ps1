@@ -22,7 +22,7 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CoreBridge.cs",
     "windows/Skybridge.WinClient/Services/IEngineClient.cs",
     "windows/Skybridge.WinClient/Services/FfiEngineClient.cs",
-    "windows/Skybridge.WinClient/Services/DummyEngineClient.cs",
+    "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
     "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs",
@@ -202,9 +202,12 @@ AssertEqual("adapter pending", preflightOnlyRequest.Plan.AdapterBinding, "prefli
 AssertEqual(5, preflightOnlyRequest.Plan.ChannelMappings.Count, "preflight channel mapping count");
 AssertEqual(CoreChannelKind.Clipboard, preflightOnlyRequest.Plan.ChannelMappings[2].Channel, "preflight clipboard mapping");
 
-await ExpectThrowsAsync<NotSupportedException>(
-    () => new DummyEngineClient().ConnectAsync(preflightOnlyRequest),
-    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
+using (var preflightOnlyEngine = new FfiEngineClient())
+{
+    await ExpectThrowsAsync<NotSupportedException>(
+        () => preflightOnlyEngine.ConnectAsync(preflightOnlyRequest),
+        "Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
+}
 
 var liveState = stateClient.BuildPreflightValidatedState(
     pairedState,
@@ -212,13 +215,7 @@ var liveState = stateClient.BuildPreflightValidatedState(
 var liveReadiness = stateClient.BuildLiveConnectionLaunchReadiness(liveState);
 AssertEqual(true, liveReadiness.IsReady, "live adapter launch readiness");
 AssertEqual("", liveReadiness.ErrorMessage, "live adapter launch readiness message");
-var liveRequest = stateClient.BuildConnectionLaunchRequest(liveState);
-var engine = new DummyEngineClient();
-await engine.ConnectAsync(liveRequest);
-AssertEqual(EngineConnectionState.Connected, engine.State, "dummy live adapter state");
-await engine.SendHeartbeatAsync();
-await engine.DisconnectAsync();
-AssertEqual(EngineConnectionState.Disconnected, engine.State, "dummy disconnect state");
+stateClient.BuildConnectionLaunchRequest(liveState);
 
 using (var ffiEngine = new FfiEngineClient())
 using (var ffiPeerEngine = new FfiEngineClient())
@@ -860,15 +857,17 @@ sealed class RecordingDiscoveryClient : IDiscoveryClient
     & dotnet restore $testProject
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke restore failed."
 
-    $oldPath = $env:PATH
-    try {
-        $env:PATH = "$nativeCoreDebugDir;$oldPath"
-        & dotnet run --project $testProject --no-restore
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke run failed."
-    }
-    finally {
-        $env:PATH = $oldPath
-    }
+    & dotnet build $testProject --no-restore
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke build failed."
+
+    $testOutputDir = Join-Path $tempRoot "bin/Debug/net10.0"
+    $nativeCoreOutputDll = Join-Path $testOutputDir "skybridge_core.dll"
+    Assert-True -Condition (Test-Path -LiteralPath $testOutputDir) -Message "Windows connection launch smoke output directory missing: $testOutputDir"
+    Copy-Item -LiteralPath $nativeCoreDll -Destination $nativeCoreOutputDll -Force
+    Assert-True -Condition (Test-Path -LiteralPath $nativeCoreOutputDll) -Message "Windows connection launch smoke native DLL copy failed: $nativeCoreOutputDll"
+
+    & dotnet run --project $testProject --no-restore --no-build
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke run failed."
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
