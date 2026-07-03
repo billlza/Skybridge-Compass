@@ -27,17 +27,6 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
-    $scriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-        Split-Path -Parent $PSCommandPath
-    } else {
-        $PSScriptRoot
-    }
-    $RepoRoot = (Resolve-Path (Join-Path $scriptRoot "..")).Path
-} else {
-    $RepoRoot = (Resolve-Path $RepoRoot).Path
-}
-
 function Assert-True {
     param(
         [bool]$Condition,
@@ -47,6 +36,18 @@ function Assert-True {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $scriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        Split-Path -Parent $PSCommandPath
+    } else {
+        $PSScriptRoot
+    }
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($scriptRoot)) -Message "RepoRoot must be supplied when the script path cannot be resolved."
+    $RepoRoot = (Resolve-Path (Join-Path $scriptRoot "..")).Path
+} else {
+    $RepoRoot = (Resolve-Path $RepoRoot).Path
 }
 
 function ConvertTo-NormalizedHostKeyFingerprint {
@@ -531,6 +532,7 @@ if ($AllowCrossNetworkIce) {
     Assert-True -Condition ((-not [string]::IsNullOrWhiteSpace($IceServers)) -or (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath))) -Message "-AllowCrossNetworkIce requires -IceServers with STUN or -IceServerCredentialsPath with authenticated TURN/STUN JSON; TURN credentials must not be passed on argv."
     if (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) {
         Assert-True -Condition (Test-Path -LiteralPath $IceServerCredentialsPath) -Message "Missing ICE server credentials JSON: $IceServerCredentialsPath"
+        Assert-True -Condition (-not $KeepArtifacts) -Message "KeepArtifacts cannot be used with -IceServerCredentialsPath because it would retain ICE server credential files on the Mac helper host."
     }
     Write-Output "windows-mac-webrtc-helper-live: cross-network-ice-enabled"
 }
@@ -564,6 +566,7 @@ Write-Output "windows-mac-webrtc-helper-live: windows-temp-ok"
 
 $remoteRoot = ""
 $script:RemoteIceServerCredentialsPath = ""
+$copiedIceServerCredentialsToMac = $false
 $offerProcess = $null
 $answerProcess = $null
 try {
@@ -591,7 +594,7 @@ try {
         "-p", "$MacPort",
         "-i", $MacSshKeyPath,
         "$MacUserName@$MacHostName",
-        "rm -rf -- $quotedRemoteRoot; mkdir -p $quotedRemoteRoot") | Out-Null
+        "rm -rf -- $quotedRemoteRoot; mkdir -p $quotedRemoteRoot; chmod 700 $quotedRemoteRoot") | Out-Null
     Assert-True -Condition ($remoteRoot -match '^/tmp/skybridge-mac-webrtc-helper\.') -Message "Unexpected Mac temp root: $remoteRoot"
 
     Write-Output "windows-mac-webrtc-helper-live: copy-helper-to-mac"
@@ -625,6 +628,7 @@ try {
     $remoteBuildCommand =
         "set -eu; " + $remoteDotNetPrelude +
         "; mkdir -p " + (ConvertTo-PosixSingleQuoted -Value $remoteLive) +
+        "; chmod 700 " + (ConvertTo-PosixSingleQuoted -Value $remoteLive) +
         "; cd " + (ConvertTo-PosixSingleQuoted -Value $remoteHelperSource) +
         "; rm -rf bin obj" +
         "; rm -f " + (ConvertTo-PosixSingleQuoted -Value $remoteBuildLog) + " " + (ConvertTo-PosixSingleQuoted -Value $remoteBuildExit) + " " + (ConvertTo-PosixSingleQuoted -Value $remoteBuildPid) +
@@ -669,9 +673,28 @@ try {
             "-o", "UpdateHostKeys=no",
             $IceServerCredentialsPath,
             "${MacUserName}@${MacHostName}:$script:RemoteIceServerCredentialsPath") | Out-Null
+        $copiedIceServerCredentialsToMac = $true
+        Invoke-Native -FileName "ssh" -TimeoutSeconds 20 -Arguments @(
+            "-n",
+            "-T",
+            "-o", "BatchMode=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PasswordAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=0",
+            "-o", "ConnectTimeout=10",
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=$MacKnownHostsPath",
+            "-o", "UpdateHostKeys=no",
+            "-p", "$MacPort",
+            "-i", $MacSshKeyPath,
+            "$MacUserName@$MacHostName",
+            "chmod 600 -- " + (ConvertTo-PosixSingleQuoted -Value $script:RemoteIceServerCredentialsPath)) | Out-Null
     }
 
     Write-Output "windows-mac-webrtc-helper-live: start-windows-offer"
+    $proofRunStartedAtUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $helperDll = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/bin/Debug/net10.0/skybridge-webrtc-helper.dll"
     $offerArguments = @(
         $helperDll,
@@ -774,6 +797,20 @@ try {
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust WebRTC proof CLI gate failed."
 
     $proof = Get-Content -Raw -LiteralPath $windowsProof | ConvertFrom-Json
+    $proofPropertyNames = @($proof.PSObject.Properties.Name)
+    Assert-True -Condition ($proofPropertyNames -contains "capturedAtUnixMs") -Message "Fresh proof is missing capturedAtUnixMs."
+    [Int64]$proofCapturedAtUnixMs = $proof.capturedAtUnixMs
+    $proofClockSkewMs = 5000
+    $proofNowUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Assert-True -Condition ($proofCapturedAtUnixMs -ge ($proofRunStartedAtUnixMs - $proofClockSkewMs)) -Message "Fresh proof was not generated by this helper-live run. capturedAtUnixMs=$proofCapturedAtUnixMs runStartedAtUnixMs=$proofRunStartedAtUnixMs"
+    Assert-True -Condition ($proofCapturedAtUnixMs -le ($proofNowUnixMs + $proofClockSkewMs)) -Message "Fresh proof capturedAtUnixMs is in the future. capturedAtUnixMs=$proofCapturedAtUnixMs nowUnixMs=$proofNowUnixMs"
+    $proofFile = Get-Item -LiteralPath $windowsProof
+    $proofSha256 = (Get-FileHash -LiteralPath $windowsProof -Algorithm SHA256).Hash.ToLowerInvariant()
+    $proofLastWriteUtc = $proofFile.LastWriteTimeUtc.ToString("o")
+    Write-Output "windows-mac-webrtc-helper-live: proof-runStartedAtUnixMs=$proofRunStartedAtUnixMs"
+    Write-Output "windows-mac-webrtc-helper-live: proof-capturedAtUnixMs=$proofCapturedAtUnixMs"
+    Write-Output "windows-mac-webrtc-helper-live: proof-sha256=$proofSha256"
+    Write-Output "windows-mac-webrtc-helper-live: proof-lastWriteUtc=$proofLastWriteUtc"
     $endpointEvidence = "$($proof.localEndpoint) $($proof.remoteEndpoint) $($proof.selectedCandidatePair)"
     if ($AllowCrossNetworkIce) {
         $signalEvidence = (Get-Content -Raw -LiteralPath $windowsOffer) + "`n" + (Get-Content -Raw -LiteralPath $windowsAnswer)
@@ -840,6 +877,9 @@ finally {
                     $remoteCleanupCommand) | Out-Null
             }
             catch {
+                if ($copiedIceServerCredentialsToMac) {
+                    throw "Mac cleanup failed after copying ICE server credentials; credential material may remain under $remoteRoot. Cleanup error: $($_.Exception.Message)"
+                }
                 Write-Output "windows-mac-webrtc-helper-live: cleanup warning: $($_.Exception.Message)"
             }
         }

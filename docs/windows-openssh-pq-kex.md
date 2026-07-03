@@ -7,7 +7,7 @@ This document is the local co-debug SSH evidence contract. It proves only that t
 The gate covers:
 
 - local OpenSSH client support for `mlkem768x25519-sha256`, `sntrup761x25519-sha512`, or `sntrup761x25519-sha512@openssh.com`.
-- pinned Windows SSH host key fingerprint before any KEX evidence is accepted.
+- pinned Windows SSH host key fingerprint before any KEX evidence is accepted; scanned host key records that do not match the expected fingerprint must not be written to the temporary `known_hosts` file used for the proof connection.
 - forced PQ-only SSH negotiation with `KexAlgorithms=<pq-only-list>`.
 - actual negotiated algorithm from `ssh -vvv`, not only version strings or config text.
 
@@ -58,6 +58,7 @@ Scripts\verify-openssh-pq-kex.ps1 `
 Passing evidence requires:
 
 - `hostKeyPinned=true`.
+- `pinnedKnownHostsRecordCount` greater than zero and `pinnedHostKeyFingerprints` containing only the expected fingerprint accepted for the proof connection.
 - `negotiatedKexAlgorithm` equals one of the required PQ/hybrid algorithms.
 - command success, unless `-AllowAuthenticationFailureAfterKex` is explicitly used and the log shows KEX completed before public-key authentication failure.
 - no fallback to `curve25519`, ECDH, or DH.

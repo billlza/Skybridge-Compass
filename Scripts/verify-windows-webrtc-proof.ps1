@@ -1,5 +1,5 @@
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RepoRoot = "",
     [Parameter(Mandatory = $true)]
     [string]$ProofPath,
     [Parameter(Mandatory = $true)]
@@ -21,6 +21,18 @@ function Assert-True {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $scriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        Split-Path -Parent $PSCommandPath
+    } else {
+        $PSScriptRoot
+    }
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($scriptRoot)) -Message "RepoRoot must be supplied when the script path cannot be resolved."
+    $RepoRoot = (Resolve-Path (Join-Path $scriptRoot "..")).Path
+} else {
+    $RepoRoot = (Resolve-Path $RepoRoot).Path
 }
 
 Assert-True -Condition (Test-Path -LiteralPath $ProofPath) -Message "Missing Windows WebRTC proof file: $ProofPath"

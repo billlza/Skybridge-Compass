@@ -223,6 +223,28 @@ function Get-BoundedLines {
     return @($lines)
 }
 
+function Get-HostKeyLineFingerprint {
+    param([string]$HostKeyLine)
+
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($HostKeyLine)) -Message "Host key line must not be empty."
+    $tempKeyFile = Join-Path ([System.IO.Path]::GetTempPath()) ("skybridge-openssh-host-key-" + [Guid]::NewGuid().ToString("N"))
+    try {
+        [System.IO.File]::WriteAllText($tempKeyFile, ($HostKeyLine + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
+        $fingerprintResult = Invoke-NativeCapture -FileName $SshKeygenPath -Arguments @("-lf", $tempKeyFile) -TimeoutSeconds 20
+        Assert-True -Condition ($fingerprintResult.exitCode -eq 0) -Message "ssh-keygen could not read scanned host key record."
+        if ($fingerprintResult.text -match 'SHA256:[A-Za-z0-9+/]+={0,2}') {
+            return $Matches[0]
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempKeyFile) {
+            Remove-Item -LiteralPath $tempKeyFile -Force
+        }
+    }
+
+    throw "ssh-keygen did not emit a SHA256 fingerprint for scanned host key record."
+}
+
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($HostName)) -Message "HostName must not be empty."
 Assert-True -Condition ($Port -gt 0 -and $Port -le 65535) -Message "Port must be in 1..65535."
 Assert-True -Condition ($ConnectTimeoutSeconds -gt 0 -and $ConnectTimeoutSeconds -le 300) -Message "ConnectTimeoutSeconds must be in 1..300."
@@ -260,18 +282,22 @@ $hostKeyLines = @(
         Where-Object { $_ -match '^\S+\s+(ssh|ecdsa|sk)-[A-Za-z0-9@._+-]+' }
 )
 Assert-True -Condition ($hostKeyLines.Count -gt 0) -Message "ssh-keyscan did not return any host key records for $HostName`:$Port."
-[System.IO.File]::WriteAllText($knownHostsFullPath, (($hostKeyLines -join [Environment]::NewLine) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
-
-$fingerprintResult = Invoke-NativeCapture -FileName $SshKeygenPath -Arguments @("-lf", $knownHostsFullPath) -TimeoutSeconds 20
-Assert-True -Condition ($fingerprintResult.exitCode -eq 0) -Message "ssh-keygen could not read scanned host keys."
 $hostKeyFingerprints = New-Object System.Collections.Generic.List[string]
-foreach ($line in ($fingerprintResult.text -split "`r?`n")) {
-    if ($line -match 'SHA256:[A-Za-z0-9+/]+={0,2}') {
-        $hostKeyFingerprints.Add($Matches[0])
+$pinnedHostKeyLines = New-Object System.Collections.Generic.List[string]
+$pinnedHostKeyFingerprints = New-Object System.Collections.Generic.List[string]
+foreach ($hostKeyLine in $hostKeyLines) {
+    $fingerprint = Get-HostKeyLineFingerprint -HostKeyLine $hostKeyLine
+    $hostKeyFingerprints.Add($fingerprint)
+    if ($fingerprint -eq $normalizedExpectedFingerprint) {
+        $pinnedHostKeyLines.Add($hostKeyLine)
+        $pinnedHostKeyFingerprints.Add($fingerprint)
     }
 }
 $hostKeyFingerprints = @($hostKeyFingerprints)
-Assert-True -Condition ($hostKeyFingerprints -contains $normalizedExpectedFingerprint) -Message "Scanned host key fingerprints did not include expected fingerprint $normalizedExpectedFingerprint."
+$pinnedHostKeyLines = @($pinnedHostKeyLines)
+$pinnedHostKeyFingerprints = @($pinnedHostKeyFingerprints)
+Assert-True -Condition ($pinnedHostKeyLines.Count -gt 0) -Message "Scanned host key fingerprints did not include expected fingerprint $normalizedExpectedFingerprint."
+[System.IO.File]::WriteAllText($knownHostsFullPath, (($pinnedHostKeyLines -join [Environment]::NewLine) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
 
 $target = if ([string]::IsNullOrWhiteSpace($UserName)) { $HostName } else { "$UserName@$HostName" }
 $kexAlgorithmList = $PqKexAlgorithms -join ","
@@ -322,8 +348,10 @@ $evidence = [ordered]@{
     clientSupportedPqKex = @($clientSupportedPqKex)
     requiredPqKexAlgorithms = @($PqKexAlgorithms)
     expectedHostKeyFingerprint = $normalizedExpectedFingerprint
-    hostKeyPinned = $hostKeyFingerprints -contains $normalizedExpectedFingerprint
+    hostKeyPinned = $pinnedHostKeyLines.Count -gt 0
     hostKeyFingerprints = @($hostKeyFingerprints)
+    pinnedHostKeyFingerprints = @($pinnedHostKeyFingerprints)
+    pinnedKnownHostsRecordCount = $pinnedHostKeyLines.Count
     negotiatedKexAlgorithm = $negotiatedKex
     negotiatedPqKex = [bool]$negotiatedPqKex
     commandExitCode = $sshResult.exitCode
