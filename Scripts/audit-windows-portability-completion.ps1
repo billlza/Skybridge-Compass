@@ -144,16 +144,18 @@ function Get-RemoteBranchHead {
             $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
         }
 
+        $remoteProbeDetail = "ls-remote --heads origin $Branch"
         $remoteResult = Invoke-GitRaw -Arguments @("ls-remote", "--heads", "origin", $Branch)
         if ($remoteResult.ExitCode -ne 0) {
+            $sshDetail = ($remoteProbeDetail + [Environment]::NewLine + $remoteResult.Text).Trim()
             if ($AllowGitHubApiFallback) {
-                return Get-GitHubApiBranchHead -Branch $Branch -Repository $Repository -SshDetail $remoteResult.Text
+                return Get-GitHubApiBranchHead -Branch $Branch -Repository $Repository -SshDetail $sshDetail
             }
 
             return [ordered]@{
                 status = "unavailable"
                 head = ""
-                detail = $remoteResult.Text
+                detail = $sshDetail
             }
         }
 
