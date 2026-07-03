@@ -33,6 +33,10 @@ public interface IRemoteDesktopWorkspaceClient
 
     string BuildAdvancedConnectPendingStatus();
 
+    string BuildNearFieldPendingStatus();
+
+    string BuildAdvancedConnectModeStatus();
+
     string BuildPerformanceOverlayPendingStatus();
 
     string BuildQualityPendingStatus();
@@ -200,6 +204,19 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 
     public string BuildAdvancedConnectPendingStatus() => DefaultAdvancedConnectPendingStatus;
 
+    // Honest, fail-closed status for the Mac connectionModeSelector ".nearField" segment.
+    // There is no Windows near-field capture transport (no display-capture adapter, no
+    // local-mirror window pump) so this surfaces an explicit pending-adapter string in the
+    // same fail-closed idiom as the connect actions above. It is NOT a transport claim and
+    // NOT a fabricated state — selecting Near states plainly that no capture has started.
+    public string BuildNearFieldPendingStatus() => DefaultNearFieldPendingStatus;
+
+    // Honest status for the Mac connectionModeSelector ".farFieldRDP" segment. Far-field
+    // (manual RDP/VNC/SSH) needs the operator to provide a target before any session can be
+    // prepared; this restates that intent without starting a transport (fail-closed parity
+    // with BuildAdvancedConnectActionAsync, which also never launches a live session).
+    public string BuildAdvancedConnectModeStatus() => DefaultAdvancedConnectModeStatus;
+
     public string BuildPerformanceOverlayPendingStatus() => DefaultPerformanceOverlayPendingStatus;
 
     public string BuildQualityPendingStatus() => DefaultQualityPendingStatus;
@@ -219,6 +236,12 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
     public static string DefaultRecommendedConnectPendingStatus { get; } = "Preparing recommended session...";
 
     public static string DefaultAdvancedConnectPendingStatus { get; } = "Preparing advanced session...";
+
+    public static string DefaultNearFieldPendingStatus { get; } =
+        "Near-field mirror pending capture adapter";
+
+    public static string DefaultAdvancedConnectModeStatus { get; } =
+        "Advanced connect: provide an RDP/VNC/SSH target to start a manual session.";
 
     public static string DefaultPerformanceOverlayPendingStatus { get; } = "Preparing performance overlay...";
 

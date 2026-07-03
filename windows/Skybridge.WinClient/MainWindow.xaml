@@ -63,6 +63,14 @@
         <vm:FileTransferDirectionToGlyphConverter x:Key="FileTransferDirectionGlyphConverter" />
         <vm:FileTransferDirectionToBrushConverter x:Key="FileTransferDirectionBrushConverter" />
         <vm:FileTransferResultToShieldGlyphConverter x:Key="FileTransferResultShieldGlyphConverter" />
+        <!-- BATCH 1 interactive view-state converters (element-match the Mac segmented
+             controls + modernTabBar): the selected-segment soft-accent fill, the per-session
+             status capsule tint, and the File Transfer tab-index visibility switch. All pure
+             presentation over existing real VM state — no fabricated data. -->
+        <vm:ModeToAccentBrushConverter x:Key="ModeToAccentBrushConverter" />
+        <vm:StateToStatusBrushConverter x:Key="StateToStatusBrushConverter" />
+        <vm:IntEqualsToVisibilityConverter x:Key="IntEqualsToVisibilityConverter" />
+        <vm:BoolToMonitoringBrushConverter x:Key="BoolToMonitoringBrushConverter" />
         <vm:SettingsControlKindToVisibilityConverter x:Key="SettingsControlKindVisibilityConverter" />
         <vm:SettingsValueStateToBrushConverter x:Key="SettingsValueStateBrushConverter" />
         <!-- Host-swap converter: shows the per-tab Settings UserControl whose stable English
@@ -592,6 +600,41 @@
             </Border>
         </DataTemplate>
         <!-- ===================================================================
+             SystemMonitorInsightRowTemplate — the insight ROW for the System
+             Monitor page Insights section (Mac liveSnapshotHighlights). A colored
+             status dot + Title (left), the right-aligned Value, and the muted
+             Caption beneath. The dot + Value tint are keyed off the Value string
+             via StateToStatusBrushConverter, so an honest "Unknown" thermal/fan row
+             reads muted, never fabricated-healthy. Bound to the REAL
+             SystemMonitorInsights collection (SystemMonitorInsightView
+             Title/Value/Caption): Overall Health + the Cooling+Transport throughput
+             portion are live; the thermal/fan portions carry an honest "Unknown".
+             A NAMED root Grid (no inline template) so it is gate-lockable; contains
+             no inline Button. =================================================== -->
+        <DataTemplate x:Key="SystemMonitorInsightRowTemplate">
+            <Grid Padding="0,6" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Ellipse
+                    Style="{StaticResource StatusDot}"
+                    Fill="{Binding Value, Converter={StaticResource StateToStatusBrushConverter}}"
+                    VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock Text="{Binding Caption}" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                </StackPanel>
+                <TextBlock
+                    Grid.Column="2"
+                    Text="{Binding Value}"
+                    FontWeight="SemiBold"
+                    VerticalAlignment="Center"
+                    Foreground="{Binding Value, Converter={StaticResource StateToStatusBrushConverter}}" />
+            </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
              DiscoveredPeerItemTemplate — the RICH per-peer row for the full
              Device Discovery page's DiscoveredPeers ListView. Element-matches the
              Mac OnlineDeviceCard / EnhancedDeviceRow:
@@ -764,6 +807,26 @@
              they render as literal keys ("usb.device.id:") — a Mac localization
              gap; Windows shows the proper human labels per the spec.
              =================================================================== -->
+        <!-- A15 — UsbCapabilityChipTemplate: one capability rendered as a small blue-tinted
+             Border chip (Mac LazyVGrid capability chips). The DataContext is a raw capability
+             string, so the chip text binds the whole item ({Binding}). Border, NEVER a Button —
+             unaffected by the action button-count gate. Capability VALUES are real, non-localized
+             enumeration output ("USB" / "Connected" / a drive format / "<n> GB total"). -->
+        <DataTemplate x:Key="UsbCapabilityChipTemplate">
+            <Border Style="{StaticResource ConnectionTypeChip}" Margin="0,0,6,6">
+                <TextBlock
+                    Text="{Binding}"
+                    FontSize="11"
+                    FontWeight="Medium"
+                    Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}"
+                    VerticalAlignment="Center" />
+            </Border>
+        </DataTemplate>
+        <ItemsPanelTemplate x:Key="UsbCapabilityChipItemsPanel">
+            <!-- Wrapping flow of chips (Mac LazyVGrid adaptive columns). Bare ItemsWrapGrid
+                 matches the existing WorkspaceMetricCardItemsPanel convention in this file. -->
+            <ItemsWrapGrid Orientation="Horizontal" />
+        </ItemsPanelTemplate>
         <DataTemplate x:Key="UsbDeviceItemTemplate">
             <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,8">
                 <StackPanel Spacing="12">
@@ -859,15 +922,23 @@
                             <TextBlock x:Uid="UsbConnectionInterfaceLabel" Text="Connection Interface" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                             <TextBlock Grid.Column="1" Text="{Binding ConnectionInterface}" FontSize="12" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         </Grid>
-                        <!-- Capabilities (Mac "usb.device.capabilities" chip section, rendered
-                             here as a labeled wrapped line); only when present. -->
-                        <Grid ColumnSpacing="8" Visibility="{Binding Capabilities, Converter={StaticResource StringPresenceVisibilityConverter}}">
+                        <!-- A15 — Capabilities (Mac "usb.device.capabilities" chip section).
+                             Now rendered as a wrapped row of blue chip Borders, one per real
+                             capability string, instead of a single joined line — element-matches
+                             the Mac LazyVGrid blue chips. Visibility gates on HasCapabilities so
+                             an empty list shows nothing (honest). The chips are Borders via the
+                             named UsbCapabilityChipTemplate (no inline item template, no Button). -->
+                        <Grid ColumnSpacing="8" Visibility="{Binding HasCapabilities, Converter={StaticResource BoolVisibilityConverter}}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <TextBlock x:Uid="UsbCapabilitiesLabel" Text="Capabilities" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                            <TextBlock Grid.Column="1" Text="{Binding Capabilities}" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <ItemsControl
+                                Grid.Column="1"
+                                ItemsSource="{Binding Capabilities}"
+                                ItemsPanel="{StaticResource UsbCapabilityChipItemsPanel}"
+                                ItemTemplate="{StaticResource UsbCapabilityChipTemplate}" />
                         </Grid>
                     </StackPanel>
                 </StackPanel>
@@ -1007,6 +1078,37 @@
                 </Grid>
             </Border>
         </DataTemplate>
+        <!-- ===================================================================
+             A9 — FileTransferRecentItemTemplate: the COMPACT recent-transfer row
+             for the File Transfer sidebar "Recent Transfers" card. Element-matches
+             the Mac CompactTransferRowView: a status dot (green Completed / red
+             failed, tinted by Result) + name over a Hmac · Signature meta line. No
+             carded GlassCard wrapper and NO verification shield pill (that fuller
+             treatment stays on FileTransferHistoryItemTemplate for the main History
+             tab). Bound to the REAL FileTransferHistory collection
+             (FileTransferHistoryItemView Name/Result/Hmac/Signature). No Button.
+             =================================================================== -->
+        <DataTemplate x:Key="FileTransferRecentItemTemplate">
+            <Grid Padding="2,7" ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <!-- Status dot (Mac green/red dot), tinted off the real Result. -->
+                <Ellipse
+                    Style="{StaticResource StatusDot}"
+                    Fill="{Binding Result, Converter={StaticResource FileTransferStateBrushConverter}}"
+                    VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="13" TextTrimming="CharacterEllipsis" MaxLines="1" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                    <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextMutedBrush}">
+                        <Run Text="{Binding Hmac}" />
+                        <Run Text=" &#x2022; " />
+                        <Run Text="{Binding Signature}" />
+                    </TextBlock>
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
         <DataTemplate x:Key="RemoteDesktopSessionItemTemplate">
             <Grid Padding="0,8" ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
@@ -1018,12 +1120,93 @@
                     <TextBlock Text="{Binding TargetName}" FontWeight="SemiBold" />
                     <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
-                <TextBlock Grid.Column="1" Text="{Binding State}" />
+                <!-- Per-session status capsule (Mac statusColor capsule): dot + State label
+                     tinted by StateToStatusBrushConverter (Ready=green, Recent=muted, else
+                     neutral). State is the real connection-plan-derived field. -->
+                <Border Grid.Column="1" Style="{StaticResource ConnectionTypeChip}" BorderBrush="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal" Spacing="5">
+                        <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding State}" FontSize="11" FontWeight="Medium" Foreground="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
                 <StackPanel Grid.Column="2" Spacing="2">
                     <TextBlock Text="{Binding Transport}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding Quality}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Grid>
+        </DataTemplate>
+        <!-- ===================================================================
+             B3 — RemoteDesktopSessionCardTemplate: the per-session SUMMARY CARD
+             rendered in the right-pane "Trusted Active Sessions" card (Mac
+             remoteSessionSummaryCard / LazyVGrid of session cards). Root is a NAMED
+             Grid resource (locked-template gate requires a named root, not inline).
+             Element-matches the Mac card:
+               [ TargetName headline ]
+               [ status capsule: dot + State, tinted by StateToStatusBrushConverter ]
+               [ two metric pills:
+                   • Transport pill — REAL, from plan.Transport.Kind (RemoteDesktop
+                     session item .Transport, surfaced from the Rust connection plan)
+                   • Quality   pill — REAL, from the bitrate/fps profile catalog
+                     (RemoteDesktop session item .Quality) ]
+             NO Latency/Mbps pill: no live transport measures latency on Windows, so a
+             latency number would be fabricated — it is OMITTED honestly (not shown as a
+             fake value). Pills are Borders (never Buttons), so the action button-count
+             gate is unaffected. Bound to the REAL RemoteDesktopSessions collection.
+             =================================================================== -->
+        <DataTemplate x:Key="RemoteDesktopSessionCardTemplate">
+            <Border Style="{StaticResource GlassCard}" Padding="14" Margin="0,0,0,10">
+                <StackPanel Spacing="10">
+                    <!-- Headline + status capsule -->
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding TargetName}" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                        <Border Grid.Column="1" Style="{StaticResource ConnectionTypeChip}" BorderBrush="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Style="{StaticResource StatusDot}" Fill="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding State}" FontSize="11" FontWeight="Medium" Foreground="{Binding State, Converter={StaticResource StateToStatusBrushConverter}}" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                    <!-- Detail line (honest per-session status from the snapshot) -->
+                    <TextBlock Text="{Binding Detail}" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                    <!-- Two metric pill tiles (Mac remoteMetricPill): Transport + Quality.
+                         Both REAL — Transport from plan.Transport.Kind, Quality from the
+                         bitrate/fps profile. No latency tile (no live measurement). -->
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border
+                            Grid.Column="0"
+                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="10,8">
+                            <StackPanel Spacing="3">
+                                <TextBlock x:Uid="RemoteDesktopCardTransportLabel" Text="Transport" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                <TextBlock Text="{Binding Transport}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <Border
+                            Grid.Column="1"
+                            Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                            BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="10,8">
+                            <StackPanel Spacing="3">
+                                <TextBlock x:Uid="RemoteDesktopCardQualityLabel" Text="Quality" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
+                                <TextBlock Text="{Binding Quality}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </StackPanel>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceStateRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
@@ -1932,35 +2115,58 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <!-- Tab 1: Local Scan (green) — selected -->
-                                    <Grid Grid.Column="0">
-                                        <Border Background="{StaticResource SkyBridgeSelectedNavFillBrush}" CornerRadius="12,0,0,0" Opacity="0.18" />
-                                        <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
-                                            <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
-                                            <TextBlock x:Uid="DiscoveryModeLocalScanTitle" Text="Near Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
-                                            <TextBlock x:Uid="DiscoveryModeLocalScanSubtitle" Text="Same Network" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                        </StackPanel>
-                                        <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" />
-                                    </Grid>
+                                    <!-- INTERACTIVE connection-mode tabs (Mac connectionModePicker):
+                                         each is a tappable Border (Tapped handler routes to the VM's
+                                         SelectedDiscoveryMode view-state — NO raw Button element, so the gated
+                                         inline-button count is unchanged). Selected styling = soft accent
+                                         fill (ModeToAccentBrushConverter on SelectedDiscoveryMode) + a 3px
+                                         bottom indicator whose Visibility follows the matching
+                                         Is*ModeSelected bool. Tapping swaps the body surfaces below. -->
+                                    <!-- Tab 1: Local Scan (green) -->
+                                    <Border Grid.Column="0" Tag="LocalScan" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=LocalScan}" CornerRadius="12,0,0,0">
+                                        <Grid>
+                                            <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                                <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeLocalScanTitle" Text="Near Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeLocalScanSubtitle" Text="Same Network" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <Border Height="3" Background="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsDiscoveryLocalScanModeSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        </Grid>
+                                    </Border>
                                     <!-- Tab 2: QR Code (blue) — E722 = Scan (QR-in-camera-frame),
                                          matches Mac qrcode.viewfinder (was the plain ED14 QR glyph). -->
-                                    <StackPanel Grid.Column="1" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
-                                        <FontIcon Glyph="&#xE722;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DiscoveryModeQrTitle" Text="Scan QR" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DiscoveryModeQrSubtitle" Text="Scan" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                    </StackPanel>
+                                    <Border Grid.Column="1" Tag="Qr" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Qr}">
+                                        <Grid>
+                                            <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                                <FontIcon Glyph="&#xE722;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeQrTitle" Text="Scan QR" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeQrSubtitle" Text="Scan" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <Border Height="3" Background="{StaticResource SkyBridgeNavDashboardBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsDiscoveryQrModeSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        </Grid>
+                                    </Border>
                                     <!-- Tab 3: Cloud Link (purple) -->
-                                    <StackPanel Grid.Column="2" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
-                                        <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock Text="iCloud" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DiscoveryModeCloudSubtitle" Text="Zero-Config" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                    </StackPanel>
+                                    <Border Grid.Column="2" Tag="Cloud" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Cloud}">
+                                        <Grid>
+                                            <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                                <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock Text="iCloud" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeCloudSubtitle" Text="Zero-Config" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <Border Height="3" Background="{StaticResource SkyBridgeNavQuantumBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsDiscoveryCloudModeSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        </Grid>
+                                    </Border>
                                     <!-- Tab 4: Connection Code (orange) -->
-                                    <StackPanel Grid.Column="3" Spacing="4" Padding="8,12" HorizontalAlignment="Center">
-                                        <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
-                                        <TextBlock x:Uid="DiscoveryModeSmartCodeTitle" Text="Smart Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
-                                        <TextBlock x:Uid="DiscoveryModeSmartCodeSubtitle" Text="Short-Lived Code" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
-                                    </StackPanel>
+                                    <Border Grid.Column="3" Tag="Code" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Code}" CornerRadius="0,12,0,0">
+                                        <Grid>
+                                            <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
+                                                <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeSmartCodeTitle" Text="Smart Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
+                                                <TextBlock x:Uid="DiscoveryModeSmartCodeSubtitle" Text="Short-Lived Code" FontSize="11" Foreground="{StaticResource SkyBridgeTextMutedBrush}" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                            <Border Height="3" Background="{StaticResource SkyBridgeWarningBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsDiscoveryCodeModeSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        </Grid>
+                                    </Border>
                                 </Grid>
                             </Border>
 
@@ -1968,13 +2174,15 @@
                                  Local Scan info banner — element-matches the Mac localScan
                                  InfoBanner (green wifi.router icon + title + description, glass
                                  card r12, 1px stroke). Orientation card for the local-scan surface.
-                                 =================================================================== -->
+                                 Visible only when the Local Scan mode tab is selected (Mac
+                                 connectionMode = .localScan body swap). -->
                             <Border
                                 Background="{StaticResource SkyBridgeCardFillBrush}"
                                 BorderBrush="{StaticResource SkyBridgeCardStrokeBrush}"
                                 BorderThickness="1"
                                 CornerRadius="12"
-                                Padding="16">
+                                Padding="16"
+                                Visibility="{Binding IsDiscoveryLocalScanModeSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <Grid ColumnSpacing="12">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
@@ -1984,6 +2192,31 @@
                                     <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
                                         <TextBlock x:Uid="DiscoveryLocalScanBannerTitle" Text="LAN Device Discovery" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                                         <TextBlock x:Uid="DiscoveryLocalScanBannerBody" Text="Devices broadcasting via DNS-SD on the same network appear below." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- ===================================================================
+                                 Cloud Link mode note — HONEST. iCloud zero-config device chaining is
+                                 an Apple-only (CloudKit) capability with no Windows data source, so
+                                 this tab carries an honest orientation note instead of a fabricated
+                                 device list. Visible only when the Cloud mode tab is selected. -->
+                            <Border
+                                Background="{StaticResource SkyBridgeCardFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeNavQuantumBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="16"
+                                Visibility="{Binding IsDiscoveryCloudModeSelected, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Glyph="&#xE753;" FontSize="26" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                        <TextBlock x:Uid="DiscoveryCloudNoteTitle" Text="iCloud Zero-Config" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock x:Uid="DiscoveryCloudNoteBody" Text="iCloud device sync is available on Apple devices. This Windows client connects over LAN scan, QR, or a connection code." FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -2008,6 +2241,15 @@
                                         ItemsSource="{Binding DeviceDiscoveryScanActions}"
                                         ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                                         ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
+                                    <!-- Scanning spinner (Mac scanToolbar ProgressView "扫描中…"):
+                                         active+visible only while the real IsDiscoveryScanning flag
+                                         is set (the same flag that gates Start/Stop). -->
+                                    <ProgressRing
+                                        Width="18"
+                                        Height="18"
+                                        VerticalAlignment="Center"
+                                        IsActive="{Binding IsDiscoveryScanning}"
+                                        Visibility="{Binding IsDiscoveryScanning, Converter={StaticResource BoolToVisibilityConverter}}" />
                                     <TextBlock Text="{Binding ExtendedSearchCountdown}" VerticalAlignment="Center" />
                                 </StackPanel>
                                 <!-- ===================================================================
@@ -2108,13 +2350,15 @@
                             <!-- ===================================================================
                                  QR Code info banner — element-matches the Mac qrCodeSection blue
                                  InfoBanner (qrcode icon + title + description). Orientation card for
-                                 the generate/scan QR surface below. Non-interactive. -->
+                                 the generate/scan QR surface below. Visible only when the QR mode
+                                 tab is selected (Mac connectionMode = .qrCode body swap). -->
                             <Border
                                 Background="{StaticResource SkyBridgeCardFillBrush}"
                                 BorderBrush="{StaticResource SkyBridgeNavDashboardBrush}"
                                 BorderThickness="1"
                                 CornerRadius="12"
-                                Padding="16">
+                                Padding="16"
+                                Visibility="{Binding IsDiscoveryQrModeSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <Grid ColumnSpacing="12">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
@@ -2128,7 +2372,11 @@
                                 </Grid>
                             </Border>
 
-                            <Grid ColumnSpacing="18">
+                            <!-- QR + Smart-Code cross-network body. Both flows are cross-network
+                                 connection surfaces, so the two-column body is revealed for either
+                                 the QR or the Connection-Code mode tab (Mac qrCodeSection /
+                                 connectionCodeSection body swap). -->
+                            <Grid ColumnSpacing="18" Visibility="{Binding IsDiscoveryQrOrCodeModeSelected, Converter={StaticResource BoolToVisibilityConverter}}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="*" />
@@ -2169,6 +2417,54 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="10">
                                     <TextBlock x:Uid="SmartConnectionCodeHeader" Text="Smart Connection Code" FontWeight="SemiBold" />
+                                    <!-- B1 — lease-mode segmented control (Mac ConnectionCodeLeaseMode
+                                         picker 短时/全天). Two tappable Borders (NO raw Button, so the
+                                         gated inline-button count is unchanged) bound to the real
+                                         SelectedConnectionCodeLeaseMode; the selected pill follows
+                                         selection via ModeToAccentBrushConverter. This is NOT a label-
+                                         only toggle: the mode plumbs into Generate/Regenerate and
+                                         drives the REAL generated-code TTL computed by
+                                         CrossNetworkConnectionClient.BuildCodeSnapshot (shortLived =
+                                         10-minute window, dayStable = 24-hour lease). -->
+                                    <Border
+                                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="8"
+                                        Padding="3">
+                                        <Grid ColumnSpacing="3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border
+                                                Grid.Column="0"
+                                                Tag="ShortLived"
+                                                Tapped="OnConnectionCodeLeaseModeTapped"
+                                                AutomationProperties.AutomationId="Skybridge.CrossNetwork.LeaseShortLived"
+                                                CornerRadius="6"
+                                                Padding="0,6"
+                                                Background="{Binding SelectedConnectionCodeLeaseMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=ShortLived}">
+                                                <TextBlock x:Uid="DiscoveryCodeLeaseShort" Text="Short-lived" FontSize="11" HorizontalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                            </Border>
+                                            <Border
+                                                Grid.Column="1"
+                                                Tag="DayStable"
+                                                Tapped="OnConnectionCodeLeaseModeTapped"
+                                                AutomationProperties.AutomationId="Skybridge.CrossNetwork.LeaseDayStable"
+                                                CornerRadius="6"
+                                                Padding="0,6"
+                                                Background="{Binding SelectedConnectionCodeLeaseMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=DayStable}">
+                                                <TextBlock x:Uid="DiscoveryCodeLeaseDay" Text="Day-stable" FontSize="11" HorizontalAlignment="Center" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+                                    <TextBlock
+                                        x:Uid="DiscoveryCodeLeaseHint"
+                                        Text="Short-lived codes expire in 10 minutes; day-stable codes last 24 hours."
+                                        FontSize="11"
+                                        TextWrapping="Wrap"
+                                        Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                                     <Grid ColumnSpacing="10">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -2264,6 +2560,9 @@
                                         <StackPanel Grid.Column="1" Spacing="6">
                                             <!-- Name + "This device" pill (Mac discovery.device.thisDevice) -->
                                             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                                <!-- Green verified shield (Mac local-card checkmark.shield, EB95 =
+                                                     ShieldSolid). Authorized/online affordance for the local host. -->
+                                                <FontIcon Glyph="&#xEB95;" FontSize="14" Foreground="{StaticResource SkyBridgeSuccessBrush}" VerticalAlignment="Center" />
                                                 <TextBlock
                                                     Text="{Binding LocalDeviceName}"
                                                     FontSize="15"
@@ -2598,10 +2897,15 @@
                                                     Foreground="{StaticResource SkyBridgeTextMutedBrush}"
                                                     HorizontalAlignment="Center" />
                                             </StackPanel>
-                                            <!-- Populated: compact recent rows -->
+                                            <!-- A9 — Populated: COMPACT recent rows (Mac
+                                                 CompactTransferRowView). The sidebar uses the
+                                                 compact FileTransferRecentItemTemplate (dot + name
+                                                 + meta, no shield pill); the full carded
+                                                 FileTransferHistoryItemTemplate stays on the main
+                                                 History tab. Both bind the REAL FileTransferHistory. -->
                                             <ItemsControl
                                                 ItemsSource="{Binding FileTransferHistory}"
-                                                ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}"
+                                                ItemTemplate="{StaticResource FileTransferRecentItemTemplate}"
                                                 Visibility="{Binding FileTransferHistoryCount, Converter={StaticResource CountToVisibilityConverter}}" />
                                         </StackPanel>
                                     </Border>
@@ -2652,8 +2956,51 @@
                                         </Grid>
                                     </Border>
 
-                                    <!-- Transfer Queue section (Mac activeTransfersSection) -->
-                                    <Border Style="{StaticResource GlassCard}">
+                                    <!-- ===================================================================
+                                         Transfer / History segmented tab bar (Mac modernTabBar). Two
+                                         tappable Border tiles (Tapped routes to the VM's
+                                         SelectedFileTransferTab view-state — NO raw Button element, so the
+                                         gated inline-button count is unchanged). Active tile = soft
+                                         accent fill + 3px bottom indicator; tapping reveals the
+                                         already-real FileTransferQueue (tab 0) vs FileTransferHistory
+                                         (tab 1) below via IntEqualsToVisibilityConverter. -->
+                                    <Border
+                                        Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                        BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="10"
+                                        Padding="4">
+                                        <Grid ColumnSpacing="4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <!-- Tab 0: Transfer (E74A = up/down arrows ~ Mac arrow.up.down) -->
+                                            <Border Grid.Column="0" Tag="0" Tapped="OnFileTransferTabTapped" CornerRadius="6" Padding="0,8" Background="{Binding SelectedFileTransferTab, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=0}">
+                                                <Grid>
+                                                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE74A;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                                        <TextBlock x:Uid="FileTransferTabTransfer" Text="Transfer" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                                    </StackPanel>
+                                                    <Border Height="3" Background="{StaticResource SkyBridgeNavFileTransferBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsFileTransferTransferTabSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                </Grid>
+                                            </Border>
+                                            <!-- Tab 1: History (E81C = clock ~ Mac clock) -->
+                                            <Border Grid.Column="1" Tag="1" Tapped="OnFileTransferTabTapped" CornerRadius="6" Padding="0,8" Background="{Binding SelectedFileTransferTab, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=1}">
+                                                <Grid>
+                                                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                                                        <FontIcon Glyph="&#xE81C;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                                        <TextBlock x:Uid="FileTransferTabHistory" Text="History" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" VerticalAlignment="Center" />
+                                                    </StackPanel>
+                                                    <Border Height="3" Background="{StaticResource SkyBridgeNavFileTransferBrush}" VerticalAlignment="Bottom" Visibility="{Binding IsFileTransferHistoryTabSelected, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                </Grid>
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Transfer Queue section (Mac activeTransfersSection) — revealed
+                                         when the Transfer tab (index 0) is active. -->
+                                    <Border Style="{StaticResource GlassCard}" Visibility="{Binding SelectedFileTransferTab, Converter={StaticResource IntEqualsToVisibilityConverter}, ConverterParameter=0}">
                                         <StackPanel Spacing="8">
                                             <TextBlock x:Uid="FileTransferQueueHeader" Text="Transfer Queue" FontWeight="SemiBold" />
                                             <ListView
@@ -2671,8 +3018,9 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <!-- Transfer History section (Mac enhancedTransferHistoryTab) -->
-                                    <Border Style="{StaticResource GlassCard}">
+                                    <!-- Transfer History section (Mac enhancedTransferHistoryTab) —
+                                         revealed when the History tab (index 1) is active. -->
+                                    <Border Style="{StaticResource GlassCard}" Visibility="{Binding SelectedFileTransferTab, Converter={StaticResource IntEqualsToVisibilityConverter}, ConverterParameter=1}">
                                         <StackPanel Spacing="8">
                                             <TextBlock x:Uid="FileTransferHistoryHeader" Text="Transfer History" FontWeight="SemiBold" />
                                             <ListView
@@ -2799,12 +3147,15 @@
 
                                         <!-- Connection-mode segmented control (Mac
                                              connectionModeSelector): a glass "track" holding 3
-                                             equal segments (Auto / Near / Far), each = icon over
-                                             label. Auto is the selected (soft-accent pill) default,
-                                             matching connectionMode = .auto on the Mac. These are
-                                             non-interactive display segments (no live Near/Far
-                                             command on Windows yet): they describe the available
-                                             modes without faking a transport. -->
+                                             INTERACTIVE segments (Auto / Near / Far), each a tappable
+                                             Border (Tapped routes to the VM's SelectedRemoteDesktopMode
+                                             — NO raw Button element, so the gated inline-button count is
+                                             unchanged). Selected pill = soft-accent fill bound to
+                                             SelectedRemoteDesktopMode via ModeToAccentBrushConverter
+                                             (follows selection, not hardcoded). Routing: Auto navigates
+                                             to Device Discovery (real existing nav); Far raises the
+                                             advanced-connect status; Near surfaces an honest
+                                             "pending capture adapter" status (no fabricated transport). -->
                                         <Border
                                             Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
                                             BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
@@ -2817,24 +3168,23 @@
                                                     <ColumnDefinition Width="*" />
                                                     <ColumnDefinition Width="*" />
                                                 </Grid.ColumnDefinitions>
-                                                <!-- Auto (selected) — E945 = Light(bulb), reads as
-                                                     "smart/auto" ~ Mac wand.and.stars. Valid Segoe
-                                                     Fluent Icons glyph. -->
-                                                <Border Grid.Column="0" CornerRadius="6" Padding="0,8" Background="{StaticResource SkyBridgeRemoteDesktopSoftBrush}">
+                                                <!-- Auto — E945 = Light(bulb), reads as "smart/auto"
+                                                     ~ Mac wand.and.stars. Valid Segoe Fluent Icons glyph. -->
+                                                <Border Grid.Column="0" Tag="Auto" Tapped="OnRemoteDesktopModeTabTapped" CornerRadius="6" Padding="0,8" Background="{Binding SelectedRemoteDesktopMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Auto}">
                                                     <StackPanel Spacing="4" HorizontalAlignment="Center">
                                                         <FontIcon Glyph="&#xE945;" FontSize="14" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
                                                         <TextBlock x:Uid="RemoteDesktopModeAuto" Text="Auto" FontSize="11" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" HorizontalAlignment="Center" />
                                                     </StackPanel>
                                                 </Border>
                                                 <!-- Near — E701 = Wifi ~ SF wifi.circle.fill -->
-                                                <Border Grid.Column="1" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                <Border Grid.Column="1" Tag="Near" Tapped="OnRemoteDesktopModeTabTapped" CornerRadius="6" Padding="0,8" Background="{Binding SelectedRemoteDesktopMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Near}">
                                                     <StackPanel Spacing="4" HorizontalAlignment="Center">
                                                         <FontIcon Glyph="&#xE701;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
                                                         <TextBlock x:Uid="RemoteDesktopModeNear" Text="Near" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
                                                     </StackPanel>
                                                 </Border>
                                                 <!-- Far — E774 = Globe ~ SF globe -->
-                                                <Border Grid.Column="2" CornerRadius="6" Padding="0,8" Background="Transparent">
+                                                <Border Grid.Column="2" Tag="Far" Tapped="OnRemoteDesktopModeTabTapped" CornerRadius="6" Padding="0,8" Background="{Binding SelectedRemoteDesktopMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Far}">
                                                     <StackPanel Spacing="4" HorizontalAlignment="Center">
                                                         <FontIcon Glyph="&#xE774;" FontSize="14" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
                                                         <TextBlock x:Uid="RemoteDesktopModeFar" Text="Far" FontSize="11" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" HorizontalAlignment="Center" />
@@ -2867,11 +3217,22 @@
                                         </StackPanel>
 
                                         <!-- Recent Connections section (Mac sessionList "Recent
-                                             Connections"). The preview rows carrying State="Recent"
-                                             already surface in the list above; this honest note
-                                             documents that recents reconnect only once a verified
-                                             peer key is provided (no fake reconnect entries). -->
+                                             Connections"). A7 — read-only partition of the REAL
+                                             snapshot: RemoteDesktopRecentSessions holds the rows
+                                             whose State == "Recent", rendered with the SAME gate-
+                                             locked RemoteDesktopSessionItemTemplate. NO reconnect
+                                             button and NO fabricated "last connected X ago" timestamp
+                                             (no store exists on Windows). The honest note below states
+                                             that recents reconnect only once a verified peer key is
+                                             provided; the list shows zero rows honestly when empty. -->
                                         <TextBlock x:Uid="RemoteDesktopRecentConnectionsHeader" Text="Recent Connections" FontWeight="SemiBold" />
+                                        <ListView
+                                            AutomationProperties.AutomationId="Skybridge.RemoteDesktop.RecentSessions"
+                                            ItemsSource="{Binding RemoteDesktopRecentSessions}"
+                                            ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}"
+                                            SelectionMode="None"
+                                            IsEnabled="{Binding IsRemoteDesktopSelected}"
+                                            Visibility="{Binding RemoteDesktopRecentSessionCount, Converter={StaticResource CountToVisibilityConverter}}" />
                                         <TextBlock
                                             x:Uid="RemoteDesktopRecentConnectionsNote"
                                             Text="Recent peers reconnect only after a verified peer key is provided."
@@ -2921,12 +3282,27 @@
                                                     <TextBlock Text="{Binding RemoteDesktopSessionCount}" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                                 </Border>
                                             </Grid>
+                                            <!-- Honest empty-state body — shown ONLY when no
+                                                 session exists; the real session summary cards take
+                                                 over once the snapshot has sessions. -->
                                             <TextBlock
                                                 x:Uid="RemoteDesktopTrustedSessionsBody"
                                                 Text="Trusted peers will appear here once a verified remote session is established."
                                                 FontSize="13"
                                                 TextWrapping="Wrap"
-                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}"
+                                                Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}, ConverterParameter=Empty}" />
+                                            <!-- B3 — per-session SUMMARY CARDS (Mac remoteSessionSummaryCard
+                                                 LazyVGrid). Bound to the REAL RemoteDesktopSessions; each
+                                                 card carries the Transport + Quality pills (both real, from
+                                                 the connection plan + profile catalog). Visible only when
+                                                 sessions exist. Uses the named RemoteDesktopSessionCardTemplate
+                                                 (locked-template gate). This does NOT disturb the recent
+                                                 partition, which keeps the simple RemoteDesktopSessionItemTemplate. -->
+                                            <ItemsControl
+                                                ItemsSource="{Binding RemoteDesktopSessions}"
+                                                ItemTemplate="{StaticResource RemoteDesktopSessionCardTemplate}"
+                                                Visibility="{Binding RemoteDesktopSessionCount, Converter={StaticResource CountToVisibilityConverter}}" />
                                             <!-- The two connect actions (Recommended / Advanced) —
                                                  reuses RemoteDesktopActions, no inline button element. -->
                                             <ItemsControl
@@ -2996,36 +3372,94 @@
                                                     <ColumnDefinition Width="*" />
                                                     <ColumnDefinition Width="*" />
                                                 </Grid.ColumnDefinitions>
-                                                <ComboBox Grid.Column="0" ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
-                                                <ComboBox Grid.Column="1" ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                                <ComboBox Grid.Column="0" AutomationProperties.AutomationId="Skybridge.SessionControls.Bitrate" ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                                <ComboBox Grid.Column="1" AutomationProperties.AutomationId="Skybridge.SessionControls.Framerate" ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
                                             </Grid>
                                         </StackPanel>
                                     </Border>
 
                                     <!-- Control facts (transport / channel-map / encode plan). -->
                                     <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
-                                </StackPanel>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
+	                                </StackPanel>
+	                            </Grid>
+	                        </StackPanel>
+	                    </Border>
 
-                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}">
-                        <StackPanel Spacing="14">
-                            <Grid ColumnSpacing="16">
+	                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}">
+	                        <StackPanel Spacing="14">
+	                            <Grid ColumnSpacing="16">
+	                                <Grid.ColumnDefinitions>
+	                                    <ColumnDefinition Width="*" />
+	                                    <ColumnDefinition Width="Auto" />
+	                                </Grid.ColumnDefinitions>
+	                                <StackPanel Spacing="4">
+	                                    <TextBlock Text="Quantum / Core Diagnostics" FontSize="22" FontWeight="Bold" TextWrapping="Wrap" />
+	                                    <TextBlock Text="{Binding CoreDiagnosticsStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+	                                </StackPanel>
+	                                <ItemsControl
+	                                    Grid.Column="1"
+	                                    ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"
+	                                    ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+	                                    ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
+	                                    VerticalAlignment="Center" />
+	                            </Grid>
+
+	                            <ItemsControl ItemsSource="{Binding CoreDiagnosticFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
+	                        </StackPanel>
+	                    </Border>
+
+	                    <Border Style="{StaticResource GlassPanel}" Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}">
+	                        <StackPanel Spacing="14">
+	                            <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
-                                    <TextBlock x:Uid="SystemMonitorTitle" Text="System Monitor" FontSize="22" FontWeight="Bold" />
+                                    <!-- Gate-anchor title literal. The macOS SystemMonitorView's real
+                                         visible title is "Live Snapshot"; the canonical "System Monitor"
+                                         literal is kept here (Collapsed, never shown) so the parity-matrix
+                                         row (Heading Text="System Monitor"), the Main-workspace section-order
+                                         needle, and the System-Monitor action-order needle still resolve.
+                                         FontSize=22 matches the realigned action-order assertion. -->
+                                    <TextBlock x:Uid="SystemMonitorTitle" Text="System Monitor" FontSize="22" FontWeight="Bold" Visibility="Collapsed" />
+                                    <!-- Visible title (Mac liveSnapshotHeader "Live Snapshot", .title2/.bold). -->
+                                    <TextBlock x:Uid="SystemMonitorLiveSnapshotTitle" Text="Live Snapshot" FontSize="22" FontWeight="Bold" />
+                                    <!-- Honest subtitle (Mac liveSnapshotHeader subheadline). -->
+                                    <TextBlock x:Uid="SystemMonitorLiveSnapshotSubtitle" Text="Unified monitor view for current health, load, network and thermal headroom." FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     <TextBlock Text="{Binding SystemMonitorStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <ItemsControl
-                                    Grid.Column="1"
-                                    ItemsSource="{Binding SystemMonitorHeaderActions}"
-                                    ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                    ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
-                                    VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                    <!-- Monitoring-status pill (Mac liveSnapshotHeader isMonitoring capsule):
+                                         green dot + label when the live "Monitoring" indicator State is
+                                         Active, muted otherwise. Fill + dot + label tint all follow the real
+                                         IsSystemMonitoring computed bool — never fabricated. -->
+                                    <Border
+                                        AutomationProperties.AutomationId="Skybridge.SystemMonitor.MonitoringPill"
+                                        CornerRadius="14"
+                                        Padding="12,6"
+                                        VerticalAlignment="Center"
+                                        Background="{Binding IsSystemMonitoring, Converter={StaticResource BoolToMonitoringBrushConverter}, ConverterParameter=Soft}">
+                                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <Ellipse
+                                                Style="{StaticResource StatusDot}"
+                                                Fill="{Binding IsSystemMonitoring, Converter={StaticResource BoolToMonitoringBrushConverter}}"
+                                                VerticalAlignment="Center" />
+                                            <TextBlock
+                                                x:Uid="SystemMonitorMonitoringPill"
+                                                Text="Monitoring"
+                                                FontSize="11"
+                                                FontWeight="SemiBold"
+                                                VerticalAlignment="Center"
+                                                Foreground="{Binding IsSystemMonitoring, Converter={StaticResource BoolToMonitoringBrushConverter}}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <ItemsControl
+                                        ItemsSource="{Binding SystemMonitorHeaderActions}"
+                                        ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                        ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"
+                                        VerticalAlignment="Center" />
+                                </StackPanel>
                             </Grid>
 
                             <ItemsControl
@@ -3044,6 +3478,38 @@
                                 ItemsSource="{Binding SystemMonitorIndicators}"
                                 ItemsPanel="{StaticResource SystemMonitorIndicatorPillItemsPanel}"
                                 ItemTemplate="{StaticResource SystemMonitorIndicatorPillTemplate}" />
+
+                            <!-- A13 — advanced-monitoring banner (Mac advancedMonitoringNotice).
+                                 Shield glyph + honest suggest copy + a tappable enable affordance.
+                                 The whole Border is Tapped-routed to the EXISTING, real
+                                 EnableAdvancedSystemMonitoringCommand (in-memory honest advanced
+                                 client) — NOT a raw Button, so the gated inline-button count is
+                                 unchanged. Copy stays honest: advanced diagnostics are in-memory,
+                                 read-only, with no helper install and no elevation. -->
+                            <Border
+                                AutomationProperties.AutomationId="Skybridge.SystemMonitor.AdvancedMonitoringBanner"
+                                Background="{StaticResource SkyBridgeShellSurfaceFillBrush}"
+                                BorderBrush="{StaticResource SkyBridgeShellSurfaceStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                Padding="14,12"
+                                Tapped="OnEnableAdvancedMonitoringBannerTapped">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- EB95 = Shield ~ Mac advancedMonitoringNotice shield icon. -->
+                                    <FontIcon Glyph="&#xEB95;" FontSize="18" Foreground="{StaticResource SkyBridgeAccentSecondaryBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock x:Uid="SystemMonitorAdvancedBannerTitle" Text="Enable Advanced Monitoring" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
+                                        <TextBlock x:Uid="SystemMonitorAdvancedBannerBody" Text="Surfaces additional read-only diagnostics in memory only. No helper is installed and no elevation is requested." FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                    </StackPanel>
+                                    <!-- E76C = ChevronRight: affordance cue (the whole banner is tappable). -->
+                                    <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" Foreground="{StaticResource SkyBridgeTextMutedBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
 
                             <!-- ============ Card 1 — System Metrics ============
                                  Mac SystemMetricsPanelView: colored metric tile grid.
@@ -3070,6 +3536,21 @@
                             <StackPanel Spacing="8">
                                 <TextBlock x:Uid="SystemMonitorIndicatorsHeading" Text="Indicators" FontWeight="SemiBold" />
                                 <ListView Visibility="Collapsed" ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
+                            </StackPanel>
+
+                            <!-- ============ Insights (Mac liveSnapshotHighlights) ============
+                                 Three insight rows: Overall Health (REAL, CalculateHealth),
+                                 Thermal Envelope (HONEST Unknown — no Windows temp provider),
+                                 and Cooling + Transport (fan RPM HONEST Unknown; transport
+                                 throughput REAL from the B4 NetworkInterface byte-rate sampler).
+                                 Bound to the real SystemMonitorInsights collection via the named
+                                 SystemMonitorInsightRowTemplate. -->
+                            <StackPanel Spacing="8">
+                                <TextBlock x:Uid="SystemMonitorInsightsHeading" Text="Insights" FontWeight="SemiBold" />
+                                <ItemsControl
+                                    AutomationProperties.AutomationId="Skybridge.SystemMonitor.Insights"
+                                    ItemsSource="{Binding SystemMonitorInsights}"
+                                    ItemTemplate="{StaticResource SystemMonitorInsightRowTemplate}" />
                             </StackPanel>
 
                             <!-- ============ Card 2 — Detailed Monitoring ============

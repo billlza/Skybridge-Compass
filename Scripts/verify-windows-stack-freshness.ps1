@@ -74,8 +74,12 @@ foreach ($path in @($winClientProjectPath, $cargoManifestPath, $architecturePath
 }
 
 $project = [xml](Get-Content -Raw -LiteralPath $winClientProjectPath)
-$targetFramework = [string]$project.Project.PropertyGroup.TargetFramework
-$windowsPackageType = [string]$project.Project.PropertyGroup.WindowsPackageType
+$targetFramework = ([string]$project.Project.PropertyGroup.TargetFramework).Trim()
+$targetPlatformMinVersion = ([string]$project.Project.PropertyGroup.TargetPlatformMinVersion).Trim()
+$windowsPackageTypes = @($project.Project.PropertyGroup |
+    ForEach-Object { $_.WindowsPackageType } |
+    Where-Object { $null -ne $_ } |
+    ForEach-Object { $_.InnerText.Trim() })
 $windowsAppSdkVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.WindowsAppSDK"
 $buildToolsVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.Windows.SDK.BuildTools"
 $qrCoderVersion = Get-PackageReferenceVersion -Project $project -PackageId "QRCoder"
@@ -83,8 +87,9 @@ $cargoManifest = Get-Content -Raw -LiteralPath $cargoManifestPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $agents = Get-Content -Raw -LiteralPath $agentsPath
 
-Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.19041.0") -Message "Windows client must target net10.0-windows10.0.19041.0, got $targetFramework"
-Assert-True -Condition ($windowsPackageType -eq "None") -Message "Windows client must set WindowsPackageType=None so unpackaged WinUI auto-initializes the Windows App SDK runtime, got $windowsPackageType"
+Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.22621.0") -Message "Windows client must target net10.0-windows10.0.22621.0, got $targetFramework"
+Assert-True -Condition ($targetPlatformMinVersion -eq "10.0.19041.0") -Message "Windows client must keep TargetPlatformMinVersion=10.0.19041.0, got $targetPlatformMinVersion"
+Assert-True -Condition ($windowsPackageTypes -contains "None") -Message "Windows client must keep a default WindowsPackageType=None path so unpackaged WinUI auto-initializes the Windows App SDK runtime. Actual=[$($windowsPackageTypes -join ', ')]"
 Assert-True -Condition ($windowsAppSdkVersion -eq "2.2.0") -Message "Windows App SDK must stay on latest stable 2.2.0, got $windowsAppSdkVersion"
 Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.1839") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.1839, got $buildToolsVersion"
 Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
@@ -93,7 +98,8 @@ Assert-Contains -Text $cargoManifest -Needle 'crate-type = ["rlib", "cdylib"]' -
 
 foreach ($architectureSignal in @(
     'Technology stack check',
-    'net10.0-windows10.0.19041.0',
+    'net10.0-windows10.0.22621.0',
+    'TargetPlatformMinVersion `10.0.19041.0`',
     'Windows App SDK `2.2.0`',
     'Windows SDK BuildTools `10.0.28000.1839`',
     '`WindowsPackageType=None`',
@@ -117,7 +123,8 @@ foreach ($architectureSignal in @(
 
 foreach ($agentSignal in @(
     'WinUI 3 + .NET 10',
-    'net10.0-windows10.0.19041.0',
+    'net10.0-windows10.0.22621.0',
+    'TargetPlatformMinVersion `10.0.19041.0`',
     'Windows App SDK `2.2.0`',
     'Windows SDK BuildTools `10.0.28000.1839`',
     'QRCoder `1.8.0`',
@@ -192,12 +199,13 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
     [ordered]@{
         generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
         checkOnline = [bool]$CheckOnline
-        project = [ordered]@{
-            targetFramework = $targetFramework
-            windowsPackageType = $windowsPackageType
-            packageVersions = [ordered]@{
-                MicrosoftWindowsAppSdk = $windowsAppSdkVersion
-                MicrosoftWindowsSdkBuildTools = $buildToolsVersion
+	        project = [ordered]@{
+	            targetFramework = $targetFramework
+	            targetPlatformMinVersion = $targetPlatformMinVersion
+	            windowsPackageTypes = @($windowsPackageTypes)
+	            packageVersions = [ordered]@{
+	                MicrosoftWindowsAppSdk = $windowsAppSdkVersion
+	                MicrosoftWindowsSdkBuildTools = $buildToolsVersion
                 QRCoder = $qrCoderVersion
             }
         }

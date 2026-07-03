@@ -11,6 +11,7 @@ internal sealed class WorkspaceActionSurfaceTargets
 
     public WorkspaceActionSurfaceTargets(WorkspaceObservableCollections collections)
         : this(
+            collections.SidebarSessionActions,
             collections.TopBarActions,
             collections.SessionControlActions,
             collections.DashboardQuickActions,
@@ -25,6 +26,7 @@ internal sealed class WorkspaceActionSurfaceTargets
             collections.FileTransferActions,
             collections.RemoteDesktopHeaderActions,
             collections.RemoteDesktopActions,
+            collections.QuantumDiagnosticsHeaderActions,
             collections.SystemMonitorHeaderActions,
             collections.SystemMonitorActions,
             collections.SettingsHeaderActions,
@@ -34,6 +36,7 @@ internal sealed class WorkspaceActionSurfaceTargets
     }
 
     private WorkspaceActionSurfaceTargets(
+        ObservableCollection<WorkspaceActionItemView> sidebarSessionActions,
         ObservableCollection<WorkspaceActionItemView> topBarActions,
         ObservableCollection<WorkspaceActionItemView> sessionControlActions,
         ObservableCollection<WorkspaceActionItemView> dashboardQuickActions,
@@ -48,6 +51,7 @@ internal sealed class WorkspaceActionSurfaceTargets
         ObservableCollection<WorkspaceActionItemView> fileTransferActions,
         ObservableCollection<WorkspaceActionItemView> remoteDesktopHeaderActions,
         ObservableCollection<WorkspaceActionItemView> remoteDesktopActions,
+        ObservableCollection<WorkspaceActionItemView> quantumDiagnosticsHeaderActions,
         ObservableCollection<WorkspaceActionItemView> systemMonitorHeaderActions,
         ObservableCollection<WorkspaceActionItemView> systemMonitorActions,
         ObservableCollection<WorkspaceActionItemView> settingsHeaderActions,
@@ -56,6 +60,7 @@ internal sealed class WorkspaceActionSurfaceTargets
     {
         _targets = new Dictionary<WorkspaceActionSurface, ObservableCollection<WorkspaceActionItemView>>
         {
+            [WorkspaceActionSurface.SidebarSession] = sidebarSessionActions,
             [WorkspaceActionSurface.TopBarActions] = topBarActions,
             [WorkspaceActionSurface.SessionControls] = sessionControlActions,
             [WorkspaceActionSurface.DashboardQuickActions] = dashboardQuickActions,
@@ -70,6 +75,7 @@ internal sealed class WorkspaceActionSurfaceTargets
             [WorkspaceActionSurface.FileTransfer] = fileTransferActions,
             [WorkspaceActionSurface.RemoteDesktopHeader] = remoteDesktopHeaderActions,
             [WorkspaceActionSurface.RemoteDesktop] = remoteDesktopActions,
+            [WorkspaceActionSurface.QuantumDiagnosticsHeader] = quantumDiagnosticsHeaderActions,
             [WorkspaceActionSurface.SystemMonitorHeader] = systemMonitorHeaderActions,
             [WorkspaceActionSurface.SystemMonitorControls] = systemMonitorActions,
             [WorkspaceActionSurface.SettingsHeader] = settingsHeaderActions,

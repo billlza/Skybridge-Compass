@@ -209,6 +209,12 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
     public string BuildAdvancedConnectPendingStatus() =>
         RemoteDesktopWorkspaceClient.DefaultAdvancedConnectPendingStatus;
 
+    public string BuildNearFieldPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultNearFieldPendingStatus;
+
+    public string BuildAdvancedConnectModeStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultAdvancedConnectModeStatus;
+
     public string BuildPerformanceOverlayPendingStatus() =>
         RemoteDesktopWorkspaceClient.DefaultPerformanceOverlayPendingStatus;
 

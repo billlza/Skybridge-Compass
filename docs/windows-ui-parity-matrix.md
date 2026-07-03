@@ -38,7 +38,7 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 | Region | Mac position | Windows binding | Required order |
 | --- | --- | --- | --- |
-| Sidebar | Product name, navigation, session actions | `NavigationItems`; `SidebarSessionActions` | Navigation list before sidebar connect/disconnect |
+| Sidebar | Product name, navigation, account footer | `NavigationItems`; no visible `SidebarSessionActions` binding | Navigation list before mac-like account footer; visible connection controls stay in Session controls |
 | Top bar | Selected feature, Core/connection state, diagnostics, notifications, theme | `SelectedFeature`; `ConnectionStatus`; `TopBarConnectionStatus`; `PerformanceStatus`; `TopBarDiagnosticsStatus`; `TopBarActions` | selected feature, status message, connection status, diagnostics status, notifications/theme actions |
 | Session controls | Global connection controls | `SessionControlActions`; `BitrateProfiles`; `FramerateProfiles` | Connect, Heartbeat, Disconnect before bitrate/framerate selectors |
 
@@ -78,7 +78,6 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 | Region | Required shared template | Required panel/style ownership |
 | --- | --- | --- |
-| Sidebar session actions | `SidebarWorkspaceActionButtonTemplate` | `VerticalWorkspaceActionItemsPanel` |
 | Top-bar actions | `TopBarStatusActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
 | Dashboard quick actions | `DashboardQuickActionTemplate` | `DashboardQuickActionItemsPanel` |
 | Workspace action surfaces | `WorkspaceActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
@@ -89,6 +88,7 @@ All action buttons must be rendered through these shared templates. Feature sect
 ## Verification
 
 - `Scripts/verify-windows-ui-parity-matrix.ps1` parses these markdown tables and verifies exact row counts, row order, duplicate prevention, pinned mac baseline objects, ordered mac source symbols, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
+- When `RepoRoot` is a full Git checkout, the matrix smoke reads the pinned mac source objects and checks the ordered Swift symbols directly. For exported work-copy verification without `.git`, the smoke remains offline and fail-closed on the exact immutable source object strings plus the ordered Mac-To-Windows Baseline Signal Matrix above, so Windows真机验证 can run without inventing or fetching mac evidence.
 - The matrix smoke also verifies shared action templates, compact workspace tool-button sizing, tooltip title binding, and rejects inline XAML action buttons outside the approved templates.
 - The matrix smoke verifies both initial and dynamic workspace action surface orders so selected-feature, readiness, and pending-provider state changes cannot leave visible buttons stale.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.

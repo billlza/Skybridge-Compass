@@ -36,6 +36,8 @@ internal sealed class Cand
 // fields for a production signaling plane.
 internal sealed class Signal
 {
+    private const long MaxSignalDocumentBytes = 1_048_576;
+
     [JsonPropertyName("type")] public string Type { get; init; } = "";
     [JsonPropertyName("sdp")] public string Sdp { get; init; } = "";
     [JsonPropertyName("candidates")] public List<Cand> Candidates { get; init; } = new();
@@ -62,7 +64,7 @@ internal sealed class Signal
             {
                 try
                 {
-                    var sig = JsonSerializer.Deserialize<Signal>(File.ReadAllText(path));
+                    var sig = JsonSerializer.Deserialize<Signal>(ReadTextWithSizeLimit(path));
                     if (sig is not null && !string.IsNullOrWhiteSpace(sig.Sdp)) return sig;
                 }
                 catch (JsonException) { /* writer mid-flight (partial JSON); retry */ }
@@ -71,5 +73,17 @@ internal sealed class Signal
             await Task.Delay(250);
         }
         throw new TimeoutException($"signal file not available within {timeout.TotalSeconds:F0}s: {path}");
+    }
+
+    private static string ReadTextWithSizeLimit(string path)
+    {
+        var fileInfo = new FileInfo(path);
+        if (fileInfo.Length > MaxSignalDocumentBytes)
+        {
+            throw new InvalidDataException(
+                $"signal file exceeds the maximum size of {MaxSignalDocumentBytes} bytes: {path}");
+        }
+
+        return File.ReadAllText(path);
     }
 }

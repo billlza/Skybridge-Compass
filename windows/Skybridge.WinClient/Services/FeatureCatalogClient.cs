@@ -33,6 +33,7 @@ public sealed class FeatureCatalogClient : IFeatureCatalogClient
             new(FeatureEntryId.UsbManagement, LabelKeyToLocalizedConverter.Localize("USB Management"), "\uE88E", "Device routing", true),
             new(FeatureEntryId.FileTransfer, LabelKeyToLocalizedConverter.Localize("File Transfer"), "\uE8E5", "Queue and history", true),
             new(FeatureEntryId.RemoteDesktop, LabelKeyToLocalizedConverter.Localize("Remote Desktop"), "\uE7F4", "Sessions", true),
+            new(FeatureEntryId.Quantum, LabelKeyToLocalizedConverter.Localize("Quantum"), "\uE72E", "Core diagnostics", true),
             new(FeatureEntryId.SystemMonitor, LabelKeyToLocalizedConverter.Localize("System Monitor"), "\uE9D9", "Metrics", true),
             new(FeatureEntryId.Settings, LabelKeyToLocalizedConverter.Localize("Settings"), "\uE713", "Preferences", true)
         }.AsReadOnly();
@@ -53,6 +54,7 @@ public enum FeatureEntryId
     UsbManagement,
     FileTransfer,
     RemoteDesktop,
+    Quantum,
     SystemMonitor,
     Settings
 }

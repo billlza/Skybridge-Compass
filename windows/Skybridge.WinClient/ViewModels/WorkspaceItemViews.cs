@@ -298,10 +298,17 @@ public sealed record UsbDeviceItemView(
     string ProductId,
     string SerialNumber,
     string ConnectionInterface,
-    string Capabilities,
+    // A15 — capability strings as a list so the UsbDeviceItemTemplate renders one chip
+    // (Border, never a Button) per capability (Mac LazyVGrid blue chips) instead of a
+    // single joined "a; b; c" line. Values are real enumeration output, kept verbatim and
+    // non-localized. HasCapabilities gates the chip row's Visibility so an empty list
+    // shows nothing — honest, no fabricated chip.
+    IReadOnlyList<string> Capabilities,
     string DeviceTypeKey,
     bool IsMfiCertified)
 {
+    public bool HasCapabilities => Capabilities.Count > 0;
+
     public static UsbDeviceItemView FromItem(UsbDeviceItem item) =>
         new(
             item.Name,
@@ -332,6 +339,18 @@ public sealed record SystemMonitorIndicatorView(
 {
     public static SystemMonitorIndicatorView FromIndicator(SystemMonitorIndicator indicator) =>
         new(indicator.Label, indicator.State, indicator.Detail);
+}
+
+// Insight row projection (Mac liveSnapshotHighlights). Carries the real backend insight as
+// Title / Value / Caption; the Value tint is derived in XAML from StateToStatusBrushConverter
+// so honest "Unknown" thermal/fan rows render muted rather than fabricated-healthy.
+public sealed record SystemMonitorInsightView(
+    string Title,
+    string Value,
+    string Caption)
+{
+    public static SystemMonitorInsightView FromInsight(SystemMonitorInsight insight) =>
+        new(insight.Title, insight.Value, insight.Caption);
 }
 
 public sealed record RemoteDesktopSessionItemView(

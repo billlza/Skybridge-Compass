@@ -13,6 +13,7 @@ internal sealed class CrossNetworkConnectionActions
     private readonly Func<string> _getCrossNetworkQrInput;
     private readonly Func<string> _getCrossNetworkCodeInput;
     private readonly Func<string> _getCrossNetworkGeneratedCode;
+    private readonly Func<CrossNetworkCodeLeaseMode> _getCrossNetworkCodeLeaseMode;
     private readonly Action<string> _setCrossNetworkStatus;
     private readonly Action<string> _setCrossNetworkGeneratedCode;
     private readonly Action<string?> _setCrossNetworkGeneratedQrCodePngBase64;
@@ -25,6 +26,7 @@ internal sealed class CrossNetworkConnectionActions
         Func<string> getCrossNetworkQrInput,
         Func<string> getCrossNetworkCodeInput,
         Func<string> getCrossNetworkGeneratedCode,
+        Func<CrossNetworkCodeLeaseMode> getCrossNetworkCodeLeaseMode,
         Action<string> setCrossNetworkStatus,
         Action<string> setCrossNetworkGeneratedCode,
         Action<string?> setCrossNetworkGeneratedQrCodePngBase64)
@@ -36,6 +38,7 @@ internal sealed class CrossNetworkConnectionActions
         _getCrossNetworkQrInput = getCrossNetworkQrInput;
         _getCrossNetworkCodeInput = getCrossNetworkCodeInput;
         _getCrossNetworkGeneratedCode = getCrossNetworkGeneratedCode;
+        _getCrossNetworkCodeLeaseMode = getCrossNetworkCodeLeaseMode;
         _setCrossNetworkStatus = setCrossNetworkStatus;
         _setCrossNetworkGeneratedCode = setCrossNetworkGeneratedCode;
         _setCrossNetworkGeneratedQrCodePngBase64 = setCrossNetworkGeneratedQrCodePngBase64;
@@ -69,7 +72,8 @@ internal sealed class CrossNetworkConnectionActions
                     action,
                     _getCrossNetworkQrInput(),
                     _getCrossNetworkCodeInput(),
-                    _getCrossNetworkGeneratedCode()));
+                    _getCrossNetworkGeneratedCode(),
+                    _getCrossNetworkCodeLeaseMode()));
 
             _connectionResultProjector.ApplyCrossNetworkPrepared(
                 snapshot,

@@ -97,6 +97,14 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
     private DateTimeOffset? _monitoringStartedAt;
     private int _monitoringSampleCount;
 
+    // Bandwidth sampler state (real, in-process). Each snapshot reads the cumulative IPv4
+    // byte counters off NetworkInterface; the throughput is the delta over the wall-clock
+    // gap since the previous sample. No helper, no elevation, no fabricated number — the
+    // first sample (no prior baseline) honestly reports "Sampling..." until a delta exists.
+    private readonly object _bandwidthLock = new();
+    private long? _lastTotalBytes;
+    private DateTimeOffset _lastBandwidthSampleAt;
+
     public SystemMonitorWorkspaceClient()
         : this(new InMemorySystemMonitorAdvancedModeClient())
     {
@@ -216,6 +224,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
                 .Count(adapter =>
                     adapter.OperationalStatus == OperationalStatus.Up
                     && adapter.NetworkInterfaceType != NetworkInterfaceType.Loopback);
+            var bandwidth = CaptureBandwidthSample();
             var overallHealth = CalculateHealth(memoryPercent, diskPercent, activeNetworkCount);
 
             var overview = new List<SystemMonitorMetric>
@@ -223,7 +232,14 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
                 new("CPU", $"{Environment.ProcessorCount} logical", "Usage sampling requires ETW/EventSource wiring"),
                 new("Memory", $"{memoryPercent:0.0}%", $"{FormatBytes(processMemoryBytes)} process working set"),
                 new("Disk", $"{diskPercent:0.0}%", drive is null ? "no ready drive" : $"{drive.Name} {FormatBytes(drive.AvailableFreeSpace)} free"),
-                new("Network", $"{activeNetworkCount} active", "NetworkInterface read-only adapter count")
+                // REAL throughput from NetworkInterface IPv4 byte-counter delta over the refresh
+                // interval (Mbps), replacing the prior adapter-count placeholder. Mac parity:
+                // liveSnapshotMetrics "Bandwidth" tile. First sample shows "Sampling..." honestly.
+                new("Bandwidth", bandwidth.Value, bandwidth.Detail),
+                // HONEST unavailable (C14): Windows ships no temperature/fan provider reachable
+                // from unprivileged UI code. Never fabricate a temperature — mirrors the Mac
+                // Thermal tile showing "不可用" when no helper is installed.
+                new("Thermal", "Unavailable", "No Windows temperature provider; an ETW/WMI/LibreHardwareMonitor adapter would be required")
             };
             var details = new List<SystemMonitorMetric>
             {
@@ -244,11 +260,33 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
                 new("Load", "Nominal", "process/runtime snapshot only until ETW sampling is wired")
             };
 
+            // Insight rows (Mac liveSnapshotHighlights). Partial-honest by design:
+            //  - Overall Health  = REAL (CalculateHealth over memory/disk/network).
+            //  - Thermal Envelope = HONEST Unknown (no Windows temperature provider; never a temp).
+            //  - Cooling + Transport = fan RPM is HONEST Unknown (no fan provider); the transport
+            //    portion is the REAL bandwidth sample from the NetworkInterface byte-rate delta.
+            var insights = new List<SystemMonitorInsight>
+            {
+                new(
+                    "Overall Health",
+                    overallHealth,
+                    "Aggregated from memory pressure, disk usage, and network adapter availability."),
+                new(
+                    "Thermal Envelope",
+                    "Unknown",
+                    "No Windows temperature provider; CPU/GPU temps require an ETW/WMI/LibreHardwareMonitor adapter."),
+                new(
+                    "Cooling + Transport",
+                    bandwidth.Value,
+                    $"Fan RPM unavailable (no Windows provider); transport throughput {bandwidth.Detail}.")
+            };
+
             return new SystemMonitorWorkspaceSnapshot(
                 DateTimeOffset.UtcNow,
                 overview,
                 details,
-                indicators);
+                indicators,
+                insights);
         });
     }
 
@@ -334,6 +372,74 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         }
     }
 
+    // Two-sample network throughput sampler (REAL, in-process). Sums the cumulative IPv4
+    // BytesReceived+BytesSent across every non-loopback up adapter, then divides the delta
+    // since the previous snapshot by the elapsed wall-clock seconds to get bits/s -> Mbps.
+    // No helper, no elevation. The first call has no baseline, so it honestly reports a
+    // "Sampling..." placeholder rather than fabricating a rate.
+    private BandwidthSample CaptureBandwidthSample()
+    {
+        long totalBytes = 0;
+        var counterAvailable = false;
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (adapter.OperationalStatus != OperationalStatus.Up
+                || adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+            {
+                continue;
+            }
+
+            try
+            {
+                var stats = adapter.GetIPv4Statistics();
+                totalBytes += stats.BytesReceived + stats.BytesSent;
+                counterAvailable = true;
+            }
+            catch (NetworkInformationException)
+            {
+                // Some adapters expose no IPv4 statistics; skip them without claiming a number.
+            }
+            catch (PlatformNotSupportedException)
+            {
+                // No IPv4 statistics provider on this adapter; honestly skip it.
+            }
+        }
+
+        var now = DateTimeOffset.UtcNow;
+
+        lock (_bandwidthLock)
+        {
+            if (!counterAvailable)
+            {
+                _lastTotalBytes = null;
+                return new BandwidthSample("Unavailable", "No IPv4-capable adapter exposed byte counters");
+            }
+
+            if (!_lastTotalBytes.HasValue)
+            {
+                _lastTotalBytes = totalBytes;
+                _lastBandwidthSampleAt = now;
+                return new BandwidthSample("Sampling...", "First sample; throughput appears on the next refresh");
+            }
+
+            var elapsedSeconds = (now - _lastBandwidthSampleAt).TotalSeconds;
+            var byteDelta = totalBytes - _lastTotalBytes.Value;
+            _lastTotalBytes = totalBytes;
+            _lastBandwidthSampleAt = now;
+
+            if (elapsedSeconds <= 0 || byteDelta < 0)
+            {
+                // Clock skew or counter reset (adapter reconnect) — do not fabricate a rate.
+                return new BandwidthSample("Sampling...", "Counter reset; throughput appears on the next refresh");
+            }
+
+            var megabitsPerSecond = byteDelta * 8d / 1_000_000d / elapsedSeconds;
+            return new BandwidthSample(
+                $"{megabitsPerSecond:0.00} Mbps",
+                $"IPv4 byte-counter delta over {elapsedSeconds:0.0}s across active adapters");
+        }
+    }
+
     private static string BuildMonitoringDetail(MonitoringSessionSnapshot monitoring)
     {
         if (!monitoring.IsActive || !monitoring.StartedAt.HasValue)
@@ -392,13 +498,18 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         bool IsActive,
         DateTimeOffset? StartedAt,
         int SampleCount);
+
+    private sealed record BandwidthSample(
+        string Value,
+        string Detail);
 }
 
 public sealed record SystemMonitorWorkspaceSnapshot(
     DateTimeOffset CapturedAt,
     IReadOnlyList<SystemMonitorMetric> Overview,
     IReadOnlyList<SystemMonitorMetric> Details,
-    IReadOnlyList<SystemMonitorIndicator> Indicators);
+    IReadOnlyList<SystemMonitorIndicator> Indicators,
+    IReadOnlyList<SystemMonitorInsight> Insights);
 
 public sealed record SystemMonitorMetric(
     string Label,
@@ -409,6 +520,15 @@ public sealed record SystemMonitorIndicator(
     string Label,
     string State,
     string Detail);
+
+// Insight row (Mac liveSnapshotHighlights): a titled health/throughput line with a
+// right-aligned value and a caption. Partial-honest — Health + the transport portion of
+// Cooling are real; the thermal/fan portions carry an honest "Unknown" value, never a
+// fabricated temperature or RPM.
+public sealed record SystemMonitorInsight(
+    string Title,
+    string Value,
+    string Caption);
 
 public sealed record SystemMonitorAdvancedModeSnapshot(
     bool IsEnabled,

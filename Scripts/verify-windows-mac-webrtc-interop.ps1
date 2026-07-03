@@ -68,6 +68,7 @@ if ($CheckOnly) {
 }
 
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($MacRemoteRepoRoot)) -Message "Windows/mac WebRTC interop requires -MacRemoteRepoRoot."
+Assert-True -Condition ($MacExpectedHostKeyFingerprint -match '^SHA256:[A-Za-z0-9+/]+={0,2}$') -Message "Windows/mac WebRTC interop requires -MacExpectedHostKeyFingerprint with a pinned SHA256 host key."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($WebRtcProofPath)) -Message "Windows/mac WebRTC interop requires -WebRtcProofPath."
 Assert-True -Condition (Test-Path -LiteralPath $WebRtcProofPath) -Message "Windows/mac WebRTC interop requires a helper proof file: $WebRtcProofPath"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) -Message "Windows/mac WebRTC interop requires -ExpectedDeviceId."

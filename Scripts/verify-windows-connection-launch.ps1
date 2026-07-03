@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 function Assert-True {
     param(
@@ -26,6 +27,7 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
     "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs",
     "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs",
+    "windows/Skybridge.WinClient/Services/CrossNetworkConnectionCodePolicy.cs",
     "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs",
     "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs",
     "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs",
@@ -532,7 +534,10 @@ await ExpectThrowsAsync<InvalidOperationException>(
 
 AssertEqual("Validating code...", crossNetworkClient.BuildPendingStatus(CrossNetworkConnectionAction.ConnectWithCode), "smart-code connect pending status");
 AssertEqual(true, crossNetworkClient.CanConnectWithCode("abc234"), "smart-code connect readiness");
+AssertEqual(true, crossNetworkClient.CanConnectWithCode("abc234de"), "preferred smart-code connect readiness");
 AssertEqual(false, crossNetworkClient.CanConnectWithCode("abc23"), "short smart-code connect readiness");
+AssertEqual(false, crossNetworkClient.CanConnectWithCode("abc234d"), "unsupported seven-character smart-code connect readiness");
+AssertEqual(true, crossNetworkClient.CanConnectWithCode("abc234defghjklmno"), "mac-compatible max-length smart-code truncation readiness");
 var codeConnectSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
     new CrossNetworkConnectionRequest(
         CrossNetworkConnectionAction.ConnectWithCode,
@@ -553,7 +558,7 @@ await ExpectThrowsAsync<InvalidOperationException>(
             "",
             "abc23",
             "")),
-    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.");
+    "Connection Code must be 6 or 8-16 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.");
 
 Console.WriteLine("windows-connection-launch-smoke: ok");
 

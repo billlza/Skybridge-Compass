@@ -1607,4 +1607,77 @@
   <data name="DiscoveryRecentNoteBody.Text" xml:space="preserve">
     <value>当 Windows 端支持连接历史存储后，最近连接过的设备将显示在这里。</value>
   </data>
+  <data name="SystemMonitorLiveSnapshotTitle.Text" xml:space="preserve">
+    <value>实时快照</value>
+    <comment>系统监控可见标题（Mac liveSnapshotHeader "Live Snapshot"）。</comment>
+  </data>
+  <data name="SystemMonitorLiveSnapshotSubtitle.Text" xml:space="preserve">
+    <value>统一监控视图，展示当前健康状况、负载、网络与散热余量。</value>
+    <comment>系统监控副标题（Mac liveSnapshotHeader 副标题）。</comment>
+  </data>
+  <data name="SystemMonitorMonitoringPill.Text" xml:space="preserve">
+    <value>监控中</value>
+    <comment>系统监控头部状态药丸（Mac liveSnapshotHeader 监控中胶囊）。</comment>
+  </data>
+  <data name="DiscoveryCloudNoteTitle.Text" xml:space="preserve">
+    <value>iCloud 零配置</value>
+    <comment>云链接模式诚实说明标题（Mac iCloud 零配置部分）。</comment>
+  </data>
+  <data name="DiscoveryCloudNoteBody.Text" xml:space="preserve">
+    <value>iCloud 设备同步在 Apple 设备上可用。此 Windows 客户端通过局域网扫描、二维码或连接码进行连接。</value>
+    <comment>云链接模式诚实说明正文（iCloud 仅限 Apple）。</comment>
+  </data>
+  <data name="FileTransferTabTransfer.Text" xml:space="preserve">
+    <value>传输</value>
+    <comment>文件传输分段标签（Mac modernTabBar 传输标签）。</comment>
+  </data>
+  <data name="FileTransferTabHistory.Text" xml:space="preserve">
+    <value>历史</value>
+    <comment>文件传输分段标签（Mac modernTabBar 历史标签）。</comment>
+  </data>
+  <!-- ============================ Batch 2 (System Monitor + cross-net lease) ============================ -->
+  <data name="SystemMonitorAdvancedBannerTitle.Text" xml:space="preserve">
+    <value>启用高级监控</value>
+    <comment>A13 高级监控横幅标题（Mac advancedMonitoringNotice）。</comment>
+  </data>
+  <data name="SystemMonitorAdvancedBannerBody.Text" xml:space="preserve">
+    <value>仅在内存中提供额外的只读诊断。不安装任何辅助程序，也不请求提权。</value>
+    <comment>A13 高级监控横幅诚实说明（仅内存，无辅助程序/提权）。</comment>
+  </data>
+  <data name="SystemMonitorInsightsHeading.Text" xml:space="preserve">
+    <value>洞察</value>
+    <comment>系统监控洞察分区标题（Mac liveSnapshotHighlights）。</comment>
+  </data>
+  <data name="SysMonLabel.Bandwidth" xml:space="preserve">
+    <value>带宽</value>
+    <comment>指标磁贴标签“带宽”（B4 实时吞吐采样）。</comment>
+  </data>
+  <data name="SysMonCaption.Throughput" xml:space="preserve">
+    <value>吞吐量</value>
+    <comment>带宽磁贴的指标副标题。</comment>
+  </data>
+  <data name="SysMonCaption.Temperature" xml:space="preserve">
+    <value>温度</value>
+    <comment>热量磁贴的指标副标题（诚实不可用）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseShort.Text" xml:space="preserve">
+    <value>短时</value>
+    <comment>B1 连接码租期分段（Mac 短时，shortLived；10 分钟有效期）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseDay.Text" xml:space="preserve">
+    <value>全天</value>
+    <comment>B1 连接码租期分段（Mac 全天，dayStable；24 小时有效期）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseHint.Text" xml:space="preserve">
+    <value>短时连接码 10 分钟后过期；全天连接码可持续 24 小时。</value>
+    <comment>B1 连接码租期提示（Mac 租期模式提示文本）。</comment>
+  </data>
+  <data name="RemoteDesktopCardTransportLabel.Text" xml:space="preserve">
+    <value>传输</value>
+    <comment>B3 per-session summary card Transport pill label. Mac remoteMetricPill transport.</comment>
+  </data>
+  <data name="RemoteDesktopCardQualityLabel.Text" xml:space="preserve">
+    <value>画质</value>
+    <comment>B3 per-session summary card Quality pill label. Mac remoteMetricPill quality.</comment>
+  </data>
 </root>

@@ -40,6 +40,9 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
     private const byte Sbf1Version = 1;
     private const ushort FlagSbp2Padded = 0x0001;
     private const ushort FlagEndOfMessage = 0x0002;
+    private const ushort KnownFlagsMask = FlagSbp2Padded | FlagEndOfMessage;
+    private const int MaxLogicalMessageBytes = 64 * 1024 * 1024;
+    private const int MaxFragmentsPerLogicalMessage = 1024;
     private static readonly byte[] Sbf1Magic = { 0x53, 0x42, 0x46, 0x31 }; // "SBF1"
 
     private readonly string _host;
@@ -51,7 +54,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
     // Per-channel monotonically increasing outbound sequence numbers.
     private readonly long[] _txSequence = new long[6];
     // Per-channel inbound reassembly buffers (payload bytes accumulated until END_OF_MESSAGE).
-    private readonly Dictionary<byte, List<byte>> _rxAssembly = new();
+    private readonly Dictionary<byte, ReassemblyState> _rxAssembly = new();
 
     private TcpClient? _client;
     private NetworkStream? _stream;
@@ -112,6 +115,12 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
         CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        var channelCode = RequireKnownChannel(channel);
+        if (payload.Length > MaxLogicalMessageBytes)
+        {
+            throw new InvalidDataException(
+                $"data-plane outbound payload exceeded {MaxLogicalMessageBytes} bytes");
+        }
 
         var stream = _stream;
         if (!_connected || stream is null)
@@ -120,8 +129,8 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
                 "data-plane IPC is not connected; refusing to send (fail-closed)");
         }
 
-        var seq = (ulong)Interlocked.Increment(ref _txSequence[(int)channel]) - 1;
-        var frame = EncodeSbf1((byte)channel, seq, FlagEndOfMessage, payload.Span);
+        var seq = (ulong)Interlocked.Increment(ref _txSequence[channelCode]) - 1;
+        var frame = EncodeSbf1(channelCode, seq, FlagEndOfMessage, payload.Span);
 
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -187,9 +196,9 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception ex) when (IsRecoverableTransportClosure(ex))
             {
-                // Socket dropped / desynced. Mark disconnected and (maybe) retry.
+                // Socket dropped. Mark disconnected and (maybe) retry.
             }
 
             _connected = false;
@@ -208,7 +217,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception ex) when (IsRecoverableTransportClosure(ex))
             {
                 // Helper not back yet; loop and retry after another delay.
             }
@@ -236,6 +245,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
     // intact (the consumer that flagged SBP2 owns unpadding) — we only reassemble.
     private void DispatchInbound(byte[] frame)
     {
+        ValidateSbf1Frame(frame);
         var channelCode = frame[5];
         var flags = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(6, 2));
         var payloadLen = (int)BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(16, 4));
@@ -246,7 +256,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
 
         lock (_gate)
         {
-            if (!_rxAssembly.TryGetValue(channelCode, out var buffer))
+            if (!_rxAssembly.TryGetValue(channelCode, out var assembly))
             {
                 // Fast path: a single self-contained frame (END_OF_MESSAGE, no
                 // prior fragments) needs no buffering.
@@ -256,29 +266,118 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
                 }
                 else
                 {
-                    buffer = new List<byte>(payloadLen);
-                    buffer.AddRange(payload.ToArray());
-                    _rxAssembly[channelCode] = buffer;
+                    assembly = new ReassemblyState(payloadLen);
+                    AppendFragment(assembly, payload, channelCode);
+                    _rxAssembly[channelCode] = assembly;
                 }
             }
             else
             {
-                buffer.AddRange(payload.ToArray());
+                AppendFragment(assembly, payload, channelCode);
                 if (endOfMessage)
                 {
-                    message = buffer.ToArray();
+                    message = assembly.Buffer.ToArray();
                     _rxAssembly.Remove(channelCode);
                 }
             }
         }
 
-        if (message is not null && IsKnownChannel(channelCode))
+        if (message is not null)
         {
             FrameReceived?.Invoke((DataPlaneChannel)channelCode, message);
         }
     }
 
     private static bool IsKnownChannel(byte code) => code is >= 1 and <= 5;
+
+    private static byte RequireKnownChannel(DataPlaneChannel channel)
+    {
+        var channelCode = (byte)channel;
+        if (!IsKnownChannel(channelCode))
+        {
+            throw new InvalidDataException($"data-plane outbound channel {channel} is not a known SBF1 channel");
+        }
+
+        return channelCode;
+    }
+
+    private static bool IsRecoverableTransportClosure(Exception ex) =>
+        ex is IOException or SocketException or ObjectDisposedException or EndOfStreamException;
+
+    private static void ValidateSbf1Frame(byte[] frame)
+    {
+        if (frame.Length < Sbf1HeaderLen)
+        {
+            throw new InvalidDataException(
+                $"data-plane frame length {frame.Length} is shorter than SBF1 header length {Sbf1HeaderLen}");
+        }
+
+        if (!frame.AsSpan(0, 4).SequenceEqual(Sbf1Magic))
+        {
+            throw new InvalidDataException("data-plane stream desync: missing SBF1 magic");
+        }
+
+        if (frame[4] != Sbf1Version)
+        {
+            throw new InvalidDataException($"data-plane frame used unsupported SBF1 version {frame[4]}");
+        }
+
+        if (!IsKnownChannel(frame[5]))
+        {
+            throw new InvalidDataException($"data-plane frame used unknown channel code {frame[5]}");
+        }
+
+        var flags = BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(6, 2));
+        if ((flags & ~KnownFlagsMask) != 0)
+        {
+            throw new InvalidDataException($"data-plane frame used unknown SBF1 flags 0x{flags:x4}");
+        }
+
+        var payloadLen = BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(16, 4));
+        if (payloadLen > (uint)MaxLogicalMessageBytes)
+        {
+            throw new InvalidDataException($"data-plane frame payload_len {payloadLen} exceeds cap");
+        }
+
+        var actualPayloadLen = frame.Length - Sbf1HeaderLen;
+        if (payloadLen != actualPayloadLen)
+        {
+            throw new InvalidDataException(
+                $"data-plane frame payload_len {payloadLen} does not match message payload bytes {actualPayloadLen}");
+        }
+    }
+
+    private static void AppendFragment(ReassemblyState assembly, ReadOnlySpan<byte> payload, byte channelCode)
+    {
+        var nextFragmentCount = assembly.FragmentCount + 1;
+        if (nextFragmentCount > MaxFragmentsPerLogicalMessage)
+        {
+            throw new InvalidDataException(
+                $"data-plane channel {channelCode} exceeded {MaxFragmentsPerLogicalMessage} fragments without END_OF_MESSAGE");
+        }
+
+        var nextBytes = assembly.Buffer.Count + (long)payload.Length;
+        if (nextBytes > MaxLogicalMessageBytes)
+        {
+            throw new InvalidDataException(
+                $"data-plane channel {channelCode} logical message exceeded {MaxLogicalMessageBytes} bytes without END_OF_MESSAGE");
+        }
+
+        assembly.Buffer.AddRange(payload.ToArray());
+        assembly.FragmentCount = nextFragmentCount;
+    }
+
+    private sealed class ReassemblyState
+    {
+        public ReassemblyState(int initialCapacity)
+        {
+            Buffer = new List<byte>(Math.Min(initialCapacity, MaxLogicalMessageBytes));
+        }
+
+        public List<byte> Buffer { get; }
+
+        public int FragmentCount { get; set; }
+    }
 
     private static byte[] EncodeSbf1(byte channelCode, ulong sequence, ushort flags, ReadOnlySpan<byte> payload)
     {
@@ -305,14 +404,8 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             return null;
         }
 
-        if (!header.AsSpan(0, 4).SequenceEqual(Sbf1Magic))
-        {
-            throw new InvalidDataException("data-plane stream desync: missing SBF1 magic");
-        }
-
         var payloadLen = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(16, 4));
-        const uint maxPayload = 64u * 1024 * 1024;
-        if (payloadLen > maxPayload)
+        if (payloadLen > (uint)MaxLogicalMessageBytes)
         {
             throw new InvalidDataException($"data-plane frame payload_len {payloadLen} exceeds cap");
         }
@@ -325,6 +418,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
                 .ConfigureAwait(false);
         }
 
+        ValidateSbf1Frame(frame);
         return frame;
     }
 
@@ -367,6 +461,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
         }
         catch (ObjectDisposedException)
         {
+            _runCts = null;
         }
 
         if (_pumpTask is not null)
@@ -375,7 +470,7 @@ public sealed class SkyBridgeDataPlaneClient : ISkyBridgeDataPlane, IAsyncDispos
             {
                 await _pumpTask.ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex) when (IsRecoverableTransportClosure(ex) || ex is OperationCanceledException)
             {
                 // pump unwinds via cancellation
             }

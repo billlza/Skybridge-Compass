@@ -16,6 +16,7 @@ internal sealed class WorkspaceObservableCollections
         DashboardQuickActions = new ObservableCollection<WorkspaceActionItemView>();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
+        SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
         TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
         SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
@@ -36,6 +37,7 @@ internal sealed class WorkspaceObservableCollections
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
+        QuantumDiagnosticsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         SystemMonitorHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         SystemMonitorActions = new ObservableCollection<WorkspaceActionItemView>();
         SettingsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -45,10 +47,17 @@ internal sealed class WorkspaceObservableCollections
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
         RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
+        // A7 — read-only partition of RemoteDesktopSessions where State=="Recent" (Mac
+        // sessionList "Recent Connections" section). Derived from the same real snapshot;
+        // no reconnect command and no fabricated last-connected timestamp.
+        RemoteDesktopRecentSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
         RemoteDesktopControlFacts = new ObservableCollection<RemoteDesktopControlFactView>();
         SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
+        // B5 — Insight rows (Mac liveSnapshotHighlights): Health + Bandwidth real, thermal/fan
+        // honest Unknown. Projected from the snapshot's Insights list.
+        SystemMonitorInsights = new ObservableCollection<SystemMonitorInsightView>();
         UsbDeviceStats = new ObservableCollection<UsbDeviceStatView>();
         UsbDevices = new ObservableCollection<UsbDeviceItemView>();
         SettingsTabs = new ObservableCollection<SettingsTabItemView>();
@@ -69,6 +78,8 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<string> FramerateProfiles { get; }
 
     public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SessionControlActions { get; }
 
@@ -108,6 +119,8 @@ internal sealed class WorkspaceObservableCollections
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
 
+    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
+
     public ObservableCollection<WorkspaceActionItemView> SystemMonitorHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SystemMonitorActions { get; }
@@ -126,6 +139,8 @@ internal sealed class WorkspaceObservableCollections
 
     public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopSessions { get; }
 
+    public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopRecentSessions { get; }
+
     public ObservableCollection<RemoteDesktopControlFactView> RemoteDesktopControlFacts { get; }
 
     public ObservableCollection<SystemMonitorMetricView> SystemMonitorOverview { get; }
@@ -133,6 +148,8 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<SystemMonitorMetricView> SystemMonitorDetails { get; }
 
     public ObservableCollection<SystemMonitorIndicatorView> SystemMonitorIndicators { get; }
+
+    public ObservableCollection<SystemMonitorInsightView> SystemMonitorInsights { get; }
 
     public ObservableCollection<UsbDeviceStatView> UsbDeviceStats { get; }
 

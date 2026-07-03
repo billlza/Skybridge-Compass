@@ -188,6 +188,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool _isDiscoveryCompatibilityModeEnabled;
     private int _extendedSearchCountdown;
     private bool _isBusy;
+    // Pure UI view-state (no DI client, no fabricated data) mirroring the Mac
+    // @State selectedConnectionMode / connectionMode / modernTabBar selection.
+    // These hold local selection only; the underlying real surfaces are unchanged.
+    private DiscoveryMode _selectedDiscoveryMode = DiscoveryMode.LocalScan;
+    private RemoteDesktopConnectionMode _selectedRemoteDesktopMode = RemoteDesktopConnectionMode.Auto;
+    private int _selectedFileTransferTab;
+    // B2 — smart-connection-code lease mode (Mac ConnectionCodeLeaseMode 短时/全天). Drives a
+    // REAL generated-code TTL via CrossNetworkConnectionClient.BuildCodeSnapshot. Default is the
+    // short-lived assistance window (set from the input-defaults snapshot at startup).
+    private CrossNetworkCodeLeaseMode _selectedConnectionCodeLeaseMode = CrossNetworkCodeLeaseMode.ShortLived;
 
     public SessionViewModel(
         IEngineClient engineClient,
@@ -362,6 +372,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _manualConnectionPort = startupState.ManualConnectionPort;
         _discoveryTxtRecord = startupState.DiscoveryTxtRecord;
         _pairingConnectionCode = startupState.PairingConnectionCode;
+        // B2 — smart-connection-code lease default from the input-defaults snapshot ("shortLived"
+        // by default). Parsed into the enum that drives the real generated-code TTL; an unknown
+        // value falls back to the short-lived assistance window rather than fabricating a longer TTL.
+        _selectedConnectionCodeLeaseMode =
+            string.Equals(startupState.ConnectionCodeLeaseMode, "dayStable", StringComparison.OrdinalIgnoreCase)
+                ? CrossNetworkCodeLeaseMode.DayStable
+                : CrossNetworkCodeLeaseMode.ShortLived;
         _extendedSearchCountdown = startupState.ExtendedSearchCountdown;
         _connectionState = startupState.ConnectionState;
         var collections = new WorkspaceObservableCollections(
@@ -593,6 +610,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             () => CrossNetworkQrInput,
             () => CrossNetworkCodeInput,
             () => CrossNetworkGeneratedCode,
+            () => SelectedConnectionCodeLeaseMode,
             value => CrossNetworkStatus = value,
             value => CrossNetworkGeneratedCode = value,
             value => CrossNetworkGeneratedQrCodeImage = BuildQrCodeImageSource(value));
@@ -620,6 +638,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => ConnectionPreflightStatus = value,
             value => DiscoveryService = value);
         CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
+        SidebarSessionActions = collections.SidebarSessionActions;
         DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
         DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
         DeviceDiscoveryManualConnectFinalActions = collections.DeviceDiscoveryManualConnectFinalActions;
@@ -631,6 +650,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferActions = collections.FileTransferActions;
         RemoteDesktopHeaderActions = collections.RemoteDesktopHeaderActions;
         RemoteDesktopActions = collections.RemoteDesktopActions;
+        QuantumDiagnosticsHeaderActions = collections.QuantumDiagnosticsHeaderActions;
         SettingsHeaderActions = collections.SettingsHeaderActions;
         SettingsToolbarActions = collections.SettingsToolbarActions;
         SettingsMaintenanceActions = collections.SettingsMaintenanceActions;
@@ -638,12 +658,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferHistory = collections.FileTransferHistory;
         FileTransferSecurityFacts = collections.FileTransferSecurityFacts;
         RemoteDesktopSessions = collections.RemoteDesktopSessions;
+        RemoteDesktopRecentSessions = collections.RemoteDesktopRecentSessions;
         RemoteDesktopControlFacts = collections.RemoteDesktopControlFacts;
         SystemMonitorHeaderActions = collections.SystemMonitorHeaderActions;
         SystemMonitorActions = collections.SystemMonitorActions;
         SystemMonitorOverview = collections.SystemMonitorOverview;
         SystemMonitorDetails = collections.SystemMonitorDetails;
         SystemMonitorIndicators = collections.SystemMonitorIndicators;
+        SystemMonitorInsights = collections.SystemMonitorInsights;
         _workspaceActionSurfaceTargets = new WorkspaceActionSurfaceTargets(collections);
         UsbDeviceStats = collections.UsbDeviceStats;
         UsbDevices = collections.UsbDevices;
@@ -660,6 +682,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // directly above. The filter is the only re-projector of RemoteDesktopSessions; a
         // re-entrancy guard keeps it from reacting to its own Clear/Add churn.
         RemoteDesktopSessions.CollectionChanged += OnRemoteDesktopSessionsChanged;
+        // Re-derive the header monitoring pill (IsSystemMonitoring) whenever the
+        // read-only snapshot applier replaces the SystemMonitorIndicators rows —
+        // the pill tint reads the real "Monitoring" indicator State (Active/Idle),
+        // never a fabricated value.
+        SystemMonitorIndicators.CollectionChanged += OnSystemMonitorIndicatorsChanged;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
         var workspaceShellStateSource = new WorkspaceShellStateSource(this);
@@ -856,6 +883,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
 
+    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
+
     public ObservableCollection<WorkspaceActionItemView> SessionControlActions { get; }
 
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
@@ -894,6 +923,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
 
+    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
+
     public ObservableCollection<WorkspaceActionItemView> SettingsHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SettingsToolbarActions { get; }
@@ -908,6 +939,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopSessions { get; }
 
+    // A7 — read-only partition of RemoteDesktopSessions whose State == "Recent" (Mac
+    // sessionList "Recent Connections" section). Re-derived from the unfiltered master in
+    // OnRemoteDesktopSessionsChanged; no reconnect command, no fabricated timestamp.
+    public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopRecentSessions { get; }
+
+    public int RemoteDesktopRecentSessionCount => RemoteDesktopRecentSessions.Count;
+
     public ObservableCollection<RemoteDesktopControlFactView> RemoteDesktopControlFacts { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SystemMonitorHeaderActions { get; }
@@ -919,6 +957,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<SystemMonitorMetricView> SystemMonitorDetails { get; }
 
     public ObservableCollection<SystemMonitorIndicatorView> SystemMonitorIndicators { get; }
+
+    // B5 — Insight rows (Mac liveSnapshotHighlights): Health + Bandwidth real, thermal/fan
+    // honest Unknown. Projected from the real snapshot by the read-only snapshot applier.
+    public ObservableCollection<SystemMonitorInsightView> SystemMonitorInsights { get; }
 
     public ObservableCollection<UsbDeviceStatView> UsbDeviceStats { get; }
 
@@ -1561,11 +1603,182 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public bool IsRemoteDesktopSelected =>
         IsFeatureSelected(FeatureEntryId.RemoteDesktop);
 
+    public bool IsQuantumSelected =>
+        IsFeatureSelected(FeatureEntryId.Quantum);
+
     public bool IsSystemMonitorSelected =>
         IsFeatureSelected(FeatureEntryId.SystemMonitor);
 
     public bool IsSettingsSelected =>
         IsFeatureSelected(FeatureEntryId.Settings);
+
+    // =====================================================================
+    // Device Discovery connection-mode view-state (Mac @State selectedConnectionMode).
+    // Pure local UI selection: tapping a mode tab swaps which orientation surface is
+    // shown. No DI client, no fabricated data — the underlying real surfaces (local
+    // scan / QR / smart-code / cloud note) are unchanged; only their Visibility follows
+    // the selected mode, mirroring the Mac connectionModePicker body swap.
+    // =====================================================================
+    public DiscoveryMode SelectedDiscoveryMode
+    {
+        get => _selectedDiscoveryMode;
+        set
+        {
+            if (SetField(ref _selectedDiscoveryMode, value))
+            {
+                OnPropertyChanged(nameof(IsDiscoveryLocalScanModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryQrModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryCloudModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryCodeModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryQrOrCodeModeSelected));
+            }
+        }
+    }
+
+    public bool IsDiscoveryLocalScanModeSelected => _selectedDiscoveryMode == DiscoveryMode.LocalScan;
+
+    public bool IsDiscoveryQrModeSelected => _selectedDiscoveryMode == DiscoveryMode.Qr;
+
+    public bool IsDiscoveryCloudModeSelected => _selectedDiscoveryMode == DiscoveryMode.Cloud;
+
+    public bool IsDiscoveryCodeModeSelected => _selectedDiscoveryMode == DiscoveryMode.Code;
+
+    // The QR + Smart-Code cross-network surfaces share one two-column body; reveal it for
+    // either QR or Code mode (both are cross-network connection flows on Windows).
+    public bool IsDiscoveryQrOrCodeModeSelected =>
+        _selectedDiscoveryMode == DiscoveryMode.Qr || _selectedDiscoveryMode == DiscoveryMode.Code;
+
+    // View-only selection setter invoked from the Border.Tapped handlers (no raw Button,
+    // keeping the gated <Button> count unchanged).
+    public void SelectDiscoveryMode(DiscoveryMode mode) => SelectedDiscoveryMode = mode;
+
+    // =====================================================================
+    // Smart-connection-code lease mode (Mac ConnectionCodeLeaseMode picker 短时/全天). NOT a
+    // view-only label: the selected mode plumbs into Generate/Regenerate and drives the REAL
+    // generated-code TTL (CrossNetworkConnectionClient.BuildCodeSnapshot computes the actual
+    // expiry from this mode). Default is shortLived (set from the input-defaults snapshot).
+    // =====================================================================
+    public CrossNetworkCodeLeaseMode SelectedConnectionCodeLeaseMode
+    {
+        get => _selectedConnectionCodeLeaseMode;
+        set
+        {
+            if (SetField(ref _selectedConnectionCodeLeaseMode, value))
+            {
+                OnPropertyChanged(nameof(IsConnectionCodeLeaseShortLivedSelected));
+                OnPropertyChanged(nameof(IsConnectionCodeLeaseDayStableSelected));
+            }
+        }
+    }
+
+    public bool IsConnectionCodeLeaseShortLivedSelected =>
+        _selectedConnectionCodeLeaseMode == CrossNetworkCodeLeaseMode.ShortLived;
+
+    public bool IsConnectionCodeLeaseDayStableSelected =>
+        _selectedConnectionCodeLeaseMode == CrossNetworkCodeLeaseMode.DayStable;
+
+    // Invoked from the lease-mode segment Border.Tapped handler (Tag = "ShortLived"/"DayStable").
+    // No raw Button, so the gated inline-button count is unchanged.
+    public void SelectConnectionCodeLeaseMode(CrossNetworkCodeLeaseMode mode) =>
+        SelectedConnectionCodeLeaseMode = mode;
+
+    // =====================================================================
+    // Remote Desktop connection-mode view-state (Mac connectionModeSelector .auto/.nearField/.farFieldRDP).
+    // Auto routes to the existing Device Discovery navigation; Far raises the existing
+    // advanced-connect status; Near surfaces an honest "pending capture adapter" status
+    // (no Windows capture transport exists yet — fail-closed, not fabricated).
+    // =====================================================================
+    public RemoteDesktopConnectionMode SelectedRemoteDesktopMode
+    {
+        get => _selectedRemoteDesktopMode;
+        set => SetField(ref _selectedRemoteDesktopMode, value);
+    }
+
+    // Invoked from the RD mode-segment Border.Tapped handlers. Sets the selected pill and
+    // performs the mode's route. Auto = real nav; Far = existing advanced-connect status;
+    // Near = honest pending-adapter status (batch 2 will replace with a real backend string).
+    public void SelectRemoteDesktopMode(RemoteDesktopConnectionMode mode)
+    {
+        SelectedRemoteDesktopMode = mode;
+
+        switch (mode)
+        {
+            case RemoteDesktopConnectionMode.Auto:
+                foreach (var item in NavigationItems)
+                {
+                    if (item.Id == FeatureEntryId.DeviceDiscovery)
+                    {
+                        SelectedFeature = item;
+                        break;
+                    }
+                }
+
+                break;
+
+            case RemoteDesktopConnectionMode.Far:
+                // Honest status sourced from the RD workspace client (fail-closed; no transport
+                // started). Replaces the prior VM-local placeholder with the real backend string.
+                RemoteDesktopStatus = _remoteDesktopClient.BuildAdvancedConnectModeStatus();
+                break;
+
+            case RemoteDesktopConnectionMode.Near:
+                // Honest fail-closed status from the RD workspace client: no Windows near-field
+                // capture adapter exists yet, so selecting Near states that plainly. Sourced from
+                // the backend (RemoteDesktopWorkspaceClient.BuildNearFieldPendingStatus), not a
+                // VM-local literal — and never a fabricated transport claim.
+                RemoteDesktopStatus = _remoteDesktopClient.BuildNearFieldPendingStatus();
+                break;
+        }
+    }
+
+    // =====================================================================
+    // File Transfer Transfer/History segmented tab view-state (Mac modernTabBar).
+    // Pure local selection: tab 0 = Transfer (queue), tab 1 = History. Reveals the
+    // already-real FileTransferQueue / FileTransferHistory collections; carries no data.
+    // =====================================================================
+    public int SelectedFileTransferTab
+    {
+        get => _selectedFileTransferTab;
+        set
+        {
+            if (SetField(ref _selectedFileTransferTab, value))
+            {
+                OnPropertyChanged(nameof(IsFileTransferTransferTabSelected));
+                OnPropertyChanged(nameof(IsFileTransferHistoryTabSelected));
+            }
+        }
+    }
+
+    public bool IsFileTransferTransferTabSelected => _selectedFileTransferTab == 0;
+
+    public bool IsFileTransferHistoryTabSelected => _selectedFileTransferTab == 1;
+
+    public void SelectFileTransferTab(int tab) => SelectedFileTransferTab = tab;
+
+    // =====================================================================
+    // System Monitor header monitoring pill (Mac liveSnapshotHeader isMonitoring).
+    // Computed from the real "Monitoring" indicator row State (Active/On) projected by
+    // SystemMonitorWorkspaceClient — green when monitoring, muted otherwise. Never
+    // fabricated: an absent/idle indicator reads as not-monitoring.
+    // =====================================================================
+    public bool IsSystemMonitoring
+    {
+        get
+        {
+            foreach (var indicator in SystemMonitorIndicators)
+            {
+                if (string.Equals(indicator.Label, "Monitoring", StringComparison.OrdinalIgnoreCase))
+                {
+                    var state = (indicator.State ?? string.Empty).Trim();
+                    return string.Equals(state, "Active", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(state, "On", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(state, "Monitoring", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            return false;
+        }
+    }
 
     public EngineConnectionState ConnectionState
     {
@@ -1928,6 +2141,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _remoteDesktopSessionMaster.Clear();
         _remoteDesktopSessionMaster.AddRange(RemoteDesktopSessions);
 
+        // A7 — re-derive the read-only "Recent Connections" partition from the unfiltered
+        // master (rows whose real State == "Recent"). Re-running on each Clear/Add burst is
+        // safe: RemoteDesktopRecentSessions is a separate collection the applier never touches.
+        RebuildRemoteDesktopRecentSessions();
+
         if (_remoteDesktopSearchText.Length > 0 && !_remoteDesktopFilterReapplyQueued)
         {
             // Defer the re-filter until the current synchronous Clear+Add burst completes so we
@@ -1943,6 +2161,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 }, null);
             }
         }
+    }
+
+    // The read-only snapshot applier replaced SystemMonitorIndicators — re-raise the computed
+    // header pill (IsSystemMonitoring) so its tint follows the live "Monitoring" indicator State.
+    private void OnSystemMonitorIndicatorsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        OnPropertyChanged(nameof(IsSystemMonitoring));
     }
 
     // Re-project RemoteDesktopSessions from the unfiltered master, keeping only rows whose
@@ -1970,6 +2195,24 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
 
         _workspaceCountNotifier.RemoteDesktopSessionsChanged();
+    }
+
+    // A7 — rebuild the read-only "Recent Connections" partition (Mac sessionList recent
+    // section) from the unfiltered master, keeping only rows whose real State == "Recent".
+    // No reconnect command and no fabricated last-connected timestamp are added — these are
+    // honest read-only rows partitioned from the same real connection-plan snapshot.
+    private void RebuildRemoteDesktopRecentSessions()
+    {
+        RemoteDesktopRecentSessions.Clear();
+        foreach (var session in _remoteDesktopSessionMaster)
+        {
+            if (string.Equals(session.State, "Recent", StringComparison.OrdinalIgnoreCase))
+            {
+                RemoteDesktopRecentSessions.Add(session);
+            }
+        }
+
+        _workspaceCountNotifier.RemoteDesktopRecentSessionsChanged();
     }
 
     public ICommand ConnectCommand { get; }
@@ -2209,4 +2452,29 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _settingsCoordinator.Dispose();
     }
 
+}
+
+/// <summary>
+/// Device Discovery connection-mode selection (Mac EnhancedDeviceDiscoveryView
+/// @State selectedConnectionMode). Pure UI view-state — selecting a mode swaps which
+/// orientation surface is shown; it carries no data and triggers no network.
+/// </summary>
+public enum DiscoveryMode
+{
+    LocalScan,
+    Qr,
+    Cloud,
+    Code
+}
+
+/// <summary>
+/// Remote Desktop connection-mode selection (Mac connectionModeSelector
+/// .auto / .nearField / .farFieldRDP). Auto routes to Device Discovery, Far raises the
+/// advanced-connect status, Near surfaces an honest pending-capture-adapter status.
+/// </summary>
+public enum RemoteDesktopConnectionMode
+{
+    Auto,
+    Near,
+    Far
 }

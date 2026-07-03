@@ -32,7 +32,6 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     private const string DirectQrPrefix = "skybridge://connect/";
     private const string QueryQrBase = "skybridge://connect?";
     private const string QueryQrPrefix = "skybridge://connect?data=";
-    private const string ShortCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private const int DynamicQrVersion = 2;
     private const int DeviceFingerprintHexLength = 16;
     private const int PublicKeyLengthBytes = 32;
@@ -49,7 +48,11 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     private static readonly JsonSerializerOptions QrJsonOptions = new(JsonSerializerDefaults.Web);
 
     public static CrossNetworkCodeInputPolicy DefaultCodeInputPolicy { get; } =
-        new(ShortCodeAlphabet, 6);
+        new(
+            CrossNetworkConnectionCodePolicy.Alphabet,
+            CrossNetworkConnectionCodePolicy.LegacyConnectionCodeLength,
+            CrossNetworkConnectionCodePolicy.PreferredConnectionCodeLength,
+            CrossNetworkConnectionCodePolicy.MaximumConnectionCodeLength);
 
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
 
@@ -66,11 +69,11 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             return string.Empty;
         }
 
-        var normalized = new char[inputPolicy.CodeLength];
+        var normalized = new char[inputPolicy.MaximumCodeLength];
         var count = 0;
         foreach (var current in value.ToUpperInvariant())
         {
-            if (!inputPolicy.Alphabet.Contains(current))
+            if (inputPolicy.Alphabet.IndexOf(current) < 0)
             {
                 continue;
             }
@@ -127,8 +130,8 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         {
             CrossNetworkConnectionAction.GenerateQrCode => Task.FromResult(BuildQrGenerationSnapshot()),
             CrossNetworkConnectionAction.ScanQrCode => Task.FromResult(BuildQrScanSnapshot(request.QrInput)),
-            CrossNetworkConnectionAction.GenerateCode => Task.FromResult(BuildCodeSnapshot("Generate Code")),
-            CrossNetworkConnectionAction.RegenerateCode => Task.FromResult(BuildCodeSnapshot("Regenerate")),
+            CrossNetworkConnectionAction.GenerateCode => Task.FromResult(BuildCodeSnapshot("Generate Code", request.LeaseMode)),
+            CrossNetworkConnectionAction.RegenerateCode => Task.FromResult(BuildCodeSnapshot("Regenerate", request.LeaseMode)),
             CrossNetworkConnectionAction.CopyCode => Task.FromResult(BuildCopySnapshot(request.CurrentCode)),
             CrossNetworkConnectionAction.ConnectWithCode => Task.FromResult(BuildCodeInputSnapshot(request.CodeInput)),
             _ => throw new InvalidOperationException("Unsupported cross-network connection action.")
@@ -259,21 +262,47 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             facts);
     }
 
-    private static CrossNetworkConnectionSnapshot BuildCodeSnapshot(string actionLabel)
+    // Lease TTLs (Mac ConnectionCodeLeaseMode). ShortLived mirrors the 10-minute assistance
+    // window the mac short-code uses; DayStable is a full 24-hour lease. These are the REAL
+    // lifetimes the snapshot's computed expiry uses, so selecting a mode changes the actual
+    // generated-code TTL, not merely a caption.
+    private static readonly TimeSpan ShortLivedCodeLease = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan DayStableCodeLease = TimeSpan.FromHours(24);
+
+    private static TimeSpan ResolveCodeLease(CrossNetworkCodeLeaseMode leaseMode) =>
+        leaseMode == CrossNetworkCodeLeaseMode.DayStable ? DayStableCodeLease : ShortLivedCodeLease;
+
+    private static string FormatLeaseDuration(TimeSpan lease) =>
+        lease.TotalHours >= 1
+            ? $"{lease.TotalHours:0} hour(s)"
+            : $"{lease.TotalMinutes:0} minute(s)";
+
+    private static CrossNetworkConnectionSnapshot BuildCodeSnapshot(
+        string actionLabel,
+        CrossNetworkCodeLeaseMode leaseMode)
     {
-        var code = GenerateShortCode();
+        var code = GenerateConnectionCode();
+        var issuedAt = DateTimeOffset.UtcNow;
+        var lease = ResolveCodeLease(leaseMode);
+        var expiresAt = issuedAt + lease;
+        var leaseModeName = leaseMode == CrossNetworkCodeLeaseMode.DayStable ? "dayStable" : "shortLived";
+        var leaseDuration = FormatLeaseDuration(lease);
         var facts = new List<CrossNetworkConnectionFact>
         {
-            new("Smart Connection Code", code, "6-digit code, valid for 10 mins, for remote assistance; this preview is not registered with signaling."),
-            new("Alphabet", ShortCodeAlphabet, "Matches the mac short-code character set and excludes ambiguous 0/O and 1/I/l glyphs."),
+            new("Smart Connection Code", code, $"Preferred {DefaultCodeInputPolicy.PreferredCodeLength}-character code, valid for {leaseDuration}, for remote assistance; this preview is not registered with signaling."),
+            new("Lease Mode", leaseModeName, leaseMode == CrossNetworkCodeLeaseMode.DayStable
+                ? "Day-stable lease: the generated code TTL is a full 24 hours (mac 全天)."
+                : "Short-lived lease: the generated code TTL is a short assistance window (mac 短时)."),
+            new("Expires At", expiresAt.ToString("O"), $"Computed from the selected lease mode; TTL = {leaseDuration} from generation."),
+            new("Alphabet", CrossNetworkConnectionCodePolicy.Alphabet, "Matches the mac short-code character set and excludes ambiguous 0/O and 1/I/l glyphs."),
             new("Action", actionLabel, "Generate Code and Regenerate share the same read-only validation path."),
             new("CrossNetworkReadiness", "idle", "No transportReady or handshakeComplete state is claimed by this read-only snapshot."),
             new("Safety", "no signaling room registered", "No WebRTC offerer, WebRTC answerer, signaling WebSocket, HTTP file server, or FfiEngineClient connection is started.")
         };
 
         return new CrossNetworkConnectionSnapshot(
-            DateTimeOffset.UtcNow,
-            "Waiting for connection...",
+            issuedAt,
+            $"Waiting for connection... (expires {expiresAt:HH:mm:ss} UTC)",
             code,
             facts);
     }
@@ -301,8 +330,8 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         var normalized = NormalizeConnectionCode(codeInput);
         var facts = new List<CrossNetworkConnectionFact>
         {
-            new("Connect", normalized, "Input accepted only after the mac 6-character filter; no WebRTC join is started."),
-            new("Alphabet", ShortCodeAlphabet, "Only mac-compatible smart-code characters are accepted."),
+            new("Connect", normalized, $"Input accepted only after the mac {CrossNetworkConnectionCodePolicy.SupportedLengthDescription} connection-code policy; no WebRTC join is started."),
+            new("Alphabet", CrossNetworkConnectionCodePolicy.Alphabet, "Only mac-compatible smart-code characters are accepted."),
             new("Validity", "10 minutes", "A live adapter must verify the remote signaling session is still valid."),
             new("CrossNetworkReadiness", "idle", "No transportReady or handshakeComplete state is claimed by this read-only snapshot."),
             new("Safety", "no WebRTC answerer started", "No signaling room join, ICE negotiation, DataChannel, HTTP file server, or FfiEngineClient connection is started.")
@@ -315,12 +344,13 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             facts);
     }
 
-    private static string GenerateShortCode()
+    private static string GenerateConnectionCode()
     {
-        var chars = new char[6];
+        var chars = new char[DefaultCodeInputPolicy.PreferredCodeLength];
         for (var index = 0; index < chars.Length; index++)
         {
-            chars[index] = ShortCodeAlphabet[RandomNumberGenerator.GetInt32(ShortCodeAlphabet.Length)];
+            chars[index] = CrossNetworkConnectionCodePolicy.Alphabet[
+                RandomNumberGenerator.GetInt32(CrossNetworkConnectionCodePolicy.Alphabet.Length)];
         }
 
         return new string(chars);
@@ -330,7 +360,8 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     {
         if (!TryNormalizeConnectionCode(raw, DefaultCodeInputPolicy, out var code))
         {
-            throw new InvalidOperationException("Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.");
+            throw new InvalidOperationException(
+                CrossNetworkConnectionCodePolicy.BuildInvalidMessage("Connection Code"));
         }
 
         return code;
@@ -342,7 +373,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         out string code)
     {
         code = NormalizeCodeInput(raw, inputPolicy);
-        return code.Length == inputPolicy.CodeLength;
+        return inputPolicy.IsSupportedLength(code.Length);
     }
 
     private static QrInputEnvelope ExtractQrPayload(string qrInput)
@@ -1022,11 +1053,24 @@ public enum CrossNetworkConnectionAction
     ConnectWithCode
 }
 
+/// <summary>
+/// Smart-connection-code lease mode (Mac ConnectionCodeLeaseMode picker 短时 / 全天). Drives a
+/// REAL generated-code time-to-live: <see cref="ShortLived"/> = a short assistance window,
+/// <see cref="DayStable"/> = a full day. The selected mode changes the actual expiry the code
+/// snapshot computes (not just a label), so the toggle is not virtual.
+/// </summary>
+public enum CrossNetworkCodeLeaseMode
+{
+    ShortLived,
+    DayStable
+}
+
 public sealed record CrossNetworkConnectionRequest(
     CrossNetworkConnectionAction Action,
     string QrInput,
     string CodeInput,
-    string CurrentCode);
+    string CurrentCode,
+    CrossNetworkCodeLeaseMode LeaseMode = CrossNetworkCodeLeaseMode.ShortLived);
 
 public sealed record CrossNetworkConnectionSnapshot(
     DateTimeOffset CapturedAt,
@@ -1043,7 +1087,14 @@ public sealed record CrossNetworkConnectionFact(
 
 public sealed record CrossNetworkCodeInputPolicy(
     string Alphabet,
-    int CodeLength);
+    int LegacyCodeLength,
+    int PreferredCodeLength,
+    int MaximumCodeLength)
+{
+    public bool IsSupportedLength(int length) =>
+        length == LegacyCodeLength ||
+        length >= PreferredCodeLength && length <= MaximumCodeLength;
+}
 
 internal sealed record GeneratedQrCode(
     string Uri,

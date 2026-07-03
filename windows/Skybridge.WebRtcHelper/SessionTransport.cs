@@ -41,6 +41,12 @@ namespace Skybridge.WebRtcHelper;
 internal static class SessionTransport
 {
     public const int Sbf1HeaderLen = 20;
+    private const byte Sbf1Version = 1;
+    private const uint MaxSbf1PayloadBytes = 64u * 1024 * 1024;
+    private const int InboundFrameQueueCapacity = 64;
+    private const ushort FlagSbp2Padded = 0x0001;
+    private const ushort FlagEndOfMessage = 0x0002;
+    private const ushort KnownFlagsMask = FlagSbp2Padded | FlagEndOfMessage;
     private static readonly byte[] Sbf1Magic = { 0x53, 0x42, 0x46, 0x31 }; // "SBF1"
 
     // Reads exactly one SBF1 frame (header + declared payload) from a stream.
@@ -65,11 +71,10 @@ internal static class SessionTransport
         // Hard cap so a bogus/hostile length can't allocate the process to death.
         // 64 MiB is far above any real clipboard/file CHUNK; large files are sent
         // as many END_OF_MESSAGE-flagged frames, not one giant payload.
-        const uint maxPayload = 64u * 1024 * 1024;
-        if (payloadLen > maxPayload)
+        if (payloadLen > MaxSbf1PayloadBytes)
         {
             throw new InvalidDataException(
-                $"data-plane frame payload_len {payloadLen} exceeds {maxPayload} cap; refusing");
+                $"data-plane frame payload_len {payloadLen} exceeds {MaxSbf1PayloadBytes} cap; refusing");
         }
 
         var frame = new byte[Sbf1HeaderLen + (int)payloadLen];
@@ -78,6 +83,11 @@ internal static class SessionTransport
         {
             var slice = frame.AsMemory(Sbf1HeaderLen, (int)payloadLen);
             await ReadFullyAsync(stream, slice, allowCleanEof: false, ct).ConfigureAwait(false);
+        }
+
+        if (!TryValidateSbf1Frame(frame, out var rejectionReason))
+        {
+            throw new InvalidDataException(rejectionReason);
         }
 
         return frame;
@@ -126,27 +136,61 @@ internal static class SessionTransport
         string tag,
         CancellationToken ct)
     {
-        // Inbound (DataChannel -> app) frames are buffered here so the SCTP
-        // receive callback never blocks on a slow/absent loopback reader.
-        var inbound = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var failureLock = new object();
+        Exception? fatalError = null;
+
+        void FailSession(Exception ex)
+        {
+            lock (failureLock)
+            {
+                fatalError ??= ex;
+            }
+
+            linked.Cancel();
+        }
+
+        // Inbound (DataChannel -> app) frames are buffered here so the SCTP receive callback never
+        // blocks on a slow/absent loopback reader. Keep it bounded: if the local app cannot drain,
+        // fail the session rather than letting a peer allocate unbounded helper memory.
+        var inbound = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(InboundFrameQueueCapacity)
         {
             SingleReader = true,
             SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait,
         });
 
         dc.onmessage += (_, _, data) =>
         {
             // SIPSorcery hands us the exact bytes the peer sent in one dc.send.
-            // That is one whole SBF1 frame. Forward verbatim.
-            if (data is { Length: > 0 })
+            // That must be one whole SBF1 frame. Validate at the helper boundary before the bytes
+            // are forwarded to the local app over loopback.
+            if (data is not { Length: > 0 })
             {
-                inbound.Writer.TryWrite(data);
-                if (data.Length >= Sbf1HeaderLen)
-                {
-                    Console.WriteLine(
-                        $"[{tag}] <- peer frame channel={ChannelOf(data)} flags=0x{FlagsOf(data):x4} bytes={data.Length}");
-                }
+                return;
             }
+
+            if (!TryValidateSbf1Frame(data, out var rejectionReason))
+            {
+                Console.Error.WriteLine($"[{tag}] rejecting peer frame: {rejectionReason}");
+                var error = new InvalidDataException(rejectionReason);
+                inbound.Writer.TryComplete(error);
+                FailSession(error);
+                return;
+            }
+
+            if (!inbound.Writer.TryWrite(data))
+            {
+                var message = $"peer->app inbound queue is full ({InboundFrameQueueCapacity} frames); closing data-plane session";
+                Console.Error.WriteLine($"[{tag}] {message}");
+                var error = new InvalidOperationException(message);
+                inbound.Writer.TryComplete(error);
+                FailSession(error);
+                return;
+            }
+
+            Console.WriteLine(
+                $"[{tag}] <- peer frame channel={ChannelOf(data)} flags=0x{FlagsOf(data):x4} bytes={data.Length}");
         };
         // RTCDataChannel teardown is observed via readyState (onclose/onerror are
         // not relied on — only onopen/onmessage are part of the surface this
@@ -156,9 +200,9 @@ internal static class SessionTransport
         {
             try
             {
-                while (!ct.IsCancellationRequested && dc.readyState == RTCDataChannelState.open)
+                while (!linked.IsCancellationRequested && dc.readyState == RTCDataChannelState.open)
                 {
-                    await Task.Delay(250, ct).ConfigureAwait(false);
+                    await Task.Delay(250, linked.Token).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
@@ -179,7 +223,6 @@ internal static class SessionTransport
         Console.WriteLine($"[{tag}] data-plane IPC listening on 127.0.0.1:{actualPort} (SBF1-framed)");
         Console.WriteLine($"SKYBRIDGE_DATAPLANE_PORT={actualPort}"); // machine-parseable handshake line
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
             // Accept exactly one app connection at a time (one helper == one peer
@@ -206,10 +249,16 @@ internal static class SessionTransport
                     var appToPeer = PumpAppToPeerAsync(stream, dc, tag, sessionCts.Token);
                     var peerToApp = PumpPeerToAppAsync(stream, inbound.Reader, tag, sessionCts.Token);
                     var finished = await Task.WhenAny(appToPeer, peerToApp).ConfigureAwait(false);
-                    sessionCts.Cancel();
-                    await SafeAwait(appToPeer).ConfigureAwait(false);
-                    await SafeAwait(peerToApp).ConfigureAwait(false);
-                    _ = finished;
+                    try
+                    {
+                        await finished.ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        sessionCts.Cancel();
+                        await SafeAwait(appToPeer, tag).ConfigureAwait(false);
+                        await SafeAwait(peerToApp, tag).ConfigureAwait(false);
+                    }
                 }
 
                 Console.WriteLine($"[{tag}] data-plane IPC client disconnected");
@@ -224,6 +273,11 @@ internal static class SessionTransport
         finally
         {
             listener.Stop();
+        }
+
+        if (fatalError is not null)
+        {
+            throw new InvalidOperationException("WebRTC helper data-plane session failed.", fatalError);
         }
     }
 
@@ -242,7 +296,12 @@ internal static class SessionTransport
             {
                 return;
             }
-            catch (Exception ex) when (ex is IOException or EndOfStreamException or InvalidDataException)
+            catch (Exception ex) when (ex is EndOfStreamException or InvalidDataException)
+            {
+                Console.Error.WriteLine($"[{tag}] app->peer frame rejected: {ex.Message}");
+                throw;
+            }
+            catch (IOException ex)
             {
                 Console.Error.WriteLine($"[{tag}] app->peer read ended: {ex.Message}");
                 return;
@@ -251,6 +310,12 @@ internal static class SessionTransport
             if (frame is null)
             {
                 return; // app closed
+            }
+
+            if (!TryValidateSbf1Frame(frame, out var rejectionReason))
+            {
+                Console.Error.WriteLine($"[{tag}] app->peer frame rejected: {rejectionReason}");
+                throw new InvalidDataException(rejectionReason);
             }
 
             if (dc.readyState != RTCDataChannelState.open)
@@ -282,6 +347,7 @@ internal static class SessionTransport
         }
         catch (OperationCanceledException)
         {
+            return;
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
         {
@@ -289,15 +355,72 @@ internal static class SessionTransport
         }
     }
 
-    private static async Task SafeAwait(Task t)
+    private static async Task SafeAwait(Task t, string tag)
     {
         try
         {
             await t.ConfigureAwait(false);
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // Both pumps are torn down via cancellation; swallow their unwind.
+            return;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            Console.Error.WriteLine($"[{tag}] pump closed during session teardown: {ex.Message}");
         }
     }
+
+    private static bool TryValidateSbf1Frame(ReadOnlySpan<byte> frame, out string rejectionReason)
+    {
+        if (frame.Length < Sbf1HeaderLen)
+        {
+            rejectionReason = $"frame length {frame.Length} is shorter than SBF1 header length {Sbf1HeaderLen}";
+            return false;
+        }
+
+        if (!frame[..4].SequenceEqual(Sbf1Magic))
+        {
+            rejectionReason = "frame did not start with SBF1 magic";
+            return false;
+        }
+
+        if (frame[4] != Sbf1Version)
+        {
+            rejectionReason = $"frame used unsupported SBF1 version {frame[4]}";
+            return false;
+        }
+
+        if (!IsKnownChannel(frame[5]))
+        {
+            rejectionReason = $"frame used unknown channel code {frame[5]}";
+            return false;
+        }
+
+        var flags = BinaryPrimitives.ReadUInt16BigEndian(frame.Slice(6, 2));
+        if ((flags & ~KnownFlagsMask) != 0)
+        {
+            rejectionReason = $"frame used unknown SBF1 flags 0x{flags:x4}";
+            return false;
+        }
+
+        var payloadLen = BinaryPrimitives.ReadUInt32BigEndian(frame.Slice(16, 4));
+        if (payloadLen > MaxSbf1PayloadBytes)
+        {
+            rejectionReason = $"frame payload_len {payloadLen} exceeds {MaxSbf1PayloadBytes} cap";
+            return false;
+        }
+
+        var actualPayloadLen = frame.Length - Sbf1HeaderLen;
+        if (payloadLen != actualPayloadLen)
+        {
+            rejectionReason = $"frame payload_len {payloadLen} does not match message payload bytes {actualPayloadLen}";
+            return false;
+        }
+
+        rejectionReason = string.Empty;
+        return true;
+    }
+
+    private static bool IsKnownChannel(byte code) => code is >= 1 and <= 5;
 }

@@ -283,6 +283,11 @@ Invoke-SmokeGate `
     -Parameters @{ RepoRoot = $RepoRoot }
 
 Invoke-SmokeGate `
+    -Name "windows-current-path-bridge-contract" `
+    -RelativeScriptPath "Scripts/verify-windows-current-path-bridge-contract.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-connection-launch" `
     -RelativeScriptPath "Scripts/verify-windows-connection-launch.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
@@ -373,6 +378,7 @@ if ($RequireMacWebRtcInterop) {
             SearchText = $SearchText
             ExtendedSearchSeconds = $ExtendedSearchSeconds
             WebRtcProofMaxAgeMs = $MacWebRtcProofMaxAgeMs
+            RequireMacRustCliSmoke = [bool]$RequireMacRustCliSmoke
         } `
         -EvidencePath $MacWebRtcProofPath
 }

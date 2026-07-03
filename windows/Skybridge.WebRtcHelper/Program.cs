@@ -24,13 +24,27 @@
 //                      local app are forwarded onto the DataChannel and frames
 //                      from the peer are forwarded back to the app. Multi-channel
 //                      (Control/File/Clipboard/Telemetry/Realtime) by virtue of
-//                      the SBF1 channel byte. This is what clipboard/file/RD build
-//                      on. See SessionTransport.cs for the framing + pump.
+//                      the SBF1 channel byte. This remains a helper smoke profile,
+//                      not the Mac product WebRTC control protocol.
+//   --mode session-echo
+//                      App-side verifier for a helper session IPC. Connects to a
+//                      session helper loopback port, echoes SBF1 frames back to
+//                      that same port, then exits after --count frames.
+//   --mode product-control-offer / --mode product-control-answer
+//                      MAC PRODUCT CONTROL TRANSPORT SHELL. Same file signaling,
+//                      but the WebRTC wire is the Mac product control channel:
+//                      DataChannel label "skybridge" and raw 4-byte-length-framed
+//                      control chunks on the local loopback IPC. No SBF1 and no
+//                      fake protocol fallback. This is the transport boundary that
+//                      a real handshake/SBWC implementation plugs into.
+//   --mode product-control-driver / --mode product-control-echo
+//                      Test-only loopback peers for the raw product-control IPC.
 //
 // The helper NEVER emits AppleNative binding — always WebRtcDataChannel /
 // WebRtcInterop (Apple<->Apple stays on the Apple native path).
 
 using System.Buffers.Binary;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -80,7 +94,12 @@ internal static class Program
                 "session-offer" => await RunSessionOfferAsync(opts),
                 "session-answer" => await RunSessionAnswerAsync(opts),
                 "session-driver" => await SessionDriver.RunAsync(opts),
-                _ => Fail($"unknown mode '{mode}' (use loopback|offer|answer|session-offer|session-answer|session-driver)"),
+                "session-echo" => await SessionEcho.RunAsync(opts),
+                "product-control-offer" => await RunProductControlOfferAsync(opts),
+                "product-control-answer" => await RunProductControlAnswerAsync(opts),
+                "product-control-driver" => await ProductControlDriver.RunAsync(opts),
+                "product-control-echo" => await ProductControlEcho.RunAsync(opts),
+                _ => Fail($"unknown mode '{mode}' (use loopback|offer|answer|session-offer|session-answer|session-driver|session-echo|product-control-offer|product-control-answer|product-control-driver|product-control-echo)"),
             };
         }
         catch (Exception ex)
@@ -96,23 +115,83 @@ internal static class Program
         return 1;
     }
 
-    private static RTCConfiguration NewConfig() => new() { iceServers = new List<RTCIceServer>() };
+    private static RTCConfiguration NewConfig() => ConfigWithIce("", null);
 
-    // Builds a config with STUN/TURN servers from a comma-separated --ice-servers arg
-    // (e.g. "stun:stun.l.google.com:19302,turn:host:3478|user|pass"). Needed for the
-    // cross-subnet Win<->Mac hop where host candidates alone won't route.
-    private static RTCConfiguration ConfigWithIce(string csv)
+    // Builds a config with unauthenticated ICE server URLs from a comma-separated
+    // --ice-servers arg. TURN credentials must not be passed on argv; wire a
+    // credential file or short-lived secure channel before enabling TURN auth here.
+    private static RTCConfiguration ConfigWithIce(string csv, Dictionary<string, string>? opts)
     {
         var servers = new List<RTCIceServer>();
         foreach (var raw in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var parts = raw.Split('|');
-            var s = new RTCIceServer { urls = parts[0] };
-            if (parts.Length >= 3) { s.username = parts[1]; s.credential = parts[2]; }
-            servers.Add(s);
+            if (raw.Contains('|', StringComparison.Ordinal))
+            {
+                throw new ArgumentException("--ice-servers must not include inline TURN credentials; use LAN/STUN-only until a credential file/channel is wired.");
+            }
+
+            RejectIceServerCredentialCarrier(raw);
+            servers.Add(new RTCIceServer { urls = raw });
         }
-        return new RTCConfiguration { iceServers = servers };
+
+        var config = new RTCConfiguration { iceServers = servers };
+        ApplyLocalIceOptions(config, opts);
+        return config;
     }
+
+    private static void RejectIceServerCredentialCarrier(string raw)
+    {
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+        {
+            throw new ArgumentException("--ice-servers must contain absolute stun:, stuns:, turn:, or turns: URIs.");
+        }
+
+        if (uri.Scheme is not ("stun" or "stuns" or "turn" or "turns"))
+        {
+            throw new ArgumentException("--ice-servers supports only stun:, stuns:, turn:, or turns: URIs.");
+        }
+
+        if (!string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Fragment))
+        {
+            throw new ArgumentException("--ice-servers must not include URI userinfo, query, or fragment credentials; use LAN/STUN-only until a secure TURN credential channel is wired.");
+        }
+    }
+
+    private static void ApplyLocalIceOptions(RTCConfiguration config, Dictionary<string, string>? opts)
+    {
+        if (opts is null)
+        {
+            return;
+        }
+
+        if (opts.TryGetValue("bind-address", out var bindAddress) && !string.IsNullOrWhiteSpace(bindAddress))
+        {
+            if (!IPAddress.TryParse(bindAddress, out var parsed))
+            {
+                throw new ArgumentException("--bind-address must be a valid IP address.");
+            }
+
+            if (IPAddress.IsLoopback(parsed) || IPAddress.Any.Equals(parsed) || IPAddress.IPv6Any.Equals(parsed))
+            {
+                throw new ArgumentException("--bind-address must be a concrete non-loopback local interface address.");
+            }
+
+            config.X_BindAddress = parsed;
+        }
+
+        if (opts.TryGetValue("ice-include-all-interfaces", out var includeAllInterfaces) &&
+            IsEnabled(includeAllInterfaces))
+        {
+            config.X_ICEIncludeAllInterfaceAddresses = true;
+        }
+    }
+
+    private static bool IsEnabled(string value) =>
+        string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
 
     // --- SBF1 frame (matches core/skybridge-core/src/frame.rs:4-78, big-endian) ---
     private static byte[] EncodeSbf1(byte channelCode, ulong sequence, ushort flags, byte[] payload)
@@ -162,7 +241,7 @@ internal static class Program
         var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
         var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
         Console.WriteLine("[offer] creating peer connection...");
-        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
 
@@ -195,7 +274,7 @@ internal static class Program
         Console.WriteLine($"[answer] waiting for offer at {offerIn} ...");
         var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
 
-        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
         // Echo every DataChannel message back verbatim (the SBF1 round-trip).
@@ -239,7 +318,7 @@ internal static class Program
         var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
 
         Console.WriteLine("[session-offer] creating peer connection...");
-        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
 
@@ -283,7 +362,7 @@ internal static class Program
         Console.WriteLine($"[session-answer] waiting for offer at {offerIn} ...");
         var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
 
-        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", "")));
+        using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
         pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
 
@@ -311,6 +390,112 @@ internal static class Program
             return Fail("session-answer: DataChannel did not open");
 
         return await PumpUntilDoneAsync(channel, ipcPort, portOut, holdSeconds, "session-answer");
+    }
+
+    // ------------------------------------------------------ product-control-offer
+    // The Mac product control transport shell. It deliberately does not speak
+    // SBF1: each local IPC message is forwarded as one raw DataChannel message on
+    // label "skybridge", matching the Mac product control channel boundary.
+    private static async Task<int> RunProductControlOfferAsync(Dictionary<string, string> opts)
+    {
+        var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
+        var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
+        var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
+        var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
+        var ipcAuthToken = ReadProductControlIpcAuthToken(opts);
+
+        try
+        {
+            Console.WriteLine("[product-control-offer] creating peer connection...");
+            using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
+            var cands = new List<Cand>();
+            pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+
+            var dc = await pc.createDataChannel(ProductControlTransport.DataChannelLabel);
+            var opened = NewTcs();
+            dc.onopen += () => opened.TrySetResult();
+
+            var offer = pc.createOffer(null);
+            await pc.setLocalDescription(offer);
+            await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+            Signal.Write(offerOut, "offer", offer.sdp, cands);
+            Console.WriteLine($"[product-control-offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
+
+            var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+            if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
+                return Fail("product-control-offer rejected the peer answer");
+            foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
+
+            Console.WriteLine("[product-control-offer] awaiting DataChannel open...");
+            await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            Console.WriteLine($"[product-control-offer] DataChannel state={dc.readyState}");
+            if (dc.readyState != RTCDataChannelState.open)
+                return Fail("product-control-offer: DataChannel did not open");
+
+            return await PumpProductControlUntilDoneAsync(dc, ipcPort, portOut, holdSeconds, "product-control-offer", ipcAuthToken);
+        }
+        finally
+        {
+            ZeroAuthToken(ipcAuthToken);
+        }
+    }
+
+    // ----------------------------------------------------- product-control-answer
+    private static async Task<int> RunProductControlAnswerAsync(Dictionary<string, string> opts)
+    {
+        var offerIn = opts.GetValueOrDefault("offer-in", "offer.json");
+        var answerOut = opts.GetValueOrDefault("answer-out", "answer.json");
+        var ipcPort = ParsePort(opts.GetValueOrDefault("ipc-port", "0"));
+        var portOut = opts.GetValueOrDefault("ipc-port-out", "");
+        var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
+        var ipcAuthToken = ReadProductControlIpcAuthToken(opts);
+
+        try
+        {
+            Console.WriteLine($"[product-control-answer] waiting for offer at {offerIn} ...");
+            var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+
+            using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
+            var cands = new List<Cand>();
+            pc.onicecandidate += c => { if (c != null) cands.Add(Cand.From(c)); };
+
+            var opened = NewTcs<RTCDataChannel>();
+            pc.ondatachannel += dc =>
+            {
+                Console.WriteLine($"[product-control-answer] datachannel '{dc.label}' offered");
+                if (!string.Equals(dc.label, ProductControlTransport.DataChannelLabel, StringComparison.Ordinal))
+                {
+                    opened.TrySetException(new InvalidOperationException(
+                        $"product-control-answer rejects DataChannel label '{dc.label}'; expected '{ProductControlTransport.DataChannelLabel}'."));
+                    return;
+                }
+
+                dc.onopen += () => opened.TrySetResult(dc);
+                if (dc.readyState == RTCDataChannelState.open) opened.TrySetResult(dc);
+            };
+
+            if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = off.Sdp }) != SetDescriptionResultEnum.OK)
+                return Fail("product-control-answer rejected the peer offer");
+            foreach (var c in off.Candidates) pc.addIceCandidate(c.ToInit());
+
+            var answer = pc.createAnswer(null);
+            await pc.setLocalDescription(answer);
+            await WaitIceGatheringAsync(pc, TimeSpan.FromSeconds(8));
+            Signal.Write(answerOut, "answer", answer.sdp, cands);
+            Console.WriteLine($"[product-control-answer] wrote answer -> {Path.GetFullPath(answerOut)}; awaiting DataChannel open...");
+
+            var channel = await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            Console.WriteLine($"[product-control-answer] DataChannel state={channel.readyState}");
+            if (channel.readyState != RTCDataChannelState.open)
+                return Fail("product-control-answer: DataChannel did not open");
+
+            return await PumpProductControlUntilDoneAsync(channel, ipcPort, portOut, holdSeconds, "product-control-answer", ipcAuthToken);
+        }
+        finally
+        {
+            ZeroAuthToken(ipcAuthToken);
+        }
     }
 
     // Shared session tail: write the bound IPC port (so the launcher can connect
@@ -353,8 +538,91 @@ internal static class Program
         return 0;
     }
 
-    private static int ParsePort(string raw) =>
-        int.TryParse(raw, out var p) && p is >= 0 and <= 65535 ? p : 0;
+    private static async Task<int> PumpProductControlUntilDoneAsync(
+        RTCDataChannel dc, int ipcPort, string portOutPath, int holdSeconds, string tag, byte[]? ipcAuthToken)
+    {
+        using var cts = new CancellationTokenSource();
+        if (holdSeconds > 0) cts.CancelAfter(TimeSpan.FromSeconds(holdSeconds));
+
+        void ReportPort(int port)
+        {
+            if (!string.IsNullOrWhiteSpace(portOutPath))
+            {
+                try
+                {
+                    var tmp = portOutPath + ".tmp";
+                    File.WriteAllText(tmp, port.ToString(), new UTF8Encoding(false));
+                    File.Move(tmp, portOutPath, overwrite: true);
+                }
+                catch (IOException ex)
+                {
+                    Console.Error.WriteLine($"[{tag}] could not write ipc-port-out: {ex.Message}");
+                }
+            }
+        }
+
+        try
+        {
+            await ProductControlTransport.RunSessionAsync(dc, ipcPort, ReportPort, tag, ipcAuthToken, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"[{tag}] hold window elapsed; closing product control transport");
+        }
+
+        Console.WriteLine($"[{tag}] product control transport ended");
+        return 0;
+    }
+
+    private static int ParsePort(string raw)
+    {
+        if (int.TryParse(raw, out var p) && p is >= 0 and <= 65535)
+        {
+            return p;
+        }
+
+        throw new ArgumentException("--ipc-port must be 0 for an OS-chosen port, or a TCP port in the range 1-65535.");
+    }
+
+    private static byte[]? ReadProductControlIpcAuthToken(Dictionary<string, string> opts)
+    {
+        var envName = opts.GetValueOrDefault("ipc-auth-token-env", "");
+        if (string.IsNullOrWhiteSpace(envName))
+        {
+            return null;
+        }
+
+        envName = envName.Trim();
+        if (envName.Any(ch => !(char.IsLetterOrDigit(ch) || ch == '_')))
+        {
+            throw new ArgumentException("--ipc-auth-token-env must name an environment variable using letters, digits, or underscores.");
+        }
+
+        var encoded = Environment.GetEnvironmentVariable(envName);
+        if (string.IsNullOrWhiteSpace(encoded))
+        {
+            throw new ArgumentException("Environment variable named by --ipc-auth-token-env is missing or empty.");
+        }
+
+        try
+        {
+            return ProductControlTransport.DecodeIpcAuthTokenFromBase64(
+                encoded.Trim(),
+                "product-control IPC authentication token");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, null);
+        }
+    }
+
+    private static void ZeroAuthToken(byte[]? token)
+    {
+        if (token is not null)
+        {
+            CryptographicOperations.ZeroMemory(token);
+        }
+    }
 
     // Shared offerer tail: await open, send SBF1, verify echo, derive fields, emit proof.
     private static async Task<int> CompleteOffererAsync(

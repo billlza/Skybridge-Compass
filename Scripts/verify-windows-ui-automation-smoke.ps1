@@ -473,8 +473,15 @@ $actionOrderBySurface = Get-ActionOrderMatrix -MatrixPath $matrixPath
 & dotnet build $projectPath --configuration $Configuration --no-restore | Write-Output
 Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke build failed."
 
-$targetFramework = "net10.0-windows10.0.19041.0"
-$exePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/bin/$Configuration/$targetFramework/Skybridge.WinClient.exe"
+$targetFramework = "net10.0-windows10.0.22621.0"
+$project = [xml]$projectText
+$runtimeIdentifiers = @($project.Project.PropertyGroup |
+    ForEach-Object { $_.RuntimeIdentifier } |
+    Where-Object { $null -ne $_ } |
+    ForEach-Object { $_.InnerText.Trim() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+Assert-True -Condition ($runtimeIdentifiers.Count -eq 1) -Message "WinUI automation smoke requires exactly one default RuntimeIdentifier; actual=[$($runtimeIdentifiers -join ', ')]"
+$exePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/bin/$Configuration/$targetFramework/$($runtimeIdentifiers[0])/Skybridge.WinClient.exe"
 Assert-True -Condition (Test-Path -LiteralPath $exePath) -Message "Missing WinUI executable: $exePath"
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -510,7 +517,7 @@ try {
         @{ Title = "System Monitor"; Heading = "System Monitor"; Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls") },
         @{ Title = "Settings"; Heading = "Settings"; Anchor = "WorkspaceAction.SettingsToolbar.ExportSettings"; EvidenceAnchors = @("WorkspaceAction.SettingsMaintenance.ApplySettings"); Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance") }
     )
-    $globalActionSurfaces = @("SidebarSession", "TopBarActions", "SessionControls")
+    $globalActionSurfaces = @("TopBarActions", "SessionControls")
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $exePath
@@ -553,9 +560,9 @@ try {
     foreach ($requiredAnchor in @(
         "Skybridge.Navigation.List",
         "Skybridge.Session.SelectedFeature.Title",
-        "WorkspaceAction.SidebarSession.Connect",
         "WorkspaceAction.TopBarActions.Notifications",
-        "WorkspaceAction.TopBarActions.Theme"
+        "WorkspaceAction.TopBarActions.Theme",
+        "WorkspaceAction.SessionControls.Connect"
     )) {
         [void](Assert-VisibleByAutomationId -Root $window -AutomationId $requiredAnchor)
     }
@@ -601,7 +608,7 @@ try {
                     "Skybridge.SelectedFeature.Title",
                     "WorkspaceAction.TopBarActions.Notifications",
                     "WorkspaceAction.TopBarActions.Theme",
-                    "WorkspaceAction.SidebarSession.Connect",
+                    "WorkspaceAction.SessionControls.Connect",
                     $feature.Anchor
                 )
                 if ($feature.ContainsKey("EvidenceAnchors")) {

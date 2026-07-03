@@ -19,6 +19,9 @@ $sourceFiles = @()
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
+$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Converters") -Filter "*.cs" |
+    Sort-Object Name |
+    ForEach-Object { $_.FullName }
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStartupStateBuilder.cs"
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
@@ -48,7 +51,9 @@ try {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -57,7 +62,10 @@ try {
 $compileItemText
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 </Project>
 "@
@@ -120,6 +128,10 @@ AssertEqual("_skybridge._udp", state.DiscoveryService, "default discovery servic
 AssertEqual("11550", state.ManualConnectionPort, "default manual connection port");
 AssertEqual("", state.DiscoveryTxtRecord, "default discovery TXT input");
 AssertEqual("", state.PairingConnectionCode, "default pairing code input");
+// BATCH 2 (B1) — smart-connection-code lease default. Startup default is the short-lived
+// assistance window; selecting day-stable extends the REAL generated-code TTL. Pinning the
+// default keeps the lease toggle wired to a real backend lifetime, not a label.
+AssertEqual("shortLived", state.ConnectionCodeLeaseMode, "default connection-code lease mode");
 AssertSequence(
     "default DNS-SD service query order",
     state.DiscoveryBrowserInputPolicy.ServiceQueryOrder,

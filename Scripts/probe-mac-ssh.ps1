@@ -419,6 +419,74 @@ function Test-KnownHostEntryPresent {
     return $false
 }
 
+function Get-HostKeyLinesFromKnownHostsFile {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $hostKeyLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($lookupName in Get-KnownHostLookupNames) {
+        try {
+            $lookupOutput = & ssh-keygen -F $lookupName -f $Path 2>$null
+        }
+        catch {
+            $lookupOutput = @()
+        }
+
+        foreach ($line in $lookupOutput) {
+            $text = [string]$line
+            if ([string]::IsNullOrWhiteSpace($text) -or $text.StartsWith("#")) {
+                continue
+            }
+
+            if ($text -match "\s(ssh-ed25519|ecdsa-sha2-|ssh-rsa)\s" -and -not $hostKeyLines.Contains($text)) {
+                $hostKeyLines.Add($text)
+            }
+        }
+    }
+
+    return @($hostKeyLines)
+}
+
+function Get-HandshakeHostKeyLines {
+    $tempKnownHostsPath = Join-Path $env:TEMP ("skybridge-host-key-handshake-" + [Guid]::NewGuid().ToString("N"))
+    $userName = if ($UserNames.Count -gt 0) { [string]$UserNames[0] } else { "skybridge-host-key-probe" }
+    $target = "$userName@$script:CurrentHostName"
+    $sshArgs = @(
+        "-n",
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "PasswordAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=0",
+        "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
+        "-o", "ConnectionAttempts=1",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=$tempKnownHostsPath",
+        "-o", "KexAlgorithms=curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256",
+        "-p", "$Port",
+        "-i", "$KeyPath")
+
+    if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
+        $sshArgs += @("-b", $DirectSourceAddress)
+    }
+
+    try {
+        & ssh @sshArgs $target "true" 2>&1 | Out-Null
+        return @(Get-HostKeyLinesFromKnownHostsFile -Path $tempKnownHostsPath)
+    }
+    catch {
+        return @()
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempKnownHostsPath) {
+            Remove-Item -LiteralPath $tempKnownHostsPath -Force
+        }
+    }
+}
+
 function Get-ScannedHostKeyLines {
     $scanArgs = @(
         "-T", "$ConnectTimeoutSeconds",
@@ -434,13 +502,23 @@ function Get-ScannedHostKeyLines {
         $scanOutput = @($_.Exception.Message)
     }
 
-    return @($scanOutput |
+    $hostKeyLines = @($scanOutput |
         ForEach-Object { [string]$_ } |
         Where-Object {
             -not [string]::IsNullOrWhiteSpace($_) -and
             -not $_.StartsWith("#") -and
             ($_ -match "\s(ssh-ed25519|ecdsa-sha2-|ssh-rsa)\s")
         })
+    if ($hostKeyLines.Count -gt 0) {
+        return $hostKeyLines
+    }
+
+    $handshakeHostKeyLines = @(Get-HandshakeHostKeyLines)
+    if ($handshakeHostKeyLines.Count -gt 0) {
+        Write-Probe "host-key scan fallback: ssh handshake populated a temporary known_hosts entry for $script:CurrentHostName"
+    }
+
+    return $handshakeHostKeyLines
 }
 
 function Get-HostKeyFingerprints {
@@ -511,6 +589,13 @@ function Confirm-HostKeyPin {
     }
 
     $hostKeyLines = @(Get-ScannedHostKeyLines)
+    if ($hostKeyLines.Count -eq 0) {
+        $hostKeyLines = @(Get-HostKeyLinesFromKnownHostsFile -Path $KnownHostsPath)
+        if ($hostKeyLines.Count -gt 0) {
+            Write-Probe "host-key scan fallback: validating existing known_hosts entry for $script:CurrentHostName"
+        }
+    }
+
     if ($hostKeyLines.Count -eq 0) {
         Write-Probe "host-key required: ssh-keyscan returned no usable host key for $script:CurrentHostName"
         return
@@ -665,20 +750,25 @@ function Write-DirectSourceDiagnostics {
 function Invoke-SshCommand {
     param(
         [string]$UserName,
-        [string]$Command = "whoami; hostname; pwd"
+        [string]$Command = "true"
     )
 
     $target = "$UserName@$script:CurrentHostName"
     $strictHostKeyChecking = if ($RequireKnownHost -or $script:MacSshProbeHostKeyPinned -or -not [string]::IsNullOrWhiteSpace($ExpectedHostKeyFingerprint)) { "yes" } else { "no" }
     $sshArgs = @(
+        "-n",
+        "-T",
         "-o", "BatchMode=yes",
         "-o", "PreferredAuthentications=publickey",
+        "-o", "IdentitiesOnly=yes",
         "-o", "PasswordAuthentication=no",
         "-o", "NumberOfPasswordPrompts=0",
         "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
         "-o", "ConnectionAttempts=1",
         "-o", "StrictHostKeyChecking=$strictHostKeyChecking",
         "-o", "UserKnownHostsFile=$KnownHostsPath",
+        "-o", "UpdateHostKeys=no",
+        "-o", "KexAlgorithms=curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256",
         "-p", "$Port",
         "-i", "$KeyPath")
 
@@ -686,25 +776,57 @@ function Invoke-SshCommand {
         $sshArgs += @("-b", $DirectSourceAddress)
     }
 
-    $sshArgs += @($target, $Command)
+    $sshArgs += @($target)
 
-    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
-    if ($nativeErrorPreference) {
-        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+    $sshArgs += @($Command)
+    if ($Command -eq "true") {
+        try {
+            & ssh @sshArgs
+            $sshExitCode = $LASTEXITCODE
+            $output = if ($sshExitCode -eq 0) { @($UserName, $script:CurrentHostName, "ready") } else { @() }
+        }
+        catch {
+            $sshExitCode = 255
+            $output = @($_.Exception.Message)
+        }
+
+        $text = ($output -join [Environment]::NewLine).Trim()
+        return [pscustomobject]@{
+            UserName = $UserName
+            ExitCode = $sshExitCode
+            Text = $text
+        }
     }
 
+    $captureRoot = Join-Path $env:TEMP ("skybridge-mac-ssh-probe-" + [Guid]::NewGuid().ToString("N"))
+    $stdoutPath = Join-Path $captureRoot "stdout.txt"
+    $stderrPath = Join-Path $captureRoot "stderr.txt"
+    New-Item -ItemType Directory -Force -Path $captureRoot | Out-Null
     try {
-        $output = & ssh @sshArgs 2>&1
+        & ssh @sshArgs > $stdoutPath 2> $stderrPath
         $sshExitCode = $LASTEXITCODE
+        $outputItems = [System.Collections.Generic.List[string]]::new()
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $stdoutText = Get-Content -Raw -LiteralPath $stdoutPath
+            if (-not [string]::IsNullOrWhiteSpace($stdoutText)) {
+                $outputItems.Add($stdoutText)
+            }
+        }
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderrText = Get-Content -Raw -LiteralPath $stderrPath
+            if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+                $outputItems.Add($stderrText)
+            }
+        }
+        $output = @($outputItems)
     }
     catch {
-        $lastNativeExitCode = $LASTEXITCODE
-        $sshExitCode = if ($lastNativeExitCode -ne 0) { $lastNativeExitCode } else { 255 }
+        $sshExitCode = 255
         $output = @($_.Exception.Message)
     }
     finally {
-        if ($nativeErrorPreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativeErrorPreference.Value -Scope Local
+        if (Test-Path -LiteralPath $captureRoot) {
+            Remove-Item -LiteralPath $captureRoot -Recurse -Force
         }
     }
 

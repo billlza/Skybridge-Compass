@@ -32,12 +32,14 @@ internal sealed class WorkspaceViewStateBuilder
         CrossNetworkConnectionAction action,
         string crossNetworkQrInput,
         string crossNetworkCodeInput,
-        string crossNetworkGeneratedCode) =>
+        string crossNetworkGeneratedCode,
+        CrossNetworkCodeLeaseMode leaseMode) =>
         new(
             action,
             crossNetworkQrInput,
             crossNetworkCodeInput,
-            crossNetworkGeneratedCode);
+            crossNetworkGeneratedCode,
+            leaseMode);
 
     public DashboardMetricsRequest BuildDashboardMetricsRequest(
         EngineConnectionState connectionState,

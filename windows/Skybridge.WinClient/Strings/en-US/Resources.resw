@@ -1652,4 +1652,77 @@
     <value>Recently connected devices will appear here once a connection-history store is available on Windows.</value>
     <comment>Recent-connections placeholder card body (honest empty state).</comment>
   </data>
+  <data name="SystemMonitorLiveSnapshotTitle.Text" xml:space="preserve">
+    <value>Live Snapshot</value>
+    <comment>System Monitor visible title (Mac liveSnapshotHeader "Live Snapshot").</comment>
+  </data>
+  <data name="SystemMonitorLiveSnapshotSubtitle.Text" xml:space="preserve">
+    <value>Unified monitor view for current health, load, network and thermal headroom.</value>
+    <comment>System Monitor subtitle (Mac liveSnapshotHeader subheadline).</comment>
+  </data>
+  <data name="SystemMonitorMonitoringPill.Text" xml:space="preserve">
+    <value>Monitoring</value>
+    <comment>System Monitor header status pill (Mac liveSnapshotHeader isMonitoring capsule).</comment>
+  </data>
+  <data name="DiscoveryCloudNoteTitle.Text" xml:space="preserve">
+    <value>iCloud Zero-Config</value>
+    <comment>Cloud Link mode honest note title (Mac iCloud zero-config section).</comment>
+  </data>
+  <data name="DiscoveryCloudNoteBody.Text" xml:space="preserve">
+    <value>iCloud device sync is available on Apple devices. This Windows client connects over LAN scan, QR, or a connection code.</value>
+    <comment>Cloud Link mode honest note body (iCloud is Apple-only).</comment>
+  </data>
+  <data name="FileTransferTabTransfer.Text" xml:space="preserve">
+    <value>Transfer</value>
+    <comment>File Transfer segmented tab (Mac modernTabBar Transfer tab).</comment>
+  </data>
+  <data name="FileTransferTabHistory.Text" xml:space="preserve">
+    <value>History</value>
+    <comment>File Transfer segmented tab (Mac modernTabBar History tab).</comment>
+  </data>
+  <!-- ============================ Batch 2 (System Monitor + cross-net lease) ============================ -->
+  <data name="SystemMonitorAdvancedBannerTitle.Text" xml:space="preserve">
+    <value>Enable Advanced Monitoring</value>
+    <comment>A13 advanced-monitoring banner title (Mac advancedMonitoringNotice).</comment>
+  </data>
+  <data name="SystemMonitorAdvancedBannerBody.Text" xml:space="preserve">
+    <value>Surfaces additional read-only diagnostics in memory only. No helper is installed and no elevation is requested.</value>
+    <comment>A13 advanced-monitoring banner honest body (in-memory, no helper/elevation).</comment>
+  </data>
+  <data name="SystemMonitorInsightsHeading.Text" xml:space="preserve">
+    <value>Insights</value>
+    <comment>System Monitor insights section heading (Mac liveSnapshotHighlights).</comment>
+  </data>
+  <data name="SysMonLabel.Bandwidth" xml:space="preserve">
+    <value>Bandwidth</value>
+    <comment>Metric tile label "Bandwidth" (B4 real throughput sampler).</comment>
+  </data>
+  <data name="SysMonCaption.Throughput" xml:space="preserve">
+    <value>Throughput</value>
+    <comment>Metric tile caption for the Bandwidth tile.</comment>
+  </data>
+  <data name="SysMonCaption.Temperature" xml:space="preserve">
+    <value>Temperature</value>
+    <comment>Metric tile caption for the Thermal tile (honest unavailable).</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseShort.Text" xml:space="preserve">
+    <value>Short-lived</value>
+    <comment>B1 connection-code lease segment (Mac 短时, shortLived; 10-minute TTL).</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseDay.Text" xml:space="preserve">
+    <value>Day-stable</value>
+    <comment>B1 connection-code lease segment (Mac 全天, dayStable; 24-hour TTL).</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseHint.Text" xml:space="preserve">
+    <value>Short-lived codes expire in 10 minutes; day-stable codes last 24 hours.</value>
+    <comment>B1 connection-code lease hint (Mac lease-mode hint text).</comment>
+  </data>
+  <data name="RemoteDesktopCardTransportLabel.Text" xml:space="preserve">
+    <value>Transport</value>
+    <comment>B3 per-session summary card Transport pill label. Mac remoteMetricPill transport.</comment>
+  </data>
+  <data name="RemoteDesktopCardQualityLabel.Text" xml:space="preserve">
+    <value>Quality</value>
+    <comment>B3 per-session summary card Quality pill label. Mac remoteMetricPill quality.</comment>
+  </data>
 </root>

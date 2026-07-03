@@ -67,11 +67,17 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["Off"] = "SysMonState.Off",
             ["Unknown"] = "SysMonState.Unknown",
             ["Nominal"] = "SysMonState.Nominal",
+            // Metric-tile labels added in batch 2: Bandwidth (real throughput, B4) +
+            // Thermal (honest unavailable, C14).
+            ["Bandwidth"] = "SysMonLabel.Bandwidth",
+            ["Thermal"] = "SysMonLabel.Thermal",
             // Metric-tile captions (output of SystemMetricLabelToCaptionConverter).
             ["Processor"] = "SysMonCaption.Processor",
             ["Working set"] = "SysMonCaption.WorkingSet",
             ["Storage"] = "SysMonCaption.Storage",
             ["Adapters"] = "SysMonCaption.Adapters",
+            ["Throughput"] = "SysMonCaption.Throughput",
+            ["Temperature"] = "SysMonCaption.Temperature",
             // Sidebar nav titles (FeatureCatalogClient feeds FeatureEntry.Title as the canonical
             // English key; FeatureCatalogClient localizes the rendered Title through Localize()).
             ["Dashboard"] = "Nav.Dashboard",
@@ -79,6 +85,7 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["USB Management"] = "Nav.UsbManagement",
             ["File Transfer"] = "Nav.FileTransfer",
             ["Remote Desktop"] = "Nav.RemoteDesktop",
+            ["Quantum"] = "Nav.Quantum",
             ["System Monitor"] = "Nav.SystemMonitor",
             ["Settings"] = "Nav.Settings",
             // NOTE: the Settings left sub-nav tab names are NOT in this string-keyed map. Two of
@@ -147,6 +154,7 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["SysMonLabel.Memory"] = new() { ["en"] = "Memory", ["zh"] = "内存", ["ja"] = "メモリ" },
             ["SysMonLabel.Disk"] = new() { ["en"] = "Disk", ["zh"] = "磁盘", ["ja"] = "ディスク" },
             ["SysMonLabel.Network"] = new() { ["en"] = "Network", ["zh"] = "网络", ["ja"] = "ネットワーク" },
+            ["SysMonLabel.Bandwidth"] = new() { ["en"] = "Bandwidth", ["zh"] = "带宽", ["ja"] = "帯域" },
             ["SysMonState.Healthy"] = new() { ["en"] = "Healthy", ["zh"] = "良好", ["ja"] = "正常" },
             ["SysMonState.Caution"] = new() { ["en"] = "Caution", ["zh"] = "注意", ["ja"] = "注意" },
             ["SysMonState.NetworkOffline"] = new() { ["en"] = "Network offline", ["zh"] = "网络离线", ["ja"] = "ネットワークオフライン" },
@@ -160,12 +168,15 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["SysMonCaption.WorkingSet"] = new() { ["en"] = "Working set", ["zh"] = "工作集", ["ja"] = "ワーキングセット" },
             ["SysMonCaption.Storage"] = new() { ["en"] = "Storage", ["zh"] = "存储", ["ja"] = "ストレージ" },
             ["SysMonCaption.Adapters"] = new() { ["en"] = "Adapters", ["zh"] = "适配器", ["ja"] = "アダプター" },
+            ["SysMonCaption.Throughput"] = new() { ["en"] = "Throughput", ["zh"] = "吞吐量", ["ja"] = "スループット" },
+            ["SysMonCaption.Temperature"] = new() { ["en"] = "Temperature", ["zh"] = "温度", ["ja"] = "温度" },
             // Sidebar nav titles (mirror the Mac NavigationItem.localizedTitle).
             ["Nav.Dashboard"] = new() { ["en"] = "Dashboard", ["zh"] = "主控台", ["ja"] = "ダッシュボード" },
             ["Nav.DeviceDiscovery"] = new() { ["en"] = "Device Discovery", ["zh"] = "设备发现", ["ja"] = "デバイス検出" },
             ["Nav.UsbManagement"] = new() { ["en"] = "USB Management", ["zh"] = "USB 管理", ["ja"] = "USB 管理" },
             ["Nav.FileTransfer"] = new() { ["en"] = "File Transfer", ["zh"] = "文件传输", ["ja"] = "ファイル転送" },
             ["Nav.RemoteDesktop"] = new() { ["en"] = "Remote Desktop", ["zh"] = "远程桌面", ["ja"] = "リモートデスクトップ" },
+            ["Nav.Quantum"] = new() { ["en"] = "Quantum", ["zh"] = "量子", ["ja"] = "量子" },
             ["Nav.SystemMonitor"] = new() { ["en"] = "System Monitor", ["zh"] = "系统监控", ["ja"] = "システムモニター" },
             ["Nav.Settings"] = new() { ["en"] = "Settings", ["zh"] = "设置", ["ja"] = "設定" },
             // Settings left sub-nav tab names (mirror the Mac SettingsView tab localizedName).

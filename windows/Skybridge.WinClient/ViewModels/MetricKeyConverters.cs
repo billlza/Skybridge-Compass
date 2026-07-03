@@ -181,6 +181,8 @@ public sealed class SystemMetricKeyToGlyphConverter : IValueConverter
             "Memory" => "\uEEA0",   // Memory
             "Disk" => "\uEDA2",     // HardDrive
             "Network" => "\uE839",  // NetworkTower
+            "Bandwidth" => "\uE839", // NetworkTower (live throughput, B4 sampler)
+            "Thermal" => "\uE9CA",  // Diagnostic dial (honest unavailable, C14)
             _ => "\uE9D9"           // Speed gauge
         };
     }
@@ -212,6 +214,8 @@ public sealed class SystemMetricKeyToBrushConverter : IValueConverter
             "Memory" => "SkyBridgeNavDashboardBrush",
             "Disk" => "SkyBridgeNavQuantumBrush",
             "Network" => "SkyBridgeSuccessBrush",
+            "Bandwidth" => "SkyBridgeSuccessBrush", // green throughput channel (B4)
+            "Thermal" => "SkyBridgeTextMutedBrush", // muted: honest unavailable, never alarm-tinted (C14)
             _ => "SkyBridgeAccentBrush"
         };
 
@@ -331,6 +335,8 @@ public sealed class SystemMetricLabelToCaptionConverter : IValueConverter
             "Memory" => "Working set",
             "Disk" => "Storage",
             "Network" => "Adapters",
+            "Bandwidth" => "Throughput",
+            "Thermal" => "Temperature",
             _ => label
         };
 

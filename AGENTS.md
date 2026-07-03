@@ -21,7 +21,7 @@ These instructions apply to the entire repository. More specific `AGENTS.md` fil
 - Use `cargo` only inside the crate (not at the repo root) unless there is a top-level workspace.
 
 ## Windows client (`windows/Skybridge.WinClient/`)
-- Target WinUI 3 + .NET 10 with `net10.0-windows10.0.19041.0`, `WindowsPackageType=None` for unpackaged Windows App SDK auto-initialization, Windows App SDK `2.2.0`, Windows SDK BuildTools `10.0.28000.1839`, and QRCoder `1.8.0` for Windows QR bitmap rendering.
+- Target WinUI 3 + .NET 10 with `net10.0-windows10.0.22621.0`, TargetPlatformMinVersion `10.0.19041.0`, `WindowsPackageType=None` for unpackaged Windows App SDK auto-initialization, Windows App SDK `2.2.0`, Windows SDK BuildTools `10.0.28000.1839`, and QRCoder `1.8.0` for Windows QR bitmap rendering.
 - Keep bindings ready for Rust FFI integration without moving Core transport, identity, pairing, or AppleNative routing policy into the Windows ViewModel layer.
 - Run `Scripts/verify-windows-stack-freshness.ps1` after changing project stack declarations, package versions, or stack documentation; add `-CheckOnline -EvidencePath <json>` when the task needs auditable latest-version evidence.
 - Keep `.github/workflows/windows-portability.yml` aligned with `Scripts/verify-windows-ci-workflow.ps1`: GitHub Actions must pin `origin` back to SSH and run `Scripts/verify-windows-portability-smoke.ps1 -CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage`.

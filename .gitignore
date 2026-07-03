@@ -135,6 +135,12 @@ core/skybridge-core/target
 !core/skybridge-core/src/bin/
 !core/skybridge-core/src/bin/*.rs
 
+# WebRTC signaling/proof artifacts contain ICE ufrag/pwd, candidates, and DTLS fingerprints.
+**/webrtc-signaling/
+windows/Skybridge.WebRtcHelper/*offer*.json
+windows/Skybridge.WebRtcHelper/*answer*.json
+windows/Skybridge.WebRtcHelper/*proof*.json
+
 
 # MSIX dev signing artifacts (generated on the box by tools/Setup-Msix.ps1 — never commit)
 *.pfx

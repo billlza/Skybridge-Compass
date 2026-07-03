@@ -33,6 +33,8 @@ internal sealed class WorkspaceCountNotifier
 
     public void RemoteDesktopSessionsChanged() => Notify(nameof(SessionViewModel.RemoteDesktopSessionCount));
 
+    public void RemoteDesktopRecentSessionsChanged() => Notify(nameof(SessionViewModel.RemoteDesktopRecentSessionCount));
+
     public void SystemMonitorMetricsChanged() => Notify(nameof(SessionViewModel.SystemMonitorMetricCount));
 
     public void SettingsActionsChanged() => Notify(nameof(SessionViewModel.SettingsActionCount));

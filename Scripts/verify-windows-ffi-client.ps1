@@ -32,6 +32,7 @@ $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Service
 $nativeDnsSdBrowsePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
+$crossNetworkConnectionCodePolicyPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionCodePolicy.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
@@ -86,7 +87,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -97,7 +98,9 @@ $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
+$crossNetworkConnectionCodePolicy = Get-Content -Raw -LiteralPath $crossNetworkConnectionCodePolicyPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
+$crossNetworkCodeBoundary = $crossNetworkConnectionCodePolicy + "`n" + $crossNetwork
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $connectionLaunchRequest = Get-Content -Raw -LiteralPath $connectionLaunchRequestPath
@@ -303,7 +306,7 @@ foreach ($signal in @(
     "no WebRTC join is started",
     "No signaling room join",
     "FfiEngineClient",
-    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789."
+    "Connection Code must be 6 or 8-16 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789."
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
@@ -622,7 +625,7 @@ foreach ($uiVisualEvidenceSmokeSignal in @(
     "Get-ActionOrderMatrix",
     "docs/windows-ui-parity-matrix.md",
     "WorkspaceAction.TopBarActions.Notifications",
-    "WorkspaceAction.SidebarSession.Connect",
+    "WorkspaceAction.SessionControls.Connect",
     "-MinimumWidth 32 -MinimumHeight 24",
     "Dashboard",
     "Device Discovery",
@@ -814,7 +817,9 @@ foreach ($stackFreshnessSignal in @(
     "checkOnline",
     "approvedVersions",
     "online",
-    "net10.0-windows10.0.19041.0",
+    "net10.0-windows10.0.22621.0",
+    "TargetPlatformMinVersion",
+    "10.0.19041.0",
     "Microsoft.WindowsAppSDK",
     "2.2.0",
     "Microsoft.Windows.SDK.BuildTools",
@@ -876,6 +881,19 @@ Assert-Contains -Text $architecture -Needle "revalidates that artifact package" 
 Assert-Contains -Text $architecture -Needle "docs/windows-webrtc-proof-schema.md" -Message "Architecture doc missing WebRTC proof schema entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-rust-webrtc-proof-cli.ps1" -Message "Architecture doc missing Rust WebRTC proof CLI gate entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-webrtc-proof-smoke.ps1" -Message "Architecture doc missing WebRTC proof schema smoke entrypoint."
+foreach ($macCurrentPathPolicySignal in @(
+    "CrossNetworkWebRTCPQCHandshakePolicy",
+    "classic_authority_bootstrap",
+    "trusted_kem",
+    "0x1001",
+    "0x0101",
+    "must not silently fall back from PQC to classic",
+    "must not require peer ML-KEM material for a fresh Mac connection code",
+    "must not be used as proof that fresh Mac connection-code bootstrap is implemented",
+    'AppControl `pong` proves an authenticated application channel'
+)) {
+    Assert-Contains -Text $architecture -Needle $macCurrentPathPolicySignal -Message "Architecture doc missing Mac current-path policy signal: $macCurrentPathPolicySignal"
+}
 Assert-Contains -Text $architecture -Needle "shared action templates" -Message "Architecture doc missing shared action-template style contract."
 Assert-Contains -Text $architecture -Needle "WorkspaceActionButtonWithDetailTemplate" -Message "Architecture doc missing action-template detail contract."
 Assert-Contains -Text $architecture -Needle 'must not introduce inline `Button` controls' -Message "Architecture doc missing inline button prohibition."
@@ -1169,6 +1187,9 @@ foreach ($signal in @(
     "ManualConnectionPort",
     "DiscoveryTxtRecord",
     "PairingConnectionCode",
+    # BATCH 2 (B1) — smart-connection-code lease default carried in the input-defaults snapshot.
+    "ConnectionCodeLeaseMode",
+    "shortLived",
     "_skybridge._udp",
     "11550"
 )) {
@@ -1212,6 +1233,7 @@ foreach ($signal in @(
 Assert-Contains -Text $architecture -Needle "ManualConnectionClient" -Message "Architecture doc missing ManualConnectionClient status."
 
 foreach ($signal in @(
+    "CrossNetworkConnectionCodePolicy",
     "public interface ICrossNetworkConnectionClient",
     "public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient",
     "BuildCodeInputPolicy",
@@ -1225,7 +1247,10 @@ foreach ($signal in @(
     "HasQrInput",
     "HasGeneratedCode",
     "TryNormalizeConnectionCode",
-    "CodeLength",
+    "LegacyCodeLength",
+    "PreferredCodeLength",
+    "MaximumCodeLength",
+    "SupportedLengthDescription",
     "Alphabet",
     "BuildPendingStatus",
     "BuildDefaultPendingStatus",
@@ -1283,7 +1308,7 @@ foreach ($signal in @(
     "no signaling room registered",
     "FfiEngineClient"
 )) {
-    Assert-Contains -Text $crossNetwork -Needle $signal -Message "CrossNetworkConnectionClient missing QR/code boundary signal: $signal"
+    Assert-Contains -Text $crossNetworkCodeBoundary -Needle $signal -Message "Cross-network QR/code boundary missing signal: $signal"
 }
 
 Assert-Contains -Text $architecture -Needle "CrossNetworkConnectionClient" -Message "Architecture doc missing CrossNetworkConnectionClient status."
@@ -1480,12 +1505,16 @@ foreach ($signal in @(
     "BuildDefaultCompletedStatus",
     "DefaultCompletedStatusMessage",
     "BuildReadOnlySnapshotAsync",
+    "DeviceInformation.FindAllAsync",
+    "System.Devices.InterfaceClassGuid",
+    "UsbInformationProperties",
     "DriveInfo.GetDrives",
     "DriveType.Removable",
+    "MergeDevices",
     "UsbDeviceStat",
     "UsbDeviceItem",
-    "provider pending",
-    "not available via DriveInfo"
+    "no placeholder/fake rows",
+    "IReadOnlyList<string> Capabilities"
 )) {
     Assert-Contains -Text $usbManagement -Needle $signal -Message "UsbManagementWorkspaceClient missing Windows USB signal: $signal"
 }
@@ -1766,7 +1795,12 @@ foreach ($signal in @(
     "CoreChannelKind.Telemetry",
     "CoreChannelKind.Control",
     "EncodeSbp2FrameAsync",
-    "RemoteDesktopControlFact"
+    "RemoteDesktopControlFact",
+    # BATCH 2 (B2) — honest fail-closed Near/Far connection-mode status sourced from the
+    # backend (not a VM-local literal, not a transport claim).
+    "BuildNearFieldPendingStatus",
+    "DefaultNearFieldPendingStatus",
+    "BuildAdvancedConnectModeStatus"
 )) {
     Assert-Contains -Text $remoteDesktop -Needle $signal -Message "RemoteDesktopWorkspaceClient missing Core remote desktop signal: $signal"
 }
@@ -1820,7 +1854,15 @@ foreach ($signal in @(
     "BuildMonitoringDetail",
     "BuildAdvancedMonitoringDetail",
     "SystemMonitorMetric",
-    "SystemMonitorIndicator"
+    "SystemMonitorIndicator",
+    # BATCH 2 (B4) — REAL two-sample NetworkInterface byte-rate bandwidth sampler (Mbps), the
+    # honest unavailable Thermal tile (C14), and the partial-honest Insight rows (B5).
+    "CaptureBandwidthSample",
+    "GetIPv4Statistics",
+    "BytesReceived",
+    "BytesSent",
+    "Mbps",
+    "SystemMonitorInsight"
 )) {
     Assert-Contains -Text $systemMonitor -Needle $signal -Message "SystemMonitorWorkspaceClient missing Windows diagnostics signal: $signal"
 }

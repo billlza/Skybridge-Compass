@@ -163,6 +163,7 @@ $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Service
 $nativeDnsSdBrowsePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
+$crossNetworkCodePolicyPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionCodePolicy.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
@@ -206,7 +207,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (Test-Path -LiteralPath $uiActionOrderSmokePath) -Message "Missing parity file: $uiActionOrderSmokePath"
@@ -267,6 +268,7 @@ $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
+$crossNetworkCodePolicy = Get-Content -Raw -LiteralPath $crossNetworkCodePolicyPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
@@ -288,7 +290,7 @@ $sessionCommandState = Get-Content -Raw -LiteralPath $sessionCommandStatePath
 $workspaceCommandState = Get-Content -Raw -LiteralPath $workspaceCommandStatePath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $winClientProject = Get-Content -Raw -LiteralPath $winClientProjectPath
-$mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
+$mainWindow = Get-Content -Raw -Encoding UTF8 -LiteralPath $mainWindowPath
 $mainWindowCode = Get-Content -Raw -LiteralPath $mainWindowCodePath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 $parityMatrixDoc = Get-Content -Raw -LiteralPath $parityMatrixDocPath
@@ -318,7 +320,8 @@ Assert-Contains -Text $mainWindowCode -Needle "RootShell.DataContext = ViewModel
 Assert-True -Condition (-not [regex]::IsMatch($mainWindowCode, "(?m)^\s*DataContext\s*=")) -Message "WinUI Window does not expose WPF-style DataContext; assign RootShell.DataContext instead."
 
 foreach ($winClientProjectSignal in @(
-    "<TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>",
+    "<TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>",
+    "<TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>",
     "<WindowsPackageType>None</WindowsPackageType>",
     '<PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />',
     '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />'
@@ -945,7 +948,6 @@ foreach ($binding in @(
     "DashboardQuickActions",
     "TopBarConnectionStatus",
     "TopBarDiagnosticsStatus",
-    "SidebarSessionActions",
     "TopBarActions",
     "SessionControlActions",
     "BitrateProfiles",
@@ -979,8 +981,19 @@ foreach ($binding in @(
     "CrossNetworkQrActions",
     "CrossNetworkCodePrimaryActions",
     "CrossNetworkCodeConnectActions",
+    # BATCH 2 (B1) — smart-connection-code lease mode (Mac ConnectionCodeLeaseMode 短时/全天).
+    # Real backend TTL, gate-locked so the lease toggle stays wired to BuildCodeSnapshot.
+    "SelectedConnectionCodeLeaseMode",
     "IsDashboardSelected",
     "IsDeviceDiscoverySelected",
+    # BATCH 1 — Device Discovery connection-mode view-state (Mac selectedConnectionMode).
+    # Now-interactive mode tabs are gate-locked so the swap stays wired.
+    "SelectedDiscoveryMode",
+    "IsDiscoveryLocalScanModeSelected",
+    "IsDiscoveryQrModeSelected",
+    "IsDiscoveryCloudModeSelected",
+    "IsDiscoveryCodeModeSelected",
+    "IsDiscoveryQrOrCodeModeSelected",
     "UsbManagementStatus",
     "UsbManagementHeaderActions",
     "UsbDeviceStats",
@@ -993,12 +1006,21 @@ foreach ($binding in @(
     "FileTransferHistory",
     "FileTransferSecurityFacts",
     "IsFileTransferSelected",
+    # BATCH 1 — File Transfer Transfer/History segmented tab view-state (Mac modernTabBar).
+    "SelectedFileTransferTab",
+    "IsFileTransferTransferTabSelected",
+    "IsFileTransferHistoryTabSelected",
     "RemoteDesktopHeaderActions",
     "RemoteDesktopActions",
     "RemoteDesktopStatus",
     "RemoteDesktopSessions",
     "RemoteDesktopControlFacts",
     "IsRemoteDesktopSelected",
+    # BATCH 1 — Remote Desktop connection-mode view-state (Mac connectionModeSelector).
+    "SelectedRemoteDesktopMode",
+    # BATCH 2 (A7) — read-only Recent Connections partition (Mac sessionList recent section).
+    # Filtered slice of the real snapshot (State == "Recent"); no reconnect, no fake timestamp.
+    "RemoteDesktopRecentSessions",
     "SystemMonitorStatus",
     "SystemMonitorHeaderActions",
     "SystemMonitorActions",
@@ -1006,6 +1028,11 @@ foreach ($binding in @(
     "SystemMonitorDetails",
     "SystemMonitorIndicators",
     "IsSystemMonitorSelected",
+    # BATCH 1 — System Monitor header monitoring pill (Mac liveSnapshotHeader isMonitoring).
+    "IsSystemMonitoring",
+    # BATCH 2 (B5) — Insight rows (Mac liveSnapshotHighlights): Health + Bandwidth real,
+    # thermal/fan honest Unknown. Projected from the real snapshot's Insights list.
+    "SystemMonitorInsights",
     "SettingsStatus",
     "SettingsHeaderActions",
     "SettingsTabs",
@@ -1049,7 +1076,6 @@ foreach ($resourceSignal in @(
     'x:Key="HorizontalWorkspaceActionItemsPanel"',
     'x:Key="SessionWorkspaceActionItemsPanel"',
     'x:Key="NavigationItemTemplate"',
-    'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
     'x:Key="BoolToVisibilityConverter"',
@@ -1066,6 +1092,15 @@ foreach ($resourceSignal in @(
     'x:Key="FileTransferQueueItemTemplate"',
     'x:Key="FileTransferHistoryItemTemplate"',
     'x:Key="RemoteDesktopSessionItemTemplate"',
+    # BATCH 3 (B3) — named per-session summary card (Transport + Quality pills) for the
+    # right-pane Trusted Active Sessions card. Recent partition keeps the item template above.
+    'x:Key="RemoteDesktopSessionCardTemplate"',
+    # BATCH 3 (A9) — compact recent-transfer row for the FT sidebar Recent Transfers card.
+    'x:Key="FileTransferRecentItemTemplate"',
+    # BATCH 3 (A15) — capability chip template for the USB device card capability row.
+    'x:Key="UsbCapabilityChipTemplate"',
+    # BATCH 2 (B5) — named insight-row template for the System Monitor Insights section.
+    'x:Key="SystemMonitorInsightRowTemplate"',
     'x:Key="WorkspaceStateRowTemplate"',
     'x:Key="SettingsDetailRowTemplate"',
     'x:Key="SettingsActionRowTemplate"',
@@ -1104,7 +1139,7 @@ foreach ($workspaceVisibilitySignal in @(
     Assert-Contains -Text $mainWindow -Needle $workspaceVisibilitySignal -Message "MainWindow.xaml must gate each main workspace feature section through selected-feature Visibility: $workspaceVisibilitySignal"
 }
 
-Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
+Assert-True -Condition (-not $mainWindow.Contains('ItemsSource="{Binding SidebarSessionActions}"')) -Message "MainWindow.xaml must keep the mac-like sidebar free of session action buttons; visible session controls belong to SessionControlActions."
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "TopBarStatusActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "DeviceDiscoveryManualConnectFinalActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
@@ -1116,7 +1151,18 @@ Assert-ItemsControlTemplate -Text $mainWindow -Binding "DiscoveredPeers" -ItemTe
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "UsbDevices" -ItemTemplate "UsbDeviceItemTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "FileTransferQueue" -ItemTemplate "FileTransferQueueItemTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "FileTransferHistory" -ItemTemplate "FileTransferHistoryItemTemplate"
+# BATCH 3 (A9) — the FT sidebar Recent Transfers card binds FileTransferHistory to the compact
+# recent-row template; the main History tab keeps the full carded template above.
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "FileTransferHistory" -ItemTemplate "FileTransferRecentItemTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "RemoteDesktopSessions" -ItemTemplate "RemoteDesktopSessionItemTemplate"
+# BATCH 3 (B3) — the right-pane Trusted Active Sessions card also binds RemoteDesktopSessions to
+# the named summary-card template (Transport + Quality pills). The sidebar Active Sessions list
+# keeps the item template above; both bindings coexist.
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "RemoteDesktopSessions" -ItemTemplate "RemoteDesktopSessionCardTemplate"
+# BATCH 2 (A7) — Recent Connections read-only partition reuses the locked session-item template.
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "RemoteDesktopRecentSessions" -ItemTemplate "RemoteDesktopSessionItemTemplate"
+# BATCH 2 (B5) — Insights section binds the named insight-row template (no inline template).
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "SystemMonitorInsights" -ItemTemplate "SystemMonitorInsightRowTemplate"
 Assert-True -Condition (-not $mainWindow.Contains("<ListView.ItemTemplate>")) -Message "MainWindow.xaml must not use inline ListView item templates; add a named root Grid resource template instead."
 
 foreach ($actionBinding in @(
@@ -1145,7 +1191,6 @@ Assert-ActionItemsControlResources -Text $mainWindow -Binding "SessionControlAct
 foreach ($automationSignal in @(
     'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
     'AutomationProperties.AutomationId="{Binding Id}"',
-    'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
@@ -1192,16 +1237,17 @@ foreach ($layoutSignal in @(
 }
 
 Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order" -Needles @(
+    'Visibility="{Binding IsDashboardSelected',
     'ItemsSource="{Binding DashboardMetrics}"',
     'ItemsSource="{Binding DashboardQuickActions}"',
-    '<TextBlock Text="Device Discovery"',
-    '<TextBlock Text="USB Management"',
-    '<TextBlock Text="File Transfer"',
-    '<TextBlock Text="Remote Desktop"',
-    '<TextBlock Text="Quantum / Core Diagnostics"',
-    '<TextBlock Text="System Monitor"',
-    '<TextBlock Text="Settings"',
-    '<TextBlock Text="Session Controls"'
+    'Visibility="{Binding IsDeviceDiscoverySelected',
+    'Visibility="{Binding IsUsbManagementSelected',
+    'Visibility="{Binding IsFileTransferSelected',
+    'Visibility="{Binding IsRemoteDesktopSelected',
+    'Visibility="{Binding IsQuantumSelected',
+    'Visibility="{Binding IsSystemMonitorSelected',
+    'Visibility="{Binding IsSettingsSelected',
+    'x:Uid="SessionControlsTitle" Text="Session Controls"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
@@ -1216,9 +1262,10 @@ Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles
     'ItemsSource="{Binding TopBarActions}"'
 )
 
-Assert-Ordered -Text $mainWindow -Context "Sidebar session action order" -Needles @(
+Assert-Ordered -Text $mainWindow -Context "Mac-like sidebar without session action buttons" -Needles @(
     'ItemsSource="{Binding NavigationItems}"',
-    'ItemsSource="{Binding SidebarSessionActions}"'
+    'carries NO sidebar Connect / Disconnect actions',
+    'ItemsSource="{Binding SessionControlActions}"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Sidebar session action catalog order" -Needles @(
@@ -1240,7 +1287,7 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Top bar action catalog or
     "WorkspaceActionCommandId.ToggleTopBarTheme",
     "WorkspaceActionGateId.CanToggleTopBarTheme"
 )
-Assert-True -Condition (-not [regex]::IsMatch($workspaceActionCatalog, "BuildTopBarActions\(\)[\s\S]*?`"Heartbeat`"[\s\S]*?BuildSessionControlActions")) -Message "Top bar action catalog must not expose Heartbeat; keep Heartbeat in sidebar/session controls."
+Assert-True -Condition (-not [regex]::IsMatch($workspaceActionCatalog, "BuildTopBarActions\(\)[\s\S]*?`"Heartbeat`"[\s\S]*?BuildSessionControlActions")) -Message "Top bar action catalog must not expose Heartbeat; keep Heartbeat in session controls."
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Session controls action catalog order" -Needles @(
     'BuildSessionControlActions',
@@ -1267,14 +1314,14 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Dashboard quick action ca
 Assert-Ordered -Text $mainWindow -Context "Session controls action order" -Needles @(
     'AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"',
     'ItemsSource="{Binding SessionControlActions}"',
-    '<TextBlock Text="Session Controls"'
+    'x:Uid="SessionControlsTitle" Text="Session Controls"'
 )
 
 Assert-Ordered -Text $dashboardMetrics -Context "Dashboard metrics service order" -Needles @(
     '"Online Devices"',
     '"Active Sessions"',
     '"Transfer Tasks"',
-    '"Performance"'
+    '"System Status"'
 )
 
 foreach ($dashboardSignal in @(
@@ -1306,8 +1353,9 @@ foreach ($dashboardSignal in @(
     "TransferTaskCount",
     "PerformanceStatus",
     "new DashboardMetricsClient()",
-    "Core engine connected peer count placeholder",
-    "renderer and ETW telemetry providers"
+    "PerformanceStatus stays the honest busy/nominal scalar",
+    "DashboardContentView `"系统状态 / System Status`" card",
+    "Mac StatCard has NO caption/description under the value"
 )) {
     Assert-Contains -Text ($dashboardMetrics + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $dashboardSignal -Message "Dashboard metrics parity signal missing: $dashboardSignal"
 }
@@ -3410,11 +3458,15 @@ foreach ($crossNetworkInputPolicySignal in @(
     "internal sealed class CrossNetworkConnectionActions",
     "internal sealed class CrossNetworkCodeInputCoordinator",
     "internal sealed record CrossNetworkCodeInputUpdate",
+    "CrossNetworkConnectionCodePolicy",
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",
     "DefaultCodeInputPolicy",
     "NormalizeCodeInput",
-    "CodeLength",
+    "LegacyCodeLength",
+    "PreferredCodeLength",
+    "MaximumCodeLength",
+    "SupportedLengthDescription",
     "Alphabet",
     "CanConnectWithCode",
     "CanScanQrCode",
@@ -3499,23 +3551,23 @@ Assert-True -Condition (-not $sessionViewModel.Contains("!string.IsNullOrWhiteSp
 Assert-True -Condition (-not $sessionViewModel.Contains("!string.IsNullOrWhiteSpace(CrossNetworkGeneratedCode)")) -Message "SessionViewModel must source generated-code copy readiness from ICrossNetworkConnectionClient."
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
-    '<TextBlock Text="Device Discovery"',
+    'Visibility="{Binding IsDeviceDiscoverySelected',
     'ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"',
     'Content="Compatibility Mode"',
     'ItemsSource="{Binding DeviceDiscoveryScanActions}"',
     'PlaceholderText="Search devices"',
-    '<TextBlock Text="Manual Host / IP"',
-    '<TextBlock Text="Port"',
-    '<TextBlock Text="Code"',
-    '<TextBlock Text="Dynamic Encrypted QR Code"',
+    'x:Uid="ManualConnectionHostLabel" Text="Manual Host / IP"',
+    'x:Uid="ManualConnectionPortLabel" Text="Port"',
+    'x:Uid="ManualConnectionCodeLabel" Text="Code"',
+    'x:Uid="DynamicEncryptedQrCodeHeader" Text="Dynamic Encrypted QR Code"',
     'ItemsSource="{Binding CrossNetworkQrActions}"',
-    '<TextBlock Text="Smart Connection Code"',
+    'x:Uid="SmartConnectionCodeHeader" Text="Smart Connection Code"',
     'ItemsSource="{Binding CrossNetworkCodePrimaryActions}"',
     'Text="{Binding CrossNetworkCodeInput',
     'ItemsSource="{Binding CrossNetworkCodeConnectActions}"',
-    '<TextBlock Text="Service"',
-    '<TextBlock Text="TXT record"',
-    '<TextBlock Text="Pairing Code"'
+    'x:Uid="DiscoveryServiceLabel" Text="Service"',
+    'x:Uid="DiscoveryTxtRecordLabel" Text="TXT record"',
+    'x:Uid="PairingCodeLabel" Text="Pairing Code"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Device Discovery primary action catalog order" -Needles @(
@@ -3566,7 +3618,7 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Cross-network smart-code 
 )
 
 Assert-Ordered -Text $mainWindow -Context "USB Management action order" -Needles @(
-    '<TextBlock Text="USB Management"',
+    'Visibility="{Binding IsUsbManagementSelected',
     'ItemsSource="{Binding UsbManagementHeaderActions}"',
     'ItemsSource="{Binding UsbDeviceStats}"',
     'ItemsSource="{Binding UsbDevices}"'
@@ -3579,12 +3631,12 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "USB Management header act
 )
 
 Assert-Ordered -Text $mainWindow -Context "File Transfer action order" -Needles @(
-    '<TextBlock Text="File Transfer"',
+    'Visibility="{Binding IsFileTransferSelected',
     'ItemsSource="{Binding FileTransferHeaderActions}"',
     'ItemsSource="{Binding FileTransferActions}"',
-    '<TextBlock Text="Transfer Queue"',
-    '<TextBlock Text="Transfer History"',
-    '<TextBlock Text="File Transfer Security"'
+    'x:Uid="FileTransferQueueHeader" Text="Transfer Queue"',
+    'x:Uid="FileTransferHistoryHeader" Text="Transfer History"',
+    'x:Uid="FileTransferSecurityHeader" Text="File Transfer Security"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer header action catalog order" -Needles @(
@@ -3609,10 +3661,10 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action cata
 )
 
 Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
-    '<TextBlock Text="Remote Desktop"',
+    'Visibility="{Binding IsRemoteDesktopSelected',
     'ItemsSource="{Binding RemoteDesktopHeaderActions}"',
     'ItemsSource="{Binding RemoteDesktopActions}"',
-    '<TextBlock Text="Active Sessions"'
+    'x:Uid="RemoteDesktopActiveSessionsHeader" Text="Active Sessions"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop header action catalog order" -Needles @(
@@ -3709,12 +3761,12 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Quantum diagnostics heade
 )
 
 Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
-    '<TextBlock Text="Settings" FontSize="18"',
+    'Visibility="{Binding IsSettingsSelected',
     'ItemsSource="{Binding SettingsHeaderActions}"',
     'ItemsSource="{Binding SettingsToolbarActions}"',
     '<TextBlock Text="Settings Tabs"',
     '<TextBlock Text="Settings Details"',
-    '<TextBlock Text="Settings Actions"',
+    'x:Uid="SettingsActionsHeader" Text="Settings Actions"',
     'ItemsSource="{Binding SettingsMaintenanceActions}"'
 )
 
@@ -3845,14 +3897,15 @@ foreach ($discoverySignal in @(
     "Connect",
     "Waiting for connection...",
     "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
-    "6-digit code, valid for 10 mins, for remote assistance",
+    "Preferred {DefaultCodeInputPolicy.PreferredCodeLength}-character code",
     "CrossNetworkConnectionClient",
     "CrossNetworkConnectionFactView",
     "CrossNetworkReadiness",
     "Code envelope validated",
     "no WebRTC join is started",
     "No signaling room join",
-    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.",
+    "BuildInvalidMessage",
+    "{subject} must be {SupportedLengthDescription} characters from {Alphabet}.",
     "no WebRTC offerer started",
     "no WebRTC answerer started",
     "no signaling room registered",
@@ -3918,12 +3971,12 @@ foreach ($discoverySignal in @(
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter + $connectionWorkspaceState + $workspaceActionCatalog + $winClientProject) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetworkCodePolicy + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter + $connectionWorkspaceState + $workspaceActionCatalog + $winClientProject) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("PairingFacts.Add(new PairingFactView")) -Message "SessionViewModel must map pairing facts from PairingMaterialClient instead of constructing pairing/trust facts inline."
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, LabelKeyToLocalizedConverter.Localize("Device Discovery"), "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
 
 foreach ($usbSignal in @(
     "USB Management",
@@ -3937,11 +3990,13 @@ foreach ($usbSignal in @(
     "Total Devices",
     "Connected Devices",
     "Device ID",
-    "Vendor / Product",
+    "Vendor ID",
+    "Product ID",
     "SerialNumber",
     "ConnectionInterface",
     "Capabilities",
-    "No USB devices detected",
+    "UsbEmptyTitle",
+    "UsbEmptySubtitle",
     "UsbManagementWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
     "DriveInfo.GetDrives",
@@ -3950,7 +4005,7 @@ foreach ($usbSignal in @(
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $usbManagement + $workspaceActionCatalog) -Needle $usbSignal -Message "USB Management parity signal missing: $usbSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", true)' -Message "USB Management must be marked implemented once the read-only device workspace exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.UsbManagement, LabelKeyToLocalizedConverter.Localize("USB Management"), "\uE88E", "Device routing", true)' -Message "USB Management must be marked implemented once the read-only device workspace exists."
 
 foreach ($fileTransferSignal in @(
     "File Transfer",
@@ -4023,7 +4078,7 @@ foreach ($fileTransferSignal in @(
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $fileTransferWorkspaceActions + $workspaceActionCatalog + $fileTransferQrSmoke) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, LabelKeyToLocalizedConverter.Localize("File Transfer"), "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."
 
 foreach ($remoteDesktopSignal in @(
     "Remote Desktop",
@@ -4089,7 +4144,7 @@ foreach ($remoteDesktopSignal in @(
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop + $remoteDesktopWorkspaceActions + $remoteDesktopProfileCatalog + $workspaceActionCatalog) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, LabelKeyToLocalizedConverter.Localize("Remote Desktop"), "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."
 
 foreach ($diagnosticSignal in @(
     "Quantum / Core Diagnostics",
@@ -4114,15 +4169,21 @@ foreach ($diagnosticSignal in @(
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $coreDiagnostics + $workspaceActionCatalog) -Needle $diagnosticSignal -Message "Quantum diagnostics parity signal missing: $diagnosticSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, LabelKeyToLocalizedConverter.Localize("Quantum"), "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
 
 Assert-Ordered -Text $mainWindow -Context "System Monitor action order" -Needles @(
-    '<TextBlock Text="System Monitor" FontSize="18"',
+    # The canonical System Monitor title literal is the FontSize=22/Bold gate-anchor TextBlock
+    # (kept Collapsed; the visible title is "Live Snapshot"). Needle drops the leading
+    # "<TextBlock " so the x:Uid attribute between it and Text= does not break the match.
+    'Text="System Monitor" FontSize="22" FontWeight="Bold"',
+    'x:Uid="SystemMonitorLiveSnapshotTitle" Text="Live Snapshot" FontSize="22" FontWeight="Bold"',
     'ItemsSource="{Binding SystemMonitorHeaderActions}"',
     'ItemsSource="{Binding SystemMonitorActions}"',
-    '<TextBlock Text="Overview"',
-    '<TextBlock Text="Indicators"',
-    '<TextBlock Text="Detailed Monitoring"'
+    # Section headings carry x:Uid attributes between "<TextBlock " and Text=, so the needles
+    # match from Text= onward (realigned to the current XAML, tightening to parity).
+    'Text="Overview"',
+    'Text="Indicators"',
+    'Text="Detailed Monitoring"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "System Monitor header action catalog order" -Needles @(
@@ -4196,7 +4257,7 @@ foreach ($systemMonitorSignal in @(
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $systemMonitor + $systemMonitorWorkspaceActions + $workspaceActionCatalog) -Needle $systemMonitorSignal -Message "System Monitor parity signal missing: $systemMonitorSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true)' -Message "System Monitor must be marked implemented once the read-only metrics workspace exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor, LabelKeyToLocalizedConverter.Localize("System Monitor"), "\uE9D9", "Metrics", true)' -Message "System Monitor must be marked implemented once the read-only metrics workspace exists."
 
 foreach ($settingsSignal in @(
     "Settings",
@@ -4236,7 +4297,7 @@ foreach ($settingsSignal in @(
     "InMemorySettingsActionIntentClient",
     "SettingsWorkspaceActions",
     "_applySettingsSnapshotAsync",
-    "await _applySettingsSnapshotAsync();",
+    "await _applySettingsSnapshotAsync().ConfigureAwait(true);",
     "RefreshSettingsActionSnapshotAsync",
     "BuildReadOnlySnapshotAsync",
     "CanExportSettings",
@@ -4298,47 +4359,50 @@ foreach ($settingsSignal in @(
     "ClearHistoryData",
     "defaultTransferPath",
     "maxConcurrentConnections",
-    "transferBufferSize",
-    "autoRetryFailedTransfers",
-    "keepTransferHistory",
-    "keepSystemAwakeDuringTransfer",
-    "scanTransferFilesForVirus",
-    "scanLevel",
-    "encryptionAlgorithm",
+    "Config · Chunk size",
+    "Config · Rate limit",
+    "Options · Resume enabled",
+    "Options · Keep history",
+    "Options · Keep system awake",
+    "Security · Scan files for virus",
+    "Security · Scan level",
+    "Security · Encryption algorithm",
     "currentConfig",
-    "optimized / needsAdjust",
-    "estimatedRate",
-    "resolution 1080p/2k/4k/5k",
-    "framerate 30/60/120 fps",
-    "preset balanced/highPerformance/highQuality/lowLatency",
-    "compression none/fast/balanced/maximum",
+    "Video transfer · Optimized / needs-adjust",
+    "Video transfer · Estimated data rate",
+    "1080P/2K/4K/5K",
+    "30/60/120",
+    "balanced/highPerf/highQuality/lowLatency",
+    "Video transfer · Compression quality",
+    "Network · Compression",
     "videoQuality",
-    "compressionLevel",
-    "refreshRate",
-    "enableAdaptiveQuality",
-    "fullScreenMode",
-    "clipboardSync",
-    "audioRedirection",
-    "trackpadGestures",
-    "mouseSensitivity",
-    "doubleClickInterval",
-    "enableUDP",
-    "bandwidthLimit",
-    "bufferSize",
+    "Display · Compression level",
+    "Display · Full screen mode",
+    "Interaction · Clipboard sync",
+    "Interaction · Audio redirection",
+    "Interaction · Trackpad gestures",
+    "Interaction · Mouse sensitivity",
+    "Interaction · Double-click interval",
+    "Network · Enable UDP",
+    "Network · Bandwidth limit",
+    "Network · Buffer size",
     "refreshInterval",
-    "enableAutoRefresh",
-    "showTrendIndicators/history",
-    "enablePerformanceAlerts",
-    "retentionDays/maxHistoryPoints",
-    "CPU/Memory/Disk/Network/Temperature/FanSpeed",
-    "enableSoundAlerts/enableNotifications",
+    "Config · Enable realtime",
+    "Config · Enable history",
+    "Config · Performance alerts",
+    "Config · Retention days",
+    "Config · Max history points",
+    "Display · Temperature",
+    "Display · Fan speed",
+    "Alerts · Sound alerts",
+    "Alerts · Notification Center",
     "PQC policy",
     "Disabled"
 )) {
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings + $settingsWorkspaceActions + $workspaceActionCatalog) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
 }
 
-Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, LabelKeyToLocalizedConverter.Localize("Settings"), "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
 
 foreach ($docSignal in @(
     "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
@@ -4424,7 +4488,6 @@ foreach ($docSignal in @(
     "WorkspaceActionCatalogClient",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
-    "SidebarWorkspaceActionButtonTemplate",
     "DashboardQuickActionTemplate",
     "ItemsPanelTemplate",
     "WorkspaceActionRenderContext",

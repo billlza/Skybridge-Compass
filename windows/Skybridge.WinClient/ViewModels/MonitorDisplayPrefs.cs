@@ -37,8 +37,8 @@ public sealed class MonitorDisplayPrefs
             _ when l.Contains("cpu") => ShowCpu,
             _ when l.Contains("内存") || l.Contains("memory") => ShowMemory,
             _ when l.Contains("磁盘") || l.Contains("disk") => ShowDisk,
-            _ when l.Contains("网络") || l.Contains("network") => ShowNetwork,
-            _ when l.Contains("温度") || l.Contains("temp") => ShowTemperature,
+            _ when l.Contains("网络") || l.Contains("network") || l.Contains("bandwidth") => ShowNetwork,
+            _ when l.Contains("温度") || l.Contains("temp") || l.Contains("thermal") => ShowTemperature,
             _ when l.Contains("风扇") || l.Contains("fan") => ShowFanSpeed,
             _ => true
         };

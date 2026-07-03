@@ -62,11 +62,13 @@ internal sealed class WorkspaceSnapshotApplier
         SystemMonitorWorkspaceSnapshot snapshot,
         ObservableCollection<SystemMonitorMetricView> overview,
         ObservableCollection<SystemMonitorMetricView> details,
-        ObservableCollection<SystemMonitorIndicatorView> indicators)
+        ObservableCollection<SystemMonitorIndicatorView> indicators,
+        ObservableCollection<SystemMonitorInsightView> insights)
     {
         WorkspaceCollectionProjector.Replace(overview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
         WorkspaceCollectionProjector.Replace(details, snapshot.Details, SystemMonitorMetricView.FromMetric);
         WorkspaceCollectionProjector.Replace(indicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
+        WorkspaceCollectionProjector.Replace(insights, snapshot.Insights, SystemMonitorInsightView.FromInsight);
         _countNotifier.SystemMonitorMetricsChanged();
     }
 

@@ -27,7 +27,8 @@ public interface IUsbManagementWorkspaceClient
 ///
 /// Enumeration is REAL and in-framework (no extra NuGet package): it uses the
 /// WinRT <see cref="DeviceInformation.FindAllAsync(string)"/> projection — already on the
-/// app's <c>net10.0-windows10.0.19041.0</c> TFM and already exercised elsewhere
+/// app's <c>net10.0-windows10.0.22621.0</c> TFM with TargetPlatformMinVersion
+/// <c>10.0.19041.0</c> and already exercised elsewhere
 /// (WeatherClient consumes Windows.Devices.Geolocation) — against the
 /// <see cref="Windows.Devices.Usb.UsbDevice.GetDeviceSelector()"/> AQS selector, which is
 /// what surfaces real Vendor/Product IDs. The DriveInfo removable-volume pass is kept and
@@ -395,7 +396,11 @@ public sealed class UsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
                 : string.Empty,
             SerialNumber ?? string.Empty,
             ConnectionInterface,
-            Capabilities.Count == 0 ? string.Empty : string.Join("; ", Capabilities),
+            // A15 — pass the capability strings through as a list (no string.Join); the
+            // view projects them to chips. A copied list keeps the record value-immutable.
+            Capabilities.Count == 0
+                ? System.Array.Empty<string>()
+                : Capabilities.ToList(),
             DeviceTypeKind.ToKey(),
             IsMfiCertified);
     }
@@ -459,6 +464,11 @@ public sealed record UsbDeviceItem(
     string ProductId,
     string SerialNumber,
     string ConnectionInterface,
-    string Capabilities,
+    // A15 — the REAL per-device capability strings (e.g. "USB", "Connected", a drive
+    // format, "<n> GB total/free"), kept as a list so the Mac LazyVGrid chip parity can
+    // render each as its own chip instead of one joined "a; b; c" line. The values come
+    // straight from the enumeration pass and stay non-localized (device formats / "USB" /
+    // "Connected"). An empty list renders no chip row (honest — no fabricated capability).
+    IReadOnlyList<string> Capabilities,
     string DeviceTypeKey,
     bool IsMfiCertified);

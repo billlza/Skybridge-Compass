@@ -168,7 +168,7 @@ $expectedFeatures = [ordered]@{
     }
 }
 
-$globalSurfaces = @("SidebarSession", "TopBarActions", "SessionControls")
+    $globalSurfaces = @("TopBarActions", "SessionControls")
 $expectedSizes = @(
     @{ Width = 1280; Height = 900 },
     @{ Width = 1366; Height = 768 }
@@ -204,7 +204,7 @@ foreach ($featureName in $expectedFeatures.Keys) {
             "Skybridge.SelectedFeature.Title",
             "WorkspaceAction.TopBarActions.Notifications",
             "WorkspaceAction.TopBarActions.Theme",
-            "WorkspaceAction.SidebarSession.Connect",
+            "WorkspaceAction.SessionControls.Connect",
             $feature.Anchor
         )) {
             Assert-True -Condition ($anchorIds -contains $requiredAnchor) -Message "Evidence capture missing anchor $requiredAnchor for $featureName."

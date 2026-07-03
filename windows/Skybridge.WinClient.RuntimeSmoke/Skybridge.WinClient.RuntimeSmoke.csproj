@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CoreBridge.cs" Link="Services\CoreBridge.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ConnectionLaunchRequest.cs" Link="Services\ConnectionLaunchRequest.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ConnectionPreflightClient.cs" Link="Services\ConnectionPreflightClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CrossNetworkConnectionCodePolicy.cs" Link="Services\CrossNetworkConnectionCodePolicy.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CurrentPathSignalingClient.cs" Link="Services\CurrentPathSignalingClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CurrentPathWebRtcHelperSignalingBridge.cs" Link="Services\CurrentPathWebRtcHelperSignalingBridge.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CurrentPathWebRtcProductControlSessionConnector.cs" Link="Services\CurrentPathWebRtcProductControlSessionConnector.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\DiscoveryClient.cs" Link="Services\DiscoveryClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FfiEngineClient.cs" Link="Services\FfiEngineClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\IEngineClient.cs" Link="Services\IEngineClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ISkyBridgeDataPlane.cs" Link="Services\ISkyBridgeDataPlane.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\PairingMaterialClient.cs" Link="Services\PairingMaterialClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SkyBridgeDataPlaneClient.cs" Link="Services\SkyBridgeDataPlaneClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcAppControlBootstrapClient.cs" Link="Services\WebRtcAppControlBootstrapClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcControlChannelCodec.cs" Link="Services\WebRtcControlChannelCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcHelperLaunchClient.cs" Link="Services\WebRtcHelperLaunchClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlPlaneClient.cs" Link="Services\WebRtcProductControlPlaneClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeDriver.cs" Link="Services\WebRtcProductHandshakeDriver.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeCodec.cs" Link="Services\WebRtcProductHandshakeCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeIdentity.cs" Link="Services\WebRtcProductHandshakeIdentity.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeSessionKeys.cs" Link="Services\WebRtcProductHandshakeSessionKeys.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductPqcHandshakeCryptoProvider.cs" Link="Services\WebRtcProductPqcHandshakeCryptoProvider.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductSecureSessionStore.cs" Link="Services\WebRtcProductSecureSessionStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlRuntime.cs" Link="Services\WebRtcProductControlRuntime.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSignalDocument.cs" Link="Services\WebRtcSignalDocument.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSessionRuntime.cs" Link="Services\WebRtcSessionRuntime.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSessionTransportAdapterClient.cs" Link="Services\WebRtcSessionTransportAdapterClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsTransportAdapterClient.cs" Link="Services\WindowsTransportAdapterClient.cs" />
+  </ItemGroup>
+</Project>

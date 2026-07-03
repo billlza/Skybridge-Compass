@@ -277,6 +277,7 @@ $featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
 $actionCatalog = Get-Content -Raw -LiteralPath $actionCatalogPath
 $actionOrderSmoke = Get-Content -Raw -LiteralPath $actionOrderSmokePath
 $paritySmoke = Get-Content -Raw -LiteralPath $paritySmokePath
+$gitObjectDatabaseAvailable = (Invoke-Git -Arguments @("rev-parse", "--git-dir")).ExitCode -eq 0
 
 $macBaselineCommit = "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c"
 $macBaselinePaths = @(
@@ -362,7 +363,13 @@ Assert-Contains -Text $matrix -Needle "Mac baseline commit: ``$macBaselineCommit
 foreach ($macPath in $macBaselinePaths) {
     $macObject = "${macBaselineCommit}:$macPath"
     Assert-Contains -Text $matrix -Needle "``$macObject``" -Message "UI parity matrix must use immutable mac source object: $macObject"
-    Assert-True -Condition (Test-GitObjectExists -ObjectName $macObject) -Message "Pinned mac source object is not available in this repository: $macObject"
+    if ($gitObjectDatabaseAvailable) {
+        Assert-True -Condition (Test-GitObjectExists -ObjectName $macObject) -Message "Pinned mac source object is not available in this repository: $macObject"
+    }
+}
+
+if (-not $gitObjectDatabaseAvailable) {
+    Assert-Contains -Text $matrix -Needle 'exported work-copy verification without `.git`' -Message "UI parity matrix must document how no-.git work-copy verification preserves mac baseline evidence."
 }
 
 $macSignalRows = Get-MarkdownTableRows `
@@ -379,9 +386,11 @@ for ($macSignalIndex = 0; $macSignalIndex -lt $macBaselineSignals.Count; $macSig
     Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required ordered mac symbols') -Expected $expected.Symbols -Context "Mac baseline signal symbols for $($expected.Source)"
     Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Windows parity anchor') -Expected $expected.Anchors -Context "Mac baseline Windows anchors for $($expected.Source)"
 
-    $macObject = "${macBaselineCommit}:$($expected.Path)"
-    $macText = Get-GitObjectText -ObjectName $macObject
-    Assert-Ordered -Text $macText -Needles $expected.Symbols -Context "Pinned mac source signals for $($expected.Source)"
+    if ($gitObjectDatabaseAvailable) {
+        $macObject = "${macBaselineCommit}:$($expected.Path)"
+        $macText = Get-GitObjectText -ObjectName $macObject
+        Assert-Ordered -Text $macText -Needles $expected.Symbols -Context "Pinned mac source signals for $($expected.Source)"
+    }
 }
 
 $featureRows = @(
@@ -456,8 +465,7 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow selected workspace visibil
 Assert-Ordered -Text $mainWindow -Context "MainWindow global shell anchor order" -Needles @(
     'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
     'ItemsSource="{Binding NavigationItems}"',
-    'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
-    'ItemsSource="{Binding SidebarSessionActions}"',
+    'carries NO sidebar Connect / Disconnect actions',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
@@ -489,7 +497,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
 )
 
 foreach ($templateSignal in @(
-    '<DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">',
     '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
@@ -503,12 +510,9 @@ foreach ($templateSignal in @(
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
 
-Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 5 -Message "MainWindow must render action buttons only through the five shared action templates."
+Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must render catalog action buttons through the four shared action templates without reintroducing sidebar session buttons."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
-    'ItemsSource="{Binding SidebarSessionActions}"',
-    'ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"',
-    'ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}"',
     'ItemsSource="{Binding TopBarActions}"',
     'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
     'ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}"',
@@ -522,11 +526,11 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usa
     'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
     'ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}"'
 )
+Assert-True -Condition (-not $mainWindow.Contains('ItemsSource="{Binding SidebarSessionActions}"')) -Message "MainWindow must keep the mac-like sidebar free of visible SidebarSessionActions."
 
 foreach ($styleMatrixSignal in @(
     "Shared Style And Template Matrix",
     "Mac baseline commit",
-    "SidebarWorkspaceActionButtonTemplate",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
     "TopBarStatusActionButtonTemplate",
@@ -646,7 +650,6 @@ $styleRows = Get-MarkdownTableRows `
     -Heading "Shared Style And Template Matrix" `
     -Columns @("Region", "Required shared template", "Required panel/style ownership")
 $expectedStyleRows = @(
-    [pscustomobject]@{ Region = "Sidebar session actions"; Template = "SidebarWorkspaceActionButtonTemplate"; Panel = "VerticalWorkspaceActionItemsPanel" },
     [pscustomobject]@{ Region = "Top-bar actions"; Template = "TopBarStatusActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },
     [pscustomobject]@{ Region = "Dashboard quick actions"; Template = "DashboardQuickActionTemplate"; Panel = "DashboardQuickActionItemsPanel" },
     [pscustomobject]@{ Region = "Workspace action surfaces"; Template = "WorkspaceActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },

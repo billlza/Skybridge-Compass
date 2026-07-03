@@ -19,6 +19,7 @@ $sourceFiles = @()
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
+$sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/Converters/LabelKeyToLocalizedConverter.cs"
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandGateCoordinator.cs"
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandAvailability.cs"
 
@@ -46,7 +47,9 @@ try {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -55,7 +58,10 @@ try {
 $compileItemText
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 </Project>
 "@
@@ -1212,6 +1218,10 @@ sealed class TestRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
     public string BuildRecommendedConnectPendingStatus() => "Preparing recommended session...";
 
     public string BuildAdvancedConnectPendingStatus() => "Preparing advanced session...";
+
+    public string BuildNearFieldPendingStatus() => "Preparing near-field connection...";
+
+    public string BuildAdvancedConnectModeStatus() => "Preparing advanced connection mode...";
 
     public string BuildPerformanceOverlayPendingStatus() => "Preparing performance overlay...";
 

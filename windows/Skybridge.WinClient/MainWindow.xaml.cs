@@ -152,6 +152,68 @@ public sealed partial class MainWindow : Window
         ViewModel.ToggleAccountOverlay();
     }
 
+    // BATCH 1 — view-state selection via Border.Tapped (NOT a raw Button, so the gated
+    // inline-<Button> budget is unchanged). Each tappable Border carries its mode/tab in
+    // FrameworkElement.Tag; the handler parses it and routes to the VM's pure view-state
+    // setter. Mirrors the Mac segmented controls / modernTabBar selection.
+
+    // Device Discovery connection-mode tab tapped (Tag = LocalScan / Qr / Cloud / Code).
+    private void OnDiscoveryModeTabTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element &&
+            element.Tag is string tag &&
+            Enum.TryParse<DiscoveryMode>(tag, ignoreCase: true, out var mode))
+        {
+            ViewModel.SelectDiscoveryMode(mode);
+        }
+    }
+
+    // Remote Desktop connection-mode segment tapped (Tag = Auto / Near / Far).
+    private void OnRemoteDesktopModeTabTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element &&
+            element.Tag is string tag &&
+            Enum.TryParse<RemoteDesktopConnectionMode>(tag, ignoreCase: true, out var mode))
+        {
+            ViewModel.SelectRemoteDesktopMode(mode);
+        }
+    }
+
+    // File Transfer segmented tab tapped (Tag = "0" Transfer / "1" History).
+    private void OnFileTransferTabTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element &&
+            element.Tag is string tag &&
+            int.TryParse(tag, out var tab))
+        {
+            ViewModel.SelectFileTransferTab(tab);
+        }
+    }
+
+    // BATCH 2 — A13: System Monitor advanced-monitoring banner tapped. Routes through the
+    // EXISTING, real EnableAdvancedSystemMonitoringCommand (in-memory honest advanced client)
+    // when it is currently executable; the whole Border is the affordance (no raw Button).
+    private void OnEnableAdvancedMonitoringBannerTapped(object sender, TappedRoutedEventArgs e)
+    {
+        var command = ViewModel.EnableAdvancedSystemMonitoringCommand;
+        if (command is not null && command.CanExecute(null))
+        {
+            command.Execute(null);
+        }
+    }
+
+    // BATCH 2 — B1: smart-connection-code lease-mode segment tapped (Tag = ShortLived / DayStable).
+    // Sets the real lease mode that drives the generated-code TTL (no raw Button).
+    private void OnConnectionCodeLeaseModeTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element &&
+            element.Tag is string tag &&
+            Enum.TryParse<Skybridge.WinClient.Services.CrossNetworkCodeLeaseMode>(tag, ignoreCase: true, out var mode))
+        {
+            ViewModel.SelectConnectionCodeLeaseMode(mode);
+        }
+    }
+
     // Export settings: a FileSavePicker initialized with this window's HWND (required unpackaged).
     // Returns the chosen path, or null on cancel. Defensive — any picker failure yields null and
     // the action reports the honest cancel/fail message.

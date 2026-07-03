@@ -417,16 +417,14 @@ public sealed partial class WeatherBackdropDX : UserControl
         }
 
         // 1. Compile VS + PS from the embedded HLSL (FXC, Shader Model 5.0).
-        //    Overload: (source, ShaderMacro[] defines, Include include, entryPoint, sourceName,
-        //    profile, ShaderFlags, out Blob, out Blob errorBlob). defines/include are null.
         Compiler.Compile(
-            WeatherHlsl, null, null, "VSMain", "WeatherBackdrop.hlsl", "vs_5_0",
-            ShaderFlags.None, out Blob vsBlob, out Blob vsError).CheckError();
+            WeatherHlsl, "VSMain", "WeatherBackdrop.hlsl", "vs_5_0",
+            out Blob vsBlob, out Blob vsError).CheckError();
         vsError?.Dispose();
 
         Compiler.Compile(
-            WeatherHlsl, null, null, "PSMain", "WeatherBackdrop.hlsl", "ps_5_0",
-            ShaderFlags.None, out Blob psBlob, out Blob psError).CheckError();
+            WeatherHlsl, "PSMain", "WeatherBackdrop.hlsl", "ps_5_0",
+            out Blob psBlob, out Blob psError).CheckError();
         psError?.Dispose();
 
         using (vsBlob)

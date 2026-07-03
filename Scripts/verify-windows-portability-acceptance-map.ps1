@@ -137,7 +137,9 @@ foreach ($signal in @(
 
 foreach ($signal in @(
     "Technology stack check",
-    "net10.0-windows10.0.19041.0",
+    "net10.0-windows10.0.22621.0",
+    "TargetPlatformMinVersion",
+    "10.0.19041.0",
     "Microsoft.WindowsAppSDK",
     "2.2.0",
     "Microsoft.Windows.SDK.BuildTools",

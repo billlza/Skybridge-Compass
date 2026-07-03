@@ -42,7 +42,8 @@ internal sealed class ReadOnlyWorkspaceSnapshotHandlers
             snapshot,
             _collections.SystemMonitorOverview,
             _collections.SystemMonitorDetails,
-            _collections.SystemMonitorIndicators);
+            _collections.SystemMonitorIndicators,
+            _collections.SystemMonitorInsights);
 
     public void ApplySettings(SettingsWorkspaceSnapshot snapshot) =>
         _snapshotApplier.ApplySettings(

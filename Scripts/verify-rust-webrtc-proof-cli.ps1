@@ -24,7 +24,9 @@ function Assert-True {
 }
 
 $manifestPath = Join-Path $RepoRoot "core/skybridge-core/Cargo.toml"
+$cliEntryPath = Join-Path $RepoRoot "core/skybridge-core/src/bin/skybridge.rs"
 Assert-True -Condition (Test-Path -LiteralPath $manifestPath) -Message "Missing Rust Core Cargo manifest: $manifestPath"
+Assert-True -Condition (Test-Path -LiteralPath $cliEntryPath) -Message "Missing Rust CLI bin entrypoint: $cliEntryPath"
 Assert-True -Condition (Test-Path -LiteralPath $ProofPath) -Message "Missing WebRTC proof file: $ProofPath"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) -Message "Rust WebRTC proof CLI requires -ExpectedDeviceId."
 Assert-True -Condition ($ExpectedFingerprint -match '^[0-9a-f]{64}$') -Message "Rust WebRTC proof CLI requires -ExpectedFingerprint as 64 lowercase hex characters."

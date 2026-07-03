@@ -1607,4 +1607,77 @@
   <data name="DiscoveryRecentNoteBody.Text" xml:space="preserve">
     <value>Windows側で接続履歴の保存に対応すると、最近接続したデバイスがここに表示されます。</value>
   </data>
+  <data name="SystemMonitorLiveSnapshotTitle.Text" xml:space="preserve">
+    <value>ライブスナップショット</value>
+    <comment>システム監視の表示タイトル（Mac liveSnapshotHeader "Live Snapshot"）。</comment>
+  </data>
+  <data name="SystemMonitorLiveSnapshotSubtitle.Text" xml:space="preserve">
+    <value>現在の健全性・負荷・ネットワーク・熱余裕をまとめて表示する統合モニター。</value>
+    <comment>システム監視のサブタイトル（Mac liveSnapshotHeader サブ見出し）。</comment>
+  </data>
+  <data name="SystemMonitorMonitoringPill.Text" xml:space="preserve">
+    <value>監視中</value>
+    <comment>システム監視ヘッダーのステータスピル（Mac liveSnapshotHeader 監視中カプセル）。</comment>
+  </data>
+  <data name="DiscoveryCloudNoteTitle.Text" xml:space="preserve">
+    <value>iCloud 設定不要</value>
+    <comment>クラウドリンクモードの注記タイトル（Mac iCloud 設定不要セクション）。</comment>
+  </data>
+  <data name="DiscoveryCloudNoteBody.Text" xml:space="preserve">
+    <value>iCloud デバイス同期は Apple デバイスで利用できます。この Windows クライアントは LAN スキャン・QR・接続コードで接続します。</value>
+    <comment>クラウドリンクモードの注記本文（iCloud は Apple 専用）。</comment>
+  </data>
+  <data name="FileTransferTabTransfer.Text" xml:space="preserve">
+    <value>転送</value>
+    <comment>ファイル転送セグメントタブ（Mac modernTabBar 転送タブ）。</comment>
+  </data>
+  <data name="FileTransferTabHistory.Text" xml:space="preserve">
+    <value>履歴</value>
+    <comment>ファイル転送セグメントタブ（Mac modernTabBar 履歴タブ）。</comment>
+  </data>
+  <!-- ============================ Batch 2 (System Monitor + cross-net lease) ============================ -->
+  <data name="SystemMonitorAdvancedBannerTitle.Text" xml:space="preserve">
+    <value>詳細モニタリングを有効化</value>
+    <comment>A13 詳細モニタリングバナーのタイトル（Mac advancedMonitoringNotice）。</comment>
+  </data>
+  <data name="SystemMonitorAdvancedBannerBody.Text" xml:space="preserve">
+    <value>追加の読み取り専用診断をメモリ内のみで表示します。ヘルパーのインストールも権限昇格も行いません。</value>
+    <comment>A13 詳細モニタリングバナーの正直な説明（メモリ内のみ、ヘルパー/昇格なし）。</comment>
+  </data>
+  <data name="SystemMonitorInsightsHeading.Text" xml:space="preserve">
+    <value>インサイト</value>
+    <comment>システムモニターのインサイトセクション見出し（Mac liveSnapshotHighlights）。</comment>
+  </data>
+  <data name="SysMonLabel.Bandwidth" xml:space="preserve">
+    <value>帯域</value>
+    <comment>メトリックタイルのラベル「帯域」（B4 リアルタイムスループットサンプラー）。</comment>
+  </data>
+  <data name="SysMonCaption.Throughput" xml:space="preserve">
+    <value>スループット</value>
+    <comment>帯域タイルのメトリックキャプション。</comment>
+  </data>
+  <data name="SysMonCaption.Temperature" xml:space="preserve">
+    <value>温度</value>
+    <comment>温度タイルのメトリックキャプション（正直に利用不可）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseShort.Text" xml:space="preserve">
+    <value>短時間</value>
+    <comment>B1 接続コードのリースセグメント（Mac 短时、shortLived、10 分の有効期限）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseDay.Text" xml:space="preserve">
+    <value>終日</value>
+    <comment>B1 接続コードのリースセグメント（Mac 全天、dayStable、24 時間の有効期限）。</comment>
+  </data>
+  <data name="DiscoveryCodeLeaseHint.Text" xml:space="preserve">
+    <value>短時間コードは 10 分で失効し、終日コードは 24 時間有効です。</value>
+    <comment>B1 接続コードのリースヒント（Mac リースモードのヒントテキスト）。</comment>
+  </data>
+  <data name="RemoteDesktopCardTransportLabel.Text" xml:space="preserve">
+    <value>トランスポート</value>
+    <comment>B3 per-session summary card Transport pill label. Mac remoteMetricPill transport.</comment>
+  </data>
+  <data name="RemoteDesktopCardQualityLabel.Text" xml:space="preserve">
+    <value>画質</value>
+    <comment>B3 per-session summary card Quality pill label. Mac remoteMetricPill quality.</comment>
+  </data>
 </root>

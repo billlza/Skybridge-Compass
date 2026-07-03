@@ -535,6 +535,11 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     private const string CoreOwned = "Core-owned";
     private const string NotPersisted = "Not persisted";
     private const string NotWired = "Not wired";
+    private const string DefaultTransferPathKey = "defaultTransferPath";
+    private const string MaxConcurrentConnectionsKey = "maxConcurrentConnections";
+    private const string CurrentConfigKey = "currentConfig";
+    private const string VideoQualityKey = "videoQuality";
+    private const string RefreshIntervalKey = "refreshInterval";
 
     private static IReadOnlyList<SettingsDetailItem> BuildDetails(
         SettingsExportPreviewSnapshot exportPreview,
@@ -632,8 +637,8 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     private static void AppendFileTransfer(List<SettingsDetailItem> d)
     {
         // Card: Config / 配置
-        d.Add(new("File Transfer", "Config · Default path", "~/Downloads (default)", DisplayOnly + ". Receive directory picker is visible; saving the path is not wired on Windows."));
-        d.Add(new("File Transfer", "Config · Max concurrent transfers", "10 (default)", NotPersisted + ". Runtime concurrency must be applied through the file-transfer settings bridge."));
+        d.Add(new("File Transfer", "Config · Default path", "~/Downloads (default)", $"{DisplayOnly}. Settings key: {DefaultTransferPathKey}. Receive directory picker is visible; saving the path is not wired on Windows."));
+        d.Add(new("File Transfer", "Config · Max concurrent transfers", "10 (default)", $"{NotPersisted}. Settings key: {MaxConcurrentConnectionsKey}. Runtime concurrency must be applied through the file-transfer settings bridge."));
         d.Add(new("File Transfer", "Config · Chunk size", "128 KB (default · 64/128/256/512 KB, 1 MB)", NotPersisted + "."));
         d.Add(new("File Transfer", "Config · Rate limit", "Unlimited (default · 0…500 MB/s)", NotPersisted + ". No bandwidth governor is wired."));
         // Card: Options / 选项
@@ -654,7 +659,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     private static void AppendRemoteDesktop(List<SettingsDetailItem> d)
     {
         // Card: Video transfer / Quality & Performance
-        d.Add(new("Remote Desktop", "Video transfer · Current config", ReadOnly, "Optimization summary only; no encoder settings are changed."));
+        d.Add(new("Remote Desktop", "Video transfer · Current config", ReadOnly, $"Settings key: {CurrentConfigKey}. Optimization summary only; no encoder settings are changed."));
         d.Add(new("Remote Desktop", "Video transfer · Optimized / needs-adjust", ReadOnly, "Validation badge is display-only."));
         d.Add(new("Remote Desktop", "Video transfer · Estimated data rate", ReadOnly, "Estimated bitrate is not pushed to runtime."));
         d.Add(new("Remote Desktop", "Video transfer · Resolution", "1080P (default · 1080P/2K/4K/5K)", NotPersisted + "."));
@@ -663,7 +668,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         d.Add(new("Remote Desktop", "Video transfer · Hardware acceleration", "On (default)", DisplayOnly + "."));
         d.Add(new("Remote Desktop", "Video transfer · Apple Silicon optimization", "On (default · macOS-only)", DisplayOnly + ". Apple-Silicon path is not applicable on Windows."));
         d.Add(new("Remote Desktop", "Video transfer · Adaptive bitrate", "On (default)", DisplayOnly + "."));
-        d.Add(new("Remote Desktop", "Video transfer · Compression quality", "Balanced (default · none/fast/balanced/maximum)", NotPersisted + "."));
+        d.Add(new("Remote Desktop", "Video transfer · Compression quality", "Balanced (default · none/fast/balanced/maximum)", $"{NotPersisted}. Settings key: {VideoQualityKey}."));
         // Card: Display / 显示
         d.Add(new("Remote Desktop", "Display · Compression level", "50 (default · 1…100)", NotPersisted + ". Not applied to live sessions yet."));
         d.Add(new("Remote Desktop", "Display · Full screen mode", "Off (default)", DisplayOnly + ". Disabled until live-session windowing is wired."));
@@ -691,7 +696,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         d.Add(new("System Monitor", "Runtime · OS", RuntimeInformation.OSDescription, $"OS architecture: {RuntimeInformation.OSArchitecture}"));
         d.Add(new("System Monitor", "Runtime · Host", Environment.MachineName, $"Logical processors: {Environment.ProcessorCount}"));
         // Card: Config / 配置
-        d.Add(new("System Monitor", "Config · Refresh interval", "1s (default · 1/5/10/30)", DisplayOnly + ". ETW/EventSource sampling is pending."));
+        d.Add(new("System Monitor", "Config · Refresh interval", "1s (default · 1/5/10/30)", $"{DisplayOnly}. Settings key: {RefreshIntervalKey}. ETW/EventSource sampling is pending."));
         d.Add(new("System Monitor", "Config · Enable realtime", "On (default)", NotWired + ". Auto refresh does not start background polling."));
         d.Add(new("System Monitor", "Config · Enable history", "On (default)", NotWired + ". History retention store is not wired."));
         d.Add(new("System Monitor", "Config · Performance alerts", "On (default)", NotWired + ". Alerts require notification permissions and thresholds."));
@@ -757,7 +762,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         d.Add(new("Advanced", "Experimental · Use new discovery algorithm", "Off (default)", DisplayOnly + "."));
         d.Add(new("Advanced", "Experimental · Enable P2P direct connection", "Off (default)", DisplayOnly + "."));
         // Card: PQC / 后量子加密
-        d.Add(new("Advanced", "PQC · App-layer PQC", "Enabled (policy-forced)", ReadOnly + ". Strict-PQC is enforced by policy; no control."));
+        d.Add(new("Advanced", "PQC · App-layer PQC", "Enabled (policy-forced)", ReadOnly + ". PQC policy is enforced by Rust Core; no control."));
         d.Add(new("Advanced", "PQC · Hybrid TLS", "OS-negotiated", ReadOnly + ". Hybrid TLS is negotiated by the OS transport; no control."));
         d.Add(new("Advanced", "PQC · Prefer X-Wing hybrid", "Off (default)", DisplayOnly + "."));
         d.Add(new("Advanced", "PQC · Signature algorithm", "ML-DSA-65 (default · 65/87)", CoreOwned + ". Suite IDs and fallback policy remain in Rust Core."));
