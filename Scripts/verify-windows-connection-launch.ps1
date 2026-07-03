@@ -16,6 +16,26 @@ function Assert-True {
     }
 }
 
+function Invoke-NativeTool {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$FailureMessage
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Output $_ }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    Assert-True -Condition ($exitCode -eq 0) -Message $FailureMessage
+}
+
 $winClientProject = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 Assert-True -Condition (Test-Path -LiteralPath $winClientProject) -Message "Missing Windows client project: $winClientProject"
 $winClientProjectText = Get-Content -Raw -LiteralPath $winClientProject
@@ -862,16 +882,22 @@ sealed class RecordingDiscoveryClient : IDiscoveryClient
     $nativeCoreDll = Join-Path $nativeCoreDebugDir "skybridge_core.dll"
     Assert-True -Condition (Test-Path -LiteralPath $nativeCoreManifest) -Message "Missing Rust core manifest: $nativeCoreManifest"
     if (-not (Test-Path -LiteralPath $nativeCoreDll)) {
-        & cargo build --manifest-path $nativeCoreManifest
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust core native DLL build failed."
+        Invoke-NativeTool `
+            -FilePath "cargo" `
+            -Arguments @("build", "--manifest-path", $nativeCoreManifest) `
+            -FailureMessage "Rust core native DLL build failed."
         Assert-True -Condition (Test-Path -LiteralPath $nativeCoreDll) -Message "Rust core native DLL missing after build: $nativeCoreDll"
     }
 
-    & dotnet restore $testProject
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke restore failed."
+    Invoke-NativeTool `
+        -FilePath "dotnet" `
+        -Arguments @("restore", $testProject) `
+        -FailureMessage "Windows connection launch smoke restore failed."
 
-    & dotnet build $testProject --no-restore
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke build failed."
+    Invoke-NativeTool `
+        -FilePath "dotnet" `
+        -Arguments @("build", $testProject, "--no-restore") `
+        -FailureMessage "Windows connection launch smoke build failed."
 
     $testOutputDir = Join-Path $tempRoot "bin/Debug/net10.0"
     $nativeCoreOutputDll = Join-Path $testOutputDir "skybridge_core.dll"
@@ -879,8 +905,10 @@ sealed class RecordingDiscoveryClient : IDiscoveryClient
     Copy-Item -LiteralPath $nativeCoreDll -Destination $nativeCoreOutputDll -Force
     Assert-True -Condition (Test-Path -LiteralPath $nativeCoreOutputDll) -Message "Windows connection launch smoke native DLL copy failed: $nativeCoreOutputDll"
 
-    & dotnet run --project $testProject --no-restore --no-build
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke run failed."
+    Invoke-NativeTool `
+        -FilePath "dotnet" `
+        -Arguments @("run", "--project", $testProject, "--no-restore", "--no-build") `
+        -FailureMessage "Windows connection launch smoke run failed."
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
