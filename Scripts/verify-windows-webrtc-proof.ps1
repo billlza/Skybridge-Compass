@@ -29,6 +29,7 @@ Assert-True -Condition ($ExpectedFingerprint -match '^[0-9a-f]{64}$') -Message "
 
 $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CoreBridge.cs",
+    "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/IEngineClient.cs",
     "windows/Skybridge.WinClient/Services/FfiEngineClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
@@ -242,7 +243,10 @@ sealed record ProofOptions(
     & dotnet restore $testProject
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows WebRTC proof restore failed."
 
-    & dotnet run --project $testProject --no-restore -- --proof $ProofPath --expected-device-id $ExpectedDeviceId --expected-fingerprint $ExpectedFingerprint --max-age-ms $MaxProofAgeMs.ToString()
+    & dotnet build $testProject --no-restore
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows WebRTC proof build failed."
+
+    & dotnet run --project $testProject --no-build -- --proof $ProofPath --expected-device-id $ExpectedDeviceId --expected-fingerprint $ExpectedFingerprint --max-age-ms $MaxProofAgeMs.ToString()
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows WebRTC proof run failed."
 }
 finally {

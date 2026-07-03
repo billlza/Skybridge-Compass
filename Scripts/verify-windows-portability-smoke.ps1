@@ -378,7 +378,6 @@ if ($RequireMacWebRtcInterop) {
             SearchText = $SearchText
             ExtendedSearchSeconds = $ExtendedSearchSeconds
             WebRtcProofMaxAgeMs = $MacWebRtcProofMaxAgeMs
-            RequireMacRustCliSmoke = [bool]$RequireMacRustCliSmoke
         } `
         -EvidencePath $MacWebRtcProofPath
 }

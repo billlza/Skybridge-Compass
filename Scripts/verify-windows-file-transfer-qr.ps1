@@ -17,6 +17,7 @@ function Assert-True {
 
 $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CoreBridge.cs",
+    "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 ) | ForEach-Object { Join-Path $RepoRoot $_ }
 
@@ -136,7 +137,13 @@ static void AssertEqual<T>(T expected, T actual, string label)
 }
 '@
 
-    dotnet run --project $testProject
+    & dotnet restore $testProject
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "windows-file-transfer-qr restore failed with exit code $LASTEXITCODE"
+
+    & dotnet build $testProject --no-restore
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "windows-file-transfer-qr build failed with exit code $LASTEXITCODE"
+
+    & dotnet run --project $testProject --no-build
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "windows-file-transfer-qr smoke failed with exit code $LASTEXITCODE"
 }
 finally {
