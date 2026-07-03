@@ -23,6 +23,40 @@ function Assert-True {
     }
 }
 
+function ConvertTo-WindowsProcessArgument {
+    param([string]$Value)
+
+    if ($Value.Length -eq 0) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $result = '"'
+    $backslashCount = 0
+    foreach ($char in $Value.ToCharArray()) {
+        if ($char -eq '\') {
+            $backslashCount += 1
+        } elseif ($char -eq '"') {
+            $result += ('\' * (($backslashCount * 2) + 1))
+            $result += '"'
+            $backslashCount = 0
+        } else {
+            if ($backslashCount -gt 0) {
+                $result += ('\' * $backslashCount)
+                $backslashCount = 0
+            }
+            $result += $char
+        }
+    }
+    if ($backslashCount -gt 0) {
+        $result += ('\' * ($backslashCount * 2))
+    }
+    $result += '"'
+    return $result
+}
+
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $scriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
         Split-Path -Parent $PSCommandPath
@@ -62,42 +96,34 @@ $cargoArguments = @(
     $MaxProofAgeMs.ToString()
 )
 $cargoCommandLabel = "webrtc-proof validate"
-$captureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("skybridge-rust-webrtc-proof-cli-" + [guid]::NewGuid().ToString("N"))
-$stdoutPath = Join-Path $captureRoot "stdout.txt"
-$stderrPath = Join-Path $captureRoot "stderr.txt"
-try {
-    New-Item -ItemType Directory -Path $captureRoot | Out-Null
-    $process = Start-Process `
-        -FilePath "cargo" `
-        -ArgumentList $cargoArguments `
-        -NoNewWindow `
-        -Wait `
-        -PassThru `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath
-    $cargoExitCode = [int]$process.ExitCode
 
-    if (Test-Path -LiteralPath $stderrPath) {
-        Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Output $_ }
-    }
-    if (Test-Path -LiteralPath $stdoutPath) {
-        Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Output $_ }
-    }
+$cargoCommand = (Get-Command cargo -ErrorAction Stop).Source
+$processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$processStartInfo.FileName = $cargoCommand
+$processStartInfo.Arguments = (($cargoArguments | ForEach-Object { ConvertTo-WindowsProcessArgument -Value $_ }) -join " ")
+$processStartInfo.UseShellExecute = $false
+$processStartInfo.RedirectStandardOutput = $true
+$processStartInfo.RedirectStandardError = $true
+$processStartInfo.CreateNoWindow = $true
+
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $processStartInfo
+[void]$process.Start()
+$stdoutTask = $process.StandardOutput.ReadToEndAsync()
+$stderrTask = $process.StandardError.ReadToEndAsync()
+$process.WaitForExit()
+$cargoExitCode = [int]$process.ExitCode
+
+$cargoOutput = @()
+if (-not [string]::IsNullOrWhiteSpace($stderrTask.Result)) {
+    $cargoOutput += ($stderrTask.Result -split "\r?\n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
-finally {
-    if (Test-Path -LiteralPath $captureRoot) {
-        $resolvedCaptureRoot = (Resolve-Path -LiteralPath $captureRoot).Path
-        $resolvedTempParent = (Resolve-Path -LiteralPath ([System.IO.Path]::GetTempPath())).Path.TrimEnd('\')
-        $captureLeaf = Split-Path -Leaf $resolvedCaptureRoot
-        $isOwnedCaptureDir = $resolvedCaptureRoot.StartsWith(
-            $resolvedTempParent,
-            [StringComparison]::OrdinalIgnoreCase) -and $captureLeaf.StartsWith(
-            "skybridge-rust-webrtc-proof-cli-",
-            [StringComparison]::Ordinal)
+if (-not [string]::IsNullOrWhiteSpace($stdoutTask.Result)) {
+    $cargoOutput += ($stdoutTask.Result -split "\r?\n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
 
-        Assert-True -Condition $isOwnedCaptureDir -Message "Refusing to remove unexpected temp directory: $resolvedCaptureRoot"
-        Remove-Item -LiteralPath $captureRoot -Recurse -Force
-    }
+if ($null -ne $cargoOutput) {
+    $cargoOutput | ForEach-Object { Write-Output $_ }
 }
 
 Assert-True -Condition ($cargoExitCode -eq 0) -Message "Rust WebRTC proof CLI validation failed: $cargoCommandLabel."
