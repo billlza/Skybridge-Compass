@@ -18,6 +18,19 @@ function Assert-True {
 
 $winClientProject = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 Assert-True -Condition (Test-Path -LiteralPath $winClientProject) -Message "Missing Windows client project: $winClientProject"
+$winClientProjectText = Get-Content -Raw -LiteralPath $winClientProject
+foreach ($nativeArtifactSignal in @(
+    "BuildSkybridgeCoreNativeDll",
+    "cargo build --manifest-path",
+    "skybridge_core.dll",
+    "CopyToOutputDirectory=""PreserveNewest""",
+    "CopyToPublishDirectory=""PreserveNewest"""
+)) {
+    Assert-True `
+        -Condition $winClientProjectText.Contains($nativeArtifactSignal) `
+        -Message "WinClient project must build/copy the product skybridge_core.dll artifact; missing signal: $nativeArtifactSignal"
+}
+
 $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CoreBridge.cs",
     "windows/Skybridge.WinClient/Services/IEngineClient.cs",

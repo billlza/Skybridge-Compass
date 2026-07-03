@@ -77,6 +77,31 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 
+  <!-- The product app uses an app-directory DllImport resolver for skybridge_core. Build the
+       Rust cdylib as part of Windows builds and copy the resulting DLL into the real WinClient
+       output/publish directory, not only into temporary smoke-test projects. -->
+  <PropertyGroup Condition="'$(OS)'=='Windows_NT'">
+    <SkybridgeCoreManifest>$(MSBuildThisFileDirectory)..\..\core\skybridge-core\Cargo.toml</SkybridgeCoreManifest>
+    <SkybridgeCoreCargoProfile Condition="'$(Configuration)'=='Release'">release</SkybridgeCoreCargoProfile>
+    <SkybridgeCoreCargoProfile Condition="'$(SkybridgeCoreCargoProfile)'==''">debug</SkybridgeCoreCargoProfile>
+    <SkybridgeCoreCargoProfileArgs Condition="'$(SkybridgeCoreCargoProfile)'=='release'">--release</SkybridgeCoreCargoProfileArgs>
+    <SkybridgeCoreRustTarget Condition="'$(RuntimeIdentifier)'=='win-arm64'">aarch64-pc-windows-msvc</SkybridgeCoreRustTarget>
+    <SkybridgeCoreRustTarget Condition="'$(RuntimeIdentifier)'=='win-x86'">i686-pc-windows-msvc</SkybridgeCoreRustTarget>
+    <SkybridgeCoreCargoTargetArgs Condition="'$(SkybridgeCoreRustTarget)'!=''">--target $(SkybridgeCoreRustTarget)</SkybridgeCoreCargoTargetArgs>
+    <SkybridgeCoreCargoTargetSegment Condition="'$(SkybridgeCoreRustTarget)'!=''">$(SkybridgeCoreRustTarget)\</SkybridgeCoreCargoTargetSegment>
+    <SkybridgeCoreNativeDll>$(MSBuildThisFileDirectory)..\..\core\skybridge-core\target\$(SkybridgeCoreCargoTargetSegment)$(SkybridgeCoreCargoProfile)\skybridge_core.dll</SkybridgeCoreNativeDll>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(OS)'=='Windows_NT'">
+    <Content Include="$(SkybridgeCoreNativeDll)" Link="skybridge_core.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="BuildSkybridgeCoreNativeDll" BeforeTargets="PrepareForBuild" Condition="'$(OS)'=='Windows_NT'">
+    <Message Importance="High" Text="Building skybridge_core native library ($(SkybridgeCoreCargoProfile))" />
+    <Exec Command="cargo build --manifest-path &quot;$(SkybridgeCoreManifest)&quot; $(SkybridgeCoreCargoProfileArgs) $(SkybridgeCoreCargoTargetArgs)" />
+    <Error Condition="!Exists('$(SkybridgeCoreNativeDll)')" Text="Missing skybridge_core native library after cargo build: $(SkybridgeCoreNativeDll)" />
+  </Target>
+
   <!-- ===== Localization resources =====
        Take explicit control of the PRIResource item set so the per-language Resources.resw are
        deterministically indexed into resources.pri (MakePri runs as part of the WinAppSDK build
