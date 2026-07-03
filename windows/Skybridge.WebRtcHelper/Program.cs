@@ -42,6 +42,8 @@
 //
 // The helper NEVER emits AppleNative binding — always WebRtcDataChannel /
 // WebRtcInterop (Apple<->Apple stays on the Apple native path).
+// Offer proofs record --network-path same-lan|cross-nat in their capability
+// transcript; Core still owns transport selection and launch binding.
 
 using System.Buffers.Binary;
 using System.Net;
@@ -51,6 +53,46 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using SIPSorcery.Net;
 using Skybridge.WebRtcHelper;
+
+internal sealed record NetworkPathTranscript(string Name, bool SameLan, bool CrossNat);
+
+internal sealed record NominatedCandidatePair(
+    string LocalEndpoint,
+    string LocalType,
+    string RemoteEndpoint,
+    string RemoteType)
+{
+    public static NominatedCandidatePair From(RTCIceCandidate localCandidate, RTCIceCandidate remoteCandidate)
+    {
+        return new NominatedCandidatePair(
+            EndpointFor(localCandidate),
+            CandidateTypeFor(localCandidate),
+            EndpointFor(remoteCandidate),
+            CandidateTypeFor(remoteCandidate));
+    }
+
+    public string ToTranscript(NetworkPathTranscript networkPath) =>
+        $"webrtc/dtls/sctp/local={LocalType}:{LocalEndpoint};remote={RemoteType}:{RemoteEndpoint};path={networkPath.Name}";
+
+    private static string EndpointFor(RTCIceCandidate candidate)
+    {
+        var address = candidate.address?.ToString();
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            throw new InvalidOperationException("Nominated ICE candidate is missing an address.");
+        }
+
+        if (candidate.port == 0)
+        {
+            throw new InvalidOperationException("Nominated ICE candidate is missing a port.");
+        }
+
+        return address.Contains(':', StringComparison.Ordinal) ? $"[{address}]:{candidate.port}" : $"{address}:{candidate.port}";
+    }
+
+    private static string CandidateTypeFor(RTCIceCandidate candidate) =>
+        candidate.type.ToString().ToLowerInvariant();
+}
 
 internal static class Program
 {
@@ -117,21 +159,32 @@ internal static class Program
 
     private static RTCConfiguration NewConfig() => ConfigWithIce("", null);
 
-    // Builds a config with unauthenticated ICE server URLs from a comma-separated
-    // --ice-servers arg. TURN credentials must not be passed on argv; wire a
-    // credential file or short-lived secure channel before enabling TURN auth here.
+    // Builds a config with unauthenticated STUN URLs from --ice-servers and
+    // authenticated TURN/STUN entries from a local credentials JSON file. TURN
+    // credentials must never be passed on argv because process lists and logs can
+    // expose them.
     private static RTCConfiguration ConfigWithIce(string csv, Dictionary<string, string>? opts)
     {
         var servers = new List<RTCIceServer>();
         foreach (var raw in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            if (raw.Contains('|', StringComparison.Ordinal))
+            if (raw.Contains('|', StringComparison.Ordinal) || raw.Contains(';', StringComparison.Ordinal))
             {
                 throw new ArgumentException("--ice-servers must not include inline TURN credentials; use LAN/STUN-only until a credential file/channel is wired.");
             }
 
-            RejectIceServerCredentialCarrier(raw);
+            var uri = ValidateIceServerUri(raw);
+            if (IsTurnUri(uri))
+            {
+                throw new ArgumentException("--ice-servers must not include TURN URLs without a credential file; use --ice-server-credentials.");
+            }
+
             servers.Add(new RTCIceServer { urls = raw });
+        }
+
+        if (opts is not null && opts.TryGetValue("ice-server-credentials", out var credentialsPath) && !string.IsNullOrWhiteSpace(credentialsPath))
+        {
+            servers.AddRange(ReadIceServerCredentials(credentialsPath));
         }
 
         var config = new RTCConfiguration { iceServers = servers };
@@ -139,7 +192,7 @@ internal static class Program
         return config;
     }
 
-    private static void RejectIceServerCredentialCarrier(string raw)
+    private static Uri ValidateIceServerUri(string raw)
     {
         if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
         {
@@ -157,6 +210,137 @@ internal static class Program
         {
             throw new ArgumentException("--ice-servers must not include URI userinfo, query, or fragment credentials; use LAN/STUN-only until a secure TURN credential channel is wired.");
         }
+
+        return uri;
+    }
+
+    private static bool IsTurnUri(Uri uri) => uri.Scheme is "turn" or "turns";
+
+    private static List<RTCIceServer> ReadIceServerCredentials(string path)
+    {
+        var resolvedPath = Path.GetFullPath(path);
+        var info = new FileInfo(resolvedPath);
+        if (!info.Exists)
+        {
+            throw new ArgumentException($"--ice-server-credentials file does not exist: {resolvedPath}");
+        }
+
+        if (info.Length is <= 0 or > 65536)
+        {
+            throw new ArgumentException("--ice-server-credentials must be a non-empty JSON file no larger than 64 KiB.");
+        }
+
+        using var document = JsonDocument.Parse(File.ReadAllText(resolvedPath));
+        if (document.RootElement.ValueKind != JsonValueKind.Object ||
+            !document.RootElement.TryGetProperty("iceServers", out var iceServers) ||
+            iceServers.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException("--ice-server-credentials must be a JSON object with an iceServers array.");
+        }
+
+        var servers = new List<RTCIceServer>();
+        foreach (var entry in iceServers.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                throw new ArgumentException("--ice-server-credentials iceServers entries must be JSON objects.");
+            }
+
+            var urls = ReadIceServerUrls(entry);
+            var username = ReadOptionalJsonString(entry, "username");
+            var credential = ReadOptionalJsonString(entry, "credential");
+            var credentialType = ReadOptionalJsonString(entry, "credentialType");
+            if (!string.IsNullOrWhiteSpace(credentialType) && !string.Equals(credentialType, "password", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("--ice-server-credentials supports only credentialType=password.");
+            }
+
+            foreach (var url in urls)
+            {
+                if (url.Contains('|', StringComparison.Ordinal) || url.Contains(';', StringComparison.Ordinal))
+                {
+                    throw new ArgumentException("--ice-server-credentials URLs must not include inline TURN credentials.");
+                }
+
+                var uri = ValidateIceServerUri(url);
+                if (IsTurnUri(uri) && (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(credential)))
+                {
+                    throw new ArgumentException("--ice-server-credentials TURN entries require non-empty username and credential fields.");
+                }
+
+                servers.Add(new RTCIceServer
+                {
+                    urls = url,
+                    username = username,
+                    credential = credential,
+                    credentialType = RTCIceCredentialType.password,
+                });
+            }
+        }
+
+        if (servers.Count == 0)
+        {
+            throw new ArgumentException("--ice-server-credentials must contain at least one ICE server.");
+        }
+
+        return servers;
+    }
+
+    private static List<string> ReadIceServerUrls(JsonElement entry)
+    {
+        if (!entry.TryGetProperty("urls", out var urls))
+        {
+            throw new ArgumentException("--ice-server-credentials entries require urls.");
+        }
+
+        if (urls.ValueKind == JsonValueKind.String)
+        {
+            var value = urls.GetString();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new ArgumentException("--ice-server-credentials urls must not be empty.");
+            }
+
+            return [value];
+        }
+
+        if (urls.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException("--ice-server-credentials urls must be a string or array of strings.");
+        }
+
+        var values = new List<string>();
+        foreach (var url in urls.EnumerateArray())
+        {
+            if (url.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(url.GetString()))
+            {
+                throw new ArgumentException("--ice-server-credentials urls array must contain non-empty strings.");
+            }
+
+            values.Add(url.GetString()!);
+        }
+
+        if (values.Count == 0)
+        {
+            throw new ArgumentException("--ice-server-credentials urls array must not be empty.");
+        }
+
+        return values;
+    }
+
+    private static string ReadOptionalJsonString(JsonElement entry, string propertyName)
+    {
+        if (!entry.TryGetProperty(propertyName, out var property))
+        {
+            return "";
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new ArgumentException($"--ice-server-credentials {propertyName} must be a string.");
+        }
+
+        return property.GetString() ?? "";
     }
 
     private static void ApplyLocalIceOptions(RTCConfiguration config, Dictionary<string, string>? opts)
@@ -207,7 +391,19 @@ internal static class Program
         return buf;
     }
 
-    // ---------------------------------------------------------------- loopback
+    private static NetworkPathTranscript GetNetworkPathTranscript(Dictionary<string, string>? opts)
+    {
+        var value = opts?.GetValueOrDefault("network-path", "same-lan") ?? "same-lan";
+        return value switch
+        {
+            "same-lan" => new NetworkPathTranscript("same-lan", SameLan: true, CrossNat: false),
+            "cross-nat" => new NetworkPathTranscript("cross-nat", SameLan: false, CrossNat: true),
+            _ => throw new ArgumentException("--network-path must be 'same-lan' or 'cross-nat'."),
+        };
+    }
+
+    private static string FormatBool(bool value) => value ? "true" : "false";
+
     private static async Task<int> RunLoopbackAsync(string proofOut, string peerDeviceId, string peerFingerprint)
     {
         Console.WriteLine("[loopback] creating two peer connections...");
@@ -231,13 +427,23 @@ internal static class Program
         await answerer.setLocalDescription(answer);
         if (offerer.setRemoteDescription(answer) != SetDescriptionResultEnum.OK) return Fail("offerer rejected answer");
 
-        return await CompleteOffererAsync(offerer, dc, opened, echoed, proofOut, peerDeviceId, peerFingerprint, "loopback");
+        return await CompleteOffererAsync(
+            offerer,
+            dc,
+            opened,
+            echoed,
+            proofOut,
+            peerDeviceId,
+            peerFingerprint,
+            "loopback",
+            GetNetworkPathTranscript(null));
     }
 
     // ------------------------------------------------------------------- offer
     private static async Task<int> RunOfferAsync(
         Dictionary<string, string> opts, string proofOut, string peerDeviceId, string peerFingerprint)
     {
+        var networkPath = GetNetworkPathTranscript(opts);
         var offerOut = opts.GetValueOrDefault("offer-out", "offer.json");
         var answerIn = opts.GetValueOrDefault("answer-in", "answer.json");
         Console.WriteLine("[offer] creating peer connection...");
@@ -262,7 +468,16 @@ internal static class Program
             return Fail("offerer rejected the peer answer");
         foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
 
-        return await CompleteOffererAsync(pc, dc, opened, echoed, proofOut, peerDeviceId, peerFingerprint, "offer");
+        return await CompleteOffererAsync(
+            pc,
+            dc,
+            opened,
+            echoed,
+            proofOut,
+            peerDeviceId,
+            peerFingerprint,
+            "offer",
+            networkPath);
     }
 
     // ------------------------------------------------------------------ answer
@@ -627,7 +842,11 @@ internal static class Program
     // Shared offerer tail: await open, send SBF1, verify echo, derive fields, emit proof.
     private static async Task<int> CompleteOffererAsync(
         RTCPeerConnection pc, RTCDataChannel dc, TaskCompletionSource opened, TaskCompletionSource<byte[]> echoed,
-        string proofOut, string peerDeviceId, string peerFingerprint, string tag)
+        string proofOut,
+        string peerDeviceId,
+        string peerFingerprint,
+        string tag,
+        NetworkPathTranscript networkPath)
     {
         Console.WriteLine($"[{tag}] awaiting DataChannel open...");
         await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
@@ -641,12 +860,11 @@ internal static class Program
         var sbf1EchoVerified = echo.AsSpan().SequenceEqual(frame);
         Console.WriteLine($"[{tag}] SBF1 echo verified={sbf1EchoVerified} ({echo.Length} bytes)");
 
+        var nominatedPair = await WaitForNominatedCandidatePairAsync(pc, TimeSpan.FromSeconds(5));
         var localSdp = pc.localDescription?.sdp?.ToString() ?? "";
         var remoteSdp = pc.remoteDescription?.sdp?.ToString() ?? "";
         var localFp = ExtractFingerprint(localSdp);
         var remoteFp = ExtractFingerprint(remoteSdp);
-        var (localEndpoint, localCand) = ExtractFirstCandidate(localSdp);
-        var (remoteEndpoint, remoteCand) = ExtractFirstCandidate(remoteSdp);
 
         var proof = new ProofDocument
         {
@@ -657,13 +875,13 @@ internal static class Program
             Sbf1EchoVerified = sbf1EchoVerified,
             Sbf1FrameMagic = "SBF1",
             AdapterBinding = "verified webrtc datachannel helper",
-            LocalEndpoint = string.IsNullOrWhiteSpace(localEndpoint) ? "127.0.0.1:0" : localEndpoint,
-            RemoteEndpoint = string.IsNullOrWhiteSpace(remoteEndpoint) ? "127.0.0.1:0" : remoteEndpoint,
-            SelectedCandidatePair = $"webrtc/dtls/sctp/{localCand}-{remoteCand}",
+            LocalEndpoint = nominatedPair.LocalEndpoint,
+            RemoteEndpoint = nominatedPair.RemoteEndpoint,
+            SelectedCandidatePair = nominatedPair.ToTranscript(networkPath),
             TransportSecretFingerprintHex = Sha256Hex($"skybridge-webrtc-helper-transport:{localFp}:{remoteFp}"),
             CapabilityDigestHex = Sha256Hex(
                 $"local=Windows,webrtc;remote=Apple,webrtc;peer={peerDeviceId};" +
-                $"fingerprint={peerFingerprint};sameLan=true;crossNat=false"),
+                $"fingerprint={peerFingerprint};sameLan={FormatBool(networkPath.SameLan)};crossNat={FormatBool(networkPath.CrossNat)}"),
             RelayId = null,
             TimestampWindowMs = 15000,
             CapturedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
@@ -706,12 +924,25 @@ internal static class Program
         return m.Success ? m.Groups[1].Value : "no-fingerprint";
     }
 
-    private static (string endpoint, string label) ExtractFirstCandidate(string sdp)
+    private static async Task<NominatedCandidatePair> WaitForNominatedCandidatePairAsync(
+        RTCPeerConnection pc,
+        TimeSpan timeout)
     {
-        var m = Regex.Match(sdp, @"a=candidate:\S+ \d+ \S+ \d+ (\S+) (\d+) typ (\S+)");
-        if (!m.Success) return ("", "host");
-        var endpoint = $"{m.Groups[1].Value}:{m.Groups[2].Value}";
-        return (endpoint, $"{m.Groups[3].Value}-{endpoint}");
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        do
+        {
+            var nominatedEntry = pc.GetRtpChannel()?.NominatedEntry;
+            if (nominatedEntry is not null)
+            {
+                return NominatedCandidatePair.From(nominatedEntry.LocalCandidate, nominatedEntry.RemoteCandidate);
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
+        while (DateTimeOffset.UtcNow < deadline);
+
+        throw new InvalidOperationException(
+            "WebRTC helper reached DataChannel echo but could not read the nominated ICE candidate pair.");
     }
 
     private static string Sha256Hex(string material) =>

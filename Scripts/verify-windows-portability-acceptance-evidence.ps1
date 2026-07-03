@@ -352,6 +352,20 @@ if ($RequireMacInterop) {
         Assert-True -Condition ($fieldValue -eq $true) -Message "Mac SSH evidence must have $macBooleanField=true."
     }
 
+    $macRustCliSmoke = Assert-JsonProperty -Object $macEvidence -Name "rustCliSmoke" -Context "macSsh"
+    Assert-True -Condition ([string](Assert-JsonProperty -Object $macRustCliSmoke -Name "status" -Context "macSsh.rustCliSmoke") -eq "passed") -Message "Mac SSH evidence must include passed rustCliSmoke status."
+    $macRustExitCode = [System.Convert]::ToInt32((Assert-JsonProperty -Object $macRustCliSmoke -Name "exitCode" -Context "macSsh.rustCliSmoke"), [Globalization.CultureInfo]::InvariantCulture)
+    Assert-True -Condition ($macRustExitCode -eq 0) -Message "Mac SSH evidence must include rustCliSmoke exitCode=0."
+    $macRustCliCommand = [string](Assert-JsonProperty -Object $macRustCliSmoke -Name "command" -Context "macSsh.rustCliSmoke")
+    Assert-True -Condition ($macRustCliCommand -match "transport select --local macos --remote ios --path same-lan") -Message "Mac Rust CLI smoke evidence must prove the transport-select command."
+    $macRustExpectedSignals = @((Assert-JsonProperty -Object $macRustCliSmoke -Name "expectedSignals" -Context "macSsh.rustCliSmoke"))
+    $macRustActualSignals = @((Assert-JsonProperty -Object $macRustCliSmoke -Name "actualSignals" -Context "macSsh.rustCliSmoke"))
+    foreach ($expectedSignal in @("kind=AppleNative", "audit=AppleNativeDefault", "relay_allowed=false")) {
+        Assert-True -Condition ($macRustExpectedSignals -contains $expectedSignal) -Message "Mac Rust CLI smoke evidence missing expected signal: $expectedSignal"
+        Assert-True -Condition ($macRustActualSignals -contains $expectedSignal) -Message "Mac Rust CLI smoke evidence missing actual signal: $expectedSignal"
+    }
+    Assert-True -Condition ([string](Assert-JsonProperty -Object $macRustCliSmoke -Name "actualOutputSha256" -Context "macSsh.rustCliSmoke") -match '^[0-9a-f]{64}$') -Message "Mac Rust CLI smoke evidence must include actualOutputSha256."
+
     $macWebRtcProofPath = [string](Assert-JsonProperty -Object $evidencePaths -Name "macWebRtcProofPath" -Context "acceptance.evidencePaths")
     $resolvedMacWebRtcProofPath = Resolve-EvidencePath -Path $macWebRtcProofPath
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($resolvedMacWebRtcProofPath)) -Message "Mac WebRTC proof evidence path is empty."

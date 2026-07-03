@@ -11,6 +11,8 @@ param(
     [string]$DirectSourceAddress = "",
     [string]$EvidencePath = "",
     [int]$ConnectTimeoutSeconds = 5,
+    [ValidateRange(10, 600)]
+    [int]$RustCliSmokeTimeoutSeconds = 120,
     [switch]$RequireDirectLan,
     [switch]$RequireRustCliSmoke,
     [string]$RemoteRepoRoot = "",
@@ -28,6 +30,23 @@ $script:MacSshProbeReadyUserName = ""
 $script:MacSshProbeHostKeyPinned = $false
 $script:MacSshProbeHostKeySource = ""
 $script:MacSshProbeHostKeyFingerprints = [System.Collections.Generic.List[string]]::new()
+$script:MacSshProbeRustCliSmoke = [ordered]@{
+    required = [bool]$RequireRustCliSmoke
+    status = if ($RequireRustCliSmoke) { "pending" } else { "not-required" }
+    name = "skybridge transport select AppleNative behavior"
+    legacyTestName = "cli_apple_to_apple_selects_apple_native"
+    remoteRepoRoot = $RemoteRepoRoot
+    userName = ""
+    hostName = ""
+    command = ""
+    expectedSignals = @("kind=AppleNative", "audit=AppleNativeDefault", "relay_allowed=false")
+    actualSignals = @()
+    actualOutput = ""
+    actualOutputSha256 = ""
+    timeoutSeconds = $RustCliSmokeTimeoutSeconds
+    exitCode = $null
+    detail = ""
+}
 
 function Write-Probe {
     param([string]$Message)
@@ -41,6 +60,93 @@ function ConvertTo-PowerShellSingleQuotedArgument {
     param([string]$Value)
 
     return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Write-JsonFileAtomic {
+    param(
+        $Value,
+        [string]$Path,
+        [int]$Depth = 8
+    )
+
+    $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $directory = Split-Path -Parent $resolvedPath
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        $directory = (Get-Location).ProviderPath
+        $resolvedPath = Join-Path $directory (Split-Path -Leaf $resolvedPath)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($directory)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    $leaf = Split-Path -Leaf $resolvedPath
+    $tempPath = Join-Path $directory (".$leaf." + [Guid]::NewGuid().ToString("N") + ".tmp")
+    $backupPath = Join-Path $directory (".$leaf." + [Guid]::NewGuid().ToString("N") + ".bak")
+    try {
+        $json = $Value | ConvertTo-Json -Depth $Depth
+        [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $resolvedPath) {
+            [System.IO.File]::Replace($tempPath, $resolvedPath, $backupPath, $true)
+            if (Test-Path -LiteralPath $backupPath) {
+                Remove-Item -LiteralPath $backupPath -Force
+            }
+        }
+        else {
+            [System.IO.File]::Move($tempPath, $resolvedPath)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force
+        }
+    }
+
+    return $resolvedPath
+}
+
+function Get-TruncatedText {
+    param(
+        [string]$Text,
+        [int]$MaxLength = 8000
+    )
+
+    if ($null -eq $Text) {
+        return ""
+    }
+
+    if ($Text.Length -le $MaxLength) {
+        return $Text
+    }
+
+    return $Text.Substring(0, $MaxLength) + "`n...[truncated]"
+}
+
+function Get-Sha256Hex {
+    param([string]$Text)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        $hash = $sha256.ComputeHash($bytes)
+        return -join ($hash | ForEach-Object { $_.ToString("x2") })
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-MatchedSignals {
+    param(
+        [string]$Text,
+        [string[]]$Signals
+    )
+
+    @($Signals | Where-Object {
+        $Text.IndexOf($_, [System.StringComparison]::Ordinal) -ge 0
+    })
 }
 
 function Get-ProbeTargetAddressesFromMessages {
@@ -253,15 +359,14 @@ function Write-ProbeEvidence {
         routeFirstFailureDetected = $routeFirstFailureDetected
         directLanLikely = [bool]($sameSubnetLanCandidateDetected -and -not $proxyTunnelRouteDetected)
         remediation = $remediation
+        rustCliSmoke = $script:MacSshProbeRustCliSmoke
         ready = [bool]$script:MacSshProbeReady
         readyHostName = $script:MacSshProbeReadyHostName
         readyUserName = $script:MacSshProbeReadyUserName
         messages = @($messages)
     }
 
-    $evidence |
-        ConvertTo-Json -Depth 8 |
-        Set-Content -LiteralPath $resolvedEvidencePath -Encoding UTF8
+    Write-JsonFileAtomic -Value $evidence -Path $resolvedEvidencePath -Depth 8 | Out-Null
     Write-Output "mac-ssh-probe: evidence=$resolvedEvidencePath"
 }
 
@@ -308,6 +413,127 @@ function ConvertTo-NormalizedHostKeyFingerprint {
     }
 
     return "SHA256:$trimmed"
+}
+
+function ConvertTo-WindowsProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        return '""'
+    }
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount += 1
+            continue
+        }
+
+        if ($character -eq '"') {
+            if ($backslashCount -gt 0) {
+                [void]$builder.Append('\' * ($backslashCount * 2))
+                $backslashCount = 0
+            }
+
+            [void]$builder.Append('\"')
+            continue
+        }
+
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append('\' * $backslashCount)
+            $backslashCount = 0
+        }
+
+        [void]$builder.Append($character)
+    }
+
+    if ($backslashCount -gt 0) {
+        [void]$builder.Append('\' * ($backslashCount * 2))
+    }
+
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Join-WindowsProcessArguments {
+    param([string[]]$Arguments)
+
+    return [string]::Join(" ", @($Arguments | ForEach-Object {
+        ConvertTo-WindowsProcessArgument -Value $_
+    }))
+}
+
+function Stop-NativeProcessTreeBestEffort {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -eq $Process -or $Process.HasExited) {
+        return
+    }
+
+    $taskkill = Get-Command "taskkill.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $taskkill) {
+        & $taskkill.Source /PID $Process.Id /T /F | Out-Null
+        if ($LASTEXITCODE -eq 0 -or $Process.HasExited) {
+            return
+        }
+    }
+
+    $Process.Kill()
+}
+
+function Invoke-NativeProcessCaptured {
+    param(
+        [string]$FileName,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 600
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FileName
+    $startInfo.Arguments = Join-WindowsProcessArguments -Arguments $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = $false
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            Stop-NativeProcessTreeBestEffort -Process $process
+            $process.WaitForExit(5000) | Out-Null
+        }
+
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($timedOut) {
+            $timeoutMessage = "$FileName timed out after $TimeoutSeconds seconds: $($Arguments -join ' ')"
+            $stderr = if ([string]::IsNullOrWhiteSpace($stderr)) {
+                $timeoutMessage
+            }
+            else {
+                $stderr.TrimEnd() + [Environment]::NewLine + $timeoutMessage
+            }
+        }
+
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Stdout = $stdoutTask.GetAwaiter().GetResult()
+            Stderr = $stderr
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
 }
 
 function Test-IsProxySourceAddress {
@@ -474,11 +700,15 @@ function Get-HandshakeHostKeyLines {
     }
 
     try {
-        & ssh @sshArgs $target "true" 2>&1 | Out-Null
+        $result = Invoke-NativeProcessCaptured `
+            -FileName "ssh" `
+            -Arguments (@($sshArgs) + @($target, "true")) `
+            -TimeoutSeconds ($ConnectTimeoutSeconds + 10)
+        if ($result.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $tempKnownHostsPath)) {
+            return @()
+        }
+
         return @(Get-HostKeyLinesFromKnownHostsFile -Path $tempKnownHostsPath)
-    }
-    catch {
-        return @()
     }
     finally {
         if (Test-Path -LiteralPath $tempKnownHostsPath) {
@@ -495,12 +725,11 @@ function Get-ScannedHostKeyLines {
         $script:CurrentHostName
     )
 
-    try {
-        $scanOutput = & ssh-keyscan @scanArgs 2>&1
-    }
-    catch {
-        $scanOutput = @($_.Exception.Message)
-    }
+    $scanResult = Invoke-NativeProcessCaptured `
+        -FileName "ssh-keyscan" `
+        -Arguments $scanArgs `
+        -TimeoutSeconds ($ConnectTimeoutSeconds + 10)
+    $scanOutput = @($scanResult.Stdout, $scanResult.Stderr)
 
     $hostKeyLines = @($scanOutput |
         ForEach-Object { [string]$_ } |
@@ -576,21 +805,35 @@ function Confirm-HostKeyPin {
     $expectedFingerprint = ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $ExpectedHostKeyFingerprint
 
     if ([string]::IsNullOrWhiteSpace($expectedFingerprint)) {
-        if (Test-KnownHostEntryPresent) {
+        Write-Probe "host-key required: pass -ExpectedHostKeyFingerprint for required Mac SSH gates; existing known_hosts alone is not accepted as pinned evidence"
+        return
+    }
+
+    $knownHostKeyLines = @(Get-HostKeyLinesFromKnownHostsFile -Path $KnownHostsPath)
+    if ($knownHostKeyLines.Count -gt 0) {
+        $knownHostFingerprints = @(Get-HostKeyFingerprints -HostKeyLines $knownHostKeyLines)
+        foreach ($fingerprint in $knownHostFingerprints) {
+            if (-not $script:MacSshProbeHostKeyFingerprints.Contains($fingerprint)) {
+                $script:MacSshProbeHostKeyFingerprints.Add($fingerprint)
+            }
+
+            Write-Probe "host-key known_hosts: $script:CurrentHostName fingerprint=$fingerprint"
+        }
+
+        if ($knownHostFingerprints -contains $expectedFingerprint) {
             $script:MacSshProbeHostKeyPinned = $true
-            $script:MacSshProbeHostKeySource = "known-hosts-file"
+            $script:MacSshProbeHostKeySource = "known-hosts-file-expected-fingerprint"
             $script:HostProbeHostKeyPinConfirmed = $true
-            Write-Probe "host-key pinned: known_hosts entry exists for $script:CurrentHostName"
+            Write-Probe "host-key pinned: known_hosts entry matches expected fingerprint $expectedFingerprint for $script:CurrentHostName"
             return
         }
 
-        Write-Probe "host-key required: no known_hosts entry exists for $script:CurrentHostName; pass -ExpectedHostKeyFingerprint or pre-populate -KnownHostsPath"
-        return
+        Write-Probe "host-key required: existing known_hosts entry does not match expected fingerprint $expectedFingerprint; scanning current host key for $script:CurrentHostName"
     }
 
     $hostKeyLines = @(Get-ScannedHostKeyLines)
     if ($hostKeyLines.Count -eq 0) {
-        $hostKeyLines = @(Get-HostKeyLinesFromKnownHostsFile -Path $KnownHostsPath)
+        $hostKeyLines = $knownHostKeyLines
         if ($hostKeyLines.Count -gt 0) {
             Write-Probe "host-key scan fallback: validating existing known_hosts entry for $script:CurrentHostName"
         }
@@ -780,14 +1023,24 @@ function Invoke-SshCommand {
 
     $sshArgs += @($Command)
     if ($Command -eq "true") {
+        $previousErrorActionPreference = $ErrorActionPreference
         try {
+            $ErrorActionPreference = "Continue"
             & ssh @sshArgs
             $sshExitCode = $LASTEXITCODE
-            $output = if ($sshExitCode -eq 0) { @($UserName, $script:CurrentHostName, "ready") } else { @() }
+            $output = if ($sshExitCode -eq 0) {
+                @($UserName, $script:CurrentHostName, "ready")
+            }
+            else {
+                @()
+            }
         }
         catch {
             $sshExitCode = 255
             $output = @($_.Exception.Message)
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
         }
 
         $text = ($output -join [Environment]::NewLine).Trim()
@@ -798,37 +1051,13 @@ function Invoke-SshCommand {
         }
     }
 
-    $captureRoot = Join-Path $env:TEMP ("skybridge-mac-ssh-probe-" + [Guid]::NewGuid().ToString("N"))
-    $stdoutPath = Join-Path $captureRoot "stdout.txt"
-    $stderrPath = Join-Path $captureRoot "stderr.txt"
-    New-Item -ItemType Directory -Force -Path $captureRoot | Out-Null
-    try {
-        & ssh @sshArgs > $stdoutPath 2> $stderrPath
-        $sshExitCode = $LASTEXITCODE
-        $outputItems = [System.Collections.Generic.List[string]]::new()
-        if (Test-Path -LiteralPath $stdoutPath) {
-            $stdoutText = Get-Content -Raw -LiteralPath $stdoutPath
-            if (-not [string]::IsNullOrWhiteSpace($stdoutText)) {
-                $outputItems.Add($stdoutText)
-            }
-        }
-        if (Test-Path -LiteralPath $stderrPath) {
-            $stderrText = Get-Content -Raw -LiteralPath $stderrPath
-            if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
-                $outputItems.Add($stderrText)
-            }
-        }
-        $output = @($outputItems)
-    }
-    catch {
-        $sshExitCode = 255
-        $output = @($_.Exception.Message)
-    }
-    finally {
-        if (Test-Path -LiteralPath $captureRoot) {
-            Remove-Item -LiteralPath $captureRoot -Recurse -Force
-        }
-    }
+    $result = Invoke-NativeProcessCaptured `
+        -FileName "ssh" `
+        -Arguments $sshArgs `
+        -TimeoutSeconds ($RustCliSmokeTimeoutSeconds + $ConnectTimeoutSeconds + 30)
+    $sshExitCode = $result.ExitCode
+    $output = @($result.Stdout, $result.Stderr) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
     $text = ($output -join [Environment]::NewLine).Trim()
     return [pscustomobject]@{
@@ -846,13 +1075,32 @@ function Invoke-MacRustCliSmoke {
     }
 
     $remoteRepo = ConvertTo-PosixSingleQuoted -Value $RemoteRepoRoot
-    $command = "set -eu; cd $remoteRepo; cargo test --manifest-path core/skybridge-core/Cargo.toml --test cli_smoke cli_apple_to_apple_selects_apple_native -- --exact"
+    $command = "set -eu; cd $remoteRepo; command -v perl >/dev/null 2>&1 || { echo 'perl is required for bounded Mac Rust CLI smoke timeout' >&2; exit 127; }; set +e; output=`$(perl -e 'alarm shift @ARGV; exec @ARGV or die `$!' $RustCliSmokeTimeoutSeconds cargo run --quiet --manifest-path core/skybridge-core/Cargo.toml --bin skybridge -- transport select --local macos --remote ios --path same-lan 2>&1); status=`$?; set -e; printf '%s\n' `"`$output`"; test `"`$status`" -eq 0; printf '%s\n' `"`$output`" | grep -F 'kind=AppleNative' >/dev/null; printf '%s\n' `"`$output`" | grep -F 'audit=AppleNativeDefault' >/dev/null; printf '%s\n' `"`$output`" | grep -F 'relay_allowed=false' >/dev/null"
+    $script:MacSshProbeRustCliSmoke["required"] = $true
+    $script:MacSshProbeRustCliSmoke["status"] = "running"
+    $script:MacSshProbeRustCliSmoke["remoteRepoRoot"] = $RemoteRepoRoot
+    $script:MacSshProbeRustCliSmoke["userName"] = $UserName
+    $script:MacSshProbeRustCliSmoke["hostName"] = $script:CurrentHostName
+    $script:MacSshProbeRustCliSmoke["command"] = "cargo run --quiet --manifest-path core/skybridge-core/Cargo.toml --bin skybridge -- transport select --local macos --remote ios --path same-lan"
+    $script:MacSshProbeRustCliSmoke["timeoutSeconds"] = $RustCliSmokeTimeoutSeconds
+    $script:MacSshProbeRustCliSmoke["detail"] = ""
+
     $probe = Invoke-SshCommand -UserName $UserName -Command $command
+    $script:MacSshProbeRustCliSmoke["exitCode"] = $probe.ExitCode
+    $script:MacSshProbeRustCliSmoke["actualOutput"] = Get-TruncatedText -Text $probe.Text
+    $script:MacSshProbeRustCliSmoke["actualOutputSha256"] = Get-Sha256Hex -Text $probe.Text
+    $script:MacSshProbeRustCliSmoke["actualSignals"] = @(Get-MatchedSignals `
+        -Text $probe.Text `
+        -Signals @($script:MacSshProbeRustCliSmoke["expectedSignals"]))
     if ($probe.ExitCode -ne 0) {
+        $script:MacSshProbeRustCliSmoke["status"] = "failed"
+        $script:MacSshProbeRustCliSmoke["detail"] = $probe.Text
         throw "Mac Rust CLI smoke failed for $UserName@$script:CurrentHostName`: $($probe.Text)"
     }
 
-    Write-Probe "$UserName rust cli smoke ready: cli_apple_to_apple_selects_apple_native"
+    $script:MacSshProbeRustCliSmoke["status"] = "passed"
+    $script:MacSshProbeRustCliSmoke["detail"] = "Mac-side transport select asserted kind=AppleNative, audit=AppleNativeDefault, relay_allowed=false."
+    Write-Probe "$UserName rust cli smoke ready: transport select AppleNative behavior"
     Write-Output $probe.Text
 }
 
@@ -1008,6 +1256,15 @@ if ($UserNames.Count -eq 0) {
     throw "Mac SSH probe requires at least one username."
 }
 
+$normalizedRequiredHostKey = ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $ExpectedHostKeyFingerprint
+if (($RequireKnownHost -or $RequireReady -or $RequireDirectLan -or $RequireRustCliSmoke) -and [string]::IsNullOrWhiteSpace($normalizedRequiredHostKey)) {
+    throw "Required Mac SSH gates require -ExpectedHostKeyFingerprint; existing known_hosts alone is not accepted as pinned evidence."
+}
+
+if ($RequireDirectLan -and [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
+    throw "Required direct-LAN Mac SSH gate requires -DirectSourceAddress so the validated source interface is explicit."
+}
+
 if (-not (Test-Path -LiteralPath $KeyPath)) {
     Write-Probe "missing SSH key: $KeyPath"
     Write-ProbeEvidence
@@ -1029,13 +1286,20 @@ foreach ($candidateHostName in $hostCandidates) {
     }
 
     $script:CurrentHostName = $script:HostProbeHostName
-    if ($RequireRustCliSmoke) {
-        Invoke-MacRustCliSmoke -UserName $script:HostProbeUserName
-    }
-
     $script:MacSshProbeReady = $true
     $script:MacSshProbeReadyHostName = $script:HostProbeHostName
     $script:MacSshProbeReadyUserName = $script:HostProbeUserName
+    if ($RequireRustCliSmoke) {
+        try {
+            Invoke-MacRustCliSmoke -UserName $script:HostProbeUserName
+        }
+        catch {
+            Write-Probe "rust cli smoke failed: $($_.Exception.Message)"
+            Write-ProbeEvidence
+            throw
+        }
+    }
+
     Write-Probe "ready"
     Write-ProbeEvidence
     return

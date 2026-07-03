@@ -20,9 +20,9 @@ Required fields:
 - `adapterBinding`: non-empty helper/session binding description, for example `verified webrtc datachannel helper`.
 - `localEndpoint`: non-empty local ICE/DTLS endpoint summary selected for the session.
 - `remoteEndpoint`: non-empty remote ICE/DTLS endpoint summary selected for the session.
-- `selectedCandidatePair`: non-empty selected ICE candidate pair summary.
+- `selectedCandidatePair`: non-empty nominated ICE candidate-pair summary. The checked helper records the runtime nominated pair as `webrtc/dtls/sctp/local=<type>:<endpoint>;remote=<type>:<endpoint>;path=<same-lan|cross-nat>`, for example `path=same-lan` for direct-LAN proof and `path=cross-nat` for cross-network STUN/TURN proof, so reviewers can distinguish direct-LAN and STUN/cross-NAT evidence without weakening either gate.
 - `transportSecretFingerprintHex`: 64-character lowercase hex fingerprint of the helper's transport secret or exporter-equivalent binding material.
-- `capabilityDigestHex`: 64-character lowercase hex digest of the capability transcript accepted for this adapter launch.
+- `capabilityDigestHex`: 64-character lowercase hex digest of the capability transcript accepted for this adapter launch. The transcript must include the accepted `sameLan` and `crossNat` values.
 - `timestampWindowMs`: positive timestamp window carried into Core launch binding material.
 - `capturedAtUnixMs`: positive Unix epoch milliseconds when the helper captured the proof.
 
@@ -49,7 +49,9 @@ A compliant helper must:
 
 - complete real WebRTC signaling, ICE, DTLS, SCTP, and DataChannel open before writing the proof.
 - send a SkyBridge Core `SBF1` frame on the DataChannel and verify the expected echo.
-- bind the selected endpoint/candidate and secret/capability transcript to the paired peer identity.
+- bind the nominated endpoint/candidate pair and secret/capability transcript to the paired peer identity.
+- record the real network path in the proof transcript. Same-LAN helper runs use `--network-path same-lan` and require explicit bind-address evidence; cross-network helper runs use `--network-path cross-nat`, `--ice-servers <stun:...>` for unauthenticated STUN, `--ice-server-credentials <turn-credentials.json>` for authenticated TURN/STUN JSON, offer/answer signaling with server-reflexive or relay ICE candidates, and an actual nominated pair that includes an `srflx`, `relay`, or routable public host candidate side. Public IPv6 host candidates are valid cross-network evidence; private, link-local, loopback, ULA, CGNAT, benchmarking, or placeholder host candidates are not.
+- keep TURN credentials out of argv, logs, and proof files. Credential JSON is local process input only; inline `turn:user:pass@...`, semicolon-delimited credentials, query strings, fragments, or other argv credential carriers are rejected.
 - write the JSON proof atomically, using a temporary file followed by rename.
 - avoid claiming AppleNative or Apple stream/datagram bindings.
 - leave signaling transport replaceable; file, SSH, QR, relay, or manual signaling can be used during development, but the accepted data plane must be WebRTC DataChannel evidence.
@@ -67,7 +69,7 @@ A compliant helper must:
   "adapterBinding": "verified webrtc datachannel helper",
   "localEndpoint": "windows.lan:5443",
   "remoteEndpoint": "mac.lan:5443",
-  "selectedCandidatePair": "webrtc/dtls/sctp/helper-selected",
+  "selectedCandidatePair": "webrtc/dtls/sctp/local=host:windows.lan:5443;remote=host:mac.lan:5443;path=same-lan",
   "transportSecretFingerprintHex": "6666666666666666666666666666666666666666666666666666666666666666",
   "capabilityDigestHex": "7777777777777777777777777777777777777777777777777777777777777777",
   "relayId": "relay-helper",
@@ -102,11 +104,26 @@ Run the default synthetic schema smoke:
 Scripts\verify-windows-webrtc-proof-smoke.ps1
 ```
 
+Run the live helper proof on a cross-network path only when the Mac SSH host key is pinned and STUN/ICE signaling can be exchanged. This proves the helper WebRTC data plane; it does not replace Mac product AppControl or peer-trust persistence evidence:
+
+```powershell
+Scripts\verify-windows-mac-webrtc-helper-live.ps1 `
+    -MacHostName <mac-host> `
+    -MacExpectedHostKeyFingerprint <SHA256:...> `
+    -ExpectedDeviceId <device-id> `
+    -ExpectedFingerprint <64-lowercase-hex> `
+    -AllowCrossNetworkIce `
+    -IceServers 'stun:stun.l.google.com:19302' `
+    -IceServerCredentialsPath <turn-credentials.json> `
+    -ProofOutPath <proof.json>
+```
+
 Prepare the Mac SSH and reusable Rust CLI side before the real interop gate:
 
 ```powershell
 Scripts\prepare-mac-rust-cli-codbg.ps1 `
     -MacExpectedHostKeyFingerprint <SHA256:...> `
+    -MacDirectSourceAddress <windows-lan-source-ip> `
     -ProbeEvidencePath <mac-ssh-evidence.json> `
     -SummaryPath <mac-rust-cli-codbg-summary.json> `
     -RequireDirectLan `

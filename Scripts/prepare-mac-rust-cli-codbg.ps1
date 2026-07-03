@@ -14,6 +14,8 @@ param(
     [string]$ProbeEvidencePath = "",
     [string]$SummaryPath = "",
     [int]$ConnectTimeoutSeconds = 5,
+    [ValidateRange(10, 600)]
+    [int]$RustCliSmokeTimeoutSeconds = 120,
     [switch]$RequireReady,
     [switch]$RequireDirectLan,
     [switch]$RequireRustCliSmoke
@@ -56,12 +58,39 @@ function ConvertTo-JsonFileUtf8 {
 
     $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $directory = Split-Path -Parent $resolvedPath
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        $directory = (Get-Location).ProviderPath
+        $resolvedPath = Join-Path $directory (Split-Path -Leaf $resolvedPath)
+    }
     if (-not [string]::IsNullOrWhiteSpace($directory)) {
         New-Item -ItemType Directory -Force -Path $directory | Out-Null
     }
 
-    $json = $Value | ConvertTo-Json -Depth 8
-    [System.IO.File]::WriteAllText($resolvedPath, $json, [System.Text.UTF8Encoding]::new($false))
+    $leaf = Split-Path -Leaf $resolvedPath
+    $tempPath = Join-Path $directory (".$leaf." + [Guid]::NewGuid().ToString("N") + ".tmp")
+    $backupPath = Join-Path $directory (".$leaf." + [Guid]::NewGuid().ToString("N") + ".bak")
+    try {
+        $json = $Value | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $resolvedPath) {
+            [System.IO.File]::Replace($tempPath, $resolvedPath, $backupPath, $true)
+            if (Test-Path -LiteralPath $backupPath) {
+                Remove-Item -LiteralPath $backupPath -Force
+            }
+        }
+        else {
+            [System.IO.File]::Move($tempPath, $resolvedPath)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force
+        }
+    }
+
     return $resolvedPath
 }
 
@@ -74,40 +103,50 @@ function Get-ProbeEvidenceObject {
     param([string]$Path)
 
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
-        return $null
+        throw "Mac SSH probe evidence is missing: $Path"
     }
 
-    try {
-        return (Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json)
-    }
-    catch {
-        return $null
-    }
+    return (Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json)
+}
+
+function ConvertTo-PowerShellSingleQuotedArgument {
+    param([string]$Value)
+
+    return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function New-NextInteropCommand {
     $parts = [System.Collections.Generic.List[string]]::new()
     $parts.Add(".\Scripts\verify-windows-mac-webrtc-interop.ps1")
-    $parts.Add("-MacHostName `"$MacHostName`"")
+    $parts.Add("-MacHostName")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacHostName))
     $parts.Add("-MacPort $MacPort")
-    $parts.Add("-MacUserNames $($MacUserNames -join ',')")
-    $parts.Add("-MacSshKeyPath `"$MacSshKeyPath`"")
-    $parts.Add("-MacKnownHostsPath `"$MacKnownHostsPath`"")
+    $parts.Add("-MacUserNames")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value ($MacUserNames -join ",")))
+    $parts.Add("-MacSshKeyPath")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacSshKeyPath))
+    $parts.Add("-MacKnownHostsPath")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacKnownHostsPath))
     if (-not [string]::IsNullOrWhiteSpace($MacExpectedHostKeyFingerprint)) {
-        $parts.Add("-MacExpectedHostKeyFingerprint `"$MacExpectedHostKeyFingerprint`"")
+        $parts.Add("-MacExpectedHostKeyFingerprint")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacExpectedHostKeyFingerprint))
     }
     if (-not [string]::IsNullOrWhiteSpace($MacExpectedHostAddress)) {
-        $parts.Add("-MacExpectedHostAddress `"$MacExpectedHostAddress`"")
+        $parts.Add("-MacExpectedHostAddress")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacExpectedHostAddress))
     }
     if (-not [string]::IsNullOrWhiteSpace($MacDirectSourceAddress)) {
-        $parts.Add("-MacDirectSourceAddress `"$MacDirectSourceAddress`"")
+        $parts.Add("-MacDirectSourceAddress")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacDirectSourceAddress))
     }
     if (-not [string]::IsNullOrWhiteSpace($MacRemoteRepoRoot)) {
-        $parts.Add("-MacRemoteRepoRoot `"$MacRemoteRepoRoot`"")
+        $parts.Add("-MacRemoteRepoRoot")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $MacRemoteRepoRoot))
     }
     else {
         $parts.Add("-MacRemoteRepoRoot <mac-repo-root>")
     }
+    $parts.Add("-RustCliSmokeTimeoutSeconds $RustCliSmokeTimeoutSeconds")
     $parts.Add("-WebRtcProofPath <helper-proof-json>")
     $parts.Add("-ExpectedDeviceId <mac-device-id>")
     $parts.Add("-ExpectedFingerprint <64-lowercase-hex>")
@@ -123,6 +162,14 @@ if ($RequireRustCliSmoke) {
 }
 
 $normalizedHostKeyFingerprint = ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $MacExpectedHostKeyFingerprint
+if (($RequireReady -or $RequireDirectLan -or $RequireRustCliSmoke) -and [string]::IsNullOrWhiteSpace($normalizedHostKeyFingerprint)) {
+    throw "Required Mac co-debug gates require -MacExpectedHostKeyFingerprint."
+}
+
+if ($RequireDirectLan -and [string]::IsNullOrWhiteSpace($MacDirectSourceAddress)) {
+    throw "Required direct-LAN Mac co-debug gate requires -MacDirectSourceAddress."
+}
+
 if ([string]::IsNullOrWhiteSpace($ProbeEvidencePath)) {
     if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
         $EvidencePath = New-DefaultEvidencePath
@@ -145,6 +192,7 @@ $probeParameters = @{
     ExpectedHostAddress = $MacExpectedHostAddress
     EvidencePath = $ProbeEvidencePath
     ConnectTimeoutSeconds = $ConnectTimeoutSeconds
+    RustCliSmokeTimeoutSeconds = $RustCliSmokeTimeoutSeconds
 }
 if (-not [string]::IsNullOrWhiteSpace($normalizedHostKeyFingerprint)) {
     $probeParameters.ExpectedHostKeyFingerprint = $normalizedHostKeyFingerprint
@@ -188,13 +236,16 @@ $summary = [ordered]@{
     knownHostsPath = $MacKnownHostsPath
     expectedHostAddress = $MacExpectedHostAddress
     expectedHostKeyFingerprint = $normalizedHostKeyFingerprint
+    macDirectSourceAddress = $MacDirectSourceAddress
     directSourceAddress = $MacDirectSourceAddress
     remoteRepoRoot = $MacRemoteRepoRoot
     requireReady = [bool]$RequireReady
     requireDirectLan = [bool]$RequireDirectLan
     requireRustCliSmoke = [bool]$RequireRustCliSmoke
+    rustCliSmokeTimeoutSeconds = $RustCliSmokeTimeoutSeconds
     macRustCliSmoke = "cli_apple_to_apple_selects_apple_native"
     probeEvidencePath = $ProbeEvidencePath
+    localSensitive = $true
     nextInteropCommand = New-NextInteropCommand
     probe = if ($probeEvidence) {
         [ordered]@{
@@ -209,6 +260,7 @@ $summary = [ordered]@{
             hostKeyPinned = [bool]$probeEvidence.hostKeyPinned
             hostKeySource = [string]$probeEvidence.hostKeySource
             hostKeyFingerprints = @($probeEvidence.hostKeyFingerprints)
+            rustCliSmoke = if ($probeEvidence.PSObject.Properties.Name -contains "rustCliSmoke") { $probeEvidence.rustCliSmoke } else { $null }
             remediation = if ($probeEvidence.PSObject.Properties.Name -contains "remediation") { $probeEvidence.remediation } else { $null }
         }
     }

@@ -41,7 +41,7 @@ try {
         adapterBinding = "verified webrtc datachannel helper"
         localEndpoint = "windows.lan:5443"
         remoteEndpoint = "mac.lan:5443"
-        selectedCandidatePair = "webrtc/dtls/sctp/helper-selected"
+        selectedCandidatePair = "webrtc/dtls/sctp/local=host:windows.lan:5443;remote=host:mac.lan:5443;path=same-lan"
         transportSecretFingerprintHex = "6666666666666666666666666666666666666666666666666666666666666666"
         capabilityDigestHex = "7777777777777777777777777777777777777777777777777777777777777777"
         relayId = "relay-helper"

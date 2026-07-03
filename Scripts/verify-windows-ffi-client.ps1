@@ -86,9 +86,11 @@ $rustWebRtcProofCliPath = Join-Path $RepoRoot "Scripts/verify-rust-webrtc-proof-
 $webrtcProofSchemaSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof-smoke.ps1"
 $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
+$macWebRtcHelperLivePath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-helper-live.ps1"
+$webrtcHelperProgramPath = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/Program.cs"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -154,6 +156,8 @@ $rustWebRtcProofCli = Get-Content -Raw -LiteralPath $rustWebRtcProofCliPath
 $webrtcProofSchemaSmoke = Get-Content -Raw -LiteralPath $webrtcProofSchemaSmokePath
 $webrtcProofSchema = Get-Content -Raw -LiteralPath $webrtcProofSchemaPath
 $macWebRtcInterop = Get-Content -Raw -LiteralPath $macWebRtcInteropPath
+$macWebRtcHelperLive = Get-Content -Raw -LiteralPath $macWebRtcHelperLivePath
+$webrtcHelperProgram = Get-Content -Raw -LiteralPath $webrtcHelperProgramPath
 $appleNativePreservationSmoke = Get-Content -Raw -LiteralPath $appleNativePreservationSmokePath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
@@ -787,7 +791,14 @@ foreach ($macSshProbeSignal in @(
     "RequireReady",
     "RequireRustCliSmoke",
     "RemoteRepoRoot",
-    "cargo test --manifest-path core/skybridge-core/Cargo.toml --test cli_smoke cli_apple_to_apple_selects_apple_native -- --exact"
+    "rustCliSmoke",
+    "actualSignals",
+    "actualOutputSha256",
+    "RustCliSmokeTimeoutSeconds",
+    "cargo run --quiet --manifest-path core/skybridge-core/Cargo.toml --bin skybridge -- transport select --local macos --remote ios --path same-lan",
+    "kind=AppleNative",
+    "audit=AppleNativeDefault",
+    "relay_allowed=false"
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "Mac SSH probe missing signal: $macSshProbeSignal"
 }
@@ -831,6 +842,10 @@ foreach ($macRustCliCodbgWrapperSmokeSignal in @(
     "summary.probe.hostKeyPinned",
     "summary.probe.directLanLikely",
     "summary.probe.remediation.status",
+    "summary.probe.rustCliSmoke.status",
+    "summary.probe.rustCliSmoke.exitCode",
+    "summary.probe.rustCliSmoke.actualSignals",
+    "transport select --local macos --remote ios --path same-lan",
     "cli_apple_to_apple_selects_apple_native",
     "verify-windows-mac-webrtc-interop",
     "Refusing to remove unexpected test directory"
@@ -1173,10 +1188,15 @@ foreach ($signal in @(
     "selectedCandidatePair",
     "transportSecretFingerprintHex",
     "capabilityDigestHex",
+    "sameLan",
+    "crossNat",
+    "path=same-lan",
+    "path=cross-nat",
     "timestampWindowMs",
     "capturedAtUnixMs",
     "must not replace the AppleNative path",
     "Scripts\prepare-mac-rust-cli-codbg.ps1",
+    "-MacDirectSourceAddress",
     "-RequireDirectLan",
     "-RequireRustCliSmoke",
     "Scripts\verify-windows-webrtc-proof-smoke.ps1",
@@ -1184,6 +1204,40 @@ foreach ($signal in @(
     "Scripts\verify-windows-portability-smoke.ps1"
 )) {
     Assert-Contains -Text $webrtcProofSchema -Needle $signal -Message "Windows WebRTC proof schema missing signal: $signal"
+}
+foreach ($signal in @(
+    "--network-path",
+    "same-lan",
+    "cross-nat",
+    "sameLan={FormatBool(networkPath.SameLan)}",
+    "crossNat={FormatBool(networkPath.CrossNat)}",
+    "path={networkPath.Name}",
+    "GetRtpChannel()?.NominatedEntry",
+    "NominatedCandidatePair.From",
+    "local={LocalType}:{LocalEndpoint};remote={RemoteType}:{RemoteEndpoint};path={networkPath.Name}",
+    "--ice-servers",
+    "--ice-server-credentials",
+    "ReadIceServerCredentials",
+    "TURN URLs without a credential file",
+    "must not include inline TURN credentials"
+)) {
+    Assert-Contains -Text $webrtcHelperProgram -Needle $signal -Message "Windows WebRTC helper program missing cross-network proof signal: $signal"
+}
+foreach ($signal in @(
+    "AllowCrossNetworkIce",
+    "IceServers",
+    "IceServerCredentialsPath",
+    "ice-server-credentials",
+    "ice-include-all-interfaces",
+    "path=cross-nat",
+    "typ\s+(srflx|relay)",
+    "Test-CrossNetworkSelectedPairEvidence",
+    "public host candidate",
+    "Direct-LAN helper proof requires -WindowsBindAddress",
+    "-IceServerCredentialsPath <turn-credentials.json>",
+    "-AllowCrossNetworkIce -IceServers <stun:...>"
+)) {
+    Assert-Contains -Text $macWebRtcHelperLive -Needle $signal -Message "Windows/mac WebRTC helper live gate missing cross-network signal: $signal"
 }
 foreach ($signal in @(
     "windows-mac-webrtc-interop: ok",

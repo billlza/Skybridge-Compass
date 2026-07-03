@@ -8,17 +8,19 @@ param(
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
     [Parameter(Mandatory = $true)]
     [string]$MacExpectedHostKeyFingerprint,
-    [Parameter(Mandatory = $true)]
-    [string]$WindowsBindAddress,
-    [Parameter(Mandatory = $true)]
-    [string]$MacBindAddress,
+    [string]$WindowsBindAddress = "",
+    [string]$MacBindAddress = "",
     [Parameter(Mandatory = $true)]
     [string]$ExpectedDeviceId,
     [Parameter(Mandatory = $true)]
     [string]$ExpectedFingerprint,
     [string]$ProofOutPath = "",
+    [string]$IceServers = "",
+    [string]$IceServerCredentialsPath = "",
     [ValidateRange(1, 300)]
     [int]$TimeoutSeconds = 120,
+    [switch]$AllowCrossNetworkIce,
+    [switch]$IceIncludeAllInterfaces,
     [switch]$KeepArtifacts
 )
 
@@ -127,6 +129,118 @@ function Join-WindowsProcessArguments {
     }
 
     return [string]::Join(" ", $rendered)
+}
+
+function Get-NetworkPathName {
+    if ($AllowCrossNetworkIce) {
+        return "cross-nat"
+    }
+
+    return "same-lan"
+}
+
+function Test-PublicHostCandidateEndpoint {
+    param([string]$Endpoint)
+
+    $addressText = $Endpoint
+    if ($addressText.StartsWith("[", [StringComparison]::Ordinal) -and $addressText.Contains("]")) {
+        $addressText = $addressText.Substring(1, $addressText.IndexOf("]", [StringComparison]::Ordinal) - 1)
+    }
+
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($addressText, [ref]$address)) {
+        return $false
+    }
+
+    if ([System.Net.IPAddress]::IsLoopback($address)) {
+        return $false
+    }
+
+    $bytes = $address.GetAddressBytes()
+    if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        if ($address.Equals([System.Net.IPAddress]::IPv6Any) -or
+            $address.Equals([System.Net.IPAddress]::IPv6Loopback) -or
+            $address.IsIPv6LinkLocal -or
+            $address.IsIPv6SiteLocal -or
+            $address.IsIPv6Multicast) {
+            return $false
+        }
+
+        $isUniqueLocal = (($bytes[0] -band 0xfe) -eq 0xfc)
+        $isGlobalUnicast = (($bytes[0] -band 0xe0) -eq 0x20)
+        return (-not $isUniqueLocal) -and $isGlobalUnicast
+    }
+
+    if ($address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $false
+    }
+
+    $first = [int]$bytes[0]
+    $second = [int]$bytes[1]
+    if ($first -eq 0 -or $first -eq 10 -or $first -eq 127 -or
+        ($first -eq 100 -and $second -ge 64 -and $second -le 127) -or
+        ($first -eq 169 -and $second -eq 254) -or
+        ($first -eq 172 -and $second -ge 16 -and $second -le 31) -or
+        ($first -eq 192 -and $second -eq 168) -or
+        ($first -eq 198 -and ($second -eq 18 -or $second -eq 19)) -or
+        $first -ge 224) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-CrossNetworkSelectedPairEvidence {
+    param([string]$SelectedCandidatePair)
+
+    if ($SelectedCandidatePair -match '(?i)(local|remote)=(srflx|relay):') {
+        return $true
+    }
+
+    $matches = [regex]::Matches($SelectedCandidatePair, '(?i)(?:local|remote)=host:(?<endpoint>\[[^\]]+\]|[^;:]+):\d+')
+    foreach ($match in $matches) {
+        if (Test-PublicHostCandidateEndpoint -Endpoint $match.Groups["endpoint"].Value) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Add-HelperIceArguments {
+    param([string[]]$Arguments)
+
+    $result = @($Arguments)
+    if (-not [string]::IsNullOrWhiteSpace($IceServers)) {
+        $result += @("--ice-servers", $IceServers)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) {
+        $result += @("--ice-server-credentials", $IceServerCredentialsPath)
+    }
+    if ($IceIncludeAllInterfaces -or $AllowCrossNetworkIce) {
+        $result += @("--ice-include-all-interfaces", "true")
+    }
+
+    $result += @("--network-path", (Get-NetworkPathName))
+    return $result
+}
+
+function Add-RemoteHelperIceArguments {
+    param([string]$CommandText)
+
+    $result = $CommandText
+    if (-not [string]::IsNullOrWhiteSpace($IceServers)) {
+        $result += " --ice-servers " + (ConvertTo-PosixSingleQuoted -Value $IceServers)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:RemoteIceServerCredentialsPath)) {
+        $result += " --ice-server-credentials " + (ConvertTo-PosixSingleQuoted -Value $script:RemoteIceServerCredentialsPath)
+    }
+    if ($IceIncludeAllInterfaces -or $AllowCrossNetworkIce) {
+        $result += " --ice-include-all-interfaces true"
+    }
+
+    $result += " --network-path " + (Get-NetworkPathName)
+    return $result
 }
 
 function Stop-ProcessTreeBestEffort {
@@ -413,6 +527,19 @@ Write-Output "windows-mac-webrtc-helper-live: known-hosts-fingerprint-ok"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) -Message "ExpectedDeviceId must be the explicit paired Mac identity for this live proof."
 Assert-True -Condition ($ExpectedFingerprint -match '^[0-9a-f]{64}$') -Message "ExpectedFingerprint must be 64 lowercase hex characters."
 Write-Output "windows-mac-webrtc-helper-live: expected-peer-identity-ok"
+if ($AllowCrossNetworkIce) {
+    Assert-True -Condition ((-not [string]::IsNullOrWhiteSpace($IceServers)) -or (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath))) -Message "-AllowCrossNetworkIce requires -IceServers with STUN or -IceServerCredentialsPath with authenticated TURN/STUN JSON; TURN credentials must not be passed on argv."
+    if (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) {
+        Assert-True -Condition (Test-Path -LiteralPath $IceServerCredentialsPath) -Message "Missing ICE server credentials JSON: $IceServerCredentialsPath"
+    }
+    Write-Output "windows-mac-webrtc-helper-live: cross-network-ice-enabled"
+}
+else {
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) -Message "-IceServerCredentialsPath is only valid with -AllowCrossNetworkIce."
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($WindowsBindAddress)) -Message "Direct-LAN helper proof requires -WindowsBindAddress. Use -AllowCrossNetworkIce -IceServers <stun:...> or -IceServerCredentialsPath <turn-credentials.json> for cross-network WebRTC."
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($MacBindAddress)) -Message "Direct-LAN helper proof requires -MacBindAddress. Use -AllowCrossNetworkIce -IceServers <stun:...> or -IceServerCredentialsPath <turn-credentials.json> for cross-network WebRTC."
+    Write-Output "windows-mac-webrtc-helper-live: direct-lan-bind-addresses-ok"
+}
 
 $helperProject = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/Skybridge.WebRtcHelper.csproj"
 $helperSource = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper"
@@ -436,6 +563,7 @@ New-Item -ItemType Directory -Force -Path $windowsRoot | Out-Null
 Write-Output "windows-mac-webrtc-helper-live: windows-temp-ok"
 
 $remoteRoot = ""
+$script:RemoteIceServerCredentialsPath = ""
 $offerProcess = $null
 $answerProcess = $null
 try {
@@ -489,6 +617,7 @@ try {
     $remoteLive = "$remoteRoot/live"
     $remoteOffer = "$remoteLive/offer.json"
     $remoteAnswer = "$remoteLive/answer.json"
+    $script:RemoteIceServerCredentialsPath = if ([string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) { "" } else { "$remoteLive/ice-server-credentials.json" }
     $remoteBuildLog = "$remoteRoot/build.log"
     $remoteBuildExit = "$remoteRoot/build.exit"
     $remoteBuildPid = "$remoteRoot/build.pid"
@@ -523,17 +652,40 @@ try {
     Wait-RemoteFile -RemotePath $remoteHelperDll -TimeoutSeconds 30
     $macBuildText | Write-Output
 
+    if (-not [string]::IsNullOrWhiteSpace($IceServerCredentialsPath)) {
+        Write-Output "windows-mac-webrtc-helper-live: copy-ice-server-credentials-to-mac"
+        Invoke-Native -FileName "scp" -TimeoutSeconds 30 -Arguments @(
+            "-P", "$MacPort",
+            "-i", $MacSshKeyPath,
+            "-o", "BatchMode=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PasswordAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=0",
+            "-o", "ConnectTimeout=10",
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=$MacKnownHostsPath",
+            "-o", "UpdateHostKeys=no",
+            $IceServerCredentialsPath,
+            "${MacUserName}@${MacHostName}:$script:RemoteIceServerCredentialsPath") | Out-Null
+    }
+
     Write-Output "windows-mac-webrtc-helper-live: start-windows-offer"
     $helperDll = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/bin/Debug/net10.0/skybridge-webrtc-helper.dll"
-    $offerProcess = Start-Native -FileName "dotnet" -StdoutPath $windowsOfferStdout -StderrPath $windowsOfferStderr -Arguments @(
+    $offerArguments = @(
         $helperDll,
         "--mode", "offer",
-        "--bind-address", $WindowsBindAddress,
         "--offer-out", $windowsOffer,
         "--answer-in", $windowsAnswer,
         "--proof-out", $windowsProof,
         "--peer-device-id", $ExpectedDeviceId,
         "--peer-fingerprint", $ExpectedFingerprint)
+    if (-not [string]::IsNullOrWhiteSpace($WindowsBindAddress)) {
+        $offerArguments += @("--bind-address", $WindowsBindAddress)
+    }
+    $offerArguments = Add-HelperIceArguments -Arguments $offerArguments
+    $offerProcess = Start-Native -FileName "dotnet" -StdoutPath $windowsOfferStdout -StderrPath $windowsOfferStderr -Arguments $offerArguments
 
     Wait-File -Path $windowsOffer -TimeoutSeconds 20 -OnPoll {
         if ($offerProcess.Process.HasExited) {
@@ -562,10 +714,13 @@ try {
         "set -eu; " + $remoteDotNetPrelude +
         '; "$DOTNET" ' + (ConvertTo-PosixSingleQuoted -Value $remoteHelperDll) +
         " --mode answer" +
-        " --bind-address " + (ConvertTo-PosixSingleQuoted -Value $MacBindAddress) +
         " --offer-in " + (ConvertTo-PosixSingleQuoted -Value $remoteOffer) +
         " --answer-out " + (ConvertTo-PosixSingleQuoted -Value $remoteAnswer) +
         " --hold-seconds 45"
+    if (-not [string]::IsNullOrWhiteSpace($MacBindAddress)) {
+        $answerCommand += " --bind-address " + (ConvertTo-PosixSingleQuoted -Value $MacBindAddress)
+    }
+    $answerCommand = Add-RemoteHelperIceArguments -CommandText $answerCommand
     Write-Output "windows-mac-webrtc-helper-live: start-mac-answer"
     $answerProcess = Start-Native -FileName "ssh" -StdoutPath $macAnswerStdout -StderrPath $macAnswerStderr -Arguments @(
         "-n",
@@ -620,9 +775,19 @@ try {
 
     $proof = Get-Content -Raw -LiteralPath $windowsProof | ConvertFrom-Json
     $endpointEvidence = "$($proof.localEndpoint) $($proof.remoteEndpoint) $($proof.selectedCandidatePair)"
-    Assert-True -Condition ($endpointEvidence.Contains($WindowsBindAddress)) -Message "Fresh proof does not include expected Windows bind address $WindowsBindAddress`: $endpointEvidence"
-    Assert-True -Condition ($endpointEvidence.Contains($MacBindAddress)) -Message "Fresh proof does not include expected Mac bind address $MacBindAddress`: $endpointEvidence"
-    Assert-True -Condition ($endpointEvidence.IndexOf("198.18.", [StringComparison]::Ordinal) -lt 0) -Message "Fresh proof selected a proxy/test-network candidate instead of direct LAN: $endpointEvidence"
+    if ($AllowCrossNetworkIce) {
+        $signalEvidence = (Get-Content -Raw -LiteralPath $windowsOffer) + "`n" + (Get-Content -Raw -LiteralPath $windowsAnswer)
+        Assert-True -Condition ($endpointEvidence.Contains("path=cross-nat")) -Message "Fresh proof did not record network-path=cross-nat: $endpointEvidence"
+        Assert-True -Condition ($signalEvidence -match '\btyp\s+(srflx|relay)\b') -Message "Cross-network proof requires server-reflexive or relay ICE candidates in offer/answer signaling."
+        Assert-True -Condition (Test-CrossNetworkSelectedPairEvidence -SelectedCandidatePair $proof.selectedCandidatePair) -Message "Cross-network proof requires the actual nominated selected candidate pair to include srflx, relay, or a public host candidate: $($proof.selectedCandidatePair)"
+        Assert-True -Condition ($endpointEvidence.IndexOf("127.0.0.1:0", [StringComparison]::Ordinal) -lt 0) -Message "Fresh proof did not record ICE endpoints: $endpointEvidence"
+    }
+    else {
+        Assert-True -Condition ($endpointEvidence.Contains($WindowsBindAddress)) -Message "Fresh proof does not include expected Windows bind address $WindowsBindAddress`: $endpointEvidence"
+        Assert-True -Condition ($endpointEvidence.Contains($MacBindAddress)) -Message "Fresh proof does not include expected Mac bind address $MacBindAddress`: $endpointEvidence"
+        Assert-True -Condition ($endpointEvidence.Contains("path=same-lan")) -Message "Fresh proof did not record network-path=same-lan: $endpointEvidence"
+        Assert-True -Condition ($endpointEvidence.IndexOf("198.18.", [StringComparison]::Ordinal) -lt 0) -Message "Fresh proof selected a proxy/test-network candidate instead of direct LAN: $endpointEvidence"
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($ProofOutPath)) {
         $resolvedProofOutPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ProofOutPath)
