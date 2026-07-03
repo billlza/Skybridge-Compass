@@ -63,8 +63,10 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $researchSynthesisPath = Join-Path $RepoRoot "docs/windows-research-agent-synthesis.md"
 $portabilityAcceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
+$opensshPqKexPath = Join-Path $RepoRoot "docs/windows-openssh-pq-kex.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $portabilityAcceptanceMapSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-map.ps1"
+$opensshPqKexSmokePath = Join-Path $RepoRoot "Scripts/verify-openssh-pq-kex.ps1"
 $portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $portabilityCompletionAuditPath = Join-Path $RepoRoot "Scripts/audit-windows-portability-completion.ps1"
 $researchEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
@@ -90,7 +92,7 @@ $macWebRtcHelperLivePath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrt
 $webrtcHelperProgramPath = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/Program.cs"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $opensshPqKexPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $opensshPqKexSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -133,8 +135,10 @@ $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $researchSynthesis = Get-Content -Raw -LiteralPath $researchSynthesisPath
 $portabilityAcceptanceMap = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapPath
+$opensshPqKex = Get-Content -Raw -LiteralPath $opensshPqKexPath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $portabilityAcceptanceMapSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapSmokePath
+$opensshPqKexSmoke = Get-Content -Raw -LiteralPath $opensshPqKexSmokePath
 $portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
 $portabilityCompletionAudit = Get-Content -Raw -LiteralPath $portabilityCompletionAuditPath
 $researchEvidenceSmoke = Get-Content -Raw -LiteralPath $researchEvidenceSmokePath
@@ -499,6 +503,7 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "REQ-BASIC-SMOKE",
     "REQ-APPLE-PRESERVATION",
     "REQ-MAC-INTEROP",
+    "REQ-OPENSSH-PQ-KEX",
     "REQ-GITHUB-SSH",
     "Product Design QA gate",
     "at or above 90%",
@@ -508,9 +513,13 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "verify-apple-native-preservation.ps1",
     "prepare-mac-rust-cli-codbg.ps1",
     "verify-windows-mac-webrtc-interop.ps1",
+    "verify-openssh-pq-kex.ps1",
+    "Windows OpenSSH PQ KEX Gate",
+    "negotiatedKexAlgorithm",
+    "not SkyBridge product transport evidence",
     "git-remote-https.exe"
 )) {
-    Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
+    Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke + $opensshPqKex + $opensshPqKexSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
 }
 foreach ($researchEvidenceSignal in @(
     "windows-research-evidence: ok",

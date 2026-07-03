@@ -38,6 +38,7 @@ $researchSynthesisPath = Join-Path $RepoRoot "docs/windows-research-agent-synthe
 $uiContractPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $uiMatrixPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $webrtcSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
+$opensshPqKexPath = Join-Path $RepoRoot "docs/windows-openssh-pq-kex.md"
 $githubTransportPath = Join-Path $RepoRoot "docs/github-ssh-transport.md"
 $acceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 
@@ -54,6 +55,7 @@ $uiMatrixSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-parity-matri
 $uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automation-smoke.ps1"
 $uiVisualEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-visual-evidence.ps1"
 $applePreservationPath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
+$opensshPqKexSmokePath = Join-Path $RepoRoot "Scripts/verify-openssh-pq-kex.ps1"
 $macCodbgPath = Join-Path $RepoRoot "Scripts/prepare-mac-rust-cli-codbg.ps1"
 $macCodbgWrapperPath = Join-Path $RepoRoot "Scripts/verify-mac-rust-cli-codbg-wrapper.ps1"
 $macInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
@@ -67,6 +69,7 @@ $researchSynthesis = Read-RequiredText -Path $researchSynthesisPath
 $uiContract = Read-RequiredText -Path $uiContractPath
 $uiMatrix = Read-RequiredText -Path $uiMatrixPath
 $webrtcSchema = Read-RequiredText -Path $webrtcSchemaPath
+$opensshPqKex = Read-RequiredText -Path $opensshPqKexPath
 $githubTransport = Read-RequiredText -Path $githubTransportPath
 $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $portabilitySmoke = Read-RequiredText -Path $portabilitySmokePath
@@ -82,6 +85,7 @@ $uiMatrixSmoke = Read-RequiredText -Path $uiMatrixSmokePath
 $uiAutomationSmoke = Read-RequiredText -Path $uiAutomationSmokePath
 $uiVisualEvidence = Read-RequiredText -Path $uiVisualEvidencePath
 $applePreservation = Read-RequiredText -Path $applePreservationPath
+$opensshPqKexSmoke = Read-RequiredText -Path $opensshPqKexSmokePath
 $macCodbg = Read-RequiredText -Path $macCodbgPath
 $macCodbgWrapper = Read-RequiredText -Path $macCodbgWrapperPath
 $macInterop = Read-RequiredText -Path $macInteropPath
@@ -102,6 +106,7 @@ foreach ($requirement in @(
     "REQ-APPLE-PRESERVATION",
     "REQ-NATIVE-DNS-SD",
     "REQ-MAC-INTEROP",
+    "REQ-OPENSSH-PQ-KEX",
     "REQ-GITHUB-SSH",
     "REQ-GITHUB-UPLOAD"
 )) {
@@ -256,6 +261,22 @@ foreach ($optionalGate in @(
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $optionalGate -Message "Portability evidence option missing signal: $optionalGate"
 }
+foreach ($signal in @(
+    "Windows OpenSSH PQ KEX Gate",
+    "REQ-OPENSSH-PQ-KEX",
+    "verify-openssh-pq-kex.ps1",
+    "ExpectedHostKeyFingerprint",
+    "KexAlgorithms=<pq-only-list>",
+    "mlkem768x25519-sha256",
+    "sntrup761x25519-sha512",
+    "negotiatedKexAlgorithm",
+    "AllowAuthenticationFailureAfterKex",
+    "not SkyBridge product transport evidence",
+    "does not satisfy WebRTC helper"
+)) {
+    Assert-Contains -Text ($acceptanceMap + $opensshPqKex + $opensshPqKexSmoke) -Needle $signal -Message "OpenSSH PQ KEX evidence missing signal: $signal"
+}
+
 foreach ($signal in @(
     "verify-windows-portability-acceptance-evidence.ps1",
     "audit-windows-portability-completion.ps1",
