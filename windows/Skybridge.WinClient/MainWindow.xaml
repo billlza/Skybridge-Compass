@@ -103,9 +103,16 @@
         </ItemsPanelTemplate>
         <ItemsPanelTemplate x:Key="DashboardQuickActionItemsPanel">
             <!-- 2x2 grid of quick-action tiles (Mac QuickActionsPanelView inner
-                 LazyVGrid). ItemWidth tuned to 158 so two tiles fit inside the
-                 half-width Quick Actions cell of the dashboard 2x2 panel grid. -->
-            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="2" ItemWidth="158" />
+                 LazyVGrid). Width is exactly two 158-wide cells so the wrap
+                 boundary is row-major and does not drift with the panel's
+                 measured width. ItemHeight matches the 96-high tile plus its
+                 12px bottom margin. -->
+            <ItemsWrapGrid
+                Orientation="Horizontal"
+                Width="316"
+                ItemWidth="158"
+                ItemHeight="108"
+                HorizontalAlignment="Left" />
         </ItemsPanelTemplate>
         <!-- System Monitor Overview metric-tile grid: a wrapping row of colored
              metric tiles (Mac SystemMetricsPanelView). 4 Overview metrics
@@ -1572,9 +1579,12 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel Spacing="2" VerticalAlignment="Center">
+                    <StackPanel
+                        Spacing="2"
+                        VerticalAlignment="Center"
+                        AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"
+                        AutomationProperties.Name="{Binding SelectedFeature.Title}">
                         <TextBlock
-                            AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"
                             Text="{Binding SelectedFeature.Title}"
                             FontSize="22"
                             FontWeight="SemiBold"
@@ -1729,7 +1739,9 @@
                 </Grid>
             </Border>
 
-            <ScrollViewer Grid.Row="1">
+            <ScrollViewer
+                Grid.Row="1"
+                AutomationProperties.AutomationId="Skybridge.Workspace.ScrollViewer">
                 <StackPanel Padding="32,24" Spacing="24">
                     <StackPanel
                         Visibility="{Binding IsDashboardSelected, Converter={StaticResource BoolToVisibilityConverter}}"
@@ -2124,7 +2136,7 @@
                                          Is*ModeSelected bool. Tapping swaps the body surfaces below. -->
                                     <!-- Tab 1: Local Scan (green) -->
                                     <Border Grid.Column="0" Tag="LocalScan" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=LocalScan}" CornerRadius="12,0,0,0">
-                                        <Grid>
+                                        <Grid AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.LocalScan" AutomationProperties.Name="Local Scan">
                                             <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                                 <FontIcon Glyph="&#xE701;" FontSize="20" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
                                                 <TextBlock x:Uid="DiscoveryModeLocalScanTitle" Text="Near Scan" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SkyBridgeSuccessBrush}" HorizontalAlignment="Center" />
@@ -2136,7 +2148,7 @@
                                     <!-- Tab 2: QR Code (blue) — E722 = Scan (QR-in-camera-frame),
                                          matches Mac qrcode.viewfinder (was the plain ED14 QR glyph). -->
                                     <Border Grid.Column="1" Tag="Qr" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Qr}">
-                                        <Grid>
+                                        <Grid AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Qr" AutomationProperties.Name="QR">
                                             <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                                 <FontIcon Glyph="&#xE722;" FontSize="20" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
                                                 <TextBlock x:Uid="DiscoveryModeQrTitle" Text="Scan QR" FontSize="12" Foreground="{StaticResource SkyBridgeNavDashboardBrush}" HorizontalAlignment="Center" />
@@ -2147,7 +2159,7 @@
                                     </Border>
                                     <!-- Tab 3: Cloud Link (purple) -->
                                     <Border Grid.Column="2" Tag="Cloud" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Cloud}">
-                                        <Grid>
+                                        <Grid AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Cloud" AutomationProperties.Name="Cloud">
                                             <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                                 <FontIcon Glyph="&#xE753;" FontSize="20" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
                                                 <TextBlock Text="iCloud" FontSize="12" Foreground="{StaticResource SkyBridgeNavQuantumBrush}" HorizontalAlignment="Center" />
@@ -2158,7 +2170,7 @@
                                     </Border>
                                     <!-- Tab 4: Connection Code (orange) -->
                                     <Border Grid.Column="3" Tag="Code" Tapped="OnDiscoveryModeTabTapped" Background="{Binding SelectedDiscoveryMode, Converter={StaticResource ModeToAccentBrushConverter}, ConverterParameter=Code}" CornerRadius="0,12,0,0">
-                                        <Grid>
+                                        <Grid AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Code" AutomationProperties.Name="Code">
                                             <StackPanel Spacing="4" Padding="8,12" HorizontalAlignment="Center">
                                                 <FontIcon Glyph="&#xE943;" FontSize="20" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" />
                                                 <TextBlock x:Uid="DiscoveryModeSmartCodeTitle" Text="Smart Code" FontSize="12" Foreground="{StaticResource SkyBridgeWarningBrush}" HorizontalAlignment="Center" TextAlignment="Center" />
@@ -3702,9 +3714,11 @@
                         </Grid.ColumnDefinitions>
 
                         <Border Style="{StaticResource GlassPanel}">
-                            <StackPanel Spacing="14">
+                            <StackPanel
+                                Spacing="14"
+                                AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
+                                AutomationProperties.Name="{Binding SelectedFeature.Title}">
                                 <TextBlock
-                                    AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
                                     Text="{Binding SelectedFeature.Title}"
                                     FontSize="18"
                                     FontWeight="SemiBold" />

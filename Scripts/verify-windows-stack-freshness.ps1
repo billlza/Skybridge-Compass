@@ -91,7 +91,7 @@ Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.22621.0") -Mes
 Assert-True -Condition ($targetPlatformMinVersion -eq "10.0.19041.0") -Message "Windows client must keep TargetPlatformMinVersion=10.0.19041.0, got $targetPlatformMinVersion"
 Assert-True -Condition ($windowsPackageTypes -contains "None") -Message "Windows client must keep a default WindowsPackageType=None path so unpackaged WinUI auto-initializes the Windows App SDK runtime. Actual=[$($windowsPackageTypes -join ', ')]"
 Assert-True -Condition ($windowsAppSdkVersion -eq "2.2.0") -Message "Windows App SDK must stay on latest stable 2.2.0, got $windowsAppSdkVersion"
-Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.1839") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.1839, got $buildToolsVersion"
+Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.2270") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.2270, got $buildToolsVersion"
 Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
 Assert-Contains -Text $cargoManifest -Needle 'edition = "2021"' -Message "Rust core must stay on Rust 2021 edition until a dedicated migration is scheduled."
 Assert-Contains -Text $cargoManifest -Needle 'crate-type = ["rlib", "cdylib"]' -Message "Rust core must build both reusable rlib and native cdylib artifacts."
@@ -101,22 +101,22 @@ foreach ($architectureSignal in @(
     'net10.0-windows10.0.22621.0',
     'TargetPlatformMinVersion `10.0.19041.0`',
     'Windows App SDK `2.2.0`',
-    'Windows SDK BuildTools `10.0.28000.1839`',
+    'Windows SDK BuildTools `10.0.28000.2270`',
     '`WindowsPackageType=None`',
     'QRCoder `1.8.0`',
     '.NET 10',
     '10.0.9',
     'November 14, 2028',
-    'MsQuic v2.5.8',
+    'MsQuic v2.5.9',
     'libdatachannel',
-    'v0.24.4',
-    'SIPSorcery `10.0.9`',
+    'v0.24.5',
+    'SIPSorcery `10.0.11`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
     '-EvidencePath <json>',
     'source URIs',
     'online latest-version results',
-    'Stack sources refreshed on 2026-06-12'
+    'Stack sources refreshed on 2026-07-03'
 )) {
     Assert-Contains -Text $architecture -Needle $architectureSignal -Message "Architecture stack freshness doc missing signal: $architectureSignal"
 }
@@ -126,7 +126,7 @@ foreach ($agentSignal in @(
     'net10.0-windows10.0.22621.0',
     'TargetPlatformMinVersion `10.0.19041.0`',
     'Windows App SDK `2.2.0`',
-    'Windows SDK BuildTools `10.0.28000.1839`',
+    'Windows SDK BuildTools `10.0.28000.2270`',
     'QRCoder `1.8.0`',
     '-EvidencePath <json>',
     'verify-windows-stack-freshness.ps1'
@@ -152,14 +152,14 @@ if ($CheckOnline) {
     Assert-True -Condition ($latestQrCoder -eq $qrCoderVersion) -Message "QRCoder package is not current stable: project=$qrCoderVersion latest=$latestQrCoder"
 
     $latestSipsorcery = Get-LatestStableNuGetVersion -PackageId "SIPSorcery"
-    Assert-True -Condition ($latestSipsorcery -eq "10.0.9") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
+    Assert-True -Condition ($latestSipsorcery -eq "10.0.11") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
 
     $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease
-    Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
+    Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.9") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
     Assert-True -Condition (-not [bool]$msquicLatest.prerelease) -Message "MsQuic latest release must not be a prerelease."
 
     $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease
-    Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.4") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
+    Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.5") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
     Assert-True -Condition (-not [bool]$libdatachannelLatest.prerelease) -Message "libdatachannel latest release must not be a prerelease."
 
     $onlineEvidence = [ordered]@{
@@ -216,9 +216,9 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
         approvedVersions = [ordered]@{
             dotnetLatestRuntime = "10.0.9"
             dotnetEolDate = "2028-11-14"
-            sipsorcery = "10.0.9"
-            msquic = "v2.5.8"
-            libdatachannel = "v0.24.4"
+            sipsorcery = "10.0.11"
+            msquic = "v2.5.9"
+            libdatachannel = "v0.24.5"
         }
         sourceUris = $sourceUris
         online = $onlineEvidenceValue

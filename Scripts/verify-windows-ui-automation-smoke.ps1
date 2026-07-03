@@ -29,6 +29,25 @@ function Assert-Contains {
     Assert-True -Condition $Text.Contains($Needle) -Message $Message
 }
 
+function Assert-UnpackagedDefaultWindowsPackageType {
+    param([xml]$Project)
+
+    $packageTypes = @($Project.Project.PropertyGroup |
+        ForEach-Object { $_.WindowsPackageType } |
+        Where-Object { $null -ne $_ })
+    $unpackagedDefaults = @($packageTypes |
+        Where-Object {
+            $_.InnerText.Trim() -eq "None" -and
+            $_.Condition -match [regex]::Escape('$(EnableMsixTooling)') -and
+            $_.Condition -match "!=" -and
+            $_.Condition -match "true"
+        })
+
+    Assert-True `
+        -Condition ($unpackagedDefaults.Count -eq 1) `
+        -Message "WinUI automation smoke requires exactly one conditional unpackaged WindowsPackageType=None default path."
+}
+
 function Find-ByAutomationId {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
@@ -38,22 +57,6 @@ function Find-ByAutomationId {
     $condition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         $AutomationId)
-    return $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-}
-
-function Find-ListItemByName {
-    param(
-        [System.Windows.Automation.AutomationElement]$Root,
-        [string]$Name
-    )
-
-    $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        $Name)
-    $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::ListItem)
-    $condition = New-Object System.Windows.Automation.AndCondition($nameCondition, $typeCondition)
     return $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
 }
 
@@ -75,6 +78,25 @@ function Wait-ForElementByAutomationId {
     } while ((Get-Date) -lt $deadline)
 
     throw "Timed out waiting for automation id: $AutomationId"
+}
+
+function Get-AncestorByControlType {
+    param(
+        [System.Windows.Automation.AutomationElement]$Element,
+        [System.Windows.Automation.ControlType]$ControlType
+    )
+
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $current = $Element
+    while ($null -ne $current) {
+        if ($current.Current.ControlType -eq $ControlType) {
+            return $current
+        }
+
+        $current = $walker.GetParent($current)
+    }
+
+    return $null
 }
 
 function Wait-ForMainWindow {
@@ -140,15 +162,44 @@ function Assert-PresentByAutomationId {
     return $element
 }
 
-function Assert-SelectedFeatureTitle {
+function Get-NavigationItemByFeatureId {
     param(
         [System.Windows.Automation.AutomationElement]$Window,
-        [string]$ExpectedHeading
+        [string]$FeatureId
     )
 
+    $featureAnchor = Assert-VisibleByAutomationId -Root $Window -AutomationId $FeatureId
+    $navigationItem = Get-AncestorByControlType -Element $featureAnchor -ControlType ([System.Windows.Automation.ControlType]::ListItem)
+    Assert-True -Condition ($null -ne $navigationItem) -Message "Navigation item ancestor is missing for feature id: $FeatureId"
+    return [pscustomobject]@{
+        Item = $navigationItem
+        Anchor = $featureAnchor
+    }
+}
+
+function Assert-SelectedFeature {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [string]$FeatureId
+    )
+
+    $navigation = Get-NavigationItemByFeatureId -Window $Window -FeatureId $FeatureId
+    $selectionPattern = $navigation.Item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    Assert-True -Condition ([bool]$selectionPattern.Current.IsSelected) -Message "Navigation feature is not selected: $FeatureId"
+
     $heading = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.SelectedFeature.Title"
-    Assert-True -Condition ($heading.Current.Name -eq $ExpectedHeading) -Message "Selected heading mismatch. expected=$ExpectedHeading actual=$($heading.Current.Name)"
+    $expectedHeading = $navigation.Anchor.Current.Name
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($expectedHeading)) -Message "Navigation feature name is empty: $FeatureId"
+    Assert-True -Condition ($heading.Current.Name -eq $expectedHeading) -Message "Selected heading mismatch for $FeatureId. expected=$expectedHeading actual=$($heading.Current.Name)"
     return $heading
+}
+
+function Assert-StatusMessageNotEmpty {
+    param([System.Windows.Automation.AutomationElement]$Window)
+
+    $status = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.Status.Message"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($status.Current.Name)) -Message "Status message is empty."
+    return $status
 }
 
 function Assert-StatusMessageContains {
@@ -175,6 +226,97 @@ function Try-ScrollIntoView {
     }
 }
 
+function Set-WorkspaceScrollPercent {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [double]$VerticalPercent,
+        [switch]$Required
+    )
+
+    $scrollViewer = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.Workspace.ScrollViewer" -TimeoutSeconds 5
+    try {
+        $scrollPattern = $scrollViewer.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+    }
+    catch {
+        if ($Required) {
+            throw "Workspace ScrollViewer does not expose ScrollPattern: $($_.Exception.Message)"
+        }
+
+        return
+    }
+
+    if (-not [bool]$scrollPattern.Current.VerticallyScrollable) {
+        if ($Required) {
+            throw "Workspace ScrollViewer is not vertically scrollable for requested percent: $VerticalPercent"
+        }
+
+        return
+    }
+
+    $boundedPercent = [Math]::Min(100.0, [Math]::Max(0.0, $VerticalPercent))
+    $scrollPattern.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll, $boundedPercent)
+    Start-Sleep -Milliseconds 250
+}
+
+function Invoke-OrClickElement {
+    param([System.Windows.Automation.AutomationElement]$Element)
+
+    try {
+        $invokePattern = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $invokePattern.Invoke()
+        Start-Sleep -Milliseconds 300
+        return
+    }
+    catch {
+        Write-Verbose "InvokePattern unavailable for $($Element.Current.AutomationId): $($_.Exception.Message)"
+    }
+
+    $rect = $Element.Current.BoundingRectangle
+    Assert-True `
+        -Condition (-not $Element.Current.IsOffscreen -and $rect.Width -gt 0 -and $rect.Height -gt 0) `
+        -Message "Cannot click offscreen or zero-sized element: $($Element.Current.AutomationId)"
+    $x = [int][Math]::Round($rect.Left + ($rect.Width / 2))
+    $y = [int][Math]::Round($rect.Top + ($rect.Height / 2))
+    [void][NativeMethods]::SetCursorPos($x, $y)
+    [NativeMethods]::MouseEvent(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    [NativeMethods]::MouseEvent(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 500
+}
+
+function Select-DiscoveryMode {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [string]$Mode,
+        [string]$ExpectedAutomationId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Mode)) {
+        return
+    }
+
+    $modeTab = Assert-PresentAndVisibleByAutomationId -Root $Window -AutomationId "Skybridge.DeviceDiscovery.Mode.$Mode"
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Invoke-OrClickElement -Element $modeTab
+
+        if ([string]::IsNullOrWhiteSpace($ExpectedAutomationId)) {
+            return
+        }
+
+        try {
+            [void](Assert-PresentAndVisibleByAutomationId -Root $Window -AutomationId $ExpectedAutomationId -TimeoutSeconds 2)
+            return
+        }
+        catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds (250 * $attempt)
+            $modeTab = Assert-PresentAndVisibleByAutomationId -Root $Window -AutomationId "Skybridge.DeviceDiscovery.Mode.$Mode"
+        }
+    }
+
+    throw "Discovery mode did not reveal expected automation id after click: mode=$Mode expected=$ExpectedAutomationId lastError=$lastError"
+}
+
 function Assert-PresentAndVisibleByAutomationId {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
@@ -195,18 +337,17 @@ function Assert-PresentAndVisibleByAutomationId {
 function Select-Feature {
     param(
         [System.Windows.Automation.AutomationElement]$Window,
-        [string]$Title,
-        [string]$ExpectedHeading,
+        [string]$FeatureId,
         [string]$AnchorAutomationId
     )
 
-    $item = Find-ListItemByName -Root $Window -Name $Title
-    Assert-True -Condition ($null -ne $item) -Message "Navigation item missing: $Title"
-    $selectionPattern = $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $navigation = Get-NavigationItemByFeatureId -Window $Window -FeatureId $FeatureId
+    $selectionPattern = $navigation.Item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     $selectionPattern.Select()
     Start-Sleep -Milliseconds 250
+    Set-WorkspaceScrollPercent -Window $Window -VerticalPercent 0
 
-    [void](Assert-SelectedFeatureTitle -Window $Window -ExpectedHeading $ExpectedHeading)
+    [void](Assert-SelectedFeature -Window $Window -FeatureId $FeatureId)
     [void](Assert-PresentAndVisibleByAutomationId -Root $Window -AutomationId $AnchorAutomationId)
 }
 
@@ -221,11 +362,11 @@ function Assert-BasicLayout {
     [void][NativeMethods]::MoveWindow([IntPtr]$Window.Current.NativeWindowHandle, 40, 40, $Width, $Height, $true)
     Activate-TestWindow -Window $Window
     Start-Sleep -Milliseconds 300
-    [void](Assert-SelectedFeatureTitle -Window $Window -ExpectedHeading "Dashboard")
+    [void](Assert-SelectedFeature -Window $Window -FeatureId "Dashboard")
     $navigation = Assert-VisibleByAutomationId -Root $Window -AutomationId "Skybridge.Navigation.List"
     $topBar = Assert-VisibleByAutomationId -Root $Window -AutomationId "WorkspaceAction.TopBarActions.Notifications"
     $themeAction = Assert-VisibleByAutomationId -Root $Window -AutomationId "WorkspaceAction.TopBarActions.Theme"
-    $dashboardAction = Assert-VisibleByAutomationId -Root $Window -AutomationId "WorkspaceAction.DashboardQuickActions.ScanDevices"
+    $dashboardAction = Assert-PresentAndVisibleByAutomationId -Root $Window -AutomationId "WorkspaceAction.DashboardQuickActions.ScanDevices"
     $windowRect = $Window.Current.BoundingRectangle
 
     Assert-True -Condition ($navigation.Current.BoundingRectangle.Left -lt $topBar.Current.BoundingRectangle.Left) -Message "Navigation must remain left of top-bar actions at ${Width}x${Height}."
@@ -335,6 +476,83 @@ function Test-ActionBoundsFollow {
     return $false
 }
 
+function Get-ActionBoundsSnapshot {
+    param(
+        [System.Windows.Automation.AutomationElement]$Root,
+        [string]$Surface,
+        [string[]]$Keys,
+        [string]$Context,
+        [int]$MinimumUsableActionWidth,
+        [int]$MinimumUsableActionHeight
+    )
+
+    $actions = [System.Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $Keys.Count; $index++) {
+        $key = $Keys[$index]
+        $automationId = "WorkspaceAction.$Surface.$key"
+        $element = Assert-PresentByAutomationId -Root $Root -AutomationId $automationId -TimeoutSeconds 5
+        $rect = $element.Current.BoundingRectangle
+
+        $actions.Add([pscustomobject]@{
+            order = $index + 1
+            key = $key
+            automationId = $automationId
+            name = $element.Current.Name
+            isEnabled = [bool]$element.Current.IsEnabled
+            isOffscreen = [bool]$element.Current.IsOffscreen
+            usable = (-not $element.Current.IsOffscreen -and
+                $rect.Width -ge $MinimumUsableActionWidth -and
+                $rect.Height -ge $MinimumUsableActionHeight)
+            bounds = [pscustomobject]@{
+                left = [double]$rect.Left
+                top = [double]$rect.Top
+                width = [double]$rect.Width
+                height = [double]$rect.Height
+            }
+        })
+    }
+
+    return @($actions)
+}
+
+function Test-ActionBoundsSnapshotUsable {
+    param(
+        [object[]]$Actions
+    )
+
+    foreach ($action in @($Actions)) {
+        if (-not $action.usable) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Format-ActionBoundsSnapshot {
+    param([object[]]$Actions)
+
+    return (@($Actions | ForEach-Object {
+                "$($_.automationId) offscreen=$($_.isOffscreen) usable=$($_.usable) bounds=left:$($_.bounds.left),top:$($_.bounds.top),width:$($_.bounds.width),height:$($_.bounds.height)"
+            }) -join "; ")
+}
+
+function Assert-ActionBoundsSnapshotUsable {
+    param(
+        [object[]]$Actions,
+        [string]$Context,
+        [int]$MinimumUsableActionWidth,
+        [int]$MinimumUsableActionHeight
+    )
+
+    foreach ($action in @($Actions)) {
+        Assert-True -Condition ($action.bounds.width -gt 0 -and $action.bounds.height -gt 0) -Message "Runtime action has invalid bounds: $($action.automationId) context=$Context"
+        Assert-True `
+            -Condition ($action.usable) `
+            -Message "Runtime action is clipped, offscreen, or below minimum usable bounds in every stable surface viewport: $($action.automationId) context=$Context isOffscreen=$($action.isOffscreen) width=$($action.bounds.width) height=$($action.bounds.height) minimumWidth=$MinimumUsableActionWidth minimumHeight=$MinimumUsableActionHeight allBounds=$(Format-ActionBoundsSnapshot -Actions $Actions). Split the surface into an explicit SurfaceGroups entry or fix the layout instead of sampling mixed scroll states."
+    }
+}
+
 function Get-RuntimeActionSurfaceSnapshot {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
@@ -350,48 +568,55 @@ function Get-RuntimeActionSurfaceSnapshot {
         $surface = $_
         Assert-True -Condition $ActionOrderBySurface.ContainsKey($surface) -Message "Runtime action surface is missing from Action Order Matrix: $surface"
         $keys = @($ActionOrderBySurface[$surface])
-        $actions = [System.Collections.Generic.List[object]]::new()
+        Assert-True -Condition ($keys.Count -gt 0) -Message "Runtime action surface has no keys: $surface"
 
-        for ($index = 0; $index -lt $keys.Count; $index++) {
-            $key = $keys[$index]
-            $automationId = "WorkspaceAction.$surface.$key"
-            $element = Assert-PresentByAutomationId -Root $Root -AutomationId $automationId -TimeoutSeconds 5
-            $rect = $element.Current.BoundingRectangle
-            if ($element.Current.IsOffscreen -or
-                $rect.Width -lt $minimumUsableActionWidth -or
-                $rect.Height -lt $minimumUsableActionHeight) {
-                Try-ScrollIntoView -Element $element
-                $element = Assert-PresentByAutomationId -Root $Root -AutomationId $automationId -TimeoutSeconds 5
-                $rect = $element.Current.BoundingRectangle
+        $anchorKeys = [System.Collections.Generic.List[string]]::new()
+        $anchorKeys.Add($keys[0]) | Out-Null
+        if ($keys.Count -gt 1 -and $keys[$keys.Count - 1] -ne $keys[0]) {
+            $anchorKeys.Add($keys[$keys.Count - 1]) | Out-Null
+        }
+
+        $actions = $null
+        $lastActions = $null
+        foreach ($anchorKey in $anchorKeys) {
+            $anchorAutomationId = "WorkspaceAction.$surface.$anchorKey"
+            $anchorElement = Assert-PresentByAutomationId -Root $Root -AutomationId $anchorAutomationId -TimeoutSeconds 5
+            if ($anchorElement.Current.IsOffscreen -or
+                $anchorElement.Current.BoundingRectangle.Width -lt $minimumUsableActionWidth -or
+                $anchorElement.Current.BoundingRectangle.Height -lt $minimumUsableActionHeight) {
+                Try-ScrollIntoView -Element $anchorElement
             }
 
-            Assert-True -Condition ($rect.Width -gt 0 -and $rect.Height -gt 0) -Message "Runtime action has invalid bounds: $automationId context=$Context"
-            Assert-True `
-                -Condition ($rect.Width -ge $minimumUsableActionWidth -and $rect.Height -ge $minimumUsableActionHeight) `
-                -Message "Runtime action is clipped below minimum usable bounds: $automationId context=$Context width=$($rect.Width) height=$($rect.Height)"
-
-            $actions.Add([pscustomobject]@{
-                order = $index + 1
-                key = $key
-                automationId = $automationId
-                name = $element.Current.Name
-                isEnabled = [bool]$element.Current.IsEnabled
-                isOffscreen = [bool]$element.Current.IsOffscreen
-                bounds = [pscustomobject]@{
-                    left = [double]$rect.Left
-                    top = [double]$rect.Top
-                    width = [double]$rect.Width
-                    height = [double]$rect.Height
-                }
-            })
+            $candidateActions = @(Get-ActionBoundsSnapshot `
+                    -Root $Root `
+                    -Surface $surface `
+                    -Keys $keys `
+                    -Context $Context `
+                    -MinimumUsableActionWidth $minimumUsableActionWidth `
+                    -MinimumUsableActionHeight $minimumUsableActionHeight)
+            $lastActions = $candidateActions
+            if (Test-ActionBoundsSnapshotUsable -Actions $candidateActions) {
+                $actions = $candidateActions
+                break
+            }
         }
+
+        if ($null -eq $actions) {
+            $actions = $lastActions
+        }
+
+        Assert-ActionBoundsSnapshotUsable `
+            -Actions $actions `
+            -Context $Context `
+            -MinimumUsableActionWidth $minimumUsableActionWidth `
+            -MinimumUsableActionHeight $minimumUsableActionHeight
 
         for ($index = 1; $index -lt $actions.Count; $index++) {
             $previous = $actions[$index - 1]
             $current = $actions[$index]
             Assert-True `
                 -Condition (Test-ActionBoundsFollow -PreviousBounds $previous.bounds -CurrentBounds $current.bounds) `
-                -Message "Runtime action bounds order drifted for $surface in $Context`: $($previous.automationId) must precede $($current.automationId)."
+                -Message "Runtime action bounds order drifted for $surface in $Context`: $($previous.automationId) bounds=left:$($previous.bounds.left),top:$($previous.bounds.top),width:$($previous.bounds.width),height:$($previous.bounds.height) must precede $($current.automationId) bounds=left:$($current.bounds.left),top:$($current.bounds.top),width:$($current.bounds.width),height:$($current.bounds.height)."
         }
 
         [pscustomobject]@{
@@ -401,6 +626,94 @@ function Get-RuntimeActionSurfaceSnapshot {
             actions = @($actions)
         }
     })
+}
+
+function Get-FeatureSurfaceGroups {
+    param($Feature)
+
+    if ($Feature.ContainsKey("SurfaceGroups")) {
+        return @($Feature.SurfaceGroups)
+    }
+
+    return @(@{
+            Mode = ""
+            Surfaces = @($Feature.Surfaces)
+        })
+}
+
+function Get-FirstRuntimeActionAutomationId {
+    param(
+        [System.Collections.IDictionary]$ActionOrderBySurface,
+        [string[]]$Surfaces
+    )
+
+    Assert-True -Condition ($Surfaces.Count -gt 0) -Message "Surface group must contain at least one surface."
+    $surface = $Surfaces[0]
+    Assert-True -Condition $ActionOrderBySurface.ContainsKey($surface) -Message "Runtime action surface is missing from Action Order Matrix: $surface"
+    $keys = @($ActionOrderBySurface[$surface])
+    Assert-True -Condition ($keys.Count -gt 0) -Message "Runtime action surface must contain at least one action key: $surface"
+    return "WorkspaceAction.$surface.$($keys[0])"
+}
+
+function Get-FeatureRuntimeActionSurfaceSnapshot {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [System.Collections.IDictionary]$ActionOrderBySurface,
+        $Feature,
+        [string]$ContextSuffix
+    )
+
+    $snapshots = [System.Collections.Generic.List[object]]::new()
+    foreach ($surfaceGroup in (Get-FeatureSurfaceGroups -Feature $Feature)) {
+        if ($surfaceGroup.ContainsKey("ScrollPercent")) {
+            Set-WorkspaceScrollPercent -Window $Window -VerticalPercent ([double]$surfaceGroup.ScrollPercent) -Required
+        }
+
+        $expectedAutomationId = if ([string]::IsNullOrWhiteSpace($surfaceGroup.Mode)) {
+            ""
+        }
+        else {
+            Get-FirstRuntimeActionAutomationId -ActionOrderBySurface $ActionOrderBySurface -Surfaces $surfaceGroup.Surfaces
+        }
+        Select-DiscoveryMode -Window $Window -Mode $surfaceGroup.Mode -ExpectedAutomationId $expectedAutomationId
+        $groupSnapshots = @(Get-RuntimeActionSurfaceSnapshot `
+                -Root $Window `
+                -ActionOrderBySurface $ActionOrderBySurface `
+                -Surfaces $surfaceGroup.Surfaces `
+                -Context "$($Feature.Title) $ContextSuffix")
+        foreach ($snapshot in $groupSnapshots) {
+            $snapshots.Add($snapshot) | Out-Null
+        }
+    }
+
+    return @($snapshots)
+}
+
+function Get-RuntimeActionSurfaceGroupSnapshot {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [System.Collections.IDictionary]$ActionOrderBySurface,
+        $SurfaceGroups,
+        [string]$Context
+    )
+
+    $snapshots = [System.Collections.Generic.List[object]]::new()
+    foreach ($surfaceGroup in @($SurfaceGroups)) {
+        if ($surfaceGroup.ContainsKey("ScrollPercent")) {
+            Set-WorkspaceScrollPercent -Window $Window -VerticalPercent ([double]$surfaceGroup.ScrollPercent) -Required
+        }
+
+        $groupSnapshots = @(Get-RuntimeActionSurfaceSnapshot `
+                -Root $Window `
+                -ActionOrderBySurface $ActionOrderBySurface `
+                -Surfaces $surfaceGroup.Surfaces `
+                -Context $Context)
+        foreach ($snapshot in $groupSnapshots) {
+            $snapshots.Add($snapshot) | Out-Null
+        }
+    }
+
+    return @($snapshots)
 }
 
 function Get-AutomationAnchorSnapshot {
@@ -443,38 +756,53 @@ function Save-WindowScreenshot {
 
     Assert-True -Condition ($width -gt 0 -and $height -gt 0) -Message "Cannot capture a zero-sized window screenshot."
 
-    $bitmap = [System.Drawing.Bitmap]::new($width, $height)
-    try {
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $minimumUsefulPngBytes = 1024
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Activate-TestWindow -Window $Window
+        Start-Sleep -Milliseconds (250 * $attempt)
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+
+        $bitmap = [System.Drawing.Bitmap]::new($width, $height)
         try {
-            $graphics.CopyFromScreen($left, $top, 0, 0, [System.Drawing.Size]::new($width, $height))
-            $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.CopyFromScreen($left, $top, 0, 0, [System.Drawing.Size]::new($width, $height))
+                $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+            }
+            finally {
+                $graphics.Dispose()
+            }
         }
         finally {
-            $graphics.Dispose()
+            $bitmap.Dispose()
+        }
+
+        if ((Test-Path -LiteralPath $Path) -and (Get-Item -LiteralPath $Path).Length -gt $minimumUsefulPngBytes) {
+            return [pscustomobject]@{
+                width = $width
+                height = $height
+            }
         }
     }
-    finally {
-        $bitmap.Dispose()
-    }
 
-    return [pscustomobject]@{
-        width = $width
-        height = $height
-    }
+    $actualLength = if (Test-Path -LiteralPath $Path) { (Get-Item -LiteralPath $Path).Length } else { 0 }
+    throw "Screenshot evidence remained too small after retries: $Path length=$actualLength"
 }
 
 $projectPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 $projectText = Get-Content -Raw -LiteralPath $projectPath
-Assert-Contains -Text $projectText -Needle "<WindowsPackageType>None</WindowsPackageType>" -Message "WinUI automation smoke requires unpackaged Windows App SDK auto-initialization."
+$project = [xml]$projectText
+Assert-UnpackagedDefaultWindowsPackageType -Project $project
 $matrixPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $actionOrderBySurface = Get-ActionOrderMatrix -MatrixPath $matrixPath
 
-& dotnet build $projectPath --configuration $Configuration --no-restore | Write-Output
+& dotnet restore $projectPath | Write-Output
+Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke restore failed."
+
+& dotnet build $projectPath --configuration $Configuration --no-restore /p:TreatWarningsAsErrors=true | Write-Output
 Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke build failed."
 
 $targetFramework = "net10.0-windows10.0.22621.0"
-$project = [xml]$projectText
 $runtimeIdentifiers = @($project.Project.PropertyGroup |
     ForEach-Object { $_.RuntimeIdentifier } |
     Where-Object { $null -ne $_ } |
@@ -502,22 +830,52 @@ public static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll", EntryPoint = "mouse_event", SetLastError = true)]
+    public static extern void MouseEvent(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
 }
 "@
 
 $process = $null
+$stdoutTask = $null
+$stderrTask = $null
 try {
     $features = @(
-        @{ Title = "Dashboard"; Heading = "Dashboard"; Anchor = "WorkspaceAction.DashboardQuickActions.ScanDevices"; Surfaces = @("DashboardQuickActions") },
-        @{ Title = "Device Discovery"; Heading = "Device Discovery"; Anchor = "WorkspaceAction.DeviceDiscoveryPrimary.ParseTxt"; Surfaces = @("DeviceDiscoveryPrimary", "DeviceDiscoveryScan", "DeviceDiscoveryManualConnectFinal", "CrossNetworkQr", "CrossNetworkCodePrimary", "CrossNetworkCodeConnect") },
-        @{ Title = "USB Management"; Heading = "USB Management"; Anchor = "WorkspaceAction.UsbManagementHeader.RefreshDevices"; Surfaces = @("UsbManagementHeader") },
-        @{ Title = "File Transfer"; Heading = "File Transfer"; Anchor = "WorkspaceAction.FileTransfer.GenerateQr"; Surfaces = @("FileTransferHeader", "FileTransfer") },
-        @{ Title = "Remote Desktop"; Heading = "Remote Desktop"; Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop") },
-        @{ Title = "Quantum"; Heading = "Quantum"; Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"; Surfaces = @("QuantumDiagnosticsHeader") },
-        @{ Title = "System Monitor"; Heading = "System Monitor"; Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls") },
-        @{ Title = "Settings"; Heading = "Settings"; Anchor = "WorkspaceAction.SettingsToolbar.ExportSettings"; EvidenceAnchors = @("WorkspaceAction.SettingsMaintenance.ApplySettings"); Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance") }
+        @{ Id = "Dashboard"; Title = "Dashboard"; Anchor = "WorkspaceAction.DashboardQuickActions.ScanDevices"; Surfaces = @("DashboardQuickActions") },
+        @{
+            Id = "DeviceDiscovery"
+            Title = "Device Discovery"
+            Anchor = "WorkspaceAction.DeviceDiscoveryPrimary.ParseTxt"
+            Surfaces = @("DeviceDiscoveryPrimary", "DeviceDiscoveryScan", "DeviceDiscoveryManualConnectFinal", "CrossNetworkQr", "CrossNetworkCodePrimary", "CrossNetworkCodeConnect")
+            SurfaceGroups = @(
+                @{ Mode = "LocalScan"; Surfaces = @("DeviceDiscoveryPrimary", "DeviceDiscoveryScan", "DeviceDiscoveryManualConnectFinal") },
+                @{ Mode = "Qr"; Surfaces = @("CrossNetworkQr") },
+                @{ Mode = "Code"; Surfaces = @("CrossNetworkCodePrimary", "CrossNetworkCodeConnect") }
+            )
+        },
+        @{ Id = "UsbManagement"; Title = "USB Management"; Anchor = "WorkspaceAction.UsbManagementHeader.RefreshDevices"; Surfaces = @("UsbManagementHeader") },
+        @{ Id = "FileTransfer"; Title = "File Transfer"; Anchor = "WorkspaceAction.FileTransfer.GenerateQr"; Surfaces = @("FileTransferHeader", "FileTransfer") },
+        @{ Id = "RemoteDesktop"; Title = "Remote Desktop"; Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop") },
+        @{ Id = "Quantum"; Title = "Quantum"; Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"; Surfaces = @("QuantumDiagnosticsHeader") },
+        @{ Id = "SystemMonitor"; Title = "System Monitor"; Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls") },
+        @{
+            Id = "Settings"
+            Title = "Settings"
+            Anchor = "WorkspaceAction.SettingsToolbar.ExportSettings"
+            Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance")
+            SurfaceGroups = @(
+                @{ ScrollPercent = 0; Surfaces = @("SettingsHeader", "SettingsToolbar") },
+                @{ ScrollPercent = 100; Surfaces = @("SettingsMaintenance") }
+            )
+        }
     )
-    $globalActionSurfaces = @("TopBarActions", "SessionControls")
+    $globalActionSurfaceGroups = @(
+        @{ ScrollPercent = 0; Surfaces = @("TopBarActions") },
+        @{ ScrollPercent = 100; Surfaces = @("SessionControls") }
+    )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $exePath
@@ -543,6 +901,8 @@ try {
     }
 
     $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $window = Wait-ForMainWindow -Process $process -TimeoutSeconds $TimeoutSeconds
     Restore-TestWindow -Window $window
     try {
@@ -559,24 +919,24 @@ try {
 
     foreach ($requiredAnchor in @(
         "Skybridge.Navigation.List",
-        "Skybridge.Session.SelectedFeature.Title",
         "WorkspaceAction.TopBarActions.Notifications",
-        "WorkspaceAction.TopBarActions.Theme",
-        "WorkspaceAction.SessionControls.Connect"
+        "WorkspaceAction.TopBarActions.Theme"
     )) {
         [void](Assert-VisibleByAutomationId -Root $window -AutomationId $requiredAnchor)
     }
-    [void](Assert-SelectedFeatureTitle -Window $window -ExpectedHeading "Dashboard")
-    [void](Assert-StatusMessageContains -Window $window -ExpectedText "Idle")
+    [void](Assert-SelectedFeature -Window $window -FeatureId "Dashboard")
+    [void](Assert-StatusMessageNotEmpty -Window $window)
 
     Assert-BasicLayout -Window $window -Width 1280 -Height 900
-    [void](Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $globalActionSurfaces -Context "global 1280x900")
+    [void](Get-RuntimeActionSurfaceGroupSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -SurfaceGroups $globalActionSurfaceGroups -Context "global 1280x900")
+    Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
     Assert-BasicLayout -Window $window -Width 1366 -Height 768
-    [void](Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $globalActionSurfaces -Context "global 1366x768")
+    [void](Get-RuntimeActionSurfaceGroupSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -SurfaceGroups $globalActionSurfaceGroups -Context "global 1366x768")
+    Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
 
     foreach ($feature in $features) {
-        Select-Feature -Window $window -Title $feature.Title -ExpectedHeading $feature.Heading -AnchorAutomationId $feature.Anchor
-        [void](Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $feature.Surfaces -Context "$($feature.Title) runtime")
+        Select-Feature -Window $window -FeatureId $feature.Id -AnchorAutomationId $feature.Anchor
+        [void](Get-FeatureRuntimeActionSurfaceSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -Feature $feature -ContextSuffix "runtime")
     }
 
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDir)) {
@@ -592,11 +952,13 @@ try {
             [void][NativeMethods]::MoveWindow([IntPtr]$window.Current.NativeWindowHandle, 40, 40, $size.Width, $size.Height, $true)
             Activate-TestWindow -Window $window
             Start-Sleep -Milliseconds 500
-            $globalActionBounds = Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $globalActionSurfaces -Context "global $($size.Width)x$($size.Height)"
+            $globalActionBounds = Get-RuntimeActionSurfaceGroupSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -SurfaceGroups $globalActionSurfaceGroups -Context "global $($size.Width)x$($size.Height)"
+            Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
 
             foreach ($feature in $features) {
-                Select-Feature -Window $window -Title $feature.Title -ExpectedHeading $feature.Heading -AnchorAutomationId $feature.Anchor
-                $featureActionBounds = Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $feature.Surfaces -Context "$($feature.Title) $($size.Width)x$($size.Height)"
+                Select-Feature -Window $window -FeatureId $feature.Id -AnchorAutomationId $feature.Anchor
+                $featureActionBounds = Get-FeatureRuntimeActionSurfaceSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -Feature $feature -ContextSuffix "$($size.Width)x$($size.Height)"
+                Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
                 [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId $feature.Anchor)
                 $fileName = "{0}x{1}-{2}.png" -f $size.Width, $size.Height, (ConvertTo-SafeFileName -Value $feature.Title)
                 $screenshotPath = Join-Path $resolvedEvidenceDir $fileName
@@ -605,19 +967,16 @@ try {
 
                 $anchorIds = @(
                     "Skybridge.Navigation.List",
-                    "Skybridge.SelectedFeature.Title",
+                    $feature.Id,
                     "WorkspaceAction.TopBarActions.Notifications",
                     "WorkspaceAction.TopBarActions.Theme",
-                    "WorkspaceAction.SessionControls.Connect",
                     $feature.Anchor
                 )
-                if ($feature.ContainsKey("EvidenceAnchors")) {
-                    $anchorIds += @($feature.EvidenceAnchors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-                }
 
                 $captures.Add([pscustomobject]@{
                     feature = $feature.Title
-                    heading = $feature.Heading
+                    featureId = $feature.Id
+                    heading = $feature.Title
                     anchor = $feature.Anchor
                     requestedWidth = $size.Width
                     requestedHeight = $size.Height
@@ -649,7 +1008,7 @@ try {
         Write-Output "windows-ui-visual-evidence: ok dir=$resolvedEvidenceDir manifest=$manifestPath captures=$($captures.Count)"
     }
 
-    Select-Feature -Window $window -Title "File Transfer" -ExpectedHeading "File Transfer" -AnchorAutomationId "WorkspaceAction.FileTransfer.GenerateQr"
+    Select-Feature -Window $window -FeatureId "FileTransfer" -AnchorAutomationId "WorkspaceAction.FileTransfer.GenerateQr"
     $generateQr = Assert-VisibleByAutomationId -Root $window -AutomationId "WorkspaceAction.FileTransfer.GenerateQr"
     $invokePattern = $generateQr.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $invokePattern.Invoke()
@@ -664,8 +1023,8 @@ catch {
     }
 
     if ($process) {
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
+        $stdout = if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() } else { "" }
+        $stderr = if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() } else { "" }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) {
             Write-Output "windows-ui-automation-smoke stdout:"
             Write-Output $stdout

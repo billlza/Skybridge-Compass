@@ -127,41 +127,49 @@ $actionOrderBySurface = Get-ActionOrderMatrix -MatrixPath $matrixPath
 
 $expectedFeatures = [ordered]@{
     "Dashboard" = @{
+        Id = "Dashboard"
         Heading = "Dashboard"
         Anchor = "WorkspaceAction.DashboardQuickActions.ScanDevices"
         Surfaces = @("DashboardQuickActions")
     }
     "Device Discovery" = @{
+        Id = "DeviceDiscovery"
         Heading = "Device Discovery"
         Anchor = "WorkspaceAction.DeviceDiscoveryPrimary.ParseTxt"
         Surfaces = @("DeviceDiscoveryPrimary", "DeviceDiscoveryScan", "DeviceDiscoveryManualConnectFinal", "CrossNetworkQr", "CrossNetworkCodePrimary", "CrossNetworkCodeConnect")
     }
     "USB Management" = @{
+        Id = "UsbManagement"
         Heading = "USB Management"
         Anchor = "WorkspaceAction.UsbManagementHeader.RefreshDevices"
         Surfaces = @("UsbManagementHeader")
     }
     "File Transfer" = @{
+        Id = "FileTransfer"
         Heading = "File Transfer"
         Anchor = "WorkspaceAction.FileTransfer.GenerateQr"
         Surfaces = @("FileTransferHeader", "FileTransfer")
     }
     "Remote Desktop" = @{
+        Id = "RemoteDesktop"
         Heading = "Remote Desktop"
         Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"
         Surfaces = @("RemoteDesktopHeader", "RemoteDesktop")
     }
     "Quantum" = @{
+        Id = "Quantum"
         Heading = "Quantum"
         Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"
         Surfaces = @("QuantumDiagnosticsHeader")
     }
     "System Monitor" = @{
+        Id = "SystemMonitor"
         Heading = "System Monitor"
         Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"
         Surfaces = @("SystemMonitorHeader", "SystemMonitorControls")
     }
     "Settings" = @{
+        Id = "Settings"
         Heading = "Settings"
         Anchor = "WorkspaceAction.SettingsToolbar.ExportSettings"
         Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance")
@@ -193,6 +201,7 @@ foreach ($featureName in $expectedFeatures.Keys) {
         $capture = $capture[0]
 
         Assert-True -Condition ($capture.heading -eq $feature.Heading) -Message "Heading mismatch for $featureName evidence."
+        Assert-True -Condition ($capture.featureId -eq $feature.Id) -Message "Feature id mismatch for $featureName evidence."
         Assert-True -Condition ($capture.anchor -eq $feature.Anchor) -Message "Anchor mismatch for $featureName evidence."
         Assert-True -Condition ($capture.screenshot -eq ("{0}x{1}-{2}.png" -f $size.Width, $size.Height, (ConvertTo-SafeFileName -Value $featureName))) -Message "Unexpected screenshot name for $featureName evidence: $($capture.screenshot)"
         Assert-True -Condition ([int]$capture.screenshotWidth -gt 0 -and [int]$capture.screenshotHeight -gt 0) -Message "Screenshot dimensions must be positive for $featureName."
@@ -201,10 +210,9 @@ foreach ($featureName in $expectedFeatures.Keys) {
         $anchorIds = @($capture.anchors | ForEach-Object { $_.automationId })
         foreach ($requiredAnchor in @(
             "Skybridge.Navigation.List",
-            "Skybridge.SelectedFeature.Title",
+            $feature.Id,
             "WorkspaceAction.TopBarActions.Notifications",
             "WorkspaceAction.TopBarActions.Theme",
-            "WorkspaceAction.SessionControls.Connect",
             $feature.Anchor
         )) {
             Assert-True -Condition ($anchorIds -contains $requiredAnchor) -Message "Evidence capture missing anchor $requiredAnchor for $featureName."

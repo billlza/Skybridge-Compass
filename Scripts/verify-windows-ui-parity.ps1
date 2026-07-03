@@ -322,12 +322,22 @@ Assert-True -Condition (-not [regex]::IsMatch($mainWindowCode, "(?m)^\s*DataCont
 foreach ($winClientProjectSignal in @(
     "<TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>",
     "<TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>",
-    "<WindowsPackageType>None</WindowsPackageType>",
     '<PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />',
-    '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />'
+    '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />'
 )) {
     Assert-Contains -Text $winClientProject -Needle $winClientProjectSignal -Message "Windows client project stack signal missing: $winClientProjectSignal"
 }
+$parsedWinClientProject = [xml]$winClientProject
+$unpackagedPackageTypes = @($parsedWinClientProject.Project.PropertyGroup |
+    ForEach-Object { $_.WindowsPackageType } |
+    Where-Object {
+        $null -ne $_ -and
+        $_.InnerText.Trim() -eq "None" -and
+        $_.Condition -match [regex]::Escape('$(EnableMsixTooling)') -and
+        $_.Condition -match "!=" -and
+        $_.Condition -match "true"
+    })
+Assert-True -Condition ($unpackagedPackageTypes.Count -eq 1) -Message "Windows client project must keep exactly one conditional unpackaged WindowsPackageType=None default."
 Assert-True -Condition (-not $winClientProject.Contains('Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1"')) -Message "Windows SDK BuildTools must not be pinned below the WindowsAppSDK transitive minimum."
 
 foreach ($compositionSignal in @(
@@ -467,7 +477,11 @@ foreach ($uiAutomationSmokeSignal in @(
     "System.Drawing",
     "Wait-ForMainWindow",
     "Assert-PresentByAutomationId",
-    "Assert-SelectedFeatureTitle",
+    "Get-NavigationItemByFeatureId",
+    "Assert-SelectedFeature",
+    "Select-DiscoveryMode",
+    "Set-WorkspaceScrollPercent",
+    "Skybridge.Workspace.ScrollViewer",
     "Assert-StatusMessageContains",
     "Restore-TestWindow",
     "Activate-TestWindow",
@@ -475,6 +489,7 @@ foreach ($uiAutomationSmokeSignal in @(
     "Save-WindowScreenshot",
     "Get-ActionOrderMatrix",
     "Get-RuntimeActionSurfaceSnapshot",
+    "Get-RuntimeActionSurfaceGroupSnapshot",
     "Test-ActionBoundsFollow",
     "minimumUsableActionWidth",
     "Action Order Matrix",
@@ -486,7 +501,8 @@ foreach ($uiAutomationSmokeSignal in @(
     "screenshotHeight",
     "windows-ui-visual-evidence.json",
     "captureCount",
-    "WindowsPackageType>None",
+    "Assert-UnpackagedDefaultWindowsPackageType",
+    "EnableMsixTooling",
     "SKYBRIDGE_WINDOWS_RUNTIME",
     "Skybridge.Navigation.List",
     "Skybridge.SelectedFeature.Title",
@@ -501,7 +517,6 @@ foreach ($uiAutomationSmokeSignal in @(
     "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics",
     "WorkspaceAction.SystemMonitorControls.Monitoring",
     "WorkspaceAction.SettingsToolbar.ExportSettings",
-    "WorkspaceAction.SettingsMaintenance.ApplySettings",
     "FileTransferShareQrImage",
     "no local files were read"
 )) {
@@ -1195,8 +1210,13 @@ foreach ($automationSignal in @(
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
+    'AutomationProperties.AutomationId="Skybridge.Workspace.ScrollViewer"',
     'AutomationProperties.AutomationId="Skybridge.Actions.TopBar"',
     'AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"',
+    'AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.LocalScan"',
+    'AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Qr"',
+    'AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Cloud"',
+    'AutomationProperties.AutomationId="Skybridge.DeviceDiscovery.Mode.Code"',
     'AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Actions.SessionControls"',
     'AutomationProperties.AutomationId="Skybridge.SessionControls.Bitrate"',

@@ -17,7 +17,7 @@ namespace Skybridge.WinClient.Services;
 /// <summary>
 /// First real Microsoft-native QUIC (MsQuic via <see cref="System.Net.Quic"/>) transport adapter for
 /// Windows-to-Windows same-LAN sessions. Per docs/windows-architecture.md:11,34 and AGENTS.md:11,
-/// Windows-to-Windows must prefer <c>WindowsNativeMsQuicTransport</c>; MsQuic v2.5.8 is the pinned
+/// Windows-to-Windows must prefer <c>WindowsNativeMsQuicTransport</c>; MsQuic v2.5.9 is the pinned
 /// native QUIC stack and sits BELOW SkyBridge Core transport binding (it does not own session identity).
 ///
 /// This adapter opens a live QUIC connection on the LAN to a Windows peer, derives the transport-binding
@@ -88,7 +88,7 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
         if (!QuicConnection.IsSupported)
         {
             throw new InvalidOperationException(
-                "Windows native MsQuic adapter requires System.Net.Quic / libmsquic (MsQuic v2.5.8) support, which is unavailable in this runtime.");
+                "Windows native MsQuic adapter requires System.Net.Quic / libmsquic (MsQuic v2.5.9) support, which is unavailable in this runtime.");
         }
 
         var live = await DialAsync(request).ConfigureAwait(false);
@@ -191,7 +191,7 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
             // MsQuic analogue of an ICE candidate pair and is bound into the Core transcript digest.
             var selectedCandidatePair = $"msquic/udp/{localEndpoint}->{remoteEndpoint}/alpn={negotiatedAlpn}";
             var adapterBinding =
-                "windows native msquic (System.Net.Quic, MsQuic v2.5.8) same-LAN; "
+                "windows native msquic (System.Net.Quic, MsQuic v2.5.9) same-LAN; "
                 + "streams=control,file,clipboard datagrams(pending-runtime)=telemetry,realtime";
 
             return new LiveQuicBinding(

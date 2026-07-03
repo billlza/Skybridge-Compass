@@ -143,11 +143,11 @@ foreach ($signal in @(
     "Microsoft.WindowsAppSDK",
     "2.2.0",
     "Microsoft.Windows.SDK.BuildTools",
-    "10.0.28000.1839",
+    "10.0.28000.2270",
     "QRCoder",
     "1.8.0",
-    "MsQuic v2.5.8",
-    "libdatachannel v0.24.4",
+    "MsQuic v2.5.9",
+    "libdatachannel v0.24.5",
     "verify-windows-stack-freshness.ps1"
 )) {
     Assert-Contains -Text $architecture -Needle $signal -Message "Stack evidence missing architecture signal: $signal"
