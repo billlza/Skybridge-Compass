@@ -100,6 +100,7 @@ foreach ($requirement in @(
     "REQ-RUST-CLI",
     "REQ-BASIC-SMOKE",
     "REQ-APPLE-PRESERVATION",
+    "REQ-NATIVE-DNS-SD",
     "REQ-MAC-INTEROP",
     "REQ-GITHUB-SSH",
     "REQ-GITHUB-UPLOAD"
@@ -259,6 +260,7 @@ foreach ($signal in @(
     "verify-windows-portability-acceptance-evidence.ps1",
     "audit-windows-portability-completion.ps1",
     "AcceptanceEvidencePath",
+    "AllowStandaloneWinUiVisualEvidence",
     "gateResults",
     "generatedAtUtc",
     "RequireRustCliCoverage",
@@ -273,6 +275,17 @@ foreach ($signal in @(
     "windows-portability-acceptance-evidence: ok"
 )) {
     Assert-Contains -Text ($acceptanceMap + $acceptanceEvidence + $completionAudit) -Needle $signal -Message "Portability acceptance evidence gate missing signal: $signal"
+}
+
+foreach ($signal in @(
+    "EvidenceBranch",
+    "EvidenceHead",
+    "repoBranch",
+    "repoHead",
+    "ExpectedBranch",
+    "ExpectedHead"
+)) {
+    Assert-Contains -Text ($acceptanceMap + $uiContract + $uiAutomationSmoke + $uiVisualEvidence + $acceptanceEvidence + $completionAudit) -Needle $signal -Message "Standalone WinUI visual evidence contract missing signal: $signal"
 }
 
 foreach ($signal in @(

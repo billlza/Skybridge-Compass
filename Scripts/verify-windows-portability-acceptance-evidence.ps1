@@ -6,6 +6,7 @@ param(
     [switch]$RequireRustCliCoverage,
     [switch]$RequireOnlineStackFreshness,
     [switch]$RequireWinUiVisualEvidence,
+    [switch]$AllowStandaloneWinUiVisualEvidence,
     [switch]$RequireNativeDnsSdAcceptance,
     [switch]$RequireMacInterop,
     [string]$RustCliCoverageEvidencePath = "",
@@ -233,15 +234,23 @@ else {
 }
 
 if ($RequireWinUiVisualEvidence) {
-    Assert-RequiredBooleanParameter -Parameters $parameters -Name "includeWinUiAutomationSmoke" -Expected $true
-    Assert-PassedGate -Name "windows-ui-automation-smoke" | Out-Null
-    Assert-PassedGate -Name "windows-ui-visual-evidence" | Out-Null
+    if ($includeWinUiAutomationSmoke) {
+        Assert-PassedGate -Name "windows-ui-automation-smoke" | Out-Null
+        Assert-PassedGate -Name "windows-ui-visual-evidence" | Out-Null
+    }
+    else {
+        Assert-True `
+            -Condition ([bool]$AllowStandaloneWinUiVisualEvidence) `
+            -Message "WinUI visual evidence was required, but acceptance evidence did not run windows-ui-automation-smoke. Pass -AllowStandaloneWinUiVisualEvidence with -WinUiEvidenceDir only when an interactive desktop task generated the evidence for this same branch/head."
+        Assert-SkippedGate -Name "windows-ui-automation-smoke" | Out-Null
+        Assert-SkippedGate -Name "windows-ui-visual-evidence" | Out-Null
+    }
     $resolvedWinUiEvidenceDir = Resolve-EvidencePath -Path $winUiEvidencePath
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($resolvedWinUiEvidenceDir)) -Message "WinUI visual evidence directory is empty."
     Assert-True -Condition (Test-Path -LiteralPath $resolvedWinUiEvidenceDir) -Message "WinUI visual evidence directory is missing: $resolvedWinUiEvidenceDir"
     $visualEvidenceVerifier = Join-Path $resolvedRepoRoot "Scripts/verify-windows-ui-visual-evidence.ps1"
     Assert-True -Condition (Test-Path -LiteralPath $visualEvidenceVerifier) -Message "Missing WinUI visual evidence verifier: $visualEvidenceVerifier"
-    & $visualEvidenceVerifier -RepoRoot $resolvedRepoRoot -EvidenceDir $resolvedWinUiEvidenceDir | Write-Output
+    & $visualEvidenceVerifier -RepoRoot $resolvedRepoRoot -EvidenceDir $resolvedWinUiEvidenceDir -ExpectedBranch $branch -ExpectedHead $head | Write-Output
 }
 
 $includeNativeDnsSdAcceptance = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "includeNativeDnsSdAcceptance" -Context "acceptance.parameters") -Context "acceptance.parameters.includeNativeDnsSdAcceptance"

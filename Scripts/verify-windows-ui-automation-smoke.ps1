@@ -3,7 +3,9 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
     [int]$TimeoutSeconds = 20,
-    [string]$EvidenceDir = ""
+    [string]$EvidenceDir = "",
+    [string]$EvidenceBranch = "",
+    [string]$EvidenceHead = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +29,44 @@ function Assert-Contains {
     )
 
     Assert-True -Condition $Text.Contains($Needle) -Message $Message
+}
+
+function Get-GitText {
+    param(
+        [string[]]$Arguments,
+        [string]$Context
+    )
+
+    $output = & git -C $RepoRoot @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to resolve $Context for WinUI visual evidence: git $($Arguments -join ' ') failed with exit code $LASTEXITCODE. $($output -join ' ')"
+    }
+
+    $value = (($output | Select-Object -First 1) -as [string]).Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "Unable to resolve $Context for WinUI visual evidence: git $($Arguments -join ' ') returned an empty value."
+    }
+
+    return $value
+}
+
+function Get-EvidenceBranch {
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceBranch)) {
+        return $EvidenceBranch.Trim()
+    }
+
+    return Get-GitText -Arguments @("rev-parse", "--abbrev-ref", "HEAD") -Context "repo branch"
+}
+
+function Get-EvidenceHead {
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceHead)) {
+        Assert-True -Condition ($EvidenceHead -match '^[0-9a-f]{40}$') -Message "EvidenceHead must be a 40-character git SHA: $EvidenceHead"
+        return $EvidenceHead.Trim()
+    }
+
+    $head = Get-GitText -Arguments @("rev-parse", "HEAD") -Context "repo head"
+    Assert-True -Condition ($head -match '^[0-9a-f]{40}$') -Message "Resolved repo head must be a 40-character git SHA: $head"
+    return $head
 }
 
 function Assert-UnpackagedDefaultWindowsPackageType {
@@ -996,6 +1036,8 @@ try {
             app = "Skybridge.WinClient"
             configuration = $Configuration
             targetFramework = $targetFramework
+            repoBranch = Get-EvidenceBranch
+            repoHead = Get-EvidenceHead
             captureCount = $captures.Count
             actionOrderMatrix = "docs/windows-ui-parity-matrix.md#action-order-matrix"
             captures = @($captures)

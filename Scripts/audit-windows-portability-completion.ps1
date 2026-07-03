@@ -4,6 +4,7 @@ param(
     [string]$RustCliCoverageEvidencePath = "artifacts/windows-portability/latest-local/rust-cli-coverage.json",
     [string]$StackFreshnessEvidencePath = "artifacts/windows-portability/latest-local/windows-stack-freshness.json",
     [string]$WinUiEvidenceDir = "",
+    [switch]$AllowStandaloneWinUiVisualEvidence,
     [string]$MacSshEvidencePath = "",
     [string]$ReportPath = "",
     [string]$ExpectedBranch = "Bill/windows-portability",
@@ -194,9 +195,13 @@ $verifierArguments = @{
 }
 
 $resolvedWinUiEvidenceDir = Resolve-RepoPath -Path $WinUiEvidenceDir
+$standaloneWinUiEvidenceAccepted = (-not [string]::IsNullOrWhiteSpace($resolvedWinUiEvidenceDir)) -and [bool]$AllowStandaloneWinUiVisualEvidence
 if (-not [string]::IsNullOrWhiteSpace($resolvedWinUiEvidenceDir)) {
     $verifierArguments.WinUiEvidenceDir = $resolvedWinUiEvidenceDir
     $verifierArguments.RequireWinUiVisualEvidence = $true
+    if ($AllowStandaloneWinUiVisualEvidence) {
+        $verifierArguments.AllowStandaloneWinUiVisualEvidence = $true
+    }
 }
 
 & $acceptanceVerifier @verifierArguments | Write-Output
@@ -211,6 +216,9 @@ Add-AuditItem -Items $items -Id "REQ-STACK" -Status "complete" -Evidence "online
 Add-AuditItem -Items $items -Id "REQ-MODULARITY" -Status "complete" -Evidence "windows-ffi-client, native-runtime-profile, connection-launch, startup-state, command-gates, and file-transfer-qr gates passed."
 if (Test-GatePassed -Acceptance $acceptance -Name "windows-ui-automation-smoke" -and (Test-GatePassed -Acceptance $acceptance -Name "windows-ui-visual-evidence")) {
     Add-AuditItem -Items $items -Id "REQ-UI" -Status "complete" -Evidence "UI static parity, action order, matrix, automation smoke, and visual evidence gates passed."
+}
+elseif ($standaloneWinUiEvidenceAccepted) {
+    Add-AuditItem -Items $items -Id "REQ-UI" -Status "complete" -Evidence "UI static gates passed and standalone interactive WinUI evidence was verified for this acceptance branch/head: $resolvedWinUiEvidenceDir"
 }
 else {
     Add-AuditItem -Items $items -Id "REQ-UI" -Status "incomplete" -Evidence "Static UI gates passed." -Gap "Interactive WinUI automation and visual evidence must pass for release-quality UI parity."

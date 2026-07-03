@@ -1,7 +1,9 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [Parameter(Mandatory = $true)]
-    [string]$EvidenceDir
+    [string]$EvidenceDir,
+    [string]$ExpectedBranch = "",
+    [string]$ExpectedHead = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -184,6 +186,14 @@ $expectedSizes = @(
 
 Assert-True -Condition ($manifest.app -eq "Skybridge.WinClient") -Message "Unexpected evidence app: $($manifest.app)"
 Assert-True -Condition ($manifest.actionOrderMatrix -eq "docs/windows-ui-parity-matrix.md#action-order-matrix") -Message "Visual evidence must reference the UI action-order matrix."
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$manifest.repoBranch)) -Message "Visual evidence manifest must include repoBranch."
+Assert-True -Condition ([string]$manifest.repoHead -match '^[0-9a-f]{40}$') -Message "Visual evidence manifest must include a 40-character repoHead: $($manifest.repoHead)"
+if (-not [string]::IsNullOrWhiteSpace($ExpectedBranch)) {
+    Assert-True -Condition ([string]$manifest.repoBranch -eq $ExpectedBranch) -Message "Visual evidence branch mismatch: expected=$ExpectedBranch actual=$($manifest.repoBranch)"
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedHead)) {
+    Assert-True -Condition ([string]$manifest.repoHead -eq $ExpectedHead) -Message "Visual evidence head mismatch: expected=$ExpectedHead actual=$($manifest.repoHead)"
+}
 
 $captures = @($manifest.captures)
 Assert-True -Condition ([int]$manifest.captureCount -eq ($expectedFeatures.Count * $expectedSizes.Count)) -Message "Unexpected manifest captureCount: $($manifest.captureCount)"
