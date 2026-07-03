@@ -21,8 +21,55 @@ function Assert-True {
     }
 }
 
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
+function Invoke-NativeTool {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$FailureMessage
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Output $stdout.TrimEnd()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        Write-Output $stderr.TrimEnd()
+    }
+
+    Assert-True -Condition ($process.ExitCode -eq 0) -Message $FailureMessage
+}
+
 $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CoreBridge.cs",
+    "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
     "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
@@ -48,8 +95,10 @@ if (-not (Test-Path -LiteralPath $coreManifest)) {
 }
 
 Assert-True -Condition (Test-Path -LiteralPath $coreManifest) -Message "Missing Rust Core manifest for native DNS-SD acceptance: $coreManifest"
-& cargo build --manifest-path $coreManifest --lib
-Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust Core native library build failed for native DNS-SD acceptance."
+Invoke-NativeTool `
+    -FilePath "cargo" `
+    -Arguments @("build", "--manifest-path", $coreManifest, "--lib") `
+    -FailureMessage "Rust Core native library build failed for native DNS-SD acceptance."
 
 $coreRoot = Split-Path -Parent $coreManifest
 $nativeDll = Join-Path $coreRoot "target/debug/skybridge_core.dll"
@@ -228,8 +277,10 @@ sealed record AcceptanceOptions(
 }
 '@
 
-    & dotnet restore $testProject
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native DNS-SD acceptance restore failed."
+    Invoke-NativeTool `
+        -FilePath "dotnet" `
+        -Arguments @("restore", $testProject) `
+        -FailureMessage "Windows native DNS-SD acceptance restore failed."
 
     $oldPath = $env:PATH
     $env:PATH = "$(Split-Path -Parent $nativeDll);$oldPath"
@@ -260,8 +311,10 @@ sealed record AcceptanceOptions(
             $runArgs += @("--search", $SearchText)
         }
 
-        & dotnet @runArgs
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native DNS-SD acceptance run failed."
+        Invoke-NativeTool `
+            -FilePath "dotnet" `
+            -Arguments $runArgs `
+            -FailureMessage "Windows native DNS-SD acceptance run failed."
     }
     finally {
         $env:PATH = $oldPath

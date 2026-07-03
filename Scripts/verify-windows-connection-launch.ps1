@@ -16,6 +16,19 @@ function Assert-True {
     }
 }
 
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
 function Invoke-NativeTool {
     param(
         [string]$FilePath,
@@ -23,17 +36,30 @@ function Invoke-NativeTool {
         [string]$FailureMessage
     )
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Output $_ }
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Output $stdout.TrimEnd()
     }
 
-    Assert-True -Condition ($exitCode -eq 0) -Message $FailureMessage
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        Write-Output $stderr.TrimEnd()
+    }
+
+    Assert-True -Condition ($process.ExitCode -eq 0) -Message $FailureMessage
 }
 
 $winClientProject = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
