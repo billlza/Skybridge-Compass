@@ -2,6 +2,8 @@
 
 This gate proves the Windows OpenSSH reverse relay used for remote co-debugging is task-owned, pinned, and fail-closed. It is management-channel evidence only. It does not satisfy WebRTC helper proof, WinClient runtime transport proof, Mac product AppControl acceptance, or peer-trust persistence.
 
+For operator recovery steps when the relay is down, use `docs/windows-stable-ssh-connection.md`. This lifecycle document is the evidence contract; the stable SSH runbook is the operational sequence for restoring the management channel before running the evidence gates.
+
 ## Boundary
 
 The lifecycle is split into three scripts:
