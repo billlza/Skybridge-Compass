@@ -9,7 +9,7 @@ This map fixes the active Windows parity objective to auditable evidence. It is 
 | `REQ-SUBAGENT-SUMMARY` sub-agent collection and synthesis is documented before final parity claims | `docs/windows-research-agent-synthesis.md` records the three explorer reports, their agent IDs, scope, findings, and decision impacts; `Scripts/verify-windows-research-evidence.ps1` keeps the synthesis auditable. |
 | `REQ-STACK` Windows stack is current and checked against primary sources | `Scripts/verify-windows-stack-freshness.ps1` checks project versions offline and supports `-CheckOnline -EvidencePath <json>` for .NET/NuGet/GitHub latest-version evidence. |
 | `REQ-MODULARITY` Windows is modular around Core/service boundaries rather than page-local logic | `Scripts/verify-windows-ffi-client.ps1`, `Scripts/verify-windows-ui-parity.ps1`, `Scripts/verify-windows-native-runtime-profile.ps1`, and `Scripts/verify-windows-connection-launch.ps1` cover CoreBridge, dependency injection, runtime selectors, transport adapters, and fail-closed launch boundaries. |
-| `REQ-UI` controllable UI parity matches mac positions and style contracts | `docs/windows-ui-parity-matrix.md`, `Scripts/verify-windows-ui-action-order.ps1`, `Scripts/verify-windows-ui-parity-matrix.ps1`, `Scripts/verify-windows-ui-automation-smoke.ps1`, and `Scripts/verify-windows-ui-visual-evidence.ps1` cover button/function order, anchors, shared templates, runtime action bounds, and 16 screenshot artifacts. The visual evidence manifest must carry `repoBranch` and `repoHead`; acceptance/completion may use `-AllowStandaloneWinUiVisualEvidence` only when an interactive desktop task generated evidence for the same branch/head outside the non-interactive smoke process. Fonts, DPI, and platform pixel metrics remain out of scope. |
+| `REQ-UI` controllable UI parity matches mac positions and style contracts | Every local Windows validation round starts by building and launching the product app through `Scripts/verify-windows-ui-automation-smoke.ps1 -EvidenceDir <dir>` in an interactive desktop session. `docs/windows-ui-parity-matrix.md`, `Scripts/verify-windows-ui-action-order.ps1`, `Scripts/verify-windows-ui-parity-matrix.ps1`, `Scripts/verify-windows-ui-automation-smoke.ps1`, and `Scripts/verify-windows-ui-visual-evidence.ps1` cover button/function order, anchors, shared templates, runtime action bounds, the real WinClient window, File Transfer QR preview, and 16 screenshot artifacts. An SSH-only `dotnet build` is build preflight, not visual evidence. The visual evidence manifest must carry `repoBranch` and `repoHead`; acceptance/completion may use `-AllowStandaloneWinUiVisualEvidence` only when an interactive desktop task generated evidence for the same branch/head outside the non-interactive smoke process. Fonts, DPI, and platform pixel metrics remain out of scope. |
 | `REQ-RUST-CLI` Rust CLI is reusable and keeps at least 90% line coverage | `Scripts/verify-rust-cli-coverage.ps1` runs `cargo fmt`, `cargo clippy`, `cargo test`, `cargo llvm-cov`, requires total and `cli.rs` line coverage at or above 90%, and records evidence JSON. |
 | `REQ-BASIC-SMOKE` CLI/basic operations and repository smoke paths are executable | `Scripts/verify-windows-portability-smoke.ps1` runs default static/service/CLI proof gates, CI runs it with `-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage`, and `Scripts/verify-windows-portability-acceptance-evidence.ps1` validates generated `gateResults`, evidence paths, branch/head metadata, optional 90% Rust CLI coverage evidence, online stack freshness evidence, WinUI visual evidence, native DNS-SD acceptance evidence, and real Mac interop evidence. |
 | `REQ-APPLE-PRESERVATION` Windows interop must not break mac/iOS AppleNative behavior | `Scripts/verify-apple-native-preservation.ps1` proves Apple-to-Apple same-LAN/cross-NAT paths keep `AppleNative`, Windows-to-Apple uses WebRTC without Apple stream/datagram bindings, and Windows-to-Windows keeps MsQuic. |
@@ -72,6 +72,26 @@ Scripts\verify-windows-portability-acceptance-evidence.ps1 `
     -RequireWinUiVisualEvidence `
     -AllowStandaloneWinUiVisualEvidence `
     -WinUiEvidenceDir <interactive-winui-evidence-dir>
+```
+
+For a manual local Windows validation round, run the app gate directly before the broader smoke package:
+
+```powershell
+Scripts\verify-windows-ui-automation-smoke.ps1 `
+    -RepoRoot . `
+    -Configuration Debug `
+    -EvidenceDir artifacts\winui-smoke
+
+Scripts\verify-windows-portability-smoke.ps1 `
+    -RepoRoot . `
+    -IncludeWinUiAutomationSmoke `
+    -WinUiEvidenceDir artifacts\winui-smoke `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json
+
+Scripts\verify-windows-portability-acceptance-evidence.ps1 `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
+    -RequireWinUiVisualEvidence `
+    -WinUiEvidenceDir artifacts\winui-smoke
 ```
 
 Run the completion audit before claiming the full objective is done:

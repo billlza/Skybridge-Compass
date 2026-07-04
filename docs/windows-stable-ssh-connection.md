@@ -98,6 +98,45 @@ Registration and lifecycle JSON can include local paths, task arguments, and top
 
 ## Required Validation
 
+Start each Windows validation round with the product app, not only with script-level gates. The build proves the Windows app can consume the current Core/native DLL and WinUI project graph; the UI automation smoke proves the visible shell still matches the macOS-derived structure.
+
+Build-only checks can run from an SSH PowerShell session:
+
+```powershell
+dotnet restore windows/Skybridge.WinClient/Skybridge.WinClient.csproj
+dotnet build windows/Skybridge.WinClient/Skybridge.WinClient.csproj --configuration Debug --no-restore /p:TreatWarningsAsErrors=true
+```
+
+The live app launch, UI Automation traversal, and screenshot package must run in an interactive Windows desktop session, such as the visible elevated PowerShell window over AweSun/RDP/console:
+
+```powershell
+Scripts\verify-windows-ui-automation-smoke.ps1 `
+    -RepoRoot . `
+    -Configuration Debug `
+    -EvidenceDir artifacts\winui-smoke
+```
+
+For the broader portability package, include the same live UI gate explicitly:
+
+```powershell
+Scripts\verify-windows-portability-smoke.ps1 `
+    -RepoRoot . `
+    -IncludeWinUiAutomationSmoke `
+    -WinUiEvidenceDir artifacts\winui-smoke `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json
+```
+
+Then require the visual package during acceptance verification:
+
+```powershell
+Scripts\verify-windows-portability-acceptance-evidence.ps1 `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
+    -RequireWinUiVisualEvidence `
+    -WinUiEvidenceDir artifacts\winui-smoke
+```
+
+Do not treat an SSH-only `dotnet build` as visual proof. It catches build/package/native-DLL regressions, but it does not prove the real app window, navigation order, action anchors, screenshots, or File Transfer QR preview.
+
 Run PowerShell parse validation on the Windows machine:
 
 ```powershell
