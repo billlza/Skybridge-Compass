@@ -76,9 +76,13 @@ $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $researchSynthesisPath = Join-Path $RepoRoot "docs/windows-research-agent-synthesis.md"
 $portabilityAcceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 $opensshPqKexPath = Join-Path $RepoRoot "docs/windows-openssh-pq-kex.md"
+$reverseSshRelayLifecyclePath = Join-Path $RepoRoot "docs/windows-reverse-ssh-relay-lifecycle.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $portabilityAcceptanceMapSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-map.ps1"
 $opensshPqKexSmokePath = Join-Path $RepoRoot "Scripts/verify-openssh-pq-kex.ps1"
+$reverseSshRelayStartPath = Join-Path $RepoRoot "Scripts/start-windows-reverse-ssh-relay.ps1"
+$reverseSshRelayRegisterPath = Join-Path $RepoRoot "Scripts/register-windows-reverse-ssh-relay-task.ps1"
+$reverseSshRelayLifecycleSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1"
 $portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $portabilityCompletionAuditPath = Join-Path $RepoRoot "Scripts/audit-windows-portability-completion.ps1"
 $researchEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
@@ -104,7 +108,7 @@ $macWebRtcHelperLivePath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrt
 $webrtcHelperProgramPath = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/Program.cs"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $opensshPqKexPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $opensshPqKexSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $opensshPqKexPath, $reverseSshRelayLifecyclePath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $opensshPqKexSmokePath, $reverseSshRelayStartPath, $reverseSshRelayRegisterPath, $reverseSshRelayLifecycleSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -148,9 +152,13 @@ $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $researchSynthesis = Get-Content -Raw -LiteralPath $researchSynthesisPath
 $portabilityAcceptanceMap = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapPath
 $opensshPqKex = Get-Content -Raw -LiteralPath $opensshPqKexPath
+$reverseSshRelayLifecycle = Get-Content -Raw -LiteralPath $reverseSshRelayLifecyclePath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $portabilityAcceptanceMapSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapSmokePath
 $opensshPqKexSmoke = Get-Content -Raw -LiteralPath $opensshPqKexSmokePath
+$reverseSshRelayStart = Get-Content -Raw -LiteralPath $reverseSshRelayStartPath
+$reverseSshRelayRegister = Get-Content -Raw -LiteralPath $reverseSshRelayRegisterPath
+$reverseSshRelayLifecycleSmoke = Get-Content -Raw -LiteralPath $reverseSshRelayLifecycleSmokePath
 $portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
 $portabilityCompletionAudit = Get-Content -Raw -LiteralPath $portabilityCompletionAuditPath
 $researchEvidenceSmoke = Get-Content -Raw -LiteralPath $researchEvidenceSmokePath
@@ -516,6 +524,7 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "REQ-APPLE-PRESERVATION",
     "REQ-MAC-INTEROP",
     "REQ-OPENSSH-PQ-KEX",
+    "REQ-WINDOWS-REVERSE-SSH-RELAY",
     "REQ-GITHUB-SSH",
     "Product Design QA gate",
     "at or above 90%",
@@ -526,14 +535,51 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "prepare-mac-rust-cli-codbg.ps1",
     "verify-windows-mac-webrtc-interop.ps1",
     "verify-openssh-pq-kex.ps1",
+    "register-windows-reverse-ssh-relay-task.ps1",
+    "start-windows-reverse-ssh-relay.ps1",
+    "verify-windows-reverse-ssh-relay-lifecycle.ps1",
     "Windows OpenSSH PQ KEX Gate",
+    "Windows Reverse SSH Relay Lifecycle Gate",
     "negotiatedKexAlgorithm",
     "pinnedHostKeyFingerprints",
     "pinnedKnownHostsRecordCount",
+    "-F", "none",
+    "PreferredAuthentications=publickey",
+    "KbdInteractiveAuthentication=no",
+    "BatchMode=yes",
+    "NumberOfPasswordPrompts=0",
+    "StrictHostKeyChecking=yes",
+    "UserKnownHostsFile=",
+    "IdentitiesOnly=yes",
+    "IdentityAgent=none",
+    "UpdateHostKeys=no",
+    "ExitOnForwardFailure=yes",
+    "NT AUTHORITY\LOCAL SERVICE",
+    "RepairPrivateKeyAcl",
+    "InstalledStartScriptPath",
+    "C:\ProgramData\SkyBridge\reverse-ssh-relay\bin",
+    "logs",
+    "taskActionExpected",
+    "taskActionFailClosed",
+    "taskPrincipalExpected",
+    "relayHostKeyPinned",
+    "identityFileAclOk",
+    "knownHostsAclOk",
+    "installedStartScriptAclOk",
+    "runtimeAclOk",
+    "sourceStartScriptSha256",
+    "installedStartScriptSha256",
+    "installedStartScriptPath",
+    "startScriptInstalledAndCurrent",
+    "sshProcessOwnerExpected",
+    "localSshEndpointReachable",
+    "sshProcessCount",
+    "RequireWindowsReverseSshRelayLifecycle",
+    "IncludeWindowsReverseSshRelayLifecycle",
     "not SkyBridge product transport evidence",
     "git-remote-https.exe"
 )) {
-    Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke + $opensshPqKex + $opensshPqKexSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
+    Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke + $opensshPqKex + $opensshPqKexSmoke + $reverseSshRelayLifecycle + $reverseSshRelayStart + $reverseSshRelayRegister + $reverseSshRelayLifecycleSmoke + $portabilitySmoke + $portabilityAcceptanceEvidenceSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
 }
 foreach ($researchEvidenceSignal in @(
     "windows-research-evidence: ok",
@@ -569,6 +615,9 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "ExpectedHead",
     "RequireNativeDnsSdAcceptance",
     "RequireMacInterop",
+    "RequireWindowsReverseSshRelayLifecycle",
+    "windowsReverseSshRelayEvidencePath",
+    "windows-reverse-ssh-relay-lifecycle",
     "totalLineCoverage",
     "cliLineCoverage",
     "cargo fmt --all -- --check",
@@ -763,7 +812,9 @@ foreach ($forbiddenWorkflowSignal in @(
     "-RequireMacSshReady",
     "-RequireMacRustCliSmoke",
     "-RequireMacWebRtcInterop",
-    "-RequireNativeDnsSdPeer"
+    "-RequireNativeDnsSdPeer",
+    "-IncludeWindowsReverseSshRelayLifecycle",
+    "-RequireWindowsReverseSshRelayLifecycle"
 )) {
     Assert-True -Condition (-not $githubWorkflow.Contains($forbiddenWorkflowSignal)) -Message "GitHub workflow must not require local-only readiness gate: $forbiddenWorkflowSignal"
 }

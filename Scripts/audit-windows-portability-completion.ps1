@@ -270,6 +270,13 @@ Add-AuditItem -Items $items -Id "REQ-BASIC-SMOKE" -Status "complete" -Evidence "
 Add-AuditItem -Items $items -Id "REQ-APPLE-PRESERVATION" -Status "complete" -Evidence "apple-native-preservation gate passed; CLI/FFI tests keep Apple-to-Apple native and Windows-to-Apple WebRTC interop."
 Add-AuditItem -Items $items -Id "REQ-NATIVE-DNS-SD" -Status "complete" -Evidence "native DNS-SD acceptance was required and passed."
 
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-reverse-ssh-relay-lifecycle") {
+    Add-AuditItem -Items $items -Id "REQ-WINDOWS-REVERSE-SSH-RELAY" -Status "complete" -Evidence "Windows reverse SSH relay lifecycle gate passed with pinned host key, least-privilege task principal, strict key ACL, local sshd reachability, and task-owned process evidence."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-WINDOWS-REVERSE-SSH-RELAY" -Status "incomplete" -Evidence "windows-reverse-ssh-relay-lifecycle gate is not passed." -Gap "Run portability smoke with -RequireWindowsReverseSshRelayLifecycle, WindowsReverseSshRelayExpectedHostKeyFingerprint, and WindowsReverseSshRelayEvidencePath after registering the scheduled task with Scripts/register-windows-reverse-ssh-relay-task.ps1."
+}
+
 $macReady = (Test-GatePassed -Acceptance $acceptance -Name "mac-ssh-readiness")
 $macInterop = (Test-GatePassed -Acceptance $acceptance -Name "windows-mac-webrtc-interop")
 if ($macReady -and $macInterop) {

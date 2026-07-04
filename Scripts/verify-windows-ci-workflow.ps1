@@ -87,7 +87,9 @@ foreach ($forbidden in @(
     "-RequireMacSshReady",
     "-RequireMacDirectLan",
     "-RequireMacWebRtcInterop",
-    "-RequireNativeDnsSdPeer"
+    "-RequireNativeDnsSdPeer",
+    "-IncludeWindowsReverseSshRelayLifecycle",
+    "-RequireWindowsReverseSshRelayLifecycle"
 )) {
     Assert-True -Condition (-not $workflow.Contains($forbidden)) -Message "Windows CI workflow must not require local-only readiness gate: $forbidden"
 }

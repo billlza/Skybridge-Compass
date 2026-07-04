@@ -16,6 +16,7 @@ This map fixes the active Windows parity objective to auditable evidence. It is 
 | `REQ-NATIVE-DNS-SD` Windows native discovery must use the Win32 DNS-SD lifecycle without becoming the default before LAN proof | `Scripts/verify-windows-native-dns-sd-acceptance.ps1` exercises `NativeWindowsDnsSdBrowseClient` through browse, resolve, cancel, TXT parsing, record free, and instance free boundaries. `Scripts/audit-windows-portability-completion.ps1` requires this gate before reporting completion; `-RequirePeer` plus expected device identity remains the local-network proof before enabling the native provider by default. |
 | `REQ-MAC-INTEROP` Windows-to-mac co-debugging is gated by direct LAN, pinned SSH host key, Mac Rust CLI smoke, DNS-SD, WebRTC proof, and launch smoke | `Scripts/prepare-mac-rust-cli-codbg.ps1`, `Scripts/verify-mac-rust-cli-codbg-wrapper.ps1`, and `Scripts/verify-windows-mac-webrtc-interop.ps1` define the local sequence. Real interop remains incomplete until direct LAN route, host-key pinning, helper proof, and expected identity evidence are available. |
 | `REQ-OPENSSH-PQ-KEX` Windows OpenSSH co-debug transport must prove actual PQ/hybrid KEX before it is treated as a hardened SSH channel | `docs/windows-openssh-pq-kex.md` defines the local-only evidence boundary. `Scripts/verify-openssh-pq-kex.ps1` requires a pinned host key, forces `mlkem768x25519-sha256` / `sntrup761x25519-sha512` only, parses `ssh -vvv` for the negotiated algorithm, and can write `artifacts\openssh-pq-kex.json`. This evidence is SSH management-channel proof only and does not satisfy WebRTC helper, WinClient runtime, Mac product AppControl, or peer-trust persistence gates. |
+| `REQ-WINDOWS-REVERSE-SSH-RELAY` Windows reverse SSH relay must be pinned, least-privilege, and task-owned before it is treated as durable management-channel access | `docs/windows-reverse-ssh-relay-lifecycle.md` defines the local-only lifecycle boundary. `Scripts/register-windows-reverse-ssh-relay-task.ps1` pins the relay host key, writes a gate-owned `known_hosts`, rejects broad private-key ACLs unless `-RepairPrivateKeyAcl` is explicit, installs the start script to `C:\ProgramData\SkyBridge\reverse-ssh-relay\bin`, keeps logs under a separate writable `logs` directory, and registers a least-privilege scheduled task. `Scripts/start-windows-reverse-ssh-relay.ps1` runs one fail-closed SSH process with `StrictHostKeyChecking=yes`, `UserKnownHostsFile=...`, `IdentitiesOnly=yes`, `IdentityAgent=none`, `UpdateHostKeys=no`, and `ExitOnForwardFailure=yes`. `Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1` records `taskActionExpected`, `taskActionFailClosed`, `taskPrincipalExpected`, `relayHostKeyPinned`, `identityFileAclOk`, `knownHostsAclOk`, `installedStartScriptAclOk`, `runtimeAclOk`, `startScriptInstalledAndCurrent`, `localSshEndpointReachable`, `sshProcessCount`, `sshProcessOwnerExpected`, and `accepted`. This follows the macOS-style source contract plus hash-verified runtime artifact pattern. This is not SkyBridge product transport evidence and does not satisfy WebRTC helper or Mac AppControl gates. |
 | `REQ-GITHUB-SSH` branch upload must avoid unstable GitHub HTTPS transport by default and provide a controlled fallback | `Scripts/ensure-github-ssh-remote.ps1`, `Scripts/verify-git-ssh-remote.ps1`, `Scripts/push-github-ssh.ps1`, `Scripts/push-github-gcm.ps1`, `.githooks/pre-push`, and `docs/github-ssh-transport.md` pin SSH remotes, known_hosts, fallback bundle creation, and an explicit Git Credential Manager HTTPS fallback with write-permission and fast-forward checks. |
 | `REQ-GITHUB-UPLOAD` the dedicated GitHub branch must actually contain the accepted commit | `Scripts/audit-windows-portability-completion.ps1 -CheckRemoteBranch -AllowGitHubApiRemoteCheck` compares `billlza/Skybridge-Compass` branch `Bill/windows-portability` with the accepted local HEAD, using SSH `git ls-remote` first and the GitHub refs API when SSH authorization is unavailable; `-RequireComplete` fails until the remote branch, Mac SSH readiness, and Windows-to-mac interop gates are complete. |
 
@@ -44,6 +45,21 @@ Scripts\verify-windows-portability-acceptance-evidence.ps1 `
     -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
     -RequireRustCliCoverage `
     -RequireOnlineStackFreshness
+```
+
+Require the Windows reverse SSH relay lifecycle only when the Windows machine owns the scheduled task and the relay host key is pinned:
+
+```powershell
+Scripts\verify-windows-portability-smoke.ps1 `
+    -RequireWindowsReverseSshRelayLifecycle `
+    -WindowsReverseSshRelayExpectedHostKeyFingerprint SHA256:<relay-host-key> `
+    -WindowsReverseSshRelayEvidencePath artifacts\windows-reverse-ssh-relay-lifecycle.json `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json
+
+Scripts\verify-windows-portability-acceptance-evidence.ps1 `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
+    -RequireWindowsReverseSshRelayLifecycle `
+    -WindowsReverseSshRelayEvidencePath artifacts\windows-reverse-ssh-relay-lifecycle.json
 ```
 
 When WinUI automation ran from an interactive scheduled task instead of the non-interactive portability smoke process, validate that evidence explicitly:

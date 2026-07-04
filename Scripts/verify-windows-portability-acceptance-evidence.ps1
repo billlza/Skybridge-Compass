@@ -9,10 +9,12 @@ param(
     [switch]$AllowStandaloneWinUiVisualEvidence,
     [switch]$RequireNativeDnsSdAcceptance,
     [switch]$RequireMacInterop,
+    [switch]$RequireWindowsReverseSshRelayLifecycle,
     [string]$RustCliCoverageEvidencePath = "",
     [string]$StackFreshnessEvidencePath = "",
     [string]$WinUiEvidenceDir = "",
     [string]$MacSshEvidencePath = "",
+    [string]$WindowsReverseSshRelayEvidencePath = "",
     [string]$ExpectedBranch = "",
     [string]$ExpectedHead = ""
 )
@@ -315,6 +317,50 @@ if ($RequireRustCliCoverage -or $includeRustCliCoverage) {
 }
 else {
     Assert-PassedOrSkippedGate -Name "rust-cli-coverage" | Out-Null
+}
+
+$includeWindowsReverseSshRelayLifecycle = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "includeWindowsReverseSshRelayLifecycle" -Context "acceptance.parameters") -Context "acceptance.parameters.includeWindowsReverseSshRelayLifecycle"
+$requireWindowsReverseSshRelayLifecycle = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "requireWindowsReverseSshRelayLifecycle" -Context "acceptance.parameters") -Context "acceptance.parameters.requireWindowsReverseSshRelayLifecycle"
+$reverseSshRelayEvidencePath = Get-OverrideOrJsonPath -OverridePath $WindowsReverseSshRelayEvidencePath -EvidencePaths $evidencePaths -PropertyName "windowsReverseSshRelayEvidencePath"
+if ($RequireWindowsReverseSshRelayLifecycle) {
+    Assert-RequiredBooleanParameter -Parameters $parameters -Name "requireWindowsReverseSshRelayLifecycle" -Expected $true
+}
+if ($RequireWindowsReverseSshRelayLifecycle -or $requireWindowsReverseSshRelayLifecycle) {
+    Assert-PassedGate -Name "windows-reverse-ssh-relay-lifecycle" | Out-Null
+    $reverseSshRelayEvidence = Read-JsonFile -Path $reverseSshRelayEvidencePath -Context "Windows reverse SSH relay lifecycle"
+    foreach ($requiredRelayBooleanField in @(
+        "accepted",
+        "taskActionExpected",
+        "taskActionFailClosed",
+        "taskPrincipalExpected",
+        "relayHostKeyPinned",
+        "identityFileAclOk",
+        "knownHostsAclOk",
+        "installedStartScriptAclOk",
+        "startScriptInstalledAndCurrent",
+        "runtimeAclOk",
+        "localSshEndpointReachable"
+    )) {
+        $fieldValue = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $reverseSshRelayEvidence -Name $requiredRelayBooleanField -Context "reverseSshRelay") -Context "reverseSshRelay.$requiredRelayBooleanField"
+        Assert-True -Condition ($fieldValue -eq $true) -Message "Windows reverse SSH relay evidence must have $requiredRelayBooleanField=true."
+    }
+    $relayProcessCount = [System.Convert]::ToInt32((Assert-JsonProperty -Object $reverseSshRelayEvidence -Name "sshProcessCount" -Context "reverseSshRelay"), [Globalization.CultureInfo]::InvariantCulture)
+    Assert-True -Condition ($relayProcessCount -eq 1) -Message "Required Windows reverse SSH relay evidence must include exactly one matching ssh.exe process."
+    $relayProcessOwnerExpected = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $reverseSshRelayEvidence -Name "sshProcessOwnerExpected" -Context "reverseSshRelay") -Context "reverseSshRelay.sshProcessOwnerExpected"
+    Assert-True -Condition ($relayProcessOwnerExpected -eq $true) -Message "Required Windows reverse SSH relay evidence must prove matching ssh.exe belongs to the task service account."
+    $relayRequireRunning = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $reverseSshRelayEvidence -Name "requireRunning" -Context "reverseSshRelay") -Context "reverseSshRelay.requireRunning"
+    Assert-True -Condition ($relayRequireRunning -eq $true) -Message "Required Windows reverse SSH relay evidence must be generated with RequireRunning=true."
+}
+elseif ($includeWindowsReverseSshRelayLifecycle) {
+    Assert-PassedGate -Name "windows-reverse-ssh-relay-lifecycle" | Out-Null
+    $reverseSshRelayEvidence = Read-JsonFile -Path $reverseSshRelayEvidencePath -Context "Windows reverse SSH relay lifecycle"
+    foreach ($optionalRelayBooleanField in @("accepted", "taskActionExpected", "taskActionFailClosed", "taskPrincipalExpected", "relayHostKeyPinned", "identityFileAclOk", "knownHostsAclOk", "installedStartScriptAclOk", "startScriptInstalledAndCurrent", "runtimeAclOk", "localSshEndpointReachable")) {
+        $fieldValue = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $reverseSshRelayEvidence -Name $optionalRelayBooleanField -Context "reverseSshRelay") -Context "reverseSshRelay.$optionalRelayBooleanField"
+        Assert-True -Condition ($fieldValue -eq $true) -Message "Included Windows reverse SSH relay evidence must have $optionalRelayBooleanField=true."
+    }
+}
+else {
+    Assert-PassedOrSkippedGate -Name "windows-reverse-ssh-relay-lifecycle" | Out-Null
 }
 
 $probeMacSsh = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "probeMacSsh" -Context "acceptance.parameters") -Context "acceptance.parameters.probeMacSsh"

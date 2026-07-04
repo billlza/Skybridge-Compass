@@ -39,6 +39,7 @@ $uiContractPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $uiMatrixPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $webrtcSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 $opensshPqKexPath = Join-Path $RepoRoot "docs/windows-openssh-pq-kex.md"
+$reverseSshRelayLifecyclePath = Join-Path $RepoRoot "docs/windows-reverse-ssh-relay-lifecycle.md"
 $githubTransportPath = Join-Path $RepoRoot "docs/github-ssh-transport.md"
 $acceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 
@@ -56,6 +57,9 @@ $uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automati
 $uiVisualEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-visual-evidence.ps1"
 $applePreservationPath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 $opensshPqKexSmokePath = Join-Path $RepoRoot "Scripts/verify-openssh-pq-kex.ps1"
+$reverseSshRelayStartPath = Join-Path $RepoRoot "Scripts/start-windows-reverse-ssh-relay.ps1"
+$reverseSshRelayRegisterPath = Join-Path $RepoRoot "Scripts/register-windows-reverse-ssh-relay-task.ps1"
+$reverseSshRelayLifecycleSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1"
 $macCodbgPath = Join-Path $RepoRoot "Scripts/prepare-mac-rust-cli-codbg.ps1"
 $macCodbgWrapperPath = Join-Path $RepoRoot "Scripts/verify-mac-rust-cli-codbg-wrapper.ps1"
 $macInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
@@ -70,6 +74,7 @@ $uiContract = Read-RequiredText -Path $uiContractPath
 $uiMatrix = Read-RequiredText -Path $uiMatrixPath
 $webrtcSchema = Read-RequiredText -Path $webrtcSchemaPath
 $opensshPqKex = Read-RequiredText -Path $opensshPqKexPath
+$reverseSshRelayLifecycle = Read-RequiredText -Path $reverseSshRelayLifecyclePath
 $githubTransport = Read-RequiredText -Path $githubTransportPath
 $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $portabilitySmoke = Read-RequiredText -Path $portabilitySmokePath
@@ -86,6 +91,9 @@ $uiAutomationSmoke = Read-RequiredText -Path $uiAutomationSmokePath
 $uiVisualEvidence = Read-RequiredText -Path $uiVisualEvidencePath
 $applePreservation = Read-RequiredText -Path $applePreservationPath
 $opensshPqKexSmoke = Read-RequiredText -Path $opensshPqKexSmokePath
+$reverseSshRelayStart = Read-RequiredText -Path $reverseSshRelayStartPath
+$reverseSshRelayRegister = Read-RequiredText -Path $reverseSshRelayRegisterPath
+$reverseSshRelayLifecycleSmoke = Read-RequiredText -Path $reverseSshRelayLifecycleSmokePath
 $macCodbg = Read-RequiredText -Path $macCodbgPath
 $macCodbgWrapper = Read-RequiredText -Path $macCodbgWrapperPath
 $macInterop = Read-RequiredText -Path $macInteropPath
@@ -107,6 +115,7 @@ foreach ($requirement in @(
     "REQ-NATIVE-DNS-SD",
     "REQ-MAC-INTEROP",
     "REQ-OPENSSH-PQ-KEX",
+    "REQ-WINDOWS-REVERSE-SSH-RELAY",
     "REQ-GITHUB-SSH",
     "REQ-GITHUB-UPLOAD"
 )) {
@@ -275,6 +284,54 @@ foreach ($signal in @(
     "does not satisfy WebRTC helper"
 )) {
     Assert-Contains -Text ($acceptanceMap + $opensshPqKex + $opensshPqKexSmoke) -Needle $signal -Message "OpenSSH PQ KEX evidence missing signal: $signal"
+}
+
+foreach ($signal in @(
+    "Windows Reverse SSH Relay Lifecycle Gate",
+    "REQ-WINDOWS-REVERSE-SSH-RELAY",
+    "register-windows-reverse-ssh-relay-task.ps1",
+    "start-windows-reverse-ssh-relay.ps1",
+    "verify-windows-reverse-ssh-relay-lifecycle.ps1",
+    "ExpectedRelayHostKeyFingerprint",
+    "-F", "none",
+    "PreferredAuthentications=publickey",
+    "KbdInteractiveAuthentication=no",
+    "BatchMode=yes",
+    "NumberOfPasswordPrompts=0",
+    "StrictHostKeyChecking=yes",
+    "UserKnownHostsFile=",
+    "IdentitiesOnly=yes",
+    "IdentityAgent=none",
+    "UpdateHostKeys=no",
+    "ExitOnForwardFailure=yes",
+    "NT AUTHORITY\LOCAL SERVICE",
+    "least-privilege",
+    "RepairPrivateKeyAcl",
+    "InstalledStartScriptPath",
+    "C:\ProgramData\SkyBridge\reverse-ssh-relay\bin",
+    "logs",
+    "taskActionExpected",
+    "taskActionFailClosed",
+    "taskPrincipalExpected",
+    "relayHostKeyPinned",
+    "identityFileAclOk",
+    "knownHostsAclOk",
+    "installedStartScriptAclOk",
+    "runtimeAclOk",
+    "sourceStartScriptSha256",
+    "installedStartScriptSha256",
+    "installedStartScriptPath",
+    "startScriptInstalledAndCurrent",
+    "sshProcessOwnerExpected",
+    "localSshEndpointReachable",
+    "sshProcessCount",
+    "accepted",
+    "RequireWindowsReverseSshRelayLifecycle",
+    "IncludeWindowsReverseSshRelayLifecycle",
+    "not SkyBridge product transport evidence",
+    "does not satisfy WebRTC helper"
+)) {
+    Assert-Contains -Text ($acceptanceMap + $reverseSshRelayLifecycle + $reverseSshRelayStart + $reverseSshRelayRegister + $reverseSshRelayLifecycleSmoke + $portabilitySmoke + $acceptanceEvidence) -Needle $signal -Message "Windows reverse SSH relay lifecycle evidence missing signal: $signal"
 }
 
 foreach ($signal in @(

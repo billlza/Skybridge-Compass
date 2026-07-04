@@ -33,6 +33,19 @@ param(
     [string]$MacWebRtcProofPath = "",
     [ValidateRange(1, 600000)]
     [UInt64]$MacWebRtcProofMaxAgeMs = 60000,
+    [switch]$IncludeWindowsReverseSshRelayLifecycle,
+    [switch]$RequireWindowsReverseSshRelayLifecycle,
+    [string]$WindowsReverseSshRelayEvidencePath = "",
+    [string]$WindowsReverseSshRelayTaskName = "SkyBridgeReverseSshTunnel",
+    [string]$WindowsReverseSshRelayHostName = "54.92.79.99",
+    [string]$WindowsReverseSshRelayUserName = "ubuntu",
+    [ValidateRange(1, 65535)]
+    [int]$WindowsReverseSshRelayPort = 22,
+    [string]$WindowsReverseSshRelayExpectedHostKeyFingerprint = "",
+    [string]$WindowsReverseSshRelayIdentityFile = "C:\ProgramData\ssh\skybridge-relay-ed25519",
+    [string]$WindowsReverseSshRelayKnownHostsPath = "C:\ProgramData\ssh\skybridge-relay-known_hosts",
+    [string]$WindowsReverseSshRelayInstalledStartScriptPath = "C:\ProgramData\SkyBridge\reverse-ssh-relay\bin\start-windows-reverse-ssh-relay.ps1",
+    [string]$WindowsReverseSshRelayTaskUserId = "NT AUTHORITY\LOCAL SERVICE",
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 2,
     [switch]$RequireGitRemoteAccess
@@ -113,6 +126,8 @@ function Write-AcceptanceEvidence {
             requireMacRustCliSmoke = [bool]$RequireMacRustCliSmoke
             requireMacWebRtcInterop = [bool]$RequireMacWebRtcInterop
             requireNativeDnsSdPeer = [bool]$RequireNativeDnsSdPeer
+            includeWindowsReverseSshRelayLifecycle = [bool]$IncludeWindowsReverseSshRelayLifecycle
+            requireWindowsReverseSshRelayLifecycle = [bool]$RequireWindowsReverseSshRelayLifecycle
             requireGitRemoteAccess = [bool]$RequireGitRemoteAccess
         }
         evidencePaths = [ordered]@{
@@ -122,6 +137,9 @@ function Write-AcceptanceEvidence {
             macSshEvidencePath = $MacSshEvidencePath
             macWebRtcProofPath = $MacWebRtcProofPath
             macExpectedHostKeyFingerprint = $MacExpectedHostKeyFingerprint
+            windowsReverseSshRelayEvidencePath = $WindowsReverseSshRelayEvidencePath
+            windowsReverseSshRelayExpectedHostKeyFingerprint = $WindowsReverseSshRelayExpectedHostKeyFingerprint
+            windowsReverseSshRelayInstalledStartScriptPath = $WindowsReverseSshRelayInstalledStartScriptPath
         }
         gateResults = @($script:PortabilitySmokeGateResults)
     } |
@@ -306,6 +324,38 @@ Invoke-SmokeGate `
     -Name "mac-rust-cli-codbg-wrapper" `
     -RelativeScriptPath "Scripts/verify-mac-rust-cli-codbg-wrapper.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
+
+if ($IncludeWindowsReverseSshRelayLifecycle -or $RequireWindowsReverseSshRelayLifecycle) {
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($WindowsReverseSshRelayExpectedHostKeyFingerprint)) -Message "WindowsReverseSshRelayExpectedHostKeyFingerprint is required when the Windows reverse SSH relay lifecycle gate is included."
+    $reverseSshRelayParameters = @{
+        RepoRoot = $RepoRoot
+        TaskName = $WindowsReverseSshRelayTaskName
+        RelayHostName = $WindowsReverseSshRelayHostName
+        RelayUserName = $WindowsReverseSshRelayUserName
+        RelayPort = $WindowsReverseSshRelayPort
+        ExpectedRelayHostKeyFingerprint = $WindowsReverseSshRelayExpectedHostKeyFingerprint
+        IdentityFile = $WindowsReverseSshRelayIdentityFile
+        KnownHostsPath = $WindowsReverseSshRelayKnownHostsPath
+        InstalledStartScriptPath = $WindowsReverseSshRelayInstalledStartScriptPath
+        TaskUserId = $WindowsReverseSshRelayTaskUserId
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WindowsReverseSshRelayEvidencePath)) {
+        $reverseSshRelayParameters.EvidencePath = $WindowsReverseSshRelayEvidencePath
+    }
+    if ($RequireWindowsReverseSshRelayLifecycle) {
+        $reverseSshRelayParameters.RequireRunning = $true
+    }
+
+    Invoke-SmokeGate `
+        -Name "windows-reverse-ssh-relay-lifecycle" `
+        -RelativeScriptPath "Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1" `
+        -Parameters $reverseSshRelayParameters `
+        -EvidencePath $WindowsReverseSshRelayEvidencePath
+}
+else {
+    Write-Output "windows-portability-smoke: skipped windows-reverse-ssh-relay-lifecycle; pass -IncludeWindowsReverseSshRelayLifecycle for local diagnostics or -RequireWindowsReverseSshRelayLifecycle with a pinned relay host key when the Windows scheduled task must be accepted."
+    Add-SmokeGateResult -Name "windows-reverse-ssh-relay-lifecycle" -Status "skipped" -Detail "Pass -IncludeWindowsReverseSshRelayLifecycle or -RequireWindowsReverseSshRelayLifecycle with WindowsReverseSshRelayExpectedHostKeyFingerprint." -EvidencePath $WindowsReverseSshRelayEvidencePath
+}
 
 if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMacRustCliSmoke) {
     $macSshParameters = @{
