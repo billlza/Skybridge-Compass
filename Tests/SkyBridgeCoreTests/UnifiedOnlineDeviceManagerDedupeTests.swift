@@ -3,6 +3,8 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
+    private let liveProtocolFingerprint = "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
+
     func testRecentStableIdentityCollapsesWhenStrongRecordExists() {
         let recent = makeDevice(
             name: "MacBook Pro",
@@ -41,6 +43,50 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
 
         XCTAssertTrue(
             UnifiedOnlineDeviceManager.shouldCollapseRecentDevice(recent, against: [strong])
+        )
+    }
+
+    @MainActor
+    func testRouteCoalescingKeepsLiveProtocolIdentityOverNewerStaleStableId() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stale = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            routeIdentifiers: [bonjourRoute],
+            platformName: "ipados",
+            modelName: "iPad_Pro_11-inch__M4_",
+            lastSeen: Date().addingTimeInterval(60)
+        )
+        let live = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            routeIdentifiers: [bonjourRoute],
+            platformName: "ipados",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.replaceDevicesForTesting([stale, live])
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(
+            manager.onlineDevices.first?.uniqueIdentifier,
+            "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04"
+        )
+        XCTAssertEqual(
+            manager.onlineDevices.first?.protocolFingerprint,
+            liveProtocolFingerprint
         )
     }
 
@@ -241,7 +287,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             routeIdentifiers: ["bonjour:Ziang的iPad@local."],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
 
         XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: stableBonjour))
@@ -326,7 +373,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         let trustRecord = TrustRecord(
             deviceId: "id:\(currentStableId)",
@@ -383,7 +431,10 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         manager.recomputeDeviceStatusesForTesting()
 
         let resolved = try XCTUnwrap(manager.onlineDevices.first)
-        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(
+            resolved.isConnectable,
+            "Apple mobile endpoints without a resolved positive control port must stay non-connectable."
+        )
         XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
     }
 
@@ -444,6 +495,140 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([staleBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLiveDiscoveredCandidateMakesStaleAppleMobilePresentationConnectable() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_"
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: "9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertEqual(manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1).count, 1)
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLiveDiscoveredAppleMobileCandidateWithoutControlPortDoesNotEnableStalePresentation() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: "9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(
+            resolved.isConnectable,
+            "resolved isConnectable=\(resolved.isConnectable) portMap=\(resolved.portMap) platform=\(resolved.platformName ?? "-") model=\(resolved.modelName ?? "-") fingerprint=\(resolved.protocolFingerprint ?? "-") hasRoute=\(manager.hasResolvedConnectableControlRoute(for: resolved))"
+        )
+        XCTAssertEqual(manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1).count, 0)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testRoutableAppleMobileBonjourWithoutProtocolFingerprintIsNotConnectable() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:iPad_Pro_11-inch__M4__local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
             modelName: "iPad Pro"
         )
         manager.replaceDevicesForTesting([staleBonjour])
@@ -489,7 +674,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([staleCloud, liveBonjour])
         defer { manager.replaceDevicesForTesting([]) }
@@ -499,6 +685,10 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         XCTAssertEqual(manager.onlineDevices.count, 1)
         let resolved = try XCTUnwrap(manager.onlineDevices.first)
         XCTAssertEqual(resolved.ipv4, "192.168.0.104")
+        XCTAssertEqual(
+            resolved.protocolFingerprint,
+            "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
+        )
         XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
     }
 
@@ -519,7 +709,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         let routableBonjour = makeDevice(
             name: "iPad",
@@ -535,7 +726,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
         )
         manager.replaceDevicesForTesting([staleBonjour, routableBonjour])
         defer { manager.replaceDevicesForTesting([]) }
@@ -611,7 +803,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([cloudOnly, stableBonjour])
         defer { manager.replaceDevicesForTesting([]) }
@@ -677,7 +870,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([cloudOnly, usbHistory, bonjour])
         defer { manager.replaceDevicesForTesting([]) }
@@ -767,7 +961,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeP2P],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([cloudOnly, usbHistory, bonjour, host])
         defer { manager.replaceDevicesForTesting([]) }
@@ -836,7 +1031,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeP2P],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([usb, bonjour, p2pHost])
         defer { manager.replaceDevicesForTesting([]) }
@@ -914,7 +1110,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeCloud],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         let bonjour = makeDevice(
             name: "Ziang的iPad",
@@ -930,7 +1127,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([stable, bonjour])
         defer { manager.replaceDevicesForTesting([]) }
@@ -980,7 +1178,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro 11-inch (M4)"
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: liveProtocolFingerprint
         )
         let hostAlias = makeDevice(
             name: "host:192.168.0.103",
@@ -995,7 +1194,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeP2P],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro 11-inch (M4)"
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([genericBonjour, hostAlias, cloud])
         defer { manager.replaceDevicesForTesting([]) }
@@ -1135,7 +1335,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         let hostAlias = makeDevice(
             name: "192.168.0.103",
@@ -1151,7 +1352,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             sources: [.skybridgeP2P],
             platformName: "iPadOS",
             osVersion: "26.5",
-            modelName: "iPad Pro"
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
         )
         manager.replaceDevicesForTesting([legacyCloudOnly, liveBonjour, hostAlias])
         defer { manager.replaceDevicesForTesting([]) }
@@ -2406,7 +2608,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         osVersion: String? = nil,
         modelName: String? = nil,
         lastSeen: Date = Date(),
-        serialNumber: String? = nil
+        serialNumber: String? = nil,
+        protocolFingerprint: String? = nil
     ) -> OnlineDevice {
         OnlineDevice(
             id: UUID(),
@@ -2424,6 +2627,7 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             services: services,
             portMap: portMap,
             routeIdentifiers: routeIdentifiers,
+            protocolFingerprint: protocolFingerprint,
             uniqueIdentifier: uniqueIdentifier,
             sources: sources,
             discoveredAt: Date(),

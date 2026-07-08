@@ -46,6 +46,32 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
         try assertHostEndpoint(endpoints[1], host: "192.168.1.20", port: 9527)
     }
 
+    func testDirectHostEndpointRequiresResolvedSkyBridgePort() throws {
+        let missingPortEndpoints = P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+            for: skybridgeDevice(ipAddress: "192.168.1.20", portMap: [:]),
+            preferDirectHostPort: true
+        )
+
+        XCTAssertEqual(missingPortEndpoints.count, 1)
+        try assertServiceEndpoint(missingPortEndpoints[0], name: "Studio MacBook Pro", domain: "local.")
+
+        let zeroPortEndpoints = P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+            for: skybridgeDevice(
+                ipAddress: "192.168.1.20",
+                portMap: [DiscoveryServiceType.skybridge.rawValue: 0]
+            ),
+            preferDirectHostPort: true
+        )
+
+        XCTAssertEqual(zeroPortEndpoints.count, 1)
+        try assertServiceEndpoint(zeroPortEndpoints[0], name: "Studio MacBook Pro", domain: "local.")
+        XCTAssertNil(
+            P2PConnectionEndpointPolicy.resolvedSkyBridgeControlPort(
+                for: skybridgeDevice(ipAddress: "192.168.1.20", portMap: [:])
+            )
+        )
+    }
+
     func testLinkLocalHostScopeIsPreservedForConnectionTarget() throws {
         let device = DiscoveredDevice(
             id: "host:fe80::1%bridge100",
@@ -114,7 +140,10 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
         )
     }
 
-    private func skybridgeDevice(ipAddress: String?) -> DiscoveredDevice {
+    private func skybridgeDevice(
+        ipAddress: String?,
+        portMap: [String: UInt16] = [DiscoveryServiceType.skybridge.rawValue: 9527]
+    ) -> DiscoveredDevice {
         DiscoveredDevice(
             id: "bonjour:Studio MacBook Pro@local.",
             name: "Studio MacBook Pro",
@@ -126,7 +155,7 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
             bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
             bonjourServiceDomain: "local.",
             services: [DiscoveryServiceType.skybridge.rawValue],
-            portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
+            portMap: portMap
         )
     }
 

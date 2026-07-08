@@ -77,8 +77,11 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(
             coordinatorSource.contains("resolvedConnectableDiscoveredCandidates(for: device, limit: 6)") &&
+            coordinatorSource.contains("!liveDiscoveredCandidates.isEmpty") &&
+            coordinatorSource.contains("UnifiedOnlineDeviceManager.hasDirectSkyBridgeControlRoute(device)") &&
+            coordinatorSource.contains("缺少新鲜可拨 SkyBridge 控制路由") &&
             coordinatorSource.contains("P2PDiscoveryError.noConnectableEndpoint"),
-            "Endpoint validation belongs in the shared coordinator so UI buttons can stay on their production behavior while fake endpoints still fail closed."
+            "Endpoint validation belongs in the shared coordinator so heartbeat-only online rows fail closed before dialing stale Bonjour services."
         )
         XCTAssertFalse(
             viewModelSource.contains("SkyBridgeLogger.discovery.info(\"Connecting to device:"),
@@ -256,7 +259,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("SKYBRIDGE_PQC_PEER_DEVICE_ID") &&
             remoteSmokeScript.contains("press_mac_online_ipad_connect_button") &&
             remoteSmokeScript.contains("observe_mac_online_ipad_connected_row") &&
-            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
+            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout \"$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS\" swift -") &&
             remoteSmokeScript.contains("subprocess.Popen(command, stdin=subprocess.PIPE)") &&
             remoteSmokeScript.contains("kAXIdentifierAttribute") &&
             remoteSmokeScript.contains("appendButtonClickEvidence") &&
@@ -367,7 +370,12 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(
             remoteSmokeScript.contains("let targetIdentityVariants = identityVariants(for: targetIdentity)") &&
+            remoteSmokeScript.contains("let targetButtonIdentityVariants: Set<String>") &&
+            remoteSmokeScript.contains("appendIdentityVariants(fieldValue(\"identityKey\", in: rowLine), to: &variants)") &&
+            remoteSmokeScript.contains("appendIdentityVariants(fieldValue(\"targetDeviceId\", in: rowLine), to: &variants)") &&
+            remoteSmokeScript.contains("appendIdentityVariants(fieldValue(\"p2pDeviceId\", in: rowLine), to: &variants)") &&
             remoteSmokeScript.contains("let targetIdentifiers: Set<String>") &&
+            remoteSmokeScript.contains("guard !targetButtonIdentityVariants.isEmpty else { return [] }") &&
             remoteSmokeScript.contains("identityValueMatchesTarget(fieldValue(\"identityKey\", in: line))") &&
             remoteSmokeScript.contains("identityValueMatchesTarget(fieldValue(\"targetDeviceId\", in: line))") &&
             remoteSmokeScript.contains("identityValueMatchesTarget(fieldValue(\"p2pDeviceId\", in: line))") &&
@@ -377,6 +385,14 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("axMatch=(target-identifier|target-row-title)") &&
             remoteSmokeScript.contains("targetIdentity == nil && isSkyBridgeDeviceButton") &&
             remoteSmokeScript.contains("subtreeContainsTargetDevice(child) && subtreeContainsConnectButton(child)") &&
+            remoteSmokeScript.contains("AXUIElementSetMessagingTimeout(root, 0.25)") &&
+            remoteSmokeScript.contains("let maxAXTraversalNodes = 5000") &&
+            remoteSmokeScript.contains("MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS=\"${SKYBRIDGE_SMOKE_MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS:-60}\"") &&
+            remoteSmokeScript.contains("SKYBRIDGE_MAC_ONLINE_APP_PID=\"$MAC_ONLINE_PID\"") &&
+            remoteSmokeScript.contains("let targetProcessIdentifier = ProcessInfo.processInfo.environment[\"SKYBRIDGE_MAC_ONLINE_APP_PID\"]") &&
+            remoteSmokeScript.contains("app = candidates.first { $0.processIdentifier == targetProcessIdentifier }") &&
+            remoteSmokeScript.contains("func pressExactIdentifierButton(in element: AXUIElement, depth: Int = 0) -> Bool") &&
+            remoteSmokeScript.contains("pressed = pressExactIdentifierButton(in: root)") &&
             remoteSmokeScript.contains("buttonIdentifier=\\(buttonIdentifier.isEmpty ? \"-\" : buttonIdentifier)"),
             "The external AX clicker must normalize raw/id: target identities and fail closed instead of title-clicking the first Connect button in a broad container."
         )
@@ -449,6 +465,13 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Mac online iPad smoke row evidence must expose the authoritative trusted protocol identity separately from the visible presentation row identity."
         )
         XCTAssertTrue(
+            discoverySource.contains("device.protocolFingerprint ?? \"\"") &&
+            discoverySource.contains("mac-online-discovery-snapshot") &&
+            unifiedSource.contains("device.pubKeyFP ?? \"\"") &&
+            unifiedSource.contains("public func smokeDiscoveryDiagnostics(limit: Int = 16)"),
+            "Discovery fingerprint changes must drive presentation refreshes, and the Mac online smoke path must expose raw discovery evidence when no connectable row appears."
+        )
+        XCTAssertTrue(
             coordinatorSource.contains("let liveDiscoveredCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)") &&
             coordinatorSource.contains("shouldPreferUSBRoute(for: device, candidates: liveDiscoveredCandidates)") &&
             coordinatorSource.contains("authoritativeProtocolDeviceId(for: device, unifiedDeviceManager: unifiedDeviceManager)") &&
@@ -508,13 +531,16 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Production Dashboard rows must not subscribe to smoke-only online state changes."
         )
         XCTAssertTrue(
-            dashboardPanelSource.contains("await appModel.connect(to: device)"),
-            "Dashboard row clicks must use the real discovered-device connection path."
+            dashboardPanelSource.contains("if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id })") &&
+            dashboardPanelSource.contains("await appModel.connect(to: onlineDevice)") &&
+            dashboardPanelSource.contains("await appModel.connect(to: device)") &&
+            dashboardPanelSource.contains("deviceId: od.uniqueIdentifier") &&
+            dashboardPanelSource.contains("pubKeyFP: od.protocolFingerprint"),
+            "Dashboard row clicks must preserve the discovered-device path, route mapped online rows through the online-device connector, and not erase online protocol identity in the mapped representation."
         )
         XCTAssertFalse(
             dashboardPanelSource.contains("guard isMacOnlineIpadSmoke else") ||
-            dashboardPanelSource.contains("resolvedOnlineDevice(for: device)") ||
-            dashboardPanelSource.contains("await appModel.connect(to: onlineDevice)"),
+            dashboardPanelSource.contains("resolvedOnlineDevice(for: device)"),
             "Dashboard row clicks must not switch to a smoke-only canonical-device shortcut."
         )
         XCTAssertFalse(
@@ -526,13 +552,15 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "DashboardViewModel must not emit button-click smoke evidence because it is not the button source."
         )
         XCTAssertTrue(
-            dashboardSource.contains("await connect(to: discoveredDevice)"),
-            "DashboardViewModel online-device compatibility entry point must stay on the existing discovered-device connection path."
+            dashboardSource.contains("OnlineDeviceConnectionCoordinator.connect(to: onlineDevice)") &&
+            dashboardSource.contains("discoveryStatus = error.localizedDescription"),
+            "DashboardViewModel online-device entry point must use the shared coordinator and surface route failures."
         )
         XCTAssertFalse(
-            dashboardSource.contains("OnlineDeviceConnectionCoordinator.connect(to: onlineDevice)") ||
+            dashboardSource.contains("let discoveredDevice = DiscoveredDevice(") ||
+            dashboardSource.contains("await connect(to: discoveredDevice)") ||
             dashboardSource.contains("canConnectOnlineDevice(_ device: OnlineDevice)"),
-            "DashboardViewModel must not be repurposed as the online-card smoke button path."
+            "DashboardViewModel must not erase online-device route metadata by converting it to a generic discovered-device path."
         )
         XCTAssertTrue(
             discoverySource.contains("OnlineDeviceConnectionCoordinator.connect("),
@@ -549,6 +577,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertTrue(
             discoverySource.contains("let buttonIdentity = canonicalAccessibilityIdentity(for: effectiveAccessibilityIdentity)") &&
             discoverySource.contains("accessibilityIdentity: cachedPresentationIdentityKey(for: device)") &&
+            discoverySource.contains("if resolvedLiveProtocolIdentity(for: device).deviceId != nil") &&
             discoverySource.contains("skybridge-online-device-connect-button-") &&
             discoverySource.contains("UUID(uuidString: normalized)"),
             "Online-device connect button accessibility identifier must use the resolved live protocol identity and canonical stable-id token so the external AX smoke does not split the same iPad by stale aliases, UUID case, or id: prefix."
@@ -752,8 +781,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(
             discoverySource.contains("cachedPresentationIdentityKey(for: device)") &&
-            discoverySource.contains("accessibilityIdentityByDeviceId"),
-            "Online row accessibility identities should be calculated with the presentation snapshot instead of resolving protocol identity for every row render."
+            discoverySource.contains("accessibilityIdentityByDeviceId") &&
+            discoverySource.contains("fingerprintSmokeIdentity(candidate.pubKeyFP) != nil"),
+            "Online row accessibility identities should use the presentation snapshot unless live Bonjour identity evidence is fresher than the cached row identity."
         )
     }
 

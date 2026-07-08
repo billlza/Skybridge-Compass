@@ -3825,6 +3825,60 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(discoverySource.contains("避免 Bonjour service 解析退回 link-local"))
   }
 
+  func testIOSP2PAdvertisingOnlyBecomesVisibleAfterListenerReady() throws {
+    let discoverySource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+    )
+
+    XCTAssertTrue(discoverySource.contains("advertisingStartupContinuation"))
+    XCTAssertTrue(discoverySource.contains("withTaskCancellationHandler"))
+    XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.failure(CancellationError()))"))
+    XCTAssertTrue(discoverySource.contains("activeListener.start(queue: queue)"))
+    XCTAssertTrue(discoverySource.contains("case .ready:"))
+    XCTAssertTrue(discoverySource.contains("isAdvertising = true"))
+    XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.success(()))"))
+    XCTAssertTrue(discoverySource.contains("AdvertisingStartupError.timedOut"))
+    XCTAssertFalse(
+      discoverySource.contains("listener?.start(queue: queue)\n        isAdvertising = true"),
+      "iOS P2P advertising must not become visible until NWListener reports ready."
+    )
+  }
+
+  func testIOSP2PForegroundListeningDoesNotSwallowListenerStartupFailures() throws {
+    let p2pManagerSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+    )
+    let appSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift"
+    )
+
+    XCTAssertFalse(
+      p2pManagerSource.contains("if discoveryManager.isAdvertising {\n            isListening = true\n            return"),
+      "P2PConnectionManager must not treat a discovery flag alone as full listener readiness."
+    )
+    XCTAssertTrue(p2pManagerSource.contains("try await discoveryManager.startAdvertising(port: 9527)"))
+    XCTAssertTrue(p2pManagerSource.contains("P2P 监听状态与 Bonjour 广播状态不一致"))
+    XCTAssertTrue(appSource.contains("try await connectionManager.startListening()"))
+    XCTAssertTrue(appSource.contains("前台恢复 P2P 监听器失败"))
+    XCTAssertFalse(
+      appSource.contains("try? await connectionManager.startListening()"),
+      "Foreground recovery must log listener startup failures instead of swallowing them."
+    )
+  }
+
+  func testIOSPrimaryBonjourTXTAdvertisesAllControlPortAliases() throws {
+    let discoverySource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+    )
+
+    XCTAssertTrue(discoverySource.contains("let portValue = String(port)"))
+    XCTAssertTrue(discoverySource.contains("record[\"port\"] = portValue"))
+    XCTAssertTrue(discoverySource.contains("record[\"skybridgePort\"] = portValue"))
+    XCTAssertTrue(discoverySource.contains("record[\"p2pPort\"] = portValue"))
+    XCTAssertTrue(discoverySource.contains("record[\"controlPort\"] = portValue"))
+    XCTAssertTrue(discoverySource.contains("record[\"controlPortSource\"] = \"listener\""))
+  }
+
   func testIOSBonjourInteropCapabilitiesStayAlignedWithAndroidAliases() throws {
     let fileTransferSource = try repositoryScriptSource(
       "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"

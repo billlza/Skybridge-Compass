@@ -142,7 +142,11 @@ enum P2PDiscoveryBonjourPolicy {
 
         func parseName(from payload: String) -> String? {
             let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)
-            return name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return legacyMangledBonjourServiceName(from: trimmed) ?? trimmed
         }
 
         func parsePlainName(from payload: String) -> String? {
@@ -177,16 +181,19 @@ enum P2PDiscoveryBonjourPolicy {
         }
 
         while true {
-            if let stripped = stripTrailingBracketSuffix(from: name, open: "(", close: ")") {
-                name = stripped
+            if let suffix = trailingBracketSuffix(from: name, open: "(", close: ")") {
+                guard shouldStripTrailingBracketSuffix(payload: suffix.payload, open: "(") else {
+                    break
+                }
+                name = suffix.prefix
                 continue
             }
-            if let stripped = stripTrailingBracketSuffix(from: name, open: "[", close: "]") {
-                name = stripped
+            if let suffix = trailingBracketSuffix(from: name, open: "[", close: "]") {
+                name = suffix.prefix
                 continue
             }
-            if let stripped = stripTrailingBracketSuffix(from: name, open: "【", close: "】") {
-                name = stripped
+            if let suffix = trailingBracketSuffix(from: name, open: "【", close: "】") {
+                name = suffix.prefix
                 continue
             }
             break
@@ -198,18 +205,97 @@ enum P2PDiscoveryBonjourPolicy {
         return PeerTrustLookup.sanitizedBonjourServiceInstanceName(name) ?? ""
     }
 
+    private nonisolated static func shouldStripTrailingBracketSuffix(payload: String, open: Character) -> Bool {
+        guard open == "(" else { return true }
+        return !isAppleHardwareModelSuffix(payload)
+    }
+
+    private nonisolated static func isAppleHardwareModelSuffix(_ raw: String) -> Bool {
+        let compact = raw
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        guard compact.count >= 2 else { return false }
+
+        if compact.hasPrefix("m") {
+            var tail = String(compact.dropFirst())
+            for suffix in ["ultra", "max", "pro"] where tail.hasSuffix(suffix) {
+                tail.removeLast(suffix.count)
+                break
+            }
+            return !tail.isEmpty && tail.allSatisfy(\.isNumber)
+        }
+
+        if compact.hasPrefix("a") {
+            var tail = String(compact.dropFirst())
+            if tail.hasSuffix("x") || tail.hasSuffix("z") {
+                tail.removeLast()
+            }
+            return !tail.isEmpty && tail.allSatisfy(\.isNumber)
+        }
+
+        return false
+    }
+
+    private nonisolated static func legacyMangledBonjourServiceName(from raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let lowered = trimmed.lowercased()
+        let suffixes = ["__local.", "_local.", ".local."]
+        guard let suffix = suffixes.first(where: { lowered.hasSuffix($0) }) else {
+            return nil
+        }
+
+        var value = String(trimmed.dropLast(suffix.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        var bracketedSuffix: String?
+        if let range = value.range(of: "__", options: .backwards) {
+            let suffixCandidate = String(value[range.upperBound...])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "_ ").union(.whitespacesAndNewlines))
+            let baseCandidate = String(value[..<range.lowerBound])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "_ ").union(.whitespacesAndNewlines))
+            if !suffixCandidate.isEmpty, !baseCandidate.isEmpty {
+                bracketedSuffix = suffixCandidate.replacingOccurrences(of: "_", with: " ")
+                value = baseCandidate
+            }
+        }
+
+        let baseName = value
+            .replacingOccurrences(of: "_", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseName.isEmpty else { return nil }
+        if let bracketedSuffix, !bracketedSuffix.isEmpty {
+            return "\(baseName) (\(bracketedSuffix))"
+        }
+        return baseName
+    }
+
     nonisolated static func stripTrailingBracketSuffix(
         from raw: String,
         open: Character,
         close: Character
     ) -> String? {
+        trailingBracketSuffix(from: raw, open: open, close: close)?.prefix
+    }
+
+    private nonisolated static func trailingBracketSuffix(
+        from raw: String,
+        open: Character,
+        close: Character
+    ) -> (prefix: String, payload: String)? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.last == close else { return nil }
         guard let openIndex = value.lastIndex(of: open), openIndex > value.startIndex else { return nil }
 
         let prefix = value[..<openIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        let payloadStart = value.index(after: openIndex)
+        let payloadEnd = value.index(before: value.endIndex)
+        let payload = value[payloadStart..<payloadEnd].trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prefix.isEmpty else { return nil }
-        return String(prefix)
+        return (String(prefix), String(payload))
     }
 
     nonisolated static func inferredDefaultAppleBonjourServiceName(fromDisplayName displayName: String) -> String? {

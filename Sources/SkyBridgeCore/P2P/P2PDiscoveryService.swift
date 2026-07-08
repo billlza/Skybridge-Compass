@@ -319,6 +319,39 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
+    private final class SendContentContext: @unchecked Sendable {
+        private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let continuation: CheckedContinuation<Void, Error>
+        private let connection: NWConnection
+        var timeoutTask: Task<Void, Never>?
+
+        init(continuation: CheckedContinuation<Void, Error>, connection: NWConnection) {
+            self.continuation = continuation
+            self.connection = connection
+        }
+
+        func cancelConnection() {
+            connection.cancel()
+        }
+
+        func complete(_ result: Result<Void, Error>) {
+            let shouldResume = resumed.withLock { isResumed -> Bool in
+                guard !isResumed else { return false }
+                isResumed = true
+                return true
+            }
+            guard shouldResume else { return }
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
     private let netServiceResolveLimiter = NetServiceResolveLimiter(limit: 4)
     private var localInterfaceCacheEntry: LocalInterfaceCacheEntry?
     private let localInterfaceCacheTTL: TimeInterval = 8
@@ -555,21 +588,15 @@ public class P2PDiscoveryService: BaseManager {
             "🧭 连接目标解析: displayName=\(deviceDiagnosticLabel, privacy: .public) bonjourInstance=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(serviceName), privacy: .public) identifier=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(device.uniqueIdentifier), privacy: .public)"
         )
         let hasBonjourIdentifier = P2PDiscoveryBonjourPolicy.isBonjourIdentifier(device.uniqueIdentifier)
-        let shouldFallbackToDefaultSkyBridgePort =
-            hasBonjourIdentifier
-            || device.source == .skybridgeBonjour
-            || device.source == .skybridgeP2P
-            || connectableServiceTypes.contains(primaryServiceType)
-            || connectableServiceTypes.contains("_skybridge._udp")
         let portValue = resolvedPort(
             for: device,
             preferredServiceType: preferredServiceType,
             primaryServiceType: primaryServiceType,
-            connectableServiceTypes: connectableServiceTypes,
-            allowSkyBridgeDefaultFallback: shouldFallbackToDefaultSkyBridgePort
+            connectableServiceTypes: connectableServiceTypes
         )
         let hasSkyBridgeControlHint =
-            shouldFallbackToDefaultSkyBridgePort
+            connectableServiceTypes.contains(primaryServiceType)
+            || connectableServiceTypes.contains("_skybridge._udp")
             || device.source == .skybridgeBonjour
             || device.source == .skybridgeP2P
         let hasLinkLocalAddress = {
@@ -587,18 +614,19 @@ public class P2PDiscoveryService: BaseManager {
             && serviceNameCandidates.contains(where: { !P2PDiscoveryBonjourPolicy.isLikelyIPAddress($0) })
             && (hasBonjourIdentifier || hasSkyBridgeControlHint || hasLinkLocalAddress || (device.ipv4 == nil && device.ipv6 == nil))
 
+        var serviceTypesToTry: [String] = []
+        if let preferredServiceType {
+            serviceTypesToTry.append(preferredServiceType)
+        }
+        if !serviceTypesToTry.contains(primaryServiceType) {
+            serviceTypesToTry.append(primaryServiceType)
+        }
+        if serviceTypesToTry.isEmpty {
+            serviceTypesToTry = [primaryServiceType]
+        }
+
         var bonjourEndpointAttempts: [NWEndpoint] = []
         if shouldAttemptBonjourService {
-            var serviceTypesToTry: [String] = []
-            if let preferredServiceType {
-                serviceTypesToTry.append(preferredServiceType)
-            }
-            if !serviceTypesToTry.contains(primaryServiceType) {
-                serviceTypesToTry.append(primaryServiceType)
-            }
-            if serviceTypesToTry.isEmpty {
-                serviceTypesToTry = [primaryServiceType]
-            }
             for candidateServiceName in serviceNameCandidates where !candidateServiceName.isEmpty && !P2PDiscoveryBonjourPolicy.isLikelyIPAddress(candidateServiceName) {
                 for serviceType in serviceTypesToTry {
                     bonjourEndpointAttempts.append(
@@ -612,6 +640,11 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
+        let freshBonjourHostFallbackEndpoints = await makeFreshBonjourHostFallbackEndpoints(
+            serviceNameCandidates: shouldAttemptBonjourService ? serviceNameCandidates : [],
+            serviceTypes: serviceTypesToTry,
+            domain: serviceDomain
+        )
         let hostFallbackEndpoints = makeHostFallbackEndpoints(device: device, portValue: portValue)
 
         var endpointAttempts: [NWEndpoint] = []
@@ -620,11 +653,13 @@ public class P2PDiscoveryService: BaseManager {
         } else if preferUSBRoute {
             endpointAttempts.append(contentsOf: hostFallbackEndpoints)
             endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
+        } else if !bonjourEndpointAttempts.isEmpty {
+            endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
+            endpointAttempts.append(contentsOf: freshBonjourHostFallbackEndpoints)
+            endpointAttempts.append(contentsOf: hostFallbackEndpoints)
         } else if hasStrongRouteIdentity, !hostFallbackEndpoints.isEmpty {
             endpointAttempts.append(contentsOf: hostFallbackEndpoints)
-            endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
         } else {
-            endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
             endpointAttempts.append(contentsOf: hostFallbackEndpoints)
         }
 
@@ -637,6 +672,10 @@ public class P2PDiscoveryService: BaseManager {
                 return true
             }
         }
+
+        RemoteControlSmokeStatusWriter.append(
+            "p2p-connect-plan serviceCandidates=\(serviceNameCandidates.count) serviceEndpoints=\(bonjourEndpointAttempts.count) freshHostEndpoints=\(freshBonjourHostFallbackEndpoints.count) hostFallbackEndpoints=\(hostFallbackEndpoints.count) endpointOrder=\(Self.smokeEndpointPlanSummary(endpointAttempts))"
+        )
 
         // If type metadata is missing but we still have Bonjour identity, probe SkyBridge default service.
         if endpointAttempts.isEmpty, shouldAttemptBonjourService {
@@ -830,7 +869,7 @@ public class P2PDiscoveryService: BaseManager {
             if let parsedFallback = UInt16(exactly: fallbackPort), parsedFallback > 0 {
                 return parsedFallback
             }
-            return 9527
+            return 0
         }()
 
         let persistentDeviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -960,8 +999,7 @@ public class P2PDiscoveryService: BaseManager {
         for device: DiscoveredDevice,
         preferredServiceType: String?,
         primaryServiceType: String,
-        connectableServiceTypes: [String],
-        allowSkyBridgeDefaultFallback: Bool
+        connectableServiceTypes: [String]
     ) -> Int {
         if let preferredServiceType, let preferredPort = device.portMap[preferredServiceType], preferredPort > 0 {
             return preferredPort
@@ -973,9 +1011,6 @@ public class P2PDiscoveryService: BaseManager {
             if let port = device.portMap[serviceType], port > 0 {
                 return port
             }
-        }
-        if allowSkyBridgeDefaultFallback {
-            return 9527
         }
         return 0
     }
@@ -1012,6 +1047,81 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         return endpoints
+    }
+
+    private func makeFreshBonjourHostFallbackEndpoints(
+        serviceNameCandidates: [String],
+        serviceTypes: [String],
+        domain: String
+    ) async -> [NWEndpoint] {
+        let normalizedServiceTypes = P2PDiscoveryBonjourPolicy.normalizedConnectableServiceTypes(
+            from: serviceTypes.isEmpty ? [BonjourInteropContract.controlServiceType] : serviceTypes
+        )
+        guard !serviceNameCandidates.isEmpty, !normalizedServiceTypes.isEmpty else {
+            return []
+        }
+
+        var endpoints: [NWEndpoint] = []
+        var seenEndpointKeys = Set<String>()
+        for serviceName in serviceNameCandidates {
+            let trimmedName = serviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty,
+                  !P2PDiscoveryBonjourPolicy.isLikelyIPAddress(trimmedName) else {
+                continue
+            }
+
+            for serviceType in normalizedServiceTypes {
+                guard let resolved = await resolveNetServiceEndpoint(
+                    domain: domain,
+                    type: serviceType,
+                    name: trimmedName,
+                    timeoutSeconds: 3.0
+                ), resolved.port > 0,
+                   let port = NWEndpoint.Port(rawValue: UInt16(resolved.port)) else {
+                    RemoteControlSmokeStatusWriter.append(
+                        "p2p-bonjour-resolve result=failure service=\(serviceType) name=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(trimmedName))"
+                    )
+                    continue
+                }
+
+                let beforeCount = endpoints.count
+                for host in [resolved.ipv4, resolved.ipv6].compactMap({ $0 }) {
+                    let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedHost.isEmpty,
+                          !isLocalIPAddress(trimmedHost),
+                          !Self.isNonRoutableIPv4Endpoint(trimmedHost) else {
+                        continue
+                    }
+
+                    let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(trimmedHost), port: port)
+                    let key = endpoint.debugDescription
+                    if seenEndpointKeys.insert(key).inserted {
+                        endpoints.append(endpoint)
+                    }
+                }
+                RemoteControlSmokeStatusWriter.append(
+                    "p2p-bonjour-resolve result=success service=\(serviceType) name=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(trimmedName)) port=\(resolved.port) directEndpoints=\(endpoints.count - beforeCount)"
+                )
+            }
+        }
+        return endpoints
+    }
+
+    private static func smokeEndpointPlanSummary(_ endpoints: [NWEndpoint]) -> String {
+        endpoints.enumerated().map { index, endpoint in
+            "\(index):\(smokeEndpointClass(endpoint)):\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
+        }.joined(separator: ",")
+    }
+
+    private static func smokeEndpointClass(_ endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service:
+            return "service"
+        case .hostPort:
+            return "direct-host"
+        default:
+            return "other"
+        }
     }
 
     private enum StrictPQCOutboundPreflightAction: Equatable {
@@ -1355,9 +1465,20 @@ public class P2PDiscoveryService: BaseManager {
         for (index, endpoint) in endpoints.enumerated() {
             let connection = makeConnection(to: endpoint, securityPlan: .plainTCP, interfacePreference: .automatic)
             let connectStartedAt = Date()
+            RemoteControlSmokeStatusWriter.append(
+                "bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) endpoint=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
+            )
             do {
                 try await waitForBootstrapControlConnection(connection, timeoutSeconds: min(10, max(3, timeoutSeconds)))
                 let connectLatencyMs = Date().timeIntervalSince(connectStartedAt) * 1_000.0
+                RemoteControlSmokeStatusWriter.append(
+                    String(
+                        format: "bootstrap-control-ready index=%d endpointClass=%@ connectLatencyMs=%.1f",
+                        index,
+                        Self.smokeEndpointClass(endpoint),
+                        connectLatencyMs
+                    )
+                )
                 try await sendBootstrapFrame(try JSONEncoder().encode(message), over: connection)
                 let responseFrame = try await receiveBootstrapFrame(
                     over: connection,
@@ -1382,6 +1503,9 @@ public class P2PDiscoveryService: BaseManager {
 	                logger.warning(
 	                    "⚠️ bootstrap control exchange failed endpoint=\(Self.protocolIdentityLogRedaction, privacy: .public) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
 	                )
+                RemoteControlSmokeStatusWriter.append(
+                    "bootstrap-control-failed index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error))"
+                )
 	            }
         }
         throw lastError ?? P2PDiscoveryError.connectionCancelled
@@ -1420,15 +1544,7 @@ public class P2PDiscoveryService: BaseManager {
         var length = UInt32(data.count).bigEndian
         framed.append(Data(bytes: &length, count: 4))
         framed.append(data)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: framed, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
-        }
+        try await Self.sendContent(framed, over: connection, timeoutSeconds: 5.0)
     }
 
     private func receiveBootstrapFrame(
@@ -1618,6 +1734,10 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private static func strictPQCBootstrapEndpointCandidates(from endpointAttempts: [NWEndpoint]) -> [NWEndpoint] {
+        let service = endpointAttempts.filter { endpoint in
+            if case .service = endpoint { return true }
+            return false
+        }
         let directRoutable = endpointAttempts.filter { endpoint in
             guard case .hostPort(let host, _) = endpoint else { return false }
             return isRoutableBootstrapHost(String(describing: host))
@@ -1626,12 +1746,8 @@ public class P2PDiscoveryService: BaseManager {
             if case .hostPort = endpoint { return true }
             return false
         }
-        let service = endpointAttempts.filter { endpoint in
-            if case .service = endpoint { return true }
-            return false
-        }
         var seen = Set<String>()
-        return (directRoutable + directAny + service).filter { endpoint in
+        return (service + directRoutable + directAny).filter { endpoint in
             let key = endpoint.debugDescription
             return seen.insert(key).inserted
         }
@@ -1852,11 +1968,13 @@ public class P2PDiscoveryService: BaseManager {
 
     private func resolveLatestConnectableDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
         let strongIdentity = (deviceId: device.deviceId, pubKeyFP: device.pubKeyFP)
+        let routeBoundBonjourIdentifier = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: device)
+            ?? device.uniqueIdentifier
         guard let matchIndex = findDiscoveredDeviceIndex(
             name: device.name,
             ipv4: device.ipv4,
             ipv6: device.ipv6,
-            bonjourIdentifier: device.uniqueIdentifier,
+            bonjourIdentifier: routeBoundBonjourIdentifier,
             strongIdentity: strongIdentity
         ) else {
             return device
@@ -1873,12 +1991,69 @@ public class P2PDiscoveryService: BaseManager {
            !suppliedFingerprint.isEmpty {
             refreshed.pubKeyFP = suppliedFingerprint
         }
+        preserveSuppliedConnectableRouteContext(from: device, into: &refreshed)
         if refreshed.id != device.id {
             logger.info(
                 "ℹ️ 连接目标已刷新为最新发现快照: \(device.name, privacy: .public) \(device.id.uuidString, privacy: .public) -> \(refreshed.id.uuidString, privacy: .public)"
             )
         }
         return refreshed
+    }
+
+    private func preserveSuppliedConnectableRouteContext(
+        from supplied: DiscoveredDevice,
+        into refreshed: inout DiscoveredDevice
+    ) {
+        guard Self.hasCompleteProtocolIdentity(
+            deviceId: refreshed.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? supplied.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+            pubKeyFP: refreshed.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                ?? supplied.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        ) else {
+            return
+        }
+
+        let refreshedRoute = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: refreshed)
+        let suppliedRoute = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: supplied)
+        if let refreshedRoute,
+           let suppliedRoute,
+           P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(refreshedRoute)
+                != P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(suppliedRoute) {
+            return
+        }
+
+        let suppliedIPv4 = refreshed.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            ? supplied.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let suppliedIPv6 = refreshed.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            ? supplied.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        refreshed._updateTransient(
+            ipv4: suppliedIPv4?.isEmpty == false ? suppliedIPv4 : nil,
+            ipv6: suppliedIPv6?.isEmpty == false ? suppliedIPv6 : nil
+        )
+        for service in supplied.services {
+            let normalized = service.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard normalized == BonjourInteropContract.controlServiceType || normalized == "_skybridge._udp" else {
+                continue
+            }
+            if !refreshed.services.contains(normalized) {
+                refreshed.services.append(normalized)
+            }
+        }
+        for (service, port) in supplied.portMap where port > 0 {
+            let normalized = service.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard normalized == BonjourInteropContract.controlServiceType || normalized == "_skybridge._udp" else {
+                continue
+            }
+            if (refreshed.portMap[normalized] ?? 0) <= 0 {
+                refreshed.portMap[normalized] = port
+            }
+        }
+        refreshed.routeIdentifiers = DiscoveredDevice.mergedRouteIdentifiers(
+            refreshed.routeIdentifiers,
+            supplied.routeIdentifiers
+        )
     }
 
     private func bonjourIdentifier(from endpoint: NWEndpoint) -> String? {
@@ -1936,12 +2111,27 @@ public class P2PDiscoveryService: BaseManager {
             throw P2PDiscoveryError.deviceNotConnected
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
+        try await Self.sendContent(data, over: connection, timeoutSeconds: 5.0)
+    }
+
+    private nonisolated static func sendContent(
+        _ data: Data,
+        over connection: NWConnection,
+        timeoutSeconds: TimeInterval
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let context = SendContentContext(continuation: continuation, connection: connection)
+            context.timeoutTask = Task { [context] in
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                context.cancelConnection()
+                context.complete(.failure(P2PDiscoveryError.timeout))
+            }
             connection.send(content: data, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
+                if let error {
+                    context.complete(.failure(error))
                 } else {
-                    continuation.resume()
+                    context.complete(.success(()))
                 }
             })
         }
@@ -2181,8 +2371,42 @@ public class P2PDiscoveryService: BaseManager {
             return strongIndex
         }
 
+        if hasStrongIdentity,
+           let normalizedBonjourIdentifier,
+           P2PDiscoveryBonjourPolicy.isRoutableBonjourIdentifier(bonjourIdentifier),
+           Self.hasCompleteProtocolIdentity(
+               deviceId: normalizedDeviceId,
+               pubKeyFP: normalizedFingerprint
+           ),
+           let routedIndex = discoveredDevices.firstIndex(where: { existing in
+               Self.discoveredDevice(existing, hasNormalizedBonjourIdentifier: normalizedBonjourIdentifier)
+           }) {
+            return routedIndex
+        }
+
         guard !hasStrongIdentity else {
             return nil
+        }
+
+        if let normalizedBonjourIdentifier,
+           P2PDiscoveryBonjourPolicy.isRoutableBonjourIdentifier(bonjourIdentifier) {
+            let routeMatchedIndexes = discoveredDevices.indices.filter {
+                Self.discoveredDevice(
+                    discoveredDevices[$0],
+                    hasNormalizedBonjourIdentifier: normalizedBonjourIdentifier
+                )
+            }
+            if let identityBackedIndex = routeMatchedIndexes.first(where: {
+                Self.hasCompleteProtocolIdentity(
+                    deviceId: discoveredDevices[$0].deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    pubKeyFP: discoveredDevices[$0].pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                )
+            }) {
+                return identityBackedIndex
+            }
+            if let routedIndex = routeMatchedIndexes.first {
+                return routedIndex
+            }
         }
 
         return discoveredDevices.firstIndex(where: { existing in
@@ -2206,6 +2430,32 @@ public class P2PDiscoveryService: BaseManager {
 
             return false
         })
+    }
+
+    private nonisolated static func hasCompleteProtocolIdentity(
+        deviceId: String?,
+        pubKeyFP: String?
+    ) -> Bool {
+        guard let deviceId, !deviceId.isEmpty,
+              let pubKeyFP, !pubKeyFP.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    private nonisolated static func discoveredDevice(
+        _ device: DiscoveredDevice,
+        hasNormalizedBonjourIdentifier normalizedBonjourIdentifier: String
+    ) -> Bool {
+        for identifier in [device.uniqueIdentifier].compactMap({ $0 }) + device.routeIdentifiers {
+            guard P2PDiscoveryBonjourPolicy.isRoutableBonjourIdentifier(identifier),
+                  let existingIdentifier = P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(identifier),
+                  existingIdentifier == normalizedBonjourIdentifier else {
+                continue
+            }
+            return true
+        }
+        return false
     }
 
     /// 添加发现的设备 - 增强版：识别设备类型
@@ -2692,22 +2942,14 @@ public class P2PDiscoveryService: BaseManager {
                 var length = UInt32(data.count).bigEndian
                 framed.append(Data(bytes: &length, count: 4))
                 framed.append(data)
-                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                    connection.send(content: framed, completion: .contentProcessed { err in
-                        if let err { c.resume(throwing: err) } else { c.resume() }
-                    })
-                }
+                try await P2PDiscoveryService.sendContent(framed, over: connection, timeoutSeconds: 5.0)
             }
         }
 
         let framedReader = FramedReader.nwConnection(connection)
 
         func sendAck(_ code: UInt8) async throws {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                connection.send(content: Data([code]), completion: .contentProcessed { err in
-                    if let err { c.resume(throwing: err) } else { c.resume() }
-                })
-            }
+            try await Self.sendContent(Data([code]), over: connection, timeoutSeconds: 5.0)
         }
 
         func sendFramed(_ data: Data) async throws {
@@ -2715,11 +2957,7 @@ public class P2PDiscoveryService: BaseManager {
             var length = UInt32(data.count).bigEndian
             framed.append(Data(bytes: &length, count: 4))
             framed.append(data)
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                connection.send(content: framed, completion: .contentProcessed { err in
-                    if let err { c.resume(throwing: err) } else { c.resume() }
-                })
-            }
+            try await Self.sendContent(framed, over: connection, timeoutSeconds: 5.0)
         }
 
         let transport = DirectHandshakeTransport(connection: connection)
@@ -4202,25 +4440,40 @@ public class P2PDiscoveryService: BaseManager {
         timeoutSeconds: TimeInterval
     ) async -> NetServiceResolvedEndpoint? {
         let resolved: NetServiceResolvedEndpoint? = await netServiceResolveLimiter.withPermit {
-            try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NetServiceResolvedEndpoint, Error>) in
-                let service = NetService(
-                    domain: domain.isEmpty ? "local." : domain,
-                    type: type,
-                    name: name
-                )
-                let context = NetServiceResolveContext(
-                    service: service,
-                    timeoutSeconds: timeoutSeconds,
-                    continuation: continuation
-                )
-                context.start()
-            }
+            try? await Self.resolveNetServiceEndpointOnMain(
+                domain: domain,
+                type: type,
+                name: name,
+                timeoutSeconds: timeoutSeconds
+            )
         }
 
         if resolved == nil {
             logger.debug("ℹ️ NetService 解析失败: name=\(name, privacy: .public) type=\(type, privacy: .public)")
         }
         return resolved
+    }
+
+    @MainActor
+    private static func resolveNetServiceEndpointOnMain(
+        domain: String,
+        type: String,
+        name: String,
+        timeoutSeconds: TimeInterval
+    ) async throws -> NetServiceResolvedEndpoint {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NetServiceResolvedEndpoint, Error>) in
+            let service = NetService(
+                domain: domain.isEmpty ? "local." : domain,
+                type: type,
+                name: name
+            )
+            let context = NetServiceResolveContext(
+                service: service,
+                timeoutSeconds: timeoutSeconds,
+                continuation: continuation
+            )
+            context.start()
+        }
     }
 
     private func resolveViaNetServiceIfNeeded(result: NWBrowser.Result, deviceIndex: Int, serviceType: String) {

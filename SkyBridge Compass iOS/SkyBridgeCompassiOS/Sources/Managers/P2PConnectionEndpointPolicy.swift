@@ -93,7 +93,7 @@ enum P2PConnectionEndpointPolicy {
         if device.bonjourServiceType == skybridgeTCP {
             score += 140
         }
-        if device.portMap[skybridgeTCP] != nil {
+        if resolvedSkyBridgeControlPort(for: device) != nil {
             score += 100
         }
         if device.services.contains(skybridgeUDP) || device.portMap[skybridgeUDP] != nil {
@@ -163,10 +163,7 @@ enum P2PConnectionEndpointPolicy {
             ?? parsedBonjourIdentity?.domain
             ?? "local."
         let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
-        let skybridgeUDP = DiscoveryServiceType.skybridgeQUIC.rawValue
-        let portValue: UInt16 = device.portMap[skybridgeTCP]
-            ?? device.portMap[skybridgeUDP]
-            ?? 9527
+        let portValue = resolvedSkyBridgeControlPort(for: device)
 
         var candidates: [NWEndpoint] = []
         let scopedConnectableAddress = connectableAddress(for: device)
@@ -190,7 +187,8 @@ enum P2PConnectionEndpointPolicy {
             )
         }
 
-        if let ipAddress = scopedConnectableAddress {
+        if let ipAddress = scopedConnectableAddress,
+           let portValue {
             candidates.append(
                 .hostPort(
                     host: NWEndpoint.Host(ipAddress),
@@ -213,6 +211,16 @@ enum P2PConnectionEndpointPolicy {
 
         var seen = Set<String>()
         return candidates.filter { seen.insert(String(describing: $0)).inserted }
+    }
+
+    static func resolvedSkyBridgeControlPort(for device: DiscoveredDevice) -> UInt16? {
+        let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
+        let skybridgeUDP = DiscoveryServiceType.skybridgeQUIC.rawValue
+        for value in [device.portMap[skybridgeTCP], device.portMap[skybridgeUDP]] {
+            guard let value, value > 0 else { continue }
+            return value
+        }
+        return nil
     }
 
     static func signedLANRefreshEndpointClass(_ endpoint: NWEndpoint) -> String {

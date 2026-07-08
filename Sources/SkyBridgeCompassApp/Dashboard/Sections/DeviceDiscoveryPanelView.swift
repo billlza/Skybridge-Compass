@@ -221,8 +221,8 @@ public struct DeviceDiscoveryPanelView: View {
                 signalStrength: od.signalStrength,
                 source: od.sources.first ?? .unknown,
                 isLocalDevice: od.isLocalDevice,
-                deviceId: nil,
-                pubKeyFP: nil,
+                deviceId: od.uniqueIdentifier,
+                pubKeyFP: od.protocolFingerprint,
                 macSet: od.macAddress.map { Set([$0]) } ?? []
             )
         }
@@ -245,7 +245,11 @@ public struct DeviceDiscoveryPanelView: View {
     @MainActor
     private func connectToDevice(_ device: DiscoveredDevice) async {
         logger.info("正在连接到设备: \(device.name)")
-        await appModel.connect(to: device)
+        if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id }) {
+            await appModel.connect(to: onlineDevice)
+        } else {
+            await appModel.connect(to: device)
+        }
         logger.info("连接设备操作完成: \(device.name)")
     }
 }

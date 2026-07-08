@@ -169,6 +169,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         updateDeviceStats()
     }
 
+    func replaceNetworkDiscoveredDevicesForTesting(_ devices: [DiscoveredDevice]) {
+        networkDiscovery.discoveredDevices = devices
+        updateDiscoveryMetadataSummary(from: devices)
+    }
+
     func reloadPersistedDevicesForTesting() {
         onlineDevices.removeAll()
         deviceMap.removeAll()
@@ -412,14 +417,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     public func hasResolvedConnectableControlRoute(for onlineDevice: OnlineDevice) -> Bool {
-        guard onlineDevice.isConnectable || onlineDevice.connectionStatus == .connected else {
-            return false
-        }
         if !resolvedConnectableDiscoveredCandidates(for: onlineDevice, limit: 1).isEmpty {
             return true
         }
+        guard onlineDevice.isConnectable || onlineDevice.connectionStatus == .connected else {
+            return false
+        }
+        guard Self.hasRequiredProtocolIdentityForCachedAppleMobileRoute(onlineDevice) else {
+            return false
+        }
         if Self.hasDirectSkyBridgeControlRoute(onlineDevice) {
             return true
+        }
+        if Self.isAppleMobilePresentation(onlineDevice),
+           !Self.hasPositiveSkyBridgeControlPort(onlineDevice.portMap) {
+            return false
         }
         guard !Self.hasExplicitOnlyNonConnectableAddress(onlineDevice) else {
             return false
@@ -439,8 +451,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard hasSkyBridgeControlHint(services: candidate.services, portMap: candidate.portMap) else {
             return false
         }
+        if isAppleMobilePresentation(candidate) {
+            guard BonjourInteropContract.normalizedPubKeyFingerprint(candidate.pubKeyFP) != nil,
+                  hasPositiveSkyBridgeControlPort(candidate.portMap) else {
+                return false
+            }
+        }
         if hasConnectableIPAddress(candidate.ipv4) || hasConnectableIPAddress(candidate.ipv6) {
-            return true
+            return hasPositiveSkyBridgeControlPort(candidate.portMap)
         }
         guard !hasExplicitOnlyNonConnectableAddress(ipv4: candidate.ipv4, ipv6: candidate.ipv6) else {
             return false
@@ -454,7 +472,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     public nonisolated static func hasDirectSkyBridgeControlRoute(_ device: OnlineDevice) -> Bool {
-        guard hasSkyBridgeControlHint(services: device.services, portMap: device.portMap) else {
+        guard hasPositiveSkyBridgeControlPort(device.portMap) else {
             return false
         }
         return hasConnectableIPAddress(device.ipv4) || hasConnectableIPAddress(device.ipv6)
@@ -484,6 +502,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return normalizedServices.contains("_skybridge._tcp")
             || normalizedServices.contains("_skybridge._udp")
             || (portMap["_skybridge._tcp"] ?? 0) > 0
+            || (portMap["_skybridge._udp"] ?? 0) > 0
+    }
+
+    private nonisolated static func hasPositiveSkyBridgeControlPort(_ portMap: [String: Int]) -> Bool {
+        (portMap["_skybridge._tcp"] ?? 0) > 0
             || (portMap["_skybridge._udp"] ?? 0) > 0
     }
 
@@ -1009,6 +1032,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     device.routeIdentifiers,
                     Self.routeIdentifiers(from: device.uniqueIdentifier)
                 ),
+                protocolFingerprint: device.pubKeyFP,
                 source: DeviceSource.skybridgeBonjour,
                 signalStrength: device.signalStrength,
                 isConnectable: Self.hasResolvedSkyBridgeControlRoute(device)
@@ -1030,6 +1054,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     device.uniqueIdentifier ?? "",
                     device.deviceId ?? "",
                     device.name,
+                    device.pubKeyFP ?? "",
                     device.platformName ?? "",
                     device.osVersion ?? "",
                     device.modelName ?? "",
@@ -1047,6 +1072,44 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             discoveryMetadataSummary = summary
         }
     }
+
+#if DEBUG
+    public struct SmokeDiscoveryDiagnostic {
+        public let name: String
+        public let uniqueIdentifier: String?
+        public let deviceId: String?
+        public let pubKeyFP: String?
+        public let ipv4: String?
+        public let ipv6: String?
+        public let services: [String]
+        public let portMap: [String: Int]
+        public let routeIdentifiers: [String]
+        public let hasResolvedControlRoute: Bool
+        public let isLocalDevice: Bool
+    }
+
+    public func smokeDiscoveryDiagnostics(limit: Int = 16) -> [SmokeDiscoveryDiagnostic] {
+        let boundedLimit = max(0, limit)
+        guard boundedLimit > 0 else { return [] }
+        return networkDiscovery.discoveredDevices
+            .prefix(boundedLimit)
+            .map { device in
+                SmokeDiscoveryDiagnostic(
+                    name: device.name,
+                    uniqueIdentifier: device.uniqueIdentifier,
+                    deviceId: device.deviceId,
+                    pubKeyFP: device.pubKeyFP,
+                    ipv4: device.ipv4,
+                    ipv6: device.ipv6,
+                    services: device.services,
+                    portMap: device.portMap,
+                    routeIdentifiers: device.routeIdentifiers,
+                    hasResolvedControlRoute: Self.hasResolvedSkyBridgeControlRoute(device),
+                    isLocalDevice: device.isLocalDevice
+                )
+            }
+    }
+#endif
 
     /// 处理USB设备更新
     private func handleUSBDevicesUpdate(_ devices: [USBDevice]) {
@@ -1169,6 +1232,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         services: [String],
         portMap: [String: Int],
         routeIdentifiers: [String] = [],
+        protocolFingerprint: String? = nil,
         source: DeviceSource,
         signalStrength: Double? = nil,
         isConnectable: Bool = true,
@@ -1195,6 +1259,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 services: services,
                 portMap: portMap,
                 routeIdentifiers: routeIdentifiers,
+                protocolFingerprint: protocolFingerprint,
                 uniqueIdentifier: identifier,
                 sources: [source],
                 discoveredAt: existingDevice.discoveredAt,
@@ -1206,7 +1271,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 signalStrength: signalStrength,
                 isConnectable: isConnectable
             ))
-            let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
+            let upgradedIdentifier = preferredIdentifier(
+                current: existingDevice.uniqueIdentifier,
+                incoming: identifier,
+                currentProtocolFingerprint: existingDevice.protocolFingerprint,
+                incomingProtocolFingerprint: protocolFingerprint
+            )
             if upgradedIdentifier != existingDevice.uniqueIdentifier {
                 existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
             }
@@ -1226,6 +1296,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         } else {
  // 尝试通过其他标识符找到相似设备
             if let similarIdentifier = findSimilarDevice(
+                incomingIdentifier: identifier,
+                incomingProtocolFingerprint: protocolFingerprint,
                 name: name,
                 ipv4: ipv4,
                 ipv6: ipv6,
@@ -1251,6 +1323,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         services: services,
                         portMap: portMap,
                         routeIdentifiers: routeIdentifiers,
+                        protocolFingerprint: protocolFingerprint,
                         uniqueIdentifier: identifier,
                         sources: [source],
                         discoveredAt: existingDevice.discoveredAt,
@@ -1262,7 +1335,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         signalStrength: signalStrength,
                         isConnectable: isConnectable
                     ))
-                    let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
+                    let upgradedIdentifier = preferredIdentifier(
+                        current: existingDevice.uniqueIdentifier,
+                        incoming: identifier,
+                        currentProtocolFingerprint: existingDevice.protocolFingerprint,
+                        incomingProtocolFingerprint: protocolFingerprint
+                    )
                     if upgradedIdentifier != existingDevice.uniqueIdentifier {
                         existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
                     }
@@ -1300,6 +1378,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     services: services,
                     portMap: portMap,
                     routeIdentifiers: routeIdentifiers,
+                    protocolFingerprint: protocolFingerprint,
                     uniqueIdentifier: identifier,
                     sources: [source],
                     discoveredAt: Date(),
@@ -1327,6 +1406,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  /// 智能查找相似设备
     private func findSimilarDevice(
+        incomingIdentifier: String,
+        incomingProtocolFingerprint: String?,
         name: String,
         ipv4: String?,
         ipv6: String?,
@@ -1335,6 +1416,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         source: DeviceSource
     ) -> String? {
         let allowsWeakNameMatch = source != .skybridgeCloud
+        let incomingHasProtocolIdentity =
+            Self.canonicalStableIdentifierToken(incomingIdentifier) != nil ||
+            normalizeFingerprint(incomingProtocolFingerprint) != nil
 
         for (identifier, device) in deviceMap {
  // 禁止将“相似设备”合并到本机条目，避免第三方设备覆盖本机
@@ -1374,6 +1458,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  // 4. 标准化名称匹配
             guard allowsWeakNameMatch else {
+                continue
+            }
+            let existingHasProtocolIdentity =
+                Self.canonicalStableIdentifierToken(device.uniqueIdentifier) != nil ||
+                normalizeFingerprint(device.protocolFingerprint) != nil
+            guard !incomingHasProtocolIdentity, !existingHasProtocolIdentity else {
                 continue
             }
 
@@ -1456,6 +1546,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
         for routeIdentifier in new.routeIdentifiers where !merged.routeIdentifiers.contains(routeIdentifier) {
             merged.routeIdentifiers.append(routeIdentifier)
+        }
+
+        if let incomingFingerprint = normalizeFingerprint(new.protocolFingerprint) {
+            merged.protocolFingerprint = incomingFingerprint
         }
 
  // 合并设备来源
@@ -1618,6 +1712,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 device.routeIdentifiers,
                 Self.routeIdentifiers(from: uniqueIdentifier)
             ),
+            protocolFingerprint: device.protocolFingerprint,
             uniqueIdentifier: uniqueIdentifier,
             sources: device.sources,
             discoveredAt: device.discoveredAt,
@@ -2664,6 +2759,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             if device.sources.contains(.skybridgeP2P) { score += 10 }
             if device.sources.contains(.skybridgeUSB) { score += 8 }
             if Self.hasDirectSkyBridgeControlRoute(device) { score += 6 }
+            if normalizeFingerprint(device.protocolFingerprint) != nil { score += 100 }
             guard score > 0 else { return nil }
             return (identifier, score, device.lastSeen)
         }
@@ -2817,6 +2913,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if hasSharedHardIdentityMatch {
             return true
         }
+        if hasStableIdentityConflict,
+           shouldCoalesceRouteBoundLiveProtocolIdentity(lhs, rhs) {
+            return true
+        }
         if hasStableIdentityConflict {
             return false
         }
@@ -2845,6 +2945,30 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard shouldAllowAppleMobileNameCoalescing(lhs, rhs) else { return false }
         return namesRepresentSameDevice(lhs.name, rhs.name)
             || shouldAllowAppleMobileGenericPathAliasCoalescing(lhs, rhs)
+    }
+
+    private nonisolated static func shouldCoalesceRouteBoundLiveProtocolIdentity(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice
+    ) -> Bool {
+        let lhsFingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(lhs.protocolFingerprint)
+        let rhsFingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(rhs.protocolFingerprint)
+        guard lhsFingerprint != nil || rhsFingerprint != nil else { return false }
+        guard isAppleMobilePresentation(lhs), isAppleMobilePresentation(rhs) else { return false }
+        guard appleModelMetadataCompatible(lhs.modelName, rhs.modelName),
+              applePlatformMetadataCompatible(lhs.platformName, rhs.platformName) else {
+            return false
+        }
+        return !routableBonjourRouteAliases(for: lhs).isDisjoint(with: routableBonjourRouteAliases(for: rhs))
+    }
+
+    private nonisolated static func routableBonjourRouteAliases(for device: OnlineDevice) -> Set<String> {
+        Set(([device.uniqueIdentifier] + device.routeIdentifiers).compactMap { raw in
+            guard P2PDiscoveryBonjourPolicy.isRoutableBonjourIdentifier(raw) else {
+                return nil
+            }
+            return P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(raw)
+        })
     }
 
     private nonisolated static func hardIdentityTokensByKind(
@@ -3044,6 +3168,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             || haystack.contains("ipados")
     }
 
+    private nonisolated static func isAppleMobilePresentation(_ device: DiscoveredDevice) -> Bool {
+        let family = appleDeviceFamilyToken(preferredValues: [
+            device.modelName,
+            device.name,
+            device.platformName
+        ])
+        return family == "ipad" || family == "iphone"
+    }
+
     private nonisolated static func isAppleMobilePresentationName(_ raw: String) -> Bool {
         let family = appleDeviceFamilyToken(raw)
         return family == "ipad" || family == "iphone"
@@ -3060,6 +3193,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private nonisolated static func hasMacServiceRouteEvidence(_ device: OnlineDevice) -> Bool {
         if hasDirectSkyBridgeControlRoute(device) {
             return true
+        }
+        if isAppleMobilePresentation(device),
+           !hasPositiveSkyBridgeControlPort(device.portMap) {
+            return false
         }
         guard !hasExplicitOnlyNonConnectableAddress(device) else {
             return false
@@ -3678,8 +3815,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
               newestSeen.timeIntervalSince(device.lastSeen) < controlRouteFreshnessWindow else {
             return false
         }
+        guard hasRequiredProtocolIdentityForCachedAppleMobileRoute(device) else {
+            return false
+        }
         if hasDirectSkyBridgeControlRoute(device) {
             return true
+        }
+        if isAppleMobilePresentation(device),
+           !hasPositiveSkyBridgeControlPort(device.portMap) {
+            return false
         }
         guard !hasExplicitOnlyNonConnectableAddress(device) else {
             return false
@@ -3712,6 +3856,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
         }
         return nil
+    }
+
+    private nonisolated static func hasRequiredProtocolIdentityForCachedAppleMobileRoute(
+        _ device: OnlineDevice
+    ) -> Bool {
+        guard isAppleMobilePresentation(device) else {
+            return true
+        }
+        return BonjourInteropContract.normalizedPubKeyFingerprint(device.protocolFingerprint) != nil
     }
 
     private nonisolated static func normalizeStableIdentifier(_ raw: String?) -> String? {
@@ -3777,7 +3930,23 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         BonjourInteropContract.normalizedPubKeyFingerprint(raw)
     }
 
-    private func preferredIdentifier(current: String, incoming: String) -> String {
+    private func preferredIdentifier(
+        current: String,
+        incoming: String,
+        currentProtocolFingerprint: String?,
+        incomingProtocolFingerprint: String?
+    ) -> String {
+        let currentHasLiveProtocolIdentity = Self.canonicalStableIdentifierToken(current) != nil
+            && normalizeFingerprint(currentProtocolFingerprint) != nil
+        let incomingHasLiveProtocolIdentity = Self.canonicalStableIdentifierToken(incoming) != nil
+            && normalizeFingerprint(incomingProtocolFingerprint) != nil
+        if incomingHasLiveProtocolIdentity, !currentHasLiveProtocolIdentity {
+            return incoming
+        }
+        if currentHasLiveProtocolIdentity, !incomingHasLiveProtocolIdentity {
+            return current
+        }
+
         let currentScore = Self.identifierStrength(current)
         let incomingScore = Self.identifierStrength(incoming)
         if incomingScore > currentScore {
@@ -4159,6 +4328,10 @@ public struct OnlineDevice: Identifiable, Hashable, Sendable {
     /// Dialable route aliases such as `bonjour:<instance>@local.` that must survive
     /// stable identity promotion.
     public var routeIdentifiers: [String] = []
+    /// Runtime-only protocol fingerprint observed from live discovery TXT. This is
+    /// intentionally not encoded so persisted recent/cloud rows cannot outrank
+    /// current live protocol identity.
+    public var protocolFingerprint: String? = nil
     public let uniqueIdentifier: String
     public var sources: [DeviceSource]
     public let discoveredAt: Date

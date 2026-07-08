@@ -413,6 +413,10 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// Bonjour 监听器（广播用）
     private var listener: NWListener?
+
+    private static let advertisingStartupTimeoutSeconds: TimeInterval = 8
+    private var advertisingStartupContinuation: CheckedContinuation<Void, Error>?
+    private var advertisingStartupTimeoutTask: Task<Void, Never>?
     
     /// 设备缓存
     private var deviceCache: [String: DiscoveredDevice] = [:]
@@ -455,6 +459,23 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 新连接回调
     public var onNewConnection: ((NWConnection, String) -> Void)?
+
+    private enum AdvertisingStartupError: LocalizedError, Sendable {
+        case timedOut(seconds: TimeInterval)
+        case cancelledBeforeReady
+        case superseded
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut(let seconds):
+                return "P2P Bonjour 广播监听器在 \(Int(seconds)) 秒内未进入 ready 状态"
+            case .cancelledBeforeReady:
+                return "P2P Bonjour 广播监听器在 ready 前被取消"
+            case .superseded:
+                return "P2P Bonjour 广播监听器启动被新的启动请求替换"
+            }
+        }
+    }
     
     /// 本机设备名称
     private var deviceName: String {
@@ -683,9 +704,19 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 开始广播服务（让其他平台发现我们）
     /// - Parameter port: 监听端口
     public func startAdvertising(port: UInt16 = 9527) async throws {
-        guard !isAdvertising else {
+        if isAdvertising, listener != nil {
             SkyBridgeLogger.shared.debug("📡 广播已在运行")
             return
+        }
+
+        if isAdvertising {
+            isAdvertising = false
+        }
+
+        if let staleListener = listener {
+            finishAdvertisingStartup(.failure(AdvertisingStartupError.superseded))
+            listener = nil
+            staleListener.cancel()
         }
         
         // 创建 TXT 记录。Bonjour `deviceId` must be the same protocol authority
@@ -722,38 +753,55 @@ public class DeviceDiscoveryManager: ObservableObject {
             self.error = error
             throw error
         }
+
+        guard let activeListener = listener else {
+            let startupError = AdvertisingStartupError.cancelledBeforeReady
+            self.error = startupError
+            throw startupError
+        }
         
         // 设置 Bonjour 服务广播
-        listener?.service = NWListener.Service(
+        activeListener.service = NWListener.Service(
             name: deviceName,
             type: DiscoveryServiceType.skybridge.rawValue,
             txtRecord: txtRecord
         )
         
-        listener?.stateUpdateHandler = { [weak self] state in
+        activeListener.stateUpdateHandler = { [weak self, weak activeListener] state in
             Task { @MainActor in
-                await self?.handleListenerStateChange(state)
+                guard let activeListener else { return }
+                await self?.handleListenerStateChange(state, for: activeListener)
             }
         }
         
-        listener?.newConnectionHandler = { [weak self] connection in
+        activeListener.newConnectionHandler = { [weak self] connection in
             Task { @MainActor in
                 await self?.handleNewIncomingConnection(connection)
             }
         }
         
-        listener?.start(queue: queue)
-        isAdvertising = true
-        
+        do {
+            try await waitForAdvertisingReady(activeListener)
+        } catch {
+            if listener === activeListener {
+                listener = nil
+            }
+            isAdvertising = false
+            self.error = error
+            throw error
+        }
+
         SkyBridgeLogger.shared.info("📡 开始广播服务: \(deviceName) (\(DiscoveryServiceType.skybridge.rawValue))")
     }
     
     /// 停止广播服务
     public func stopAdvertising() {
-        guard isAdvertising else { return }
+        guard isAdvertising || listener != nil || advertisingStartupContinuation != nil else { return }
         
-        listener?.cancel()
+        let activeListener = listener
         listener = nil
+        finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
+        activeListener?.cancel()
         isAdvertising = false
         
         SkyBridgeLogger.shared.info("📡 停止广播服务")
@@ -1700,11 +1748,78 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     // MARK: - Private Methods - Listener
+
+    private func waitForAdvertisingReady(_ activeListener: NWListener) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                advertisingStartupContinuation = continuation
+                scheduleAdvertisingStartupTimeout(seconds: Self.advertisingStartupTimeoutSeconds)
+                activeListener.start(queue: queue)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self, weak activeListener] in
+                guard let self,
+                      let activeListener,
+                      self.listener === activeListener else {
+                    return
+                }
+
+                self.listener = nil
+                self.isAdvertising = false
+                self.finishAdvertisingStartup(.failure(CancellationError()))
+                activeListener.cancel()
+            }
+        }
+    }
+
+    private func scheduleAdvertisingStartupTimeout(seconds: TimeInterval) {
+        advertisingStartupTimeoutTask?.cancel()
+        advertisingStartupTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+            } catch {
+                return
+            }
+
+            guard let self,
+                  self.advertisingStartupContinuation != nil,
+                  let activeListener = self.listener,
+                  !self.isAdvertising else {
+                return
+            }
+
+            let timeoutError = AdvertisingStartupError.timedOut(seconds: seconds)
+            self.listener = nil
+            self.isAdvertising = false
+            self.error = timeoutError
+            self.finishAdvertisingStartup(.failure(timeoutError))
+            activeListener.cancel()
+        }
+    }
+
+    private func finishAdvertisingStartup(_ result: Result<Void, Error>) {
+        guard let continuation = advertisingStartupContinuation else { return }
+        advertisingStartupContinuation = nil
+        advertisingStartupTimeoutTask?.cancel()
+        advertisingStartupTimeoutTask = nil
+
+        switch result {
+        case .success:
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
     
-    private func handleListenerStateChange(_ state: NWListener.State) async {
+    private func handleListenerStateChange(_ state: NWListener.State, for activeListener: NWListener) async {
+        guard listener === activeListener else { return }
+
         switch state {
         case .ready:
-            if let port = listener?.port {
+            isAdvertising = true
+            error = nil
+            finishAdvertisingStartup(.success(()))
+            if let port = activeListener.port {
                 SkyBridgeLogger.shared.info("✅ 监听器就绪，端口: \(port)")
             } else {
                 SkyBridgeLogger.shared.info("✅ 监听器就绪")
@@ -1714,10 +1829,14 @@ public class DeviceDiscoveryManager: ObservableObject {
             SkyBridgeLogger.shared.error("❌ 监听器失败: \(error.localizedDescription)")
             self.error = error
             isAdvertising = false
+            listener = nil
+            finishAdvertisingStartup(.failure(error))
 
         case .cancelled:
             SkyBridgeLogger.shared.info("⏹️ 监听器已取消")
             isAdvertising = false
+            listener = nil
+            finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
             
         default:
             break
@@ -1896,8 +2015,12 @@ public class DeviceDiscoveryManager: ObservableObject {
         record["hs_soa"] = "1"
         record["name"] = deviceName
         if port > 0 {
-            record["port"] = String(port)
-            record["skybridgePort"] = String(port)
+            let portValue = String(port)
+            record["port"] = portValue
+            record["skybridgePort"] = portValue
+            record["p2pPort"] = portValue
+            record["controlPort"] = portValue
+            record["controlPortSource"] = "listener"
         }
         
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）

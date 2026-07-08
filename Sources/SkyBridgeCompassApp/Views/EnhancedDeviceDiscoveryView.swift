@@ -963,6 +963,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var cachedTrustedRecordGroups: [TrustRecordDisplayGroup] = []
     @State private var cachedPresentationSnapshot: DeviceDiscoveryPresentationSnapshot = .empty
     @State private var cachedTrustedBonjourRefreshKey = ""
+    @State private var lastMacOnlineIPadSmokeDiscoveryDiagnosticKey = ""
     @State private var presentationRefreshGeneration: UInt64 = 0
     @State private var presentationRefreshTask: Task<Void, Never>?
 
@@ -994,6 +995,10 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
         .navigationTitle(LocalizationManager.shared.localizedString("discovery.title"))
         .task {
+            if isMacOnlineIPadSmokeClient {
+                unifiedDeviceManager.startDiscovery()
+                unifiedDeviceManager.refreshDevices()
+            }
             appendMacOnlineIPadSmokeRowsIfNeeded()
         }
         .onChange(of: smokeOnlineDeviceSnapshotKey) { _, _ in
@@ -1356,6 +1361,17 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .font(.caption)
                     .foregroundColor(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let smokeTarget = macOnlineIPadSmokeConnectTarget {
+                Button("Connect") {
+                    connectToOnlineDevice(smokeTarget)
+                }
+                .frame(width: 1, height: 1)
+                .opacity(0.01)
+                .accessibilityIdentifier(macOnlineIPadSmokeConnectButtonIdentifier(for: smokeTarget))
+                .accessibilityLabel(Text("Connect"))
+                .accessibilityHint(Text(smokeTarget.name))
             }
 
             // 我的设备（固定展示，不依赖扫描结果；避免被“在线设备”列表/过滤逻辑吞掉）
@@ -2501,6 +2517,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     effectiveConnectionStatus(for: device).rawValue,
                     device.platformName ?? "",
                     device.modelName ?? "",
+                    device.protocolFingerprint ?? "",
                     device.ipv4 ?? "",
                     device.ipv6 ?? "",
                     device.sources.map(\.rawValue).sorted().joined(separator: ","),
@@ -2532,6 +2549,73 @@ public struct EnhancedDeviceDiscoveryView: View {
     private var isMacOnlineIPadSmokeClient: Bool {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client"
+    }
+
+    private var macOnlineIPadSmokeTargetIdentity: String? {
+        guard let value = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_IDENTITY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private var macOnlineIPadSmokeConnectTarget: OnlineDevice? {
+        guard isMacOnlineIPadSmokeClient else { return nil }
+        let candidates = filteredOnlineDevicesNonLocal.filter { device in
+            appleMobilePresentationFamily(for: device) == "ipad"
+                && effectiveConnectionStatus(for: device) == .online
+                && unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        if let target = macOnlineIPadSmokeTargetIdentity,
+           let matched = candidates.first(where: { macOnlineIPadSmokeDevice($0, matches: target) }) {
+            return matched
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsProtocolIdentity = smokeProtocolIdentity(for: lhs)
+            let rhsProtocolIdentity = smokeProtocolIdentity(for: rhs)
+            let lhsHasFingerprint = fingerprintSmokeIdentity(from: lhsProtocolIdentity.pubKeyFP) != nil
+            let rhsHasFingerprint = fingerprintSmokeIdentity(from: rhsProtocolIdentity.pubKeyFP) != nil
+            if lhsHasFingerprint != rhsHasFingerprint {
+                return lhsHasFingerprint
+            }
+            if lhs.lastSeen != rhs.lastSeen {
+                return lhs.lastSeen > rhs.lastSeen
+            }
+            return lhs.name < rhs.name
+        }.first
+    }
+
+    private func macOnlineIPadSmokeDevice(_ device: OnlineDevice, matches targetIdentity: String) -> Bool {
+        let targetPayload = stableIdentityPayload(from: targetIdentity).lowercased()
+        let protocolIdentity = smokeProtocolIdentity(for: device)
+        let candidates = [
+            cachedPresentationIdentityKey(for: device),
+            protocolIdentity.authorityDeviceId,
+            protocolIdentity.protocolDeviceId,
+            device.uniqueIdentifier
+        ].compactMap { $0 }
+        return candidates.contains { stableIdentityPayload(from: $0).lowercased() == targetPayload }
+    }
+
+    private func macOnlineIPadSmokeConnectButtonIdentifier(for device: OnlineDevice) -> String {
+        "skybridge-online-device-connect-button-\(accessibilityIdentifierToken(for: cachedPresentationIdentityKey(for: device)))"
+    }
+
+    private func accessibilityIdentifierToken(for identity: String) -> String {
+        identity.unicodeScalars.map { scalar -> String in
+            switch scalar.value {
+            case 48...57, 65...90, 97...122:
+                return String(scalar)
+            default:
+                return "_"
+            }
+        }
+        .joined()
+        .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
     }
 
     private var smokeStatusURL: URL? {
@@ -2569,12 +2653,75 @@ public struct EnhancedDeviceDiscoveryView: View {
             )
         }
 
+        appendMacOnlineIPadSmokeDiscoveryDiagnosticsIfNeeded(to: statusURL)
+
         let rows = macOnlineIPadSmokeVisibleRows()
         guard !rows.isEmpty else { return }
 
         for row in rows {
             appendSmokeStatusLine(smokeOnlineDeviceStatusLine(for: row.device, surface: row.surface), to: statusURL)
         }
+    }
+
+    private func appendMacOnlineIPadSmokeDiscoveryDiagnosticsIfNeeded(to statusURL: URL) {
+#if DEBUG
+        let diagnostics = unifiedDeviceManager.smokeDiscoveryDiagnostics(limit: 16)
+        let diagnosticKeyBody = diagnostics.map { diagnostic in
+            [
+                diagnostic.uniqueIdentifier ?? "",
+                diagnostic.deviceId ?? "",
+                diagnostic.pubKeyFP ?? "",
+                diagnostic.ipv4 ?? "",
+                diagnostic.ipv6 ?? "",
+                diagnostic.services.sorted().joined(separator: ","),
+                diagnostic.portMap
+                    .map { "\($0.key)=\($0.value)" }
+                    .sorted()
+                    .joined(separator: ",")
+            ].joined(separator: "|")
+        }
+        .joined(separator: "\n")
+        let key = "rawCount=\(diagnostics.count)\n\(diagnosticKeyBody)"
+
+        guard key != lastMacOnlineIPadSmokeDiscoveryDiagnosticKey else { return }
+        lastMacOnlineIPadSmokeDiscoveryDiagnosticKey = key
+
+        if diagnostics.isEmpty {
+            appendSmokeStatusLine(
+                "mac-online-discovery-snapshot rawCount=0 scanning=\(unifiedDeviceManager.isScanning ? 1 : 0)",
+                to: statusURL
+            )
+            return
+        }
+
+        for diagnostic in diagnostics {
+            let services = diagnostic.services.sorted().joined(separator: ",")
+            let ports = diagnostic.portMap
+                .map { "\($0.key)=\($0.value)" }
+                .sorted()
+                .joined(separator: ",")
+            let routes = diagnostic.routeIdentifiers.sorted().joined(separator: ",")
+            appendSmokeStatusLine(
+                [
+                    "mac-online-discovery-snapshot",
+                    "rawCount=\(diagnostics.count)",
+                    "scanning=\(unifiedDeviceManager.isScanning ? 1 : 0)",
+                    "local=\(diagnostic.isLocalDevice ? 1 : 0)",
+                    "controlEndpoint=\(diagnostic.hasResolvedControlRoute ? 1 : 0)",
+                    "device=\(smokeFieldValue(diagnostic.name))",
+                    "uniqueIdentifier=\(smokeFieldValue(diagnostic.uniqueIdentifier ?? "-"))",
+                    "deviceId=\(smokeFieldValue(diagnostic.deviceId ?? "-"))",
+                    "pubKeyFP=\(smokeFieldValue(diagnostic.pubKeyFP ?? "-"))",
+                    "ipv4=\(smokeFieldValue(diagnostic.ipv4 ?? "-"))",
+                    "ipv6=\(smokeFieldValue(diagnostic.ipv6 ?? "-"))",
+                    "services=\(smokeFieldValue(services.isEmpty ? "-" : services))",
+                    "ports=\(smokeFieldValue(ports.isEmpty ? "-" : ports))",
+                    "routes=\(smokeFieldValue(routes.isEmpty ? "-" : routes))"
+                ].joined(separator: " "),
+                to: statusURL
+            )
+        }
+#endif
     }
 
     private func macOnlineIPadSmokeVisibleRows() -> [MacOnlineIPadSmokeVisibleRow] {
@@ -2683,7 +2830,10 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func cachedPresentationIdentityKey(for device: OnlineDevice) -> String {
-        cachedPresentationSnapshot.accessibilityIdentityByDeviceId[device.id]
+        if resolvedLiveProtocolIdentity(for: device).deviceId != nil {
+            return computeResolvedPresentationIdentityKey(for: device, trustedGroups: trustedRecordsForUI)
+        }
+        return cachedPresentationSnapshot.accessibilityIdentityByDeviceId[device.id]
             ?? computeResolvedPresentationIdentityKey(for: device, trustedGroups: trustedRecordsForUI)
     }
 
@@ -2716,7 +2866,11 @@ public struct EnhancedDeviceDiscoveryView: View {
     private func resolvedLiveProtocolIdentity(for device: OnlineDevice) -> (deviceId: String?, pubKeyFP: String?) {
         let candidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)
             + unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
-        for candidate in candidates {
+        let preferredCandidates = candidates.filter { candidate in
+            nonEmptySmokeIdentity(candidate.deviceId) != nil
+                && fingerprintSmokeIdentity(from: candidate.pubKeyFP) != nil
+        } + candidates
+        for candidate in preferredCandidates {
             if let deviceId = nonEmptySmokeIdentity(candidate.deviceId) {
                 let pubKeyFP = nonEmptySmokeIdentity(candidate.pubKeyFP)
                 return (stableIdentityPayload(from: deviceId), pubKeyFP)
@@ -2773,9 +2927,17 @@ public struct EnhancedDeviceDiscoveryView: View {
         if value.lowercased().hasPrefix("recent:") {
             value = String(value.dropFirst("recent:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard value.lowercased().hasPrefix("fp:") else { return nil }
-        let payload = String(value.dropFirst("fp:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-        return payload.isEmpty ? nil : payload
+        let payload: String
+        if value.lowercased().hasPrefix("fp:") {
+            payload = String(value.dropFirst("fp:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            payload = value
+        }
+        guard payload.count == 64,
+              payload.allSatisfy(\.isHexDigit) else {
+            return nil
+        }
+        return payload.lowercased()
     }
 
     private func appendSmokeStatusLine(_ line: String, to statusURL: URL) {

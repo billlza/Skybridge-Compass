@@ -23,6 +23,105 @@ import UserNotifications
 public class DeviceDiscoveryManagerOptimized: ObservableObject {
     nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
+    private struct ResolvedBonjourService: Sendable {
+        let port: Int
+        let ipv4: String?
+        let ipv6: String?
+        let txt: [String: String]
+    }
+
+    private enum BonjourResolveError: Error {
+        case timeout
+        case failed([String: NSNumber])
+    }
+
+    private final class BonjourServiceResolveContext: NSObject, NetServiceDelegate, @unchecked Sendable {
+        private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let service: NetService
+        private let timeoutSeconds: TimeInterval
+        private let continuation: CheckedContinuation<ResolvedBonjourService, Error>
+        private var timeoutTask: Task<Void, Never>?
+        private var selfRetain: BonjourServiceResolveContext?
+
+        init(
+            service: NetService,
+            timeoutSeconds: TimeInterval,
+            continuation: CheckedContinuation<ResolvedBonjourService, Error>
+        ) {
+            self.service = service
+            self.timeoutSeconds = timeoutSeconds
+            self.continuation = continuation
+            super.init()
+            self.selfRetain = self
+        }
+
+        func start() {
+            service.delegate = self
+            service.schedule(in: .main, forMode: .common)
+            service.resolve(withTimeout: timeoutSeconds)
+
+            timeoutTask = Task { [weak self] in
+                guard let self else { return }
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                self.finish(.failure(BonjourResolveError.timeout))
+            }
+        }
+
+        func netServiceDidResolveAddress(_ sender: NetService) {
+            let port = max(0, sender.port)
+            var foundIPv4: String?
+            var foundIPv6: String?
+
+            for data in sender.addresses ?? [] {
+                let address = DeviceDiscoveryManagerOptimized.extractIPAddress(from: data)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                guard !address.isEmpty else { continue }
+                if address.contains("."), !address.hasPrefix("169.254"), !address.hasPrefix("127."), foundIPv4 == nil {
+                    foundIPv4 = address
+                } else if address.contains(":"), !address.hasPrefix("fe80:"), foundIPv6 == nil {
+                    foundIPv6 = address
+                }
+            }
+
+            finish(.success(ResolvedBonjourService(
+                port: port,
+                ipv4: foundIPv4,
+                ipv6: foundIPv6,
+                txt: DeviceDiscoveryManagerOptimized.parseNetServiceTXT(sender.txtRecordData())
+            )))
+        }
+
+        func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+            finish(.failure(BonjourResolveError.failed(errorDict)))
+        }
+
+        private func finish(_ result: Result<ResolvedBonjourService, Error>) {
+            let shouldResume = resumed.withLock { isResumed -> Bool in
+                guard !isResumed else { return false }
+                isResumed = true
+                return true
+            }
+            guard shouldResume else { return }
+
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            service.stop()
+            service.delegate = nil
+            service.remove(from: .main, forMode: .common)
+
+            switch result {
+            case .success(let resolved):
+                continuation.resume(returning: resolved)
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+
+            selfRetain = nil
+        }
+    }
+
  // MARK: - 发布的属性
 
     @Published public var discoveredDevices: [DiscoveredDevice] = []
@@ -67,11 +166,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private var fingerprintProvider: (@Sendable (DiscoveredDevice) async -> IdentityFingerprint?)?
     private var pendingUpdates: Set<DiscoveredDevice> = []
 
- /// 最近被 `.removed` 浏览事件移除的设备身份及其时间戳，用于在短 TTL 内压制
- /// 在途 detached 解析 Task 把已移除设备重新插回 pendingUpdates 导致的“幽灵设备”。
- /// key = 有稳定 deviceId 时为该 id，否则为 "name:" + 清洗后的名称。仅在 @MainActor 上读写。
+    /// 最近被 `.removed` 浏览事件移除的设备身份及其时间戳，用于在短 TTL 内压制
+    /// 在途 detached 解析 Task 把已移除设备重新插回 pendingUpdates 导致的“幽灵设备”。
+    /// key = 有稳定 deviceId 时为该 id，否则为 "name:" + 清洗后的名称。仅在 @MainActor 上读写。
     private var recentlyRemovedIdentities: [String: Date] = [:]
     private let removedTTL: TimeInterval = 5.0
+    private var primaryControlResolveCooldown: [String: Date] = [:]
+    private let primaryControlResolveCooldownTTL: TimeInterval = 10.0
 
  // USB设备管理器
     private var usbManager: USBCConnectionManager?
@@ -957,7 +1058,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 改为通过 IdentityResolver 进行统一决策，避免跨源误并。
  // 若存在外部指纹提供者，则生成候选指纹参与合并判定。
             let candidateFP = fpMap[device.id] ?? nil
-            let mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: device, candidateFP: candidateFP)
+            let routeBoundMergeIndex = Self.routeBoundMergeIndex(in: discoveredDevices, candidate: device)
+            let mergeIndex: Int?
+            if let routeBoundMergeIndex {
+                mergeIndex = routeBoundMergeIndex
+            } else {
+                mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: device, candidateFP: candidateFP)
+            }
 
  // 判定候选设备是否为本机（强身份硬匹配）
             let candidateIsLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
@@ -1021,10 +1128,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
 
                 // Allow same-record updates (same UUID) even if strong identity fields weren't present in the initial placeholder.
+                let routeBoundProtocolMerge = Self.isRouteBoundProtocolMerge(
+                    existing: existingDevice,
+                    candidate: device
+                )
                 let strongMatch =
                     (existingDevice.id == device.id) ||
                     (validId(existingDevice.deviceId) && validId(device.deviceId) && existingDevice.deviceId == device.deviceId) ||
-                    (validFP(existingDevice.pubKeyFP) && validFP(device.pubKeyFP) && existingDevice.pubKeyFP == device.pubKeyFP)
+                    (validFP(existingDevice.pubKeyFP) && validFP(device.pubKeyFP) && existingDevice.pubKeyFP == device.pubKeyFP) ||
+                    routeBoundProtocolMerge
 
  // 若非强匹配，禁止合并（视为不同设备）
                 guard strongMatch else {
@@ -1065,6 +1177,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     merged.services = Array(Set(device.services + merged.services))
                     merged.portMap = device.portMap.merging(merged.portMap) { new, _ in new }
                     merged.mergeRouteIdentifiers(device.routeIdentifiers)
+                    if device.source != .unknown {
+                        merged.source = device.source
+                    }
 
  // 合并强身份字段（优先非空）
                     merged.deviceId = device.deviceId ?? merged.deviceId
@@ -1283,7 +1398,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             from: networkLinkStatus,
             defaultTypes: [.wifi]
         )
+        let source = inferSource(from: serviceType)
         let deviceId = UUID()
+        schedulePrimaryControlServiceHydrationIfNeeded(
+            from: result,
+            serviceType: serviceType,
+            fallbackMetadata: metadata,
+            fallbackNetworkLinkStatus: networkLinkStatus
+        )
 
  // 守卫：非 SkyBridge serviceType 的设备强制标记为非本机
         let isSkyBridgeService = serviceType.lowercased().contains("skybridge")
@@ -1318,6 +1440,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             routeIdentifiers: [bonjourID].compactMap { $0 },
             signalStrength: Self.signalPercentage(from: networkLinkStatus),
             networkLinkStatus: networkLinkStatus,
+            source: source,
             isLocalDevice: false, // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
             deviceId: strong.deviceId,
             pubKeyFP: strong.pubKeyFP
@@ -1367,6 +1490,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 routeIdentifiers: [bonjourID].compactMap { $0 },
                 signalStrength: resolvedSignalStrength,
                 networkLinkStatus: networkLinkStatus,
+                source: source,
                 isLocalDevice: false, // 后续由 resolveIsLocal 统一判定
                 deviceId: strong.deviceId,
                 pubKeyFP: strong.pubKeyFP
@@ -1456,6 +1580,238 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return (nil, nil, port)
         }
         return (nil, nil, port)
+    }
+
+    private func schedulePrimaryControlServiceHydrationIfNeeded(
+        from result: NWBrowser.Result,
+        serviceType: String,
+        fallbackMetadata: BonjourDeviceInfo?,
+        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?
+    ) {
+        let normalizedServiceType = serviceType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedServiceType != BonjourInteropContract.controlServiceType,
+              normalizedServiceType.hasPrefix("_skybridge") else {
+            return
+        }
+        guard case .service(let name, _, let domain, _) = result.endpoint else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
+        let normalizedDomain = Self.normalizedBonjourDomain(domain)
+        let cooldownKey = "\(trimmedName)|\(normalizedDomain)|\(BonjourInteropContract.controlServiceType)"
+        let now = Date()
+        primaryControlResolveCooldown = primaryControlResolveCooldown.filter {
+            now.timeIntervalSince($0.value) < primaryControlResolveCooldownTTL
+        }
+        if let last = primaryControlResolveCooldown[cooldownKey],
+           now.timeIntervalSince(last) < primaryControlResolveCooldownTTL {
+            return
+        }
+        primaryControlResolveCooldown[cooldownKey] = now
+
+        Task { [weak self, trimmedName, normalizedDomain, fallbackMetadata, fallbackNetworkLinkStatus] in
+            guard let self else { return }
+            do {
+                let resolved = try await Self.resolveBonjourServiceOnMain(
+                    domain: normalizedDomain,
+                    type: BonjourInteropContract.controlServiceType,
+                    name: trimmedName,
+                    timeoutSeconds: 3.0
+                )
+                self.publishHydratedPrimaryControlService(
+                    resolved,
+                    serviceName: trimmedName,
+                    domain: normalizedDomain,
+                    fallbackMetadata: fallbackMetadata,
+                    fallbackNetworkLinkStatus: fallbackNetworkLinkStatus
+                )
+            } catch {
+                self.logger.debug(
+                    "ℹ️ primary-control hydration skipped name=\(trimmedName, privacy: .public) reason=\(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private static func resolveBonjourServiceOnMain(
+        domain: String,
+        type: String,
+        name: String,
+        timeoutSeconds: TimeInterval
+    ) async throws -> ResolvedBonjourService {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ResolvedBonjourService, Error>) in
+            let service = NetService(
+                domain: domain.isEmpty ? "local." : domain,
+                type: type,
+                name: name
+            )
+            let context = BonjourServiceResolveContext(
+                service: service,
+                timeoutSeconds: timeoutSeconds,
+                continuation: continuation
+            )
+            context.start()
+        }
+    }
+
+    private func publishHydratedPrimaryControlService(
+        _ resolved: ResolvedBonjourService,
+        serviceName: String,
+        domain: String,
+        fallbackMetadata: BonjourDeviceInfo?,
+        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?
+    ) {
+        let controlType = BonjourInteropContract.controlServiceType
+        let txt = resolved.txt
+        let identity = Self.protocolIdentity(fromTXT: txt)
+        let metadata = Self.deviceInfo(fromTXT: txt) ?? fallbackMetadata
+        let controlPort = P2PDiscoveryBonjourPolicy.advertisedServicePort(
+            from: txt,
+            serviceType: controlType
+        ) ?? resolved.port
+        guard controlPort > 0 else {
+            logger.debug("ℹ️ primary-control hydration missing port name=\(serviceName, privacy: .public)")
+            return
+        }
+
+        let route = "bonjour:\(serviceName)@\(domain)"
+        let displayName = resolvedDisplayName(
+            metadata: metadata,
+            endpointFallback: serviceName
+        )
+        let hydrated = DiscoveredDevice(
+            id: UUID(),
+            name: displayName,
+            ipv4: resolved.ipv4,
+            ipv6: resolved.ipv6,
+            platformName: metadata?.platform,
+            osVersion: metadata?.osVersion,
+            modelName: metadata?.model,
+            chip: metadata?.chip,
+            services: [controlType],
+            portMap: [controlType: controlPort],
+            remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
+            connectionTypes: Self.connectionTypes(
+                from: fallbackNetworkLinkStatus,
+                defaultTypes: [.wifi]
+            ),
+            uniqueIdentifier: Self.preferredUniqueIdentifier(
+                deviceId: identity.deviceId,
+                pubKeyFP: identity.pubKeyFP,
+                bonjourID: route,
+                ipv4: resolved.ipv4,
+                ipv6: resolved.ipv6
+            ),
+            routeIdentifiers: [route],
+            signalStrength: Self.signalPercentage(from: fallbackNetworkLinkStatus),
+            networkLinkStatus: fallbackNetworkLinkStatus,
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: identity.deviceId,
+            pubKeyFP: identity.pubKeyFP
+        )
+
+        pendingUpdates.insert(hydrated)
+        scheduleFlush()
+        logger.debug(
+            "✅ primary-control hydration queued name=\(serviceName, privacy: .public) port=\(controlPort, privacy: .public) identity=\(identity.deviceId == nil ? "missing" : "present", privacy: .public) fingerprint=\(identity.pubKeyFP == nil ? "missing" : "present", privacy: .public)"
+        )
+    }
+
+    private nonisolated static func protocolIdentity(fromTXT txt: [String: String]) -> (deviceId: String?, pubKeyFP: String?) {
+        let deviceId = sanitizeStableDeviceId(
+            txtValue(txt, keys: ["deviceId", "id", "deviceID", "device_id", "uuid", "uniqueId", "unique_id"])
+        )
+        let pubKeyFP = sanitizePubKeyFingerprint(
+            txtValue(txt, keys: ["pubKeyFP", "pubKeyFp", "pubkeyfp", "pub_key_fp", "identityFingerprint"])
+        )
+        return (deviceId, pubKeyFP)
+    }
+
+    private nonisolated static func deviceInfo(fromTXT txt: [String: String]) -> BonjourDeviceInfo? {
+        let info = BonjourDeviceInfo(
+            deviceId: protocolIdentity(fromTXT: txt).deviceId,
+            hostname: txtValue(txt, keys: ["hostname", "host"]),
+            model: txtValue(txt, keys: ["model", "modelName", "md"]),
+            chip: txtValue(txt, keys: ["chip", "soc", "cpu"]),
+            type: txtValue(txt, keys: ["type", "deviceType"]),
+            version: txtValue(txt, keys: ["version", "ver", "sw"]),
+            osVersion: txtValue(txt, keys: ["osVersion", "os_version", "osver", "osVer", "osv"]),
+            manufacturer: txtValue(txt, keys: ["manufacturer", "brand", "mf"]),
+            platform: txtValue(txt, keys: ["platform", "os"]),
+            name: txtValue(txt, keys: ["name", "device", "fn"]),
+            remoteVideoFormats: BonjourInteropContract.normalizedRemoteVideoFormats(
+                from: txtValue(txt, keys: Array(BonjourInteropContract.remoteVideoFormatTXTKeys))
+            )
+        )
+
+        if info.deviceId == nil,
+           info.hostname == nil,
+           info.model == nil,
+           info.chip == nil,
+           info.platform == nil,
+           info.osVersion == nil,
+           info.name == nil,
+           info.remoteVideoFormats.isEmpty {
+            return nil
+        }
+        return info
+    }
+
+    private nonisolated static func txtValue(_ txt: [String: String], keys: [String]) -> String? {
+        for key in keys {
+            guard let value = txt[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                continue
+            }
+            return value
+        }
+        return nil
+    }
+
+    private nonisolated static func parseNetServiceTXT(_ data: Data?) -> [String: String] {
+        guard let data else { return [:] }
+        let raw = NetService.dictionary(fromTXTRecord: data)
+        var parsed: [String: String] = [:]
+        for (key, value) in raw {
+            guard let stringValue = String(data: value, encoding: .utf8) else { continue }
+            parsed[key] = stringValue
+        }
+        return parsed
+    }
+
+    private nonisolated static func extractIPAddress(from data: Data) -> String {
+        data.withUnsafeBytes { bytes in
+            guard bytes.count >= MemoryLayout<sockaddr>.size,
+                  let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
+                return ""
+            }
+            switch Int32(sockaddr.pointee.sa_family) {
+            case AF_INET:
+                guard bytes.count >= MemoryLayout<sockaddr_in>.size,
+                      let addr = bytes.bindMemory(to: sockaddr_in.self).baseAddress,
+                      let cstr = inet_ntoa(addr.pointee.sin_addr) else {
+                    return ""
+                }
+                return String(cString: cstr)
+            case AF_INET6:
+                guard bytes.count >= MemoryLayout<sockaddr_in6>.size,
+                      let addr = bytes.bindMemory(to: sockaddr_in6.self).baseAddress else {
+                    return ""
+                }
+                var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                var sin6Addr = addr.pointee.sin6_addr
+                guard inet_ntop(AF_INET6, &sin6Addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else {
+                    return ""
+                }
+                let data = Data(bytes: buffer, count: Int(INET6_ADDRSTRLEN))
+                let trimmed = data.prefix { $0 != 0 }
+                return String(decoding: trimmed, as: UTF8.self)
+            default:
+                return ""
+            }
+        }
     }
 
     private func measureLinkQuality(host: String?, port: Int) async -> Double? {
@@ -1637,10 +1993,52 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             from: result,
             serviceType: serviceType
         )
+        let source = inferSource(from: serviceType)
+        schedulePrimaryControlServiceHydrationIfNeeded(
+            from: result,
+            serviceType: serviceType,
+            fallbackMetadata: metadata,
+            fallbackNetworkLinkStatus: networkLinkStatus
+        )
 
         await MainActor.run {
+            let candidate = DiscoveredDevice(
+                id: UUID(),
+                name: deviceName,
+                ipv4: ipv4,
+                ipv6: ipv6,
+                platformName: metadata?.platform,
+                osVersion: metadata?.osVersion,
+                modelName: metadata?.model,
+                chip: metadata?.chip,
+                services: [serviceType],
+                portMap: [serviceType: port],
+                remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
+                connectionTypes: Self.connectionTypes(
+                    from: networkLinkStatus,
+                    defaultTypes: [.wifi]
+                ),
+                uniqueIdentifier: Self.preferredUniqueIdentifier(
+                    deviceId: strong.deviceId,
+                    pubKeyFP: strong.pubKeyFP,
+                    bonjourID: bonjourID,
+                    ipv4: ipv4,
+                    ipv6: ipv6
+                ),
+                routeIdentifiers: [bonjourID].compactMap { $0 },
+                signalStrength: Self.signalPercentage(from: networkLinkStatus),
+                networkLinkStatus: networkLinkStatus,
+                source: source,
+                deviceId: strong.deviceId,
+                pubKeyFP: strong.pubKeyFP
+            )
+            let routeBoundIndex = Self.routeBoundMergeIndex(in: discoveredDevices, candidate: candidate)
+            let hasProtocolIdentity = Self.hasAnyProtocolIdentity(
+                deviceId: strong.deviceId,
+                pubKeyFP: strong.pubKeyFP
+            )
  // 查找现有设备
-            if let index = discoveredDevices.firstIndex(where: { existingDevice in
+            let weakIndex = hasProtocolIdentity ? nil : discoveredDevices.firstIndex(where: { existingDevice in
                 // Prefer stable deviceId match when available.
                 if let sid = strong.deviceId, !sid.isEmpty, existingDevice.deviceId == sid { return true }
                 if let existingIPv4 = existingDevice.ipv4, let newIPv4 = ipv4, existingIPv4 == newIPv4 {
@@ -1649,7 +2047,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 let cleanExistingName = existingDevice.name.filter { $0.isLetter || $0.isNumber }
                 let cleanNewName = deviceName.filter { $0.isLetter || $0.isNumber }
                 return cleanExistingName == cleanNewName && !cleanNewName.isEmpty
-            }) {
+            })
+
+            if let index = routeBoundIndex ?? weakIndex {
  // 更新现有设备（重新创建以更新不可变属性）
                 let existingDevice = discoveredDevices[index]
                 var newServices = existingDevice.services
@@ -1691,7 +2091,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     ),
                     signalStrength: Self.signalPercentage(from: networkLinkStatus) ?? existingDevice.signalStrength,
                     networkLinkStatus: networkLinkStatus ?? existingDevice.networkLinkStatus,
-                    source: existingDevice.source,
+                    source: Self.preferredDeviceSource(existing: existingDevice.source, candidate: source),
                     isLocalDevice: existingDevice.isLocalDevice,
                     deviceId: strong.deviceId ?? existingDevice.deviceId,
                     pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
@@ -1761,6 +2161,142 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
     private nonisolated static func signalPercentage(from status: DeviceNetworkLinkStatus?) -> Double? {
         status?.normalizedSignalStrength.map { $0 * 100.0 }
+    }
+
+    nonisolated static func routeBoundMergeIndex(
+        in devices: [DiscoveredDevice],
+        candidate: DiscoveredDevice
+    ) -> Int? {
+        let normalizedDeviceId = sanitizeStableDeviceId(candidate.deviceId)
+        let normalizedFingerprint = sanitizePubKeyFingerprint(candidate.pubKeyFP)
+        let hasProtocolIdentity = hasAnyProtocolIdentity(
+            deviceId: normalizedDeviceId,
+            pubKeyFP: normalizedFingerprint
+        )
+
+        if let strongIndex = devices.firstIndex(where: { existing in
+            if let normalizedDeviceId,
+               let existingId = sanitizeStableDeviceId(existing.deviceId),
+               existingId == normalizedDeviceId {
+                return true
+            }
+            if let normalizedFingerprint,
+               let existingFingerprint = sanitizePubKeyFingerprint(existing.pubKeyFP),
+               existingFingerprint == normalizedFingerprint {
+                return true
+            }
+            return false
+        }) {
+            return strongIndex
+        }
+
+        guard let routeIdentifier = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: candidate),
+              let normalizedRouteIdentifier = P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(routeIdentifier) else {
+            return nil
+        }
+
+        let routeMatchedIndexes = devices.indices.filter {
+            discoveredDevice(
+                devices[$0],
+                hasNormalizedBonjourIdentifier: normalizedRouteIdentifier
+            )
+        }
+        guard !routeMatchedIndexes.isEmpty else { return nil }
+
+        if hasCompleteProtocolIdentity(
+            deviceId: normalizedDeviceId,
+            pubKeyFP: normalizedFingerprint
+        ) {
+            return routeMatchedIndexes.first(where: {
+                !hasAnyProtocolIdentity(
+                    deviceId: devices[$0].deviceId,
+                    pubKeyFP: devices[$0].pubKeyFP
+                )
+            })
+        }
+
+        guard !hasProtocolIdentity else {
+            return nil
+        }
+
+        return routeMatchedIndexes.first(where: {
+            hasCompleteProtocolIdentity(
+                deviceId: devices[$0].deviceId,
+                pubKeyFP: devices[$0].pubKeyFP
+            )
+        }) ?? routeMatchedIndexes.first
+    }
+
+    nonisolated static func isRouteBoundProtocolMerge(
+        existing: DiscoveredDevice,
+        candidate: DiscoveredDevice
+    ) -> Bool {
+        guard let routeIdentifier = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: candidate),
+              let normalizedRouteIdentifier = P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(routeIdentifier),
+              discoveredDevice(existing, hasNormalizedBonjourIdentifier: normalizedRouteIdentifier) else {
+            return false
+        }
+
+        let existingComplete = hasCompleteProtocolIdentity(
+            deviceId: existing.deviceId,
+            pubKeyFP: existing.pubKeyFP
+        )
+        let candidateComplete = hasCompleteProtocolIdentity(
+            deviceId: candidate.deviceId,
+            pubKeyFP: candidate.pubKeyFP
+        )
+        let existingHasAnyIdentity = hasAnyProtocolIdentity(
+            deviceId: existing.deviceId,
+            pubKeyFP: existing.pubKeyFP
+        )
+        let candidateHasAnyIdentity = hasAnyProtocolIdentity(
+            deviceId: candidate.deviceId,
+            pubKeyFP: candidate.pubKeyFP
+        )
+
+        if existingComplete && !candidateHasAnyIdentity {
+            return true
+        }
+        if candidateComplete && !existingHasAnyIdentity {
+            return true
+        }
+        return false
+    }
+
+    nonisolated static func preferredDeviceSource(
+        existing: DeviceSource,
+        candidate: DeviceSource
+    ) -> DeviceSource {
+        candidate == .unknown ? existing : candidate
+    }
+
+    nonisolated static func hasCompleteProtocolIdentity(
+        deviceId: String?,
+        pubKeyFP: String?
+    ) -> Bool {
+        sanitizeStableDeviceId(deviceId) != nil && sanitizePubKeyFingerprint(pubKeyFP) != nil
+    }
+
+    nonisolated static func hasAnyProtocolIdentity(
+        deviceId: String?,
+        pubKeyFP: String?
+    ) -> Bool {
+        sanitizeStableDeviceId(deviceId) != nil || sanitizePubKeyFingerprint(pubKeyFP) != nil
+    }
+
+    private nonisolated static func discoveredDevice(
+        _ device: DiscoveredDevice,
+        hasNormalizedBonjourIdentifier normalizedBonjourIdentifier: String
+    ) -> Bool {
+        for identifier in [device.uniqueIdentifier].compactMap({ $0 }) + device.routeIdentifiers {
+            guard P2PDiscoveryBonjourPolicy.isRoutableBonjourIdentifier(identifier),
+                  let existingIdentifier = P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(identifier),
+                  existingIdentifier == normalizedBonjourIdentifier else {
+                continue
+            }
+            return true
+        }
+        return false
     }
 
     private static func extractAdvertisedServicePort(from result: NWBrowser.Result, serviceType: String) -> Int? {
@@ -2098,11 +2634,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 var length = UInt32(data.count).bigEndian
                 framed.append(Data(bytes: &length, count: 4))
                 framed.append(data)
-                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                    connection.send(content: framed, completion: .contentProcessed { err in
-                        if let err { c.resume(throwing: err) } else { c.resume() }
-                    })
-                }
+                try await DeviceDiscoveryManagerOptimized.sendContent(
+                    framed,
+                    on: connection,
+                    timeoutSeconds: 5.0
+                )
             }
         }
 
@@ -3149,6 +3685,65 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 connection.cancel()
                 continuation.resume(throwing: DeviceDiscoveryError.connectionTimeout)
             }
+        }
+    }
+
+    private final class SendContentContinuationContext: @unchecked Sendable {
+        private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let continuation: CheckedContinuation<Void, Error>
+        private let connection: NWConnection
+        var timeoutTask: Task<Void, Never>?
+
+        init(continuation: CheckedContinuation<Void, Error>, connection: NWConnection) {
+            self.continuation = continuation
+            self.connection = connection
+        }
+
+        func complete(_ result: Result<Void, Error>) {
+            let shouldResume = resumed.withLock { isResumed -> Bool in
+                guard !isResumed else { return false }
+                isResumed = true
+                return true
+            }
+            guard shouldResume else { return }
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+
+        func cancelConnection() {
+            connection.cancel()
+        }
+    }
+
+    nonisolated private static func sendContent(
+        _ data: Data,
+        on connection: NWConnection,
+        timeoutSeconds: TimeInterval
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let context = SendContentContinuationContext(
+                continuation: continuation,
+                connection: connection
+            )
+            context.timeoutTask = Task {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                context.cancelConnection()
+                context.complete(.failure(DeviceDiscoveryError.connectionTimeout))
+            }
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    context.complete(.failure(error))
+                } else {
+                    context.complete(.success(()))
+                }
+            })
         }
     }
 

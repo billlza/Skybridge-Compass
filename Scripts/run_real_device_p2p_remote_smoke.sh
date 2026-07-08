@@ -335,6 +335,9 @@ MAC_ONLINE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-mac-online"
 MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
 MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
 MAC_ONLINE_SIGN_IDENTITY="${SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY:-}"
+MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS:-60}"
+MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS:-120}"
+MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS:-3}"
 MAC_APP_BUNDLE="$ARTIFACT_DIR/LocalLanInteropHost.app"
 MAC_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanInteropHost"
 MAC_SOURCE_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanSmokeSourceHost"
@@ -1054,6 +1057,7 @@ open_macos_online_ipad_app_bundle() {
     --env "SKYBRIDGE_SMOKE_AUTO_EXIT=1" \
     --env "SKYBRIDGE_SMOKE_STATUS_FILE=$MAC_ONLINE_STATUS" \
     --env "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS=$SMOKE_TIMEOUT_SECONDS" \
+    --env "SKYBRIDGE_TARGET_IPAD_IDENTITY=$IOS_PQC_DEVICE_ID" \
     "$MAC_ONLINE_APP_BUNDLE" \
     2>>"$MAC_ONLINE_LAUNCH_OPEN_STDERR"
   local open_status=$?
@@ -1147,6 +1151,15 @@ wait_for_mac_online_pattern() {
       return 0
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      local grace_started_at
+      grace_started_at="$(date +%s)"
+      while (( "$(date +%s)" - grace_started_at < MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS )); do
+        sync_mac_online_launch_stdio
+        if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$pattern" "$MAC_ONLINE_STATUS"; then
+          return 0
+        fi
+        sleep 0.5
+      done
       printf '%s failed stage=mac-online-ipad phase=wait-pattern reason=timeout label=%s pid=%s\n' \
         "$(timestamp_utc)" "${label// /_}" "${MAC_ONLINE_PID:-none}" >>"$MAC_ONLINE_STATUS"
       echo "Timed out waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
@@ -1163,7 +1176,7 @@ wait_for_mac_online_pattern() {
 }
 
 press_mac_online_ipad_connect_button() {
-  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout "$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS" swift - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -1178,11 +1191,19 @@ guard AXIsProcessTrusted() else {
     fail("macOS Accessibility permission is required to press the SkyBridge online iPad Connect button")
 }
 
+let targetProcessIdentifier = ProcessInfo.processInfo.environment["SKYBRIDGE_MAC_ONLINE_APP_PID"]
+    .flatMap { pid in Int32(pid.trimmingCharacters(in: .whitespacesAndNewlines)) }
 let candidates = NSWorkspace.shared.runningApplications.filter { app in
     app.localizedName == "SkyBridge Compass Pro"
         || app.executableURL?.lastPathComponent == "SkyBridgeCompassApp"
 }
-guard let app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first else {
+let app: NSRunningApplication?
+if let targetProcessIdentifier {
+    app = candidates.first { $0.processIdentifier == targetProcessIdentifier }
+} else {
+    app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first
+}
+guard let app else {
     fail("SkyBridge Compass Pro process is not running")
 }
 
@@ -1263,14 +1284,6 @@ func identityVariants(for identity: String?) -> Set<String> {
 }
 
 let targetIdentityVariants = identityVariants(for: targetIdentity)
-let targetIdentifiers: Set<String> = {
-    guard !targetIdentityVariants.isEmpty else { return [] }
-    return Set(targetIdentityVariants.compactMap { identity in
-        let token = accessibilityIdentifierToken(for: identity)
-        guard !token.isEmpty else { return nil }
-        return "skybridge-online-device-connect-button-\(token)"
-    })
-}()
 
 func identityValueMatchesTarget(_ value: String?) -> Bool {
     guard let value,
@@ -1328,6 +1341,29 @@ let targetRowEvidenceLine: String? = {
 
     guard targetIdentity == nil else { return nil }
     return enabledOnlineDeviceRows.last
+}()
+
+func appendIdentityVariants(_ value: String?, to variants: inout Set<String>) {
+    variants.formUnion(identityVariants(for: value))
+}
+
+let targetButtonIdentityVariants: Set<String> = {
+    var variants = targetIdentityVariants
+    if let rowLine = targetRowEvidenceLine {
+        appendIdentityVariants(fieldValue("identityKey", in: rowLine), to: &variants)
+        appendIdentityVariants(fieldValue("targetDeviceId", in: rowLine), to: &variants)
+        appendIdentityVariants(fieldValue("p2pDeviceId", in: rowLine), to: &variants)
+    }
+    return variants
+}()
+
+let targetIdentifiers: Set<String> = {
+    guard !targetButtonIdentityVariants.isEmpty else { return [] }
+    return Set(targetButtonIdentityVariants.compactMap { identity in
+        let token = accessibilityIdentifierToken(for: identity)
+        guard !token.isEmpty else { return nil }
+        return "skybridge-online-device-connect-button-\(token)"
+    })
 }()
 
 let targetDeviceNames: Set<String> = {
@@ -1474,8 +1510,27 @@ func appendConnectStartEvidence(targetRowBound: Bool, didCenterClick: Bool) {
 }
 
 let root = AXUIElementCreateApplication(app.processIdentifier)
+AXUIElementSetMessagingTimeout(root, 0.25)
+
+let maxAXTraversalNodes = 5000
+let maxAXTraversalDepth = 32
+var axTraversalNodes = 0
+
+func resetAXTraversalBudget() {
+    axTraversalNodes = 0
+}
+
+func shouldVisitAXNode(depth: Int) -> Bool {
+    guard depth <= maxAXTraversalDepth,
+          axTraversalNodes < maxAXTraversalNodes else {
+        return false
+    }
+    axTraversalNodes += 1
+    return true
+}
 
 func value(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+    AXUIElementSetMessagingTimeout(element, 0.25)
     var result: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &result)
     guard error == .success else { return nil }
@@ -1545,7 +1600,8 @@ func children(of element: AXUIElement) -> [AXUIElement] {
 }
 
 func subtreeContainsTargetDevice(_ element: AXUIElement, depth: Int = 0) -> Bool {
-    guard !targetDeviceNames.isEmpty, depth < 16 else { return false }
+    guard !targetDeviceNames.isEmpty,
+          shouldVisitAXNode(depth: depth) else { return false }
     let ownText = normalizedAXText(textValues(of: element).joined(separator: " "))
     if targetDeviceNames.contains(where: { ownText.contains($0) }) {
         return true
@@ -1554,7 +1610,7 @@ func subtreeContainsTargetDevice(_ element: AXUIElement, depth: Int = 0) -> Bool
 }
 
 func subtreeContainsConnectButton(_ element: AXUIElement, depth: Int = 0) -> Bool {
-    guard depth < 16 else { return false }
+    guard shouldVisitAXNode(depth: depth) else { return false }
     let role = stringValue(element, kAXRoleAttribute as String) ?? ""
     let identifier = stringValue(element, kAXIdentifierAttribute as String) ?? ""
     let title = stringValue(element, kAXTitleAttribute as String)
@@ -1569,13 +1625,45 @@ func subtreeContainsConnectButton(_ element: AXUIElement, depth: Int = 0) -> Boo
     return children(of: element).contains { subtreeContainsConnectButton($0, depth: depth + 1) }
 }
 
+func pressExactIdentifierButton(in element: AXUIElement, depth: Int = 0) -> Bool {
+    guard shouldVisitAXNode(depth: depth) else { return false }
+    let role = stringValue(element, kAXRoleAttribute as String) ?? ""
+    let identifier = stringValue(element, kAXIdentifierAttribute as String) ?? ""
+    let title = stringValue(element, kAXTitleAttribute as String)
+        ?? stringValue(element, kAXDescriptionAttribute as String)
+        ?? ""
+    let enabled = boolValue(element, kAXEnabledAttribute as String) ?? true
+    if role == kAXButtonRole as String,
+       enabled,
+       targetIdentifiers.contains(identifier) {
+        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        let didCenterClick = clickElementCenter(element)
+        if error == .success || didCenterClick {
+            appendButtonClickEvidence(
+                targetRowBound: true,
+                axMatch: "target-identifier",
+                buttonIdentifier: identifier,
+                didCenterClick: didCenterClick
+            )
+            print("pressed connect button title=\(title) identifier=\(identifier)")
+            return true
+        }
+    }
+    for child in children(of: element) {
+        if pressExactIdentifierButton(in: child, depth: depth + 1) {
+            return true
+        }
+    }
+    return false
+}
+
 func pressFirstConnectButton(
     in element: AXUIElement,
     depth: Int = 0,
     allowTitleMatch: Bool,
     targetRowBound: Bool
 ) -> Bool {
-    guard depth < 24 else { return false }
+    guard shouldVisitAXNode(depth: depth) else { return false }
     let role = stringValue(element, kAXRoleAttribute as String) ?? ""
     let identifier = stringValue(element, kAXIdentifierAttribute as String) ?? ""
     let title = stringValue(element, kAXTitleAttribute as String)
@@ -1624,7 +1712,7 @@ func pressFirstConnectButton(
 }
 
 func pressConnectButtonInTargetRow(in element: AXUIElement, depth: Int = 0) -> Bool {
-    guard depth < 20 else { return false }
+    guard shouldVisitAXNode(depth: depth) else { return false }
     let candidateChildren = children(of: element).filter { child in
         subtreeContainsTargetDevice(child) && subtreeContainsConnectButton(child)
     }
@@ -1644,18 +1732,32 @@ func pressConnectButtonInTargetRow(in element: AXUIElement, depth: Int = 0) -> B
 NSRunningApplication(processIdentifier: app.processIdentifier)?.activate(options: [.activateAllWindows])
 Thread.sleep(forTimeInterval: 0.5)
 
-let pressed = pressFirstConnectButton(in: root, allowTitleMatch: false, targetRowBound: false)
-    || pressConnectButtonInTargetRow(in: root)
-    || (targetDeviceNames.isEmpty && pressFirstConnectButton(in: root, allowTitleMatch: true, targetRowBound: false))
+var pressed = false
+resetAXTraversalBudget()
+if !targetIdentifiers.isEmpty {
+    pressed = pressExactIdentifierButton(in: root)
+}
+if !pressed {
+    resetAXTraversalBudget()
+    pressed = pressFirstConnectButton(in: root, allowTitleMatch: false, targetRowBound: false)
+}
+if !pressed {
+    resetAXTraversalBudget()
+    pressed = pressConnectButtonInTargetRow(in: root)
+}
+if !pressed && targetDeviceNames.isEmpty {
+    resetAXTraversalBudget()
+    pressed = pressFirstConnectButton(in: root, allowTitleMatch: true, targetRowBound: false)
+}
 
 guard pressed else {
-    fail("unable to find an enabled SkyBridge online iPad Connect button")
+    fail("unable to find an enabled SkyBridge online iPad Connect button targetIdentifiers=\(targetIdentifiers.count) targetRowBound=\(targetRowEvidenceLine != nil)")
 }
 SWIFT
 }
 
 observe_mac_online_ipad_connected_row() {
-  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout "$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS" swift - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -1670,11 +1772,19 @@ guard AXIsProcessTrusted() else {
     fail("macOS Accessibility permission is required to observe the SkyBridge online iPad connection result")
 }
 
+let targetProcessIdentifier = ProcessInfo.processInfo.environment["SKYBRIDGE_MAC_ONLINE_APP_PID"]
+    .flatMap { pid in Int32(pid.trimmingCharacters(in: .whitespacesAndNewlines)) }
 let candidates = NSWorkspace.shared.runningApplications.filter { app in
     app.localizedName == "SkyBridge Compass Pro"
         || app.executableURL?.lastPathComponent == "SkyBridgeCompassApp"
 }
-guard let app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first else {
+let app: NSRunningApplication?
+if let targetProcessIdentifier {
+    app = candidates.first { $0.processIdentifier == targetProcessIdentifier }
+} else {
+    app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first
+}
+guard let app else {
     fail("SkyBridge Compass Pro process is not running")
 }
 
@@ -1914,6 +2024,7 @@ wait_for_mac_online_connected_row() {
   started_at="$(date +%s)"
   while true; do
     if SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_ONLINE_STATUS" \
+      SKYBRIDGE_MAC_ONLINE_APP_PID="$MAC_ONLINE_PID" \
       SKYBRIDGE_TARGET_IPAD_IDENTITY="$IOS_PQC_DEVICE_ID" \
       SKYBRIDGE_TARGET_IPAD_NAME="${SKYBRIDGE_SMOKE_IOS_TARGET_NAME:-iPad}" \
       observe_mac_online_ipad_connected_row >>"$MAC_ONLINE_STDOUT" 2>&1; then
@@ -1956,13 +2067,14 @@ run_mac_online_ipad_button_smoke() {
   printf '%s launch requested role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=external-accessibility method=open-app-bundle\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
   start_macos_online_ipad_client
   wait_for_mac_online_pattern 'boot .*role=mac-online-ipad-client .*source=app' 20 "macOS online iPad app smoke role boot"
-  wait_for_mac_online_pattern 'mac-online-device-ui .*targetFamily=ipad .*source=OnlineDeviceCard .*status=online .*buttonEnabled=1' 60 "macOS online iPad visible connectable row"
+  wait_for_mac_online_pattern 'mac-online-device-ui .*targetFamily=ipad .*source=OnlineDeviceCard .*status=online .*buttonEnabled=1' "$MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS" "macOS online iPad visible connectable row"
 
   echo "==> Pressing macOS online iPad Connect button"
   local click_started_at
   click_started_at="$(date +%s)"
   while true; do
     if SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_ONLINE_STATUS" \
+      SKYBRIDGE_MAC_ONLINE_APP_PID="$MAC_ONLINE_PID" \
       SKYBRIDGE_TARGET_IPAD_IDENTITY="$IOS_PQC_DEVICE_ID" \
       SKYBRIDGE_TARGET_IPAD_NAME="${SKYBRIDGE_SMOKE_IOS_TARGET_NAME:-iPad}" \
       press_mac_online_ipad_connect_button >>"$MAC_ONLINE_STDOUT" 2>&1; then
@@ -4239,13 +4351,13 @@ wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*handshak
 wait_for_ios_status_pattern "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}" "$SMOKE_TIMEOUT_SECONDS" "P2P remote desktop pass window"
 copy_ios_status
 validate_remote_desktop_route_evidence
-validate_remote_desktop_performance_window
 if [[ "$RUN_MAC_ONLINE_IPAD_SMOKE" == "1" ]]; then
   run_mac_online_ipad_button_smoke
 else
   append_host_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
   append_ios_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
 fi
+validate_remote_desktop_performance_window
 wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"

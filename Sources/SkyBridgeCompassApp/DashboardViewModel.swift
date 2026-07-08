@@ -807,21 +807,13 @@ final class DashboardViewModel: ObservableObject {
 
  /// 🆕 连接到在线设备(新的统一设备类型)
     func connect(to onlineDevice: OnlineDevice) async {
- // 将OnlineDevice转换为DiscoveredDevice以兼容现有的连接逻辑
-        let discoveredDevice = DiscoveredDevice(
-            id: onlineDevice.id,
-            name: onlineDevice.name,
-            ipv4: onlineDevice.ipv4,
-            ipv6: onlineDevice.ipv6,
-            services: onlineDevice.services,
-            portMap: onlineDevice.portMap,
-            connectionTypes: onlineDevice.connectionTypes,
-            uniqueIdentifier: onlineDevice.uniqueIdentifier,
-            signalStrength: nil
-        )
-
- // 执行连接
-        await connect(to: discoveredDevice)
+        discoveryStatus = "正在连接到 \(onlineDevice.name)"
+        do {
+            try await OnlineDeviceConnectionCoordinator.connect(to: onlineDevice)
+            discoveryStatus = "已连接到 \(onlineDevice.name)"
+        } catch {
+            discoveryStatus = error.localizedDescription
+        }
     }
 
     private func recordSiriConnectRequest(targetName: String) {

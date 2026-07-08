@@ -1759,12 +1759,9 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 开始监听连接（使用 DeviceDiscoveryManager 的广播功能）
     public func startListening() async throws {
-        if discoveryManager.isAdvertising {
-            isListening = true
-            return
-        }
-        if isListening {
+        if isListening, !discoveryManager.isAdvertising {
             // Recover from stale state (e.g. listener failed/cancelled but flag not updated).
+            SkyBridgeLogger.shared.warning("⚠️ P2P 监听状态与 Bonjour 广播状态不一致，正在重新建立监听器")
             isListening = false
         }
         
@@ -1784,7 +1781,11 @@ public class P2PConnectionManager: ObservableObject {
         }
         
         // 使用 DeviceDiscoveryManager 的广播功能
-        try await discoveryManager.startAdvertising(port: 9527)
+        if discoveryManager.isAdvertising {
+            SkyBridgeLogger.shared.debug("📡 P2P Bonjour 广播已就绪，继续确认传输层")
+        } else {
+            try await discoveryManager.startAdvertising(port: 9527)
+        }
         guard discoveryManager.isAdvertising else {
             isListening = false
             lastError = "P2P 广播监听未进入可用状态"

@@ -437,8 +437,10 @@ struct SkyBridgeCompassApp: App {
             discoveryManager.retryAuthorizationBlockedBrowsers()
             // 前台：确保按设置启动
             applyDiscoverySettings()
-            if !connectionManager.isListening {
-                try? await connectionManager.startListening()
+            do {
+                try await connectionManager.startListening()
+            } catch {
+                SkyBridgeLogger.shared.error("❌ 前台恢复 P2P 监听器失败: \(error.localizedDescription)")
             }
             // 回到前台：重启在线心跳定时器（后台空闲时会被停掉以省电）。start() 幂等。
             ICloudDevicePresenceService.shared.start()
