@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "source": "SkyBridgeProtocolCore.BonjourInteropProtocolContract",
+  "serviceTypes": {
+    "legacyQuicPrimary": "_skybridge._udp",
+    "control": "_skybridge._tcp",
+    "fileTransfer": "_skybridge-transfer._tcp",
+    "remoteControl": "_skybridge-remote._tcp",
+    "companionLink": "_companion-link._tcp"
+  },
+  "discovery": {
+    "appleDefaultServiceTypes": [
+      "_skybridge._tcp",
+      "_skybridge-transfer._tcp",
+      "_skybridge-remote._tcp"
+    ],
+    "windowsCompatibilityQueryOrder": [
+      "_skybridge._udp",
+      "_skybridge._tcp",
+      "_skybridge-transfer._tcp",
+      "_skybridge-remote._tcp"
+    ]
+  },
+  "capabilities": {
+    "base": [
+      "clipboard",
+      "clipboard_sync"
+    ],
+    "fileTransfer": [
+      "file",
+      "file_transfer",
+      "classic_resume"
+    ],
+    "remoteControl": [
+      "screen_sharing",
+      "remote_desktop",
+      "rdview",
+      "remote_control",
+      "rdcontrol"
+    ]
+  },
+  "txt": {
+    "deviceIdentityKeys": [
+      "deviceId",
+      "id",
+      "deviceID",
+      "device_id",
+      "uuid",
+      "uniqueId",
+      "unique_id"
+    ],
+    "pubKeyFingerprintKeys": [
+      "pubKeyFP",
+      "pubKeyFp",
+      "pub_key_fp",
+      "identityFingerprint",
+      "publicKeyFingerprint"
+    ],
+    "pubKeyFingerprintPattern": "^[0-9a-f]{64}$",
+    "fileTransferPortKeys": [
+      "transferPort",
+      "fileTransferPort",
+      "file_transfer_port",
+      "port"
+    ],
+    "remoteControlPortKeys": [
+      "remotePort",
+      "remoteControlPort",
+      "remote_port",
+      "port"
+    ],
+    "remoteVideoFormatKeys": [
+      "remoteVideoFormats",
+      "remote_video_formats",
+      "remoteformats",
+      "remotevideoformats",
+      "remotevideformats"
+    ]
+  },
+  "remoteVideoFormats": {
+    "allowedTokens": [
+      "jpeg",
+      "h264",
+      "hevc"
+    ]
+  },
+  "routeProvenance": {
+    "txtPortsAreDiagnosticOnly": true,
+    "actionableRoutesRequireResolvedDnsSdEndpoint": true,
+    "capabilitiesDoNotCreateRoutes": true,
+    "pubKeyFingerprintIsTrustHintOnly": true
+  }
+}

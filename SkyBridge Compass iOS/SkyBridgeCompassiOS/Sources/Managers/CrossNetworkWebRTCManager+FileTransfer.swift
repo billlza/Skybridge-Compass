@@ -153,14 +153,19 @@ extension CrossNetworkWebRTCManager {
             do {
                 try await sendFileTransferMessage(ack)
             } catch {
-                // Best-effort; ignore.
-                _ = label
-                _ = keys
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ WebRTC file-transfer ack send failed: label=\(label) op=\(ack.op.rawValue) transfer=<redacted> error=\(error.localizedDescription)"
+                )
             }
         }
 
         switch msg.op {
         case .metadata:
+            if let validationError = Self.validateInboundTransferId(msg.transferId) {
+                await sendAck(.init(op: .error, transferId: msg.transferId, message: validationError), label: "metaError")
+                return
+            }
+
             // Idempotent: allow re-sending metadata for the same transferId (resume).
             if inboundFileTransfers[msg.transferId] != nil {
                 await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
@@ -186,6 +191,42 @@ extension CrossNetworkWebRTCManager {
                 return
             }
 
+            guard let senderId = Self.requiredInboundSenderDeviceId(msg.senderDeviceId) else {
+                await sendAck(
+                    .init(
+                        op: .error,
+                        transferId: msg.transferId,
+                        message: Self.inboundFileTransferMissingSenderIdentityMessage
+                    ),
+                    label: "metaError"
+                )
+                return
+            }
+            let senderName = msg.senderDeviceName ?? (remoteDeviceName ?? senderId)
+            let approvalRequest = InboundFileTransferApprovalRequest(
+                transferId: msg.transferId,
+                fileName: fileName,
+                fileSize: fileSize,
+                chunkSize: chunkSize,
+                totalChunks: totalChunks,
+                senderDeviceId: senderId,
+                senderDeviceName: senderName
+            )
+            switch await inboundFileTransferApprovalProvider(approvalRequest) {
+            case .approved:
+                break
+            case .rejected(let reason):
+                await sendAck(
+                    .init(
+                        op: .error,
+                        transferId: msg.transferId,
+                        message: Self.normalizedInboundApprovalRejectionMessage(reason)
+                    ),
+                    label: "metaError"
+                )
+                return
+            }
+
             let baseDir = Self.downloadsDirectoryURL()
 
             do {
@@ -197,8 +238,6 @@ extension CrossNetworkWebRTCManager {
                     return
                 }
                 let handle = try FileHandle(forWritingTo: tempURL)
-                let senderId = msg.senderDeviceId ?? (remoteDeviceId ?? "mac")
-                let senderName = msg.senderDeviceName ?? (remoteDeviceName ?? "macOS")
 
                 inboundFileTransfers[msg.transferId] = InboundFileTransferState(
                     transferId: msg.transferId,

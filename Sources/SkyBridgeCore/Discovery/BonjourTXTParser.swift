@@ -81,7 +81,7 @@ public enum BonjourTXTParser: Sendable {
         ("platform", ["platform", "os"]),
         ("version", ["version", "ver", "sw"]),
         ("osVersion", ["osVersion", "os_version", "osver", "osVer", "osv"]),
-        ("remoteVideoFormats", ["remoteVideoFormats", "remote_video_formats", "remoteformats"]),
+        ("remoteVideoFormats", ["remoteVideoFormats", "remotevideoformats", "remote_video_formats", "remoteformats", "remotevideformats"]),
     ]
 
  /// 用于正则解析的模式（降级方案）
@@ -115,6 +115,18 @@ public enum BonjourTXTParser: Sendable {
         (
             "remote_video_formats",
             "remote_video_formats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
+        ),
+        (
+            "remoteformats",
+            "remoteformats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
+        ),
+        (
+            "remotevideoformats",
+            "remotevideoformats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
+        ),
+        (
+            "remotevideformats",
+            "remotevideformats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
         ),
     ]
 
@@ -180,6 +192,7 @@ public enum BonjourTXTParser: Sendable {
             "port", "skybridgePort", "p2pPort", "controlPort", "controlPortSource",
             "transferPort", "fileTransferPort", "file_transfer_port",
             "remotePort", "remoteControlPort", "remote_port",
+            "remoteVideoFormats", "remotevideoformats", "remote_video_formats", "remoteformats", "remotevideformats",
             "lanHost", "lanIPv4", "lanIPv6", "host", "ip", "ipv4", "ipv6", "address", "hostAddress"
         ]
         var result: [String: String] = [:]
@@ -266,7 +279,11 @@ public enum BonjourTXTParser: Sendable {
             ?? dict["mac"]
             ?? dict["bssid"]
         let remoteVideoFormats = parseRemoteVideoFormats(
-            dict["remoteVideoFormats"] ?? dict["remote_video_formats"] ?? dict["remoteformats"]
+            dict["remoteVideoFormats"]
+                ?? dict["remotevideoformats"]
+                ?? dict["remote_video_formats"]
+                ?? dict["remoteformats"]
+                ?? dict["remotevideformats"]
         )
 
         let platform = dict["platform"] ?? dict["os"]
@@ -294,16 +311,7 @@ public enum BonjourTXTParser: Sendable {
     }
 
     private static func parseRemoteVideoFormats(_ raw: String?) -> [String] {
-        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return []
-        }
-        var formats: [String] = []
-        for token in raw.split(separator: ",") {
-            let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !normalized.isEmpty, !formats.contains(normalized) else { continue }
-            formats.append(normalized)
-        }
-        return formats
+        BonjourInteropContract.normalizedRemoteVideoFormats(from: raw)
     }
 
  /// 从字符串描述提取设备信息

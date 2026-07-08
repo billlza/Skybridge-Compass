@@ -100,6 +100,25 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteVideoFormatsDropUnsupportedAdvertisedTokens() {
+        let incoming = streamConfiguration(
+            preferredCodec: "h264",
+            supportedVideoFormats: ["vp9", "HEVC", "jpeg"],
+            screenDataChannelEnabled: true,
+            streamRefreshToken: 3
+        )
+
+        let plan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+            incoming,
+            previousConfig: streamConfiguration(streamRefreshToken: 2),
+            advertisedFormats: ["av1", "h264", "hevc", "path/escape"],
+            hasSessionKeys: true
+        )
+
+        XCTAssertEqual(plan.remoteVideoFormats, ["h264", "hevc", "jpeg"])
+    }
+
+    @MainActor
     func testRefreshTokenRemovalStillMarksPendingRefreshLikeLegacyBranch() {
         let incoming = streamConfiguration(streamRefreshToken: nil)
 

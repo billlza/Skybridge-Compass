@@ -31,8 +31,9 @@ public class DeviceDiscoveryManager: BaseManager {
 
  // 服务类型瘦身 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
-        "_skybridge._tcp",
-        "_skybridge-transfer._tcp",
+        BonjourInteropContract.controlServiceType,
+        BonjourInteropContract.fileTransferServiceType,
+        BonjourInteropContract.remoteControlServiceType,
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -41,7 +42,7 @@ public class DeviceDiscoveryManager: BaseManager {
     public var enableCompatibilityMode: Bool = false
     public var enableCompanionLink: Bool = false
     private func effectiveServiceTypes() -> [String] {
-        var base = ["_skybridge._tcp", "_skybridge-transfer._tcp"]
+        var base = BonjourInteropContract.defaultDiscoveryServiceTypes
         if enableCompanionLink { base.append("_companion-link._tcp") }
         if enableCompatibilityMode {
             base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
@@ -430,22 +431,16 @@ public class DeviceDiscoveryManager: BaseManager {
                     txt["identityFingerprint"] = snap.pubKeyFP
                 }
                 txt["hs_soa"] = "1"
-                txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
-                if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
-                    let port = String(transferPort)
-                    txt["transferPort"] = port
-                    txt["fileTransferPort"] = port
-                }
-                if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
-                    let port = String(remotePort)
-                    txt["remotePort"] = port
-                    txt["remoteControlPort"] = port
-                }
+                BonjourInteropContract.attachPrimaryAdvertisementTXT(
+                    to: &txt,
+                    transferPort: endpoints.fileTransferPort,
+                    remoteControlPort: endpoints.remoteControlPort
+                )
  // 通过统一广播中心启动，避免跨管理器重复监听同一服务类型
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: getDeviceName(),
-                    serviceType: "_skybridge._tcp",
+                    serviceType: BonjourInteropContract.controlServiceType,
                     txtRecord: txt,
                     owner: advertisementOwner,
                     connectionHandler: { connection in
@@ -1928,8 +1923,7 @@ nonisolated private static func DDM_ExtractPubKeyFingerprint(_ result: NWBrowser
         ?? dict["pubkeyfp"]
         ?? dict["pub_key_fp"]
         ?? dict["identityFingerprint"]
-    guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-          value.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
+    guard let value = BonjourInteropContract.normalizedPubKeyFingerprint(raw) else {
         return nil
     }
     return value

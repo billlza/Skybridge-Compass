@@ -234,6 +234,9 @@ verify_app_bundle_build_source() {
     local build_source=""
     local build_scheme=""
     local build_configuration=""
+    local git_commit=""
+    local git_branch=""
+    local git_dirty_state=""
 
     skybridge_assert_release_app_stable_platform_metadata "$info_plist" "Release DMG App Bundle" || exit 1
 
@@ -241,12 +244,20 @@ verify_app_bundle_build_source() {
         build_source=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildSource' "$info_plist" 2>/dev/null || true)
         build_scheme=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildScheme' "$info_plist" 2>/dev/null || true)
         build_configuration=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildConfiguration' "$info_plist" 2>/dev/null || true)
+        git_commit=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingGitCommit' "$info_plist" 2>/dev/null || true)
+        git_branch=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingGitBranch' "$info_plist" 2>/dev/null || true)
+        git_dirty_state=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingGitDirtyState' "$info_plist" 2>/dev/null || true)
     fi
 
     case "$build_source" in
         xcode_release|swiftpm_release)
             if [[ "$build_scheme" == "$XCODE_PACKAGE_SCHEME" \
-                && "$build_configuration" == "Release" ]]; then
+                && "$build_configuration" == "Release" \
+                && -n "$git_commit" \
+                && "$git_commit" != "unknown" \
+                && -n "$git_branch" \
+                && "$git_branch" != "unknown" \
+                && "$git_dirty_state" == "clean" ]]; then
                 return 0
             fi
             ;;
@@ -254,6 +265,7 @@ verify_app_bundle_build_source() {
 
     log_error "发布 DMG 仅允许使用明确 Release 产物打包。当前 App Bundle 构建来源: ${build_source:-missing}"
     log_error "期望 scheme/config: ${XCODE_PACKAGE_SCHEME}/Release；当前: ${build_scheme:-missing}/${build_configuration:-missing}"
+    log_error "期望 Git provenance: explicit commit, explicit branch state, clean worktree；当前: commit=${git_commit:-missing} branch=${git_branch:-missing} dirty=${git_dirty_state:-missing}"
     log_error "请重新执行 build_dmg.sh（不要复用未知来源生成的 .app）。"
     exit 1
 }

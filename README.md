@@ -197,9 +197,9 @@ bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
 swift test
 ```
 
-## Rust CLI / Agent Workspace
+## SkyBridge CLI / Agent Workspace
 
-CLI/agent 的新 headless 工作区位于 `rust/`，用于承载正式的 operator surface，不再依赖 GUI 侧状态。
+SkyBridge CLI/agent 的 headless Rust 工作区位于 `rust/`，用于承载正式的 operator surface，不再依赖 GUI 侧状态。用户可见产品名是 SkyBridge CLI；稳定命令名仍是 `skybridge`。
 
 常用命令：
 

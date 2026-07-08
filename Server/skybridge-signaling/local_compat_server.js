@@ -29,7 +29,13 @@ const WS_MAX_BUFFERED_BYTES = readPositiveIntegerEnv(
   'WS_MAX_BUFFERED_BYTES',
   512 * 1024
 );
+const WS_MAX_PENDING_FRAMES = readPositiveIntegerEnv(
+  'SKYBRIDGE_LOCAL_COMPAT_MAX_PENDING_FRAMES',
+  'WS_MAX_PENDING_FRAMES',
+  64
+);
 const WS_ALLOW_LEGACY_QUERY_TOKEN = allowsLegacyQueryTokenFromEnv(process.env);
+const HTTP_ALLOW_LEGACY_LOOKUP_IDENTITY_BINDING = allowsLegacyLookupIdentityBindingFromEnv(process.env);
 if (WS_MAX_PAYLOAD_BYTES < WS_MAX_MSG_BYTES) {
   throw new Error('invalid_local_compat_resource_limit:SKYBRIDGE_LOCAL_COMPAT_MAX_WS_PAYLOAD_BYTES');
 }
@@ -50,6 +56,11 @@ function readPositiveIntegerEnv(primaryName, fallbackName, defaultValue) {
     throw new Error(`invalid_local_compat_resource_limit:${sourceName}`);
   }
   return value;
+}
+
+function allowsLegacyLookupIdentityBindingFromEnv(env) {
+  const raw = String(env.SKYBRIDGE_LOCAL_COMPAT_ALLOW_LEGACY_LOOKUP_IDENTITY_BINDING || '').trim().toLowerCase();
+  return raw === 'true' || raw === '1';
 }
 
 function normalizeSignalingWebSocketPath(rawPath) {
@@ -113,6 +124,10 @@ function sessionLogId(record) {
 
 function tokenPresence(value) {
   return String(value || '').trim() ? 'present' : 'missing';
+}
+
+function requestHasAdmissionToken(req) {
+  return String(req.get('X-SkyBridge-Admission') || '').trim() !== '';
 }
 
 function parseJWTClaims(token) {
@@ -259,6 +274,72 @@ function isCurrentRoleSocket(record, role, ws) {
   return socketForRole(record, role) === ws;
 }
 
+function peerRoleFor(role) {
+  return role === 'initiator' ? 'responder' : 'initiator';
+}
+
+function pendingRelayForRole(record, role) {
+  if (!record.pendingRelay) {
+    record.pendingRelay = {
+      initiator: { frames: [], bytes: 0 },
+      responder: { frames: [], bytes: 0 }
+    };
+  }
+  return record.pendingRelay[role];
+}
+
+function clearPendingFramesFromRole(record, fromRole) {
+  if (!record?.pendingRelay) return;
+  for (const role of ['initiator', 'responder']) {
+    const pending = pendingRelayForRole(record, role);
+    const kept = pending.frames.filter((frame) => frame.fromRole !== fromRole);
+    if (kept.length === pending.frames.length) continue;
+    pending.frames = kept;
+    pending.bytes = kept.reduce((total, frame) => total + frame.bytes, 0);
+    console.log(`[ws] pending cleared sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${fromRole} for=${role}`);
+  }
+}
+
+function enqueuePendingRelayFrame(record, targetRole, fromRole, text, bytes, sourceSocket) {
+  const pending = pendingRelayForRole(record, targetRole);
+  if (
+    pending.frames.length >= WS_MAX_PENDING_FRAMES
+    || pending.bytes + bytes > WS_MAX_BUFFERED_BYTES
+  ) {
+    console.log(
+      `[ws] pending reject sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${fromRole} for=${targetRole} bytes=${bytes}`
+    );
+    closeWebSocketWithReason(sourceSocket, 1013, 'pending_backpressure', `pending:${fromRole}->${targetRole}`);
+    return false;
+  }
+  pending.frames.push({ fromRole, text, bytes });
+  pending.bytes += bytes;
+  console.log(
+    `[ws] pending queued sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${fromRole} for=${targetRole} bytes=${bytes} frames=${pending.frames.length}`
+  );
+  return true;
+}
+
+function flushPendingRelayFrames(record, targetRole, targetSocket) {
+  const pending = pendingRelayForRole(record, targetRole);
+  while (pending.frames.length > 0) {
+    const frame = pending.frames.shift();
+    pending.bytes = Math.max(0, pending.bytes - frame.bytes);
+    console.log(
+      `[ws] pending relay sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${frame.fromRole} to=${targetRole} bytes=${frame.bytes}`
+    );
+    if (!sendTextFrame(targetSocket, frame.text, `pending:${frame.fromRole}->${targetRole}`)) {
+      console.warn(
+        `[ws] pending relay failed sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${frame.fromRole} to=${targetRole}`
+      );
+      pending.frames = [];
+      pending.bytes = 0;
+      return false;
+    }
+  }
+  return true;
+}
+
 function closeWebSocketWithReason(ws, code, reason, context) {
   if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
     return false;
@@ -319,7 +400,8 @@ app.get('/', (req, res) => {
       '/api/webrtc/lookup/:code',
       '/api/turn/credentials',
       SIGNALING_WEBSOCKET_PATH
-    ]
+    ],
+    allowLegacyLookupIdentityBinding: HTTP_ALLOW_LEGACY_LOOKUP_IDENTITY_BINDING
   });
 });
 
@@ -427,7 +509,11 @@ app.get('/api/webrtc/lookup/:code', (req, res) => {
   let binding = null;
   try {
     binding = requireAdmission(req);
-  } catch (_) {
+  } catch (error) {
+    if (!HTTP_ALLOW_LEGACY_LOOKUP_IDENTITY_BINDING || requestHasAdmissionToken(req)) {
+      console.log(`[http] lookup denied sessionLogId=${sessionLogId(record)} code=${LOG_REDACTED} reason=${safeErrorCode(error)}`);
+      return res.status(error.statusCode || 401).json({ error: error.message });
+    }
     binding = legacyBindingFromRequest(req);
   }
   if (!binding) {
@@ -514,11 +600,13 @@ wss.on('connection', (ws, req) => {
   const previousSocket = setSocketForRole(record, role, ws);
   if (previousSocket && previousSocket !== ws) {
     console.log(`[ws] reclaim sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role}`);
+    clearPendingFramesFromRole(record, role);
     closeWebSocketWithReason(previousSocket, 1008, 'reclaimed', `reclaim:${role}`);
   }
 
   console.log(`[ws] bound sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role}`);
   sendServerFrame(ws, { type: 'bound', sessionId, role });
+  flushPendingRelayFrames(record, role, ws);
 
   ws.on('message', (raw, isBinary) => {
     if (!isCurrentRoleSocket(record, role, ws)) {
@@ -536,11 +624,14 @@ wss.on('connection', (ws, req) => {
       closeWebSocketWithReason(ws, 1009, 'message_too_large', `message_size:${role}`);
       return;
     }
-    const peer = role === 'initiator' ? record.responder?.socket : record.initiator.socket;
+    const peerRole = peerRoleFor(role);
+    const peer = socketForRole(record, peerRole);
+    const text = webSocketMessageToText(raw);
     if (peer && peer.readyState === WebSocket.OPEN) {
-      const text = webSocketMessageToText(raw);
       console.log(`[ws] relay sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${role} bytes=${bytes}`);
       sendTextFrame(peer, text, `relay:${role}`);
+    } else {
+      enqueuePendingRelayFrame(record, peerRole, role, text, bytes, ws);
     }
   });
 

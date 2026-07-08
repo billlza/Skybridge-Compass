@@ -16,6 +16,9 @@ Options:
   --widget-path <path>          Widget appex to validate; defaults to <app>/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex
   --widget-source-entitlements <path>
                                 Source widget entitlements plist
+  --manifest-path <path>        Signed stable update manifest to validate against the app and DMG.
+                                Explicit paths are required to exist. Without this option,
+                                dist/macos-stable.json is validated only after it has been generated.
   --package-integrity-only      Validate package identity, signing, stapling, and Gatekeeper only
   --skip-launch-smoke           Skip open/launch smoke test
   --skip-cli-quality-gates      Skip Rust CLI coverage, performance, and memory gates
@@ -94,6 +97,8 @@ SOURCE_INFO_PLIST="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Info.plist"
 SOURCE_ENTITLEMENTS="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
 WIDGET_PATH=""
 SOURCE_WIDGET_ENTITLEMENTS="${PROJECT_ROOT}/Sources/SkyBridgeCompassWidgets/SkyBridgeCompassWidgetsExtension.entitlements"
+MANIFEST_PATH="${PROJECT_ROOT}/dist/macos-stable.json"
+MANIFEST_PATH_EXPLICIT=0
 REQUIRE_NOTARIZATION="${SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION:-0}"
 SKIP_LAUNCH_SMOKE=0
 SKIP_CLI_QUALITY_GATES=0
@@ -135,6 +140,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --widget-source-entitlements)
       SOURCE_WIDGET_ENTITLEMENTS="${2:-}"
+      shift 2
+      ;;
+    --manifest-path)
+      MANIFEST_PATH="${2:-}"
+      MANIFEST_PATH_EXPLICIT=1
       shift 2
       ;;
     --package-integrity-only)
@@ -263,6 +273,20 @@ fail() {
   exit 1
 }
 
+validate_release_git_provenance() {
+  local git_commit="$1"
+  local git_branch="$2"
+  local git_dirty_state="$3"
+  local artifact_label="$4"
+
+  [[ -n "${git_commit}" && "${git_commit}" != "unknown" ]] \
+    || fail "${artifact_label} is missing explicit Git commit provenance; rebuild with Scripts/package_app.sh"
+  [[ -n "${git_branch}" && "${git_branch}" != "unknown" ]] \
+    || fail "${artifact_label} is missing explicit Git branch provenance; rebuild with Scripts/package_app.sh"
+  [[ "${git_dirty_state}" == "clean" ]] \
+    || fail "${artifact_label} Git dirty state must be clean for release readiness (actual: ${git_dirty_state:-missing})"
+}
+
 run_skybridge_cli() {
   if [[ -n "${SKYBRIDGE_CLI_BIN:-}" ]]; then
     [[ -x "${SKYBRIDGE_CLI_BIN}" ]] || fail "SKYBRIDGE_CLI_BIN is not executable: ${SKYBRIDGE_CLI_BIN}"
@@ -308,6 +332,7 @@ validate_update_check_configuration() {
   local checker_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Services/AppUpdateChecker.swift"
   local manifest_generator="${PROJECT_ROOT}/Scripts/generate_macos_update_manifest.swift"
   local github_publisher="${PROJECT_ROOT}/Scripts/publish_macos_update_release.sh"
+  local manifest_validator="${PROJECT_ROOT}/Scripts/validate_macos_update_manifest.sh"
   local manifest_url=""
   local signing_keys=""
 
@@ -347,8 +372,12 @@ validate_update_check_configuration() {
     || fail "manifest generator must refuse to advertise unnotarized packages"
   [[ -f "${github_publisher}" ]] \
     || fail "missing GitHub release update publisher: ${github_publisher}"
+  [[ -f "${manifest_validator}" ]] \
+    || fail "missing macOS update manifest validator: ${manifest_validator}"
   grep -q 'macos-stable.json' "${github_publisher}" \
     || fail "GitHub update publisher must upload the stable manifest asset name expected by the app"
+  grep -q 'validate_macos_update_manifest.sh' "${github_publisher}" \
+    || fail "GitHub update publisher must validate generated and downloaded stable manifests against the exact app and DMG"
   grep -q 'gh release upload' "${github_publisher}" \
     || fail "GitHub update publisher must upload DMG and manifest assets through GitHub Releases"
   grep -q 'gh release download' "${github_publisher}" \
@@ -357,6 +386,26 @@ validate_update_check_configuration() {
     || fail "GitHub update publisher must verify notarization/stapling before advertising a DMG update"
   grep -Fq "https://github.com/\${REPOSITORY}/releases/download/\${TAG_NAME}" "${github_publisher}" \
     || fail "GitHub update publisher must build a download URL matching GitHub Releases asset URLs"
+}
+
+validate_local_update_manifest() {
+  local manifest_path="$1"
+  local app_path="$2"
+  local dmg_path="$3"
+  local manifest_validator="${PROJECT_ROOT}/Scripts/validate_macos_update_manifest.sh"
+
+  [[ -n "${manifest_path}" ]] || fail "missing --manifest-path for stable update manifest validation"
+  [[ -f "${manifest_path}" ]] || fail "missing stable update manifest: ${manifest_path}"
+  [[ -x "${manifest_validator}" || -f "${manifest_validator}" ]] \
+    || fail "missing macOS update manifest validator: ${manifest_validator}"
+
+  log_info "Validating signed stable update manifest against app and DMG"
+  bash "${manifest_validator}" \
+    --manifest-path "${manifest_path}" \
+    --app-path "${app_path}" \
+    --dmg-path "${dmg_path}" \
+    --require-apple-pqc-sdk-build \
+    || fail "stable update manifest does not advertise the exact release app and DMG"
 }
 
 run_cli_connectivity_gate() {
@@ -667,6 +716,12 @@ validate_dmg_embedded_app() {
   local dmg_build_source=""
   local dmg_build_scheme=""
   local dmg_build_configuration=""
+  local dmg_git_commit=""
+  local dmg_git_branch=""
+  local dmg_git_dirty_state=""
+  local expected_git_commit=""
+  local expected_git_branch=""
+  local expected_git_dirty_state=""
   local dmg_cdhash=""
 
   log_info "Mounting DMG and validating embedded app bundle"
@@ -688,6 +743,12 @@ validate_dmg_embedded_app() {
   dmg_build_source="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingBuildSource" 2>/dev/null || true)"
   dmg_build_scheme="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingBuildScheme" 2>/dev/null || true)"
   dmg_build_configuration="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingBuildConfiguration" 2>/dev/null || true)"
+  dmg_git_commit="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingGitCommit" 2>/dev/null || true)"
+  dmg_git_branch="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingGitBranch" 2>/dev/null || true)"
+  dmg_git_dirty_state="$(plist_read_value "${dmg_info_plist}" "SkyBridgePackagingGitDirtyState" 2>/dev/null || true)"
+  expected_git_commit="$(plist_read_value "${expected_app_path}/Contents/Info.plist" "SkyBridgePackagingGitCommit" 2>/dev/null || true)"
+  expected_git_branch="$(plist_read_value "${expected_app_path}/Contents/Info.plist" "SkyBridgePackagingGitBranch" 2>/dev/null || true)"
+  expected_git_dirty_state="$(plist_read_value "${expected_app_path}/Contents/Info.plist" "SkyBridgePackagingGitDirtyState" 2>/dev/null || true)"
 
   [[ "${dmg_bundle_id}" == "${expected_bundle_id}" ]] \
     || fail "DMG app bundle identifier (${dmg_bundle_id}) does not match dist app (${expected_bundle_id})"
@@ -706,6 +767,13 @@ validate_dmg_embedded_app() {
     || fail "DMG app build scheme drifted (actual: ${dmg_build_scheme:-missing})"
   [[ "${dmg_build_configuration}" == "Release" ]] \
     || fail "DMG app build configuration drifted (actual: ${dmg_build_configuration:-missing})"
+  [[ -n "${dmg_git_commit}" && "${dmg_git_commit}" == "${expected_git_commit}" ]] \
+    || fail "DMG app Git commit (${dmg_git_commit:-missing}) does not match dist app (${expected_git_commit:-missing})"
+  [[ -n "${dmg_git_branch}" && "${dmg_git_branch}" == "${expected_git_branch}" ]] \
+    || fail "DMG app Git branch (${dmg_git_branch:-missing}) does not match dist app (${expected_git_branch:-missing})"
+  [[ -n "${dmg_git_dirty_state}" && "${dmg_git_dirty_state}" == "${expected_git_dirty_state}" ]] \
+    || fail "DMG app Git dirty state (${dmg_git_dirty_state:-missing}) does not match dist app (${expected_git_dirty_state:-missing})"
+  validate_release_git_provenance "${dmg_git_commit}" "${dmg_git_branch}" "${dmg_git_dirty_state}" "DMG app"
   skybridge_assert_bundle_has_apple_pqc_compile_marker "${dmg_app_path}" "DMG embedded app bundle" \
     || fail "DMG embedded app is missing the Apple PQC SDK compile marker"
 
@@ -752,13 +820,44 @@ collect_named_pids() {
   pgrep -x "${executable_name}" 2>/dev/null || true
 }
 
+redact_release_log_excerpt() {
+  python3 - <<'PY'
+import os
+import re
+import sys
+
+text = sys.stdin.read()
+home = os.environ.get("HOME")
+if home:
+    text = text.replace(home, "<home>")
+patterns = [
+    (r"\bAuthorization:\s*Bearer\s+\S+", "Authorization: Bearer <redacted>"),
+    (r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*)?\b", "<redacted-jwt>"),
+    (
+        r"\b(?:access[-_]?token|refresh[-_]?token|bearer[-_]?token|api[-_]?key|anon[-_]?key|connection[-_]?code|code|tenant[-_]?id|user[-_]?id|device[-_]?id)="
+        r"(?!<redacted\b|<redacted>)[^\s&]+",
+        lambda match: match.group(0).split("=", 1)[0] + "=<redacted>",
+    ),
+    (r"\b(?:ws|wss|https?)://[^\s\"']+", "<redacted-url>"),
+    (r"(?<![A-Za-z0-9])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?", "<redacted-ip>"),
+    (r"(^|[\s\"=])/(?:Users|private/var|var/folders|tmp)/[^\s\"']+", r"\1<redacted-path>"),
+]
+for pattern, replacement in patterns:
+    text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+print(text, end="")
+PY
+}
+
 capture_recent_logs() {
   local process_name="$1"
   if ! command -v log >/dev/null 2>&1; then
     return 0
   fi
 
-  log show --style compact --last 2m --predicate "process == \"${process_name}\"" 2>/dev/null | tail -n 20 || true
+  log show --style compact --last 2m --predicate "process == \"${process_name}\"" 2>/dev/null \
+    | tail -n 20 \
+    | redact_release_log_excerpt \
+    || true
 }
 
 compare_plists() {
@@ -1354,6 +1453,9 @@ APP_BUILD="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleVersion" 2>/dev/null 
 APP_BUILD_SOURCE="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingBuildSource" 2>/dev/null || true)"
 APP_BUILD_SCHEME="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingBuildScheme" 2>/dev/null || true)"
 APP_BUILD_CONFIGURATION="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingBuildConfiguration" 2>/dev/null || true)"
+APP_GIT_COMMIT="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingGitCommit" 2>/dev/null || true)"
+APP_GIT_BRANCH="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingGitBranch" 2>/dev/null || true)"
+APP_GIT_DIRTY_STATE="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingGitDirtyState" 2>/dev/null || true)"
 APP_EXECUTABLE_PATH="${APP_PATH}/Contents/MacOS/${APP_EXECUTABLE_NAME}"
 APP_HELPER_PLIST_PATH="${APP_PATH}/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper.plist"
 APP_HELPER_BIN_PATH="${APP_PATH}/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper/com.skybridge.PowerMetricsHelper"
@@ -1402,6 +1504,11 @@ esac
   || fail "app bundle build scheme drifted from release packaging policy (actual: ${APP_BUILD_SCHEME:-missing})"
 [[ "${APP_BUILD_CONFIGURATION}" == "Release" ]] \
   || fail "app bundle build configuration is not Release (actual: ${APP_BUILD_CONFIGURATION:-missing})"
+[[ -n "${APP_GIT_COMMIT}" ]] \
+  || fail "app bundle is missing SkyBridgePackagingGitCommit; rebuild with Scripts/package_app.sh"
+[[ -n "${APP_GIT_BRANCH}" ]] \
+  || fail "app bundle is missing SkyBridgePackagingGitBranch; rebuild with Scripts/package_app.sh"
+validate_release_git_provenance "${APP_GIT_COMMIT}" "${APP_GIT_BRANCH}" "${APP_GIT_DIRTY_STATE}" "app bundle"
 
 if [[ -z "${DMG_PATH}" ]]; then
   DMG_PATH="$(resolve_default_dmg_path "${APP_INFO_PLIST}")"
@@ -1511,6 +1618,13 @@ compare_required_privacy_usage_descriptions "${SOURCE_INFO_PLIST}" "${APP_INFO_P
 
 validate_swift_toolchain_baseline
 validate_update_check_configuration "${APP_INFO_PLIST}"
+if [[ "${MANIFEST_PATH_EXPLICIT}" == "1" ]]; then
+  validate_local_update_manifest "${MANIFEST_PATH}" "${APP_PATH}" "${DMG_PATH}"
+elif [[ -f "${MANIFEST_PATH}" ]]; then
+  validate_local_update_manifest "${MANIFEST_PATH}" "${APP_PATH}" "${DMG_PATH}"
+else
+  log_info "Stable update manifest not present at ${MANIFEST_PATH}; deferring exact manifest validation to Scripts/publish_macos_update_release.sh"
+fi
 
 validate_modern_app_icon_contract "${APP_INFO_PLIST}" "${APP_RESOURCES_DIR}" \
   || fail "app icon contract drifted from the precomposed AppIcon.icns release path"
@@ -1585,7 +1699,7 @@ assess_gatekeeper_target "${APP_PATH}" "execute" "App Bundle"
 assess_gatekeeper_target "${DMG_PATH}" "open" "DMG"
 
 if [[ "${PACKAGE_INTEGRITY_ONLY}" == "1" ]]; then
-  log_info "Package integrity-only validation complete"
+  log_warn "Package integrity-only validation complete; full_release_readiness=false release_proof=false skipped_gates=cli,connectivity,remote-control-notice,performance,launch,memory"
   exit 0
 fi
 
@@ -1598,7 +1712,7 @@ if [[ "${SKIP_LAUNCH_SMOKE}" == "1" ]]; then
   if [[ "${SKIP_CLI_QUALITY_GATES}" != "1" && "${SKIP_MEMORY_CHECK}" != "1" ]]; then
     fail "launch smoke cannot be skipped while the memory leak scan gate is enabled"
   fi
-  log_warn "launch smoke was skipped by request"
+  log_warn "launch smoke was skipped by request; full_release_readiness=false until a non-skipped launch/memory lane passes"
 else
   smoke_launch_app "${APP_PATH}" "${APP_EXECUTABLE_NAME}"
 fi
@@ -1616,4 +1730,8 @@ if [[ -n "${RUNNING_PATH}" ]]; then
   log_info "PowerMetricsHelper running version: ${RUNNING_VERSION:-unknown}"
 fi
 
-log_info "minimum macOS release readiness checks passed"
+if [[ "${SKIP_CLI_QUALITY_GATES}" == "1" || "${SKIP_PERFORMANCE_GATES}" == "1" || "${SKIP_MEMORY_CHECK}" == "1" || "${SKIP_LAUNCH_SMOKE}" == "1" ]]; then
+  log_warn "macOS release readiness completed with explicit skips; full_release_readiness=false release_proof=false"
+else
+  log_info "full macOS release readiness checks passed"
+fi

@@ -6,6 +6,8 @@ import CryptoKit
 @available(iOS 17.0, *)
 public enum AppMessage: Codable, Sendable, Equatable {
     case clipboard(ClipboardPayload)
+    /// 设备间文本消息（离线时经 OfflineMessageQueue 排队，重连后投递）。
+    case textMessage(TextMessagePayload)
     case pairingIdentityExchange(PairingIdentityExchangePayload)
     case kemRefreshRequest(KEMRefreshRequestPayload)
     case signedKEMRefresh(SignedKEMRefreshPayload)
@@ -13,11 +15,81 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case protocolIdentityBindingRequest(ProtocolIdentityBindingRequestPayload)
     case signedProtocolIdentityBinding(SignedProtocolIdentityBindingPayload)
     case heartbeat(HeartbeatPayload)
+    case authenticatedRouteBinding(AuthenticatedRouteBindingPayload)
     case peerDisconnecting(PeerDisconnectingPayload)
     /// Lightweight RTT probe (request).
     case ping(PingPayload)
     /// Lightweight RTT probe (response).
     case pong(PongPayload)
+
+    public struct TextMessagePayload: Codable, Sendable, Equatable {
+        public let id: UUID
+        public let text: String
+        public let sentAt: Date
+
+        public init(id: UUID = UUID(), text: String, sentAt: Date = Date()) {
+            self.id = id
+            self.text = text
+            self.sentAt = sentAt
+        }
+    }
+
+    public struct AuthenticatedRouteBindingPayload: Codable, Sendable, Equatable {
+        public static let currentVersion = 1
+
+        public let version: Int
+        public let kind: String
+        public let serviceType: String
+        public let instanceName: String
+        public let hostName: String
+        public let port: UInt16
+        public let endpointProvenance: String
+        public let localDeviceId: String
+        public let remoteDeviceId: String
+        public let routeAuthorityProtocolPublicKeyFingerprint: String
+        public let remoteProtocolPublicKeyFingerprint: String
+        public let sessionHashHex: String
+        public let transcriptPrefixHex: String
+        public let sentAt: Date
+        public let expiresAt: Date
+        public let nonce: Data
+
+        public init(
+            version: Int = Self.currentVersion,
+            kind: String,
+            serviceType: String,
+            instanceName: String,
+            hostName: String,
+            port: UInt16,
+            endpointProvenance: String,
+            localDeviceId: String,
+            remoteDeviceId: String,
+            routeAuthorityProtocolPublicKeyFingerprint: String,
+            remoteProtocolPublicKeyFingerprint: String,
+            sessionHashHex: String,
+            transcriptPrefixHex: String,
+            sentAt: Date = Date(),
+            expiresAt: Date,
+            nonce: Data
+        ) {
+            self.version = version
+            self.kind = kind
+            self.serviceType = serviceType
+            self.instanceName = instanceName
+            self.hostName = hostName
+            self.port = port
+            self.endpointProvenance = endpointProvenance
+            self.localDeviceId = localDeviceId
+            self.remoteDeviceId = remoteDeviceId
+            self.routeAuthorityProtocolPublicKeyFingerprint = routeAuthorityProtocolPublicKeyFingerprint
+            self.remoteProtocolPublicKeyFingerprint = remoteProtocolPublicKeyFingerprint
+            self.sessionHashHex = sessionHashHex
+            self.transcriptPrefixHex = transcriptPrefixHex
+            self.sentAt = sentAt
+            self.expiresAt = expiresAt
+            self.nonce = nonce
+        }
+    }
 
     public enum KEMRefreshValidationError: Error, LocalizedError, Sendable, Equatable {
         case invalidVersion
@@ -787,6 +859,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case clipboard
+        case textMessage
         case pairingIdentityExchange
         case kemRefreshRequest
         case signedKEMRefresh
@@ -794,6 +867,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case protocolIdentityBindingRequest
         case signedProtocolIdentityBinding
         case heartbeat
+        case authenticatedRouteBinding
         case peerDisconnecting
         case ping
         case pong
@@ -808,6 +882,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         if let payload = try? container.decode(ClipboardPayload.self, forKey: .clipboard) {
             self = .clipboard(payload)
+            return
+        }
+        if let payload = try? container.decode(TextMessagePayload.self, forKey: .textMessage) {
+            self = .textMessage(payload)
             return
         }
         if let payload = try? container.decode(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
@@ -838,6 +916,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self = .heartbeat(payload)
             return
         }
+        if let payload = try? container.decode(AuthenticatedRouteBindingPayload.self, forKey: .authenticatedRouteBinding) {
+            self = .authenticatedRouteBinding(payload)
+            return
+        }
         if let payload = try? container.decode(PeerDisconnectingPayload.self, forKey: .peerDisconnecting) {
             self = .peerDisconnecting(payload)
             return
@@ -853,6 +935,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         if let payload = (try? container.decode(LegacyAssociatedValueBox<ClipboardPayload>.self, forKey: .clipboard))?._0 {
             self = .clipboard(payload)
+            return
+        }
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<TextMessagePayload>.self, forKey: .textMessage))?._0 {
+            self = .textMessage(payload)
             return
         }
         if let payload = (try? container.decode(LegacyAssociatedValueBox<PairingIdentityExchangePayload>.self, forKey: .pairingIdentityExchange))?._0 {
@@ -883,6 +969,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self = .heartbeat(payload)
             return
         }
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<AuthenticatedRouteBindingPayload>.self, forKey: .authenticatedRouteBinding))?._0 {
+            self = .authenticatedRouteBinding(payload)
+            return
+        }
         if let payload = (try? container.decode(LegacyAssociatedValueBox<PeerDisconnectingPayload>.self, forKey: .peerDisconnecting))?._0 {
             self = .peerDisconnecting(payload)
             return
@@ -909,6 +999,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
         switch self {
         case .clipboard(let payload):
             try container.encode(payload, forKey: .clipboard)
+        case .textMessage(let payload):
+            try container.encode(payload, forKey: .textMessage)
         case .pairingIdentityExchange(let payload):
             try container.encode(payload, forKey: .pairingIdentityExchange)
         case .kemRefreshRequest(let payload):
@@ -923,6 +1015,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .signedProtocolIdentityBinding)
         case .heartbeat(let payload):
             try container.encode(payload, forKey: .heartbeat)
+        case .authenticatedRouteBinding(let payload):
+            try container.encode(payload, forKey: .authenticatedRouteBinding)
         case .peerDisconnecting(let payload):
             try container.encode(payload, forKey: .peerDisconnecting)
         case .ping(let payload):

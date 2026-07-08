@@ -75,8 +75,57 @@ EXEMPT = {
 # still tracked for drift, but the report labels them so reviewers know a diff is
 # expected and the question is only "did the WIRE behaviour change".
 KNOWN_FORKED = {
+    "CrossNetworkWebRTCLocalAppMessageFactory.swift",
     "TwoAttemptHandshakeManager.swift",
 }
+
+WIRE_ANCHORS = [
+    ("DataChannel control label",
+     r'controlChannelLabel\s*=\s*"([^"]+)"',
+     None),
+    ("DataChannel screen label",
+     r'screenChannelLabel\s*=\s*"([^"]+)"',
+     None),
+    ("AppMessage payload cases",
+     r'^\s*case\s+([a-z][A-Za-z0-9_]*)\(([A-Za-z0-9_]+Payload)\)',
+     "AppMessage.swift"),
+    ("Cross-network file-transfer operations",
+     r'^\s*case\s+(metadata|metadataAck|chunk|chunkAck|complete|completeAck|cancel|error)\b',
+     "CrossNetworkFileTransferWire.swift"),
+    ("Cross-network file-transfer fields",
+     r'public\s+let\s+([A-Za-z0-9_]+)\s*:\s*([A-Za-z0-9_<>\[\]\?: ]+)',
+     "CrossNetworkFileTransferWire.swift"),
+    ("Remote-control secure packet types",
+     r'case\s+(control|screen|audio)\s*=\s*([0-9]+)',
+     "RemoteControlSecureEnvelope.swift"),
+    ("Remote-control secure envelope constants",
+     r'private\s+static\s+let\s+(magic|version|headerLength|tagLength|epoch|directionInitiatorToResponder|directionResponderToInitiator)\s*(?::\s*[A-Za-z0-9_]+)?\s*=\s*([0-9xA-Fa-f_]+)',
+     "RemoteControlSecureEnvelope.swift"),
+    ("Handshake signature domains",
+     r'static\s+let\s+(protocolA|protocolB|secureEnclaveA|secureEnclaveB)\s*=\s*"([^"]+)"',
+     "HandshakeMessages.swift"),
+    ("Handshake identity public-key fields",
+     r'public\s+let\s+(protocolPublicKey|protocolAlgorithm|secureEnclavePublicKey)\s*:\s*([A-Za-z0-9_<>\[\]\?: ]+)',
+     "HandshakeMessages.swift"),
+    ("Handshake identity algorithm bytes",
+     r'case\s+\.([A-Za-z0-9_]+):\s*algorithmByte\s*=\s*(0x[0-9A-Fa-f]+)',
+     "HandshakeMessages.swift"),
+    ("WebRTC signaling message types",
+     r'case\s+(join|offer|answer|iceCandidate|leave)\b',
+     "WebRTCSignalingEnvelope.swift"),
+    ("WebRTC signaling payload fields",
+     r'public\s+var\s+([A-Za-z0-9_]+)\s*:\s*([A-Za-z0-9_<>\[\]\?: ]+)',
+     "WebRTCSignalingEnvelope.swift"),
+    ("WebRTC signaling immutable envelope fields",
+     r'public\s+let\s+([A-Za-z0-9_]+)\s*:\s*([A-Za-z0-9_<>\[\]\?: ]+)',
+     "WebRTCSignalingEnvelope.swift"),
+    ("Remote SDP/ICE validator limits",
+     r'private\s+static\s+let\s+(maxRemote(?:SDP|ICE)[A-Za-z0-9]+)\s*=\s*([0-9_ *]+)',
+     "WebRTCSession+SDP.swift"),
+    ("Remote SDP/ICE fail-closed reasons",
+     r'"((?:remote (?:offer|answer|ICE candidate)|[^"]*(?:DTLS fingerprint|ICE credentials|session-level ICE candidate|missing sdpMLineIndex|contains control characters|exceeds 256 ICE candidates))[^"]*)"',
+     "WebRTCSession+SDP.swift"),
+]
 
 
 def normalize(text: str) -> str:
@@ -132,29 +181,40 @@ def discover_pairs() -> dict[str, dict]:
 # --- Wire-anchor cross-checks: constants that MUST match across platforms. ---
 
 def _extract(pattern: str, root: Path) -> set[str]:
-    rx = re.compile(pattern)
+    rx = re.compile(pattern, re.MULTILINE)
     vals: set[str] = set()
     for p in root.rglob("*.swift"):
         try:
             for m in rx.finditer(p.read_text(encoding="utf-8", errors="replace")):
-                vals.add(m.group(1))
+                vals.add("|".join(part.strip() for part in m.groups()))
         except OSError:
             continue
+    return vals
+
+
+def _extract_from_named_file(pattern: str, root: Path, filename: str) -> set[str]:
+    rx = re.compile(pattern, re.MULTILINE)
+    vals: set[str] = set()
+    for p in root.rglob(filename):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in rx.finditer(text):
+            vals.add("|".join(part.strip() for part in m.groups()))
     return vals
 
 
 def check_wire_anchors() -> list[str]:
     """Return a list of human-readable mismatch errors (empty = OK)."""
     errors: list[str] = []
-    anchors = [
-        ("DataChannel control label",
-         r'controlChannelLabel\s*=\s*"([^"]+)"'),
-        ("DataChannel screen label",
-         r'screenChannelLabel\s*=\s*"([^"]+)"'),
-    ]
-    for label, pat in anchors:
-        ios_vals = _extract(pat, IOS_CORE)
-        mac_vals = _extract(pat, MACOS_SOURCES)
+    for label, pat, filename in WIRE_ANCHORS:
+        if filename is None:
+            ios_vals = _extract(pat, IOS_CORE)
+            mac_vals = _extract(pat, MACOS_SOURCES)
+        else:
+            ios_vals = _extract_from_named_file(pat, IOS_CORE, filename)
+            mac_vals = _extract_from_named_file(pat, MACOS_SOURCES, filename)
         if not ios_vals or not mac_vals:
             errors.append(f"anchor '{label}': not found on both sides (ios={sorted(ios_vals)} macos={sorted(mac_vals)})")
         elif ios_vals != mac_vals:
@@ -231,7 +291,7 @@ def cmd_check(pairs):
         print("❌ protocol-parity check FAILED:\n", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
-        print(f"\n  Tracked pairs: {len(current)} | anchors checked: 2 (DataChannel labels)", file=sys.stderr)
+        print(f"\n  Tracked pairs: {len(current)} | anchors checked: {len(WIRE_ANCHORS)}", file=sys.stderr)
         return 1
 
     print(f"✅ protocol-parity OK — {len(current)} tracked pairs match baseline; wire anchors consistent.")

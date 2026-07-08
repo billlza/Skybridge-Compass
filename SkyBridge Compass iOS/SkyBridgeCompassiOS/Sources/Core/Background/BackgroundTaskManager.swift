@@ -290,7 +290,13 @@ public class BackgroundTaskManager: ObservableObject {
     private func syncOfflineMessages() async {
         // 同步离线消息
         let queue = OfflineMessageQueue.shared
-        queue.cleanupExpiredMessages()
+        do {
+            try queue.cleanupExpiredMessages()
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "Offline message background sync cleanup failed: \(DeviceMessagingService.logSafeErrorSummary(error))"
+            )
+        }
         
         // 检查连接状态并发送待处理消息
         // 实际实现需要与 P2PConnectionManager 配合
@@ -304,7 +310,13 @@ public class BackgroundTaskManager: ObservableObject {
     private func cleanupData() async {
         // 清理过期数据
         let queue = OfflineMessageQueue.shared
-        queue.cleanupExpiredMessages()
+        do {
+            try queue.cleanupExpiredMessages()
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "Offline message background cleanup failed: \(DeviceMessagingService.logSafeErrorSummary(error))"
+            )
+        }
         
         // 清理过期的会话密钥
         let keychain = KeychainManager.shared

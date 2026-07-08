@@ -2203,6 +2203,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             await handlePairingIdentityExchange(payload)
         case .heartbeat:
             break
+        case .authenticatedRouteBinding:
+            break
         case .peerDisconnecting:
             disconnect()
         case .ping(let payload):

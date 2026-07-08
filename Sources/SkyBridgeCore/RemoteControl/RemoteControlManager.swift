@@ -25,6 +25,7 @@ private final class PeerConnection {
     let connection: NWConnection
     var remoteVideoFormats: Set<String>
     var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
+    var pendingRequestedStreamConfiguration: RemoteDesktopStreamConfiguration?
     var captureCompatibilityOverride: RemoteFrameType?
     var lastViewerStreamRefreshAt: Date = .distantPast
     var securityNoticeId: UUID?
@@ -1147,6 +1148,10 @@ public final class RemoteControlManager: BaseManager {
             return false
         }
         peer.securityAdmissionApproved = true
+        if let pendingConfiguration = peer.pendingRequestedStreamConfiguration {
+            peer.pendingRequestedStreamConfiguration = nil
+            await applyViewerStreamConfiguration(pendingConfiguration, for: peer)
+        }
         return true
     }
 
@@ -2874,6 +2879,7 @@ public final class RemoteControlManager: BaseManager {
                     )
                     logger.info("🔐 RemoteControl inbound handshake driver ready for \(peer.id, privacy: .public)")
                 } catch {
+                    emitSmokeTrace("mac remote inbound-init-failed peer=\(peer.id) reason=\(error.localizedDescription)")
                     logger.error("❌ RemoteControl inbound handshake init failed for \(peer.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     if Self.shouldKeepTransportAliveAfterHandshakeFailure(for: peer.role) {
                         emitSmokeTrace("mac remote inbound-init-retry peer=\(peer.id) reason=\(error.localizedDescription)")
@@ -3100,7 +3106,10 @@ public final class RemoteControlManager: BaseManager {
     private func handleControlMessagePayload(_ messageData: Data, from peer: PeerConnection) async throws {
         guard isCurrentPeer(peer) else { return }
         let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
-        guard RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
+        let isPreApprovalStreamConfiguration = message.type == .streamConfiguration
+            && peer.role == .beingControlled
+            && !peer.securityAdmissionApproved
+        guard isPreApprovalStreamConfiguration || RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
             message.type,
             isApproved: peer.role != .beingControlled || peer.securityAdmissionApproved
         ) else {
@@ -3143,6 +3152,27 @@ public final class RemoteControlManager: BaseManager {
                     for: peer
                 )
             }
+            guard peer.role != .beingControlled || peer.securityAdmissionApproved else {
+                peer.pendingRequestedStreamConfiguration = config
+                logger.info(
+                    "⏳ viewer 流配置已暂存，等待远控安全提示批准后再应用: peer=\(peer.id, privacy: .public)"
+                )
+                RemoteControlSmokeStatusWriter.append(
+                    "remoteControlStreamConfigDeferred session=\(peer.id) transport=p2p reason=awaiting_security_notice"
+                )
+                break
+            }
+            await applyViewerStreamConfiguration(config, for: peer)
+        case .damageReport, .cursorUpdate, .overlayUpdate:
+            break
+        }
+    }
+
+    private func applyViewerStreamConfiguration(
+        _ config: RemoteDesktopStreamConfiguration,
+        for peer: PeerConnection
+    ) async {
+        guard isCurrentPeer(peer) else { return }
             let previousConfig = peer.requestedStreamConfiguration
             let effectiveConfig = RemoteControlStreamRequestPolicy
                 .streamConfigurationByPreservingAudioEndpointForVideoRefresh(
@@ -3165,7 +3195,7 @@ public final class RemoteControlManager: BaseManager {
                 logger.info(
                     "🎛️ 应用 viewer 停止流配置: peer=\(peer.id, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
                 )
-                break
+                return
             }
             logger.info(
                 "🎛️ 应用 viewer 流配置: peer=\(peer.id, privacy: .public) first=\(previousConfig == nil, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) transport=\(effectiveConfig.screenFrameTransport ?? "legacy", privacy: .public)"
@@ -3191,15 +3221,6 @@ public final class RemoteControlManager: BaseManager {
                 refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken))
                 """
             )
-            guard peer.role != .beingControlled || peer.securityAdmissionApproved else {
-                logger.info(
-                    "⏳ viewer 流配置已记录，等待远控安全提示批准后再启用推流和剪贴板: peer=\(peer.id, privacy: .public)"
-                )
-                RemoteControlSmokeStatusWriter.append(
-                    "remoteControlStreamConfigDeferred session=\(peer.id) transport=p2p reason=awaiting_security_notice"
-                )
-                break
-            }
             configureClipboardSync(for: peer)
             cancelDeferredScreenSharingFallback(for: peer.id)
             if !screenSharingActive {
@@ -3233,9 +3254,6 @@ public final class RemoteControlManager: BaseManager {
                 }
                 startInteractionTelemetryIfNeeded(for: peer)
             }
-        case .damageReport, .cursorUpdate, .overlayUpdate:
-            break
-        }
     }
 
     private func sendRemoteFrame(_ plaintext: Data, to peer: PeerConnection) async throws {

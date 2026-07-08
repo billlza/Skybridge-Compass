@@ -1037,4 +1037,46 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("handleConnectionStateChange(state, for: device, connection: connection)"))
         XCTAssertTrue(source.contains("connections.values.contains { $0 === connection }"))
     }
+
+    func testIOSFileTransferInboundMetadataFailuresFailClosed() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"),
+            encoding: .utf8
+        )
+
+        let receiveStart = try XCTUnwrap(source.range(of: "private func receiveMetadata"))
+        let receiveEnd = try XCTUnwrap(
+            source.range(of: "private nonisolated func getPeerName", range: receiveStart.lowerBound..<source.endIndex)
+        )
+        let receiveMetadataBlock = String(source[receiveStart.lowerBound..<receiveEnd.lowerBound])
+
+        XCTAssertTrue(source.contains("private enum InboundInitialMetadataError"))
+        XCTAssertTrue(receiveMetadataBlock.contains("decodeInboundInitialMetadataHeader"))
+        XCTAssertTrue(receiveMetadataBlock.contains("decodeInboundInitialMetadataPayload"))
+        XCTAssertTrue(receiveMetadataBlock.contains("Result<TransferHeader, InboundInitialMetadataError>"))
+        XCTAssertTrue(receiveMetadataBlock.contains("Result<FileMetadata, InboundInitialMetadataError>"))
+        XCTAssertTrue(receiveMetadataBlock.contains("rejectInboundMetadataConnection"))
+        for reason in [
+            "header_receive_failed",
+            "missing_header",
+            "malformed_header",
+            "unsupported_resume_request",
+            "unexpected_initial_message",
+            "invalid_metadata_length",
+            "metadata_receive_failed",
+            "missing_metadata_payload",
+            "malformed_metadata_json"
+        ] {
+            XCTAssertTrue(source.contains("\"\(reason)\""), "Missing fail-closed reason \(reason)")
+        }
+        XCTAssertTrue(receiveMetadataBlock.contains("activeConnections.removeValue(forKey: connectionId)"))
+        XCTAssertTrue(receiveMetadataBlock.contains("connection.stateUpdateHandler = nil"))
+        XCTAssertTrue(receiveMetadataBlock.contains("connection.cancel()"))
+        XCTAssertFalse(receiveMetadataBlock.contains("try? JSONDecoder().decode(FileMetadata.self"))
+        XCTAssertFalse(receiveMetadataBlock.contains("error.localizedDescription"))
+    }
 }

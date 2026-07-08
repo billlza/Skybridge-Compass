@@ -61,6 +61,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
     @Published public private(set) var idleConnectionPrompt: IdleConnectionPrompt?
     nonisolated static let webRTCStartupJoinHeartbeatAttempts = 60
+    nonisolated private static let maxPendingPreSessionSignalingEnvelopes = 32
     nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
     public var activeRemoteDesktopSessionId: String? {
@@ -631,6 +632,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var latestLocalOfferBySessionId: [String: String] = [:]
     private var latestLocalAnswerBySessionId: [String: String] = [:]
     private var localICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
+    private var pendingPreSessionSignalingEnvelopesBySessionId: [String: [WebRTCSignalingEnvelope]] = [:]
     private var joinHeartbeatTask: Task<Void, Never>?
     private var offerResendTask: Task<Void, Never>?
     private var remoteDesktopHeartbeatTask: Task<Void, Never>?
@@ -643,6 +645,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     // File transfer waiters (transferId|op|chunkIndex -> waiter)
     // token 用于防止残留的超时任务误杀同 key 的后续 waiter（见 waitForFileTransferAck）。
+    typealias InboundFileTransferApprovalProvider = @MainActor (InboundFileTransferApprovalRequest) async -> InboundFileTransferApprovalDecision
+    var inboundFileTransferApprovalProvider: InboundFileTransferApprovalProvider = { _ in
+        .rejected(reason: CrossNetworkWebRTCManager.inboundFileTransferExplicitApprovalRequiredMessage)
+    }
     var fileTransferWaiters: [String: FileTransferWaiter] = [:]
     var webRTCSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
     var webRTCSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
@@ -956,6 +962,74 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func additionalProtocolFingerprints(for sessionId: String) -> Set<String> {
         currentPathAdditionalProtocolFingerprintsBySessionId[sessionId] ?? []
+    }
+
+    private func localRouteAuthorityProtocolFingerprint() async -> String? {
+        let fingerprints = await localProtocolIdentityPublicKeysForPairing()
+            .compactMap { $0.authoritativeFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter(CrossNetworkWebRTCLocalAppMessageFactory.isCanonicalLowerHexFingerprint)
+        return fingerprints.first
+    }
+
+    private func sendLocalAuthenticatedRouteBindings(
+        keys: SessionKeys,
+        sessionId: String,
+        session: WebRTCSession,
+        stage: String
+    ) async {
+        guard currentSessionId == sessionId else { return }
+        guard !strictPQCClassicBootstrapOnlySessionIds.contains(sessionId),
+              !rekeyInProgressSessionIds.contains(sessionId) else {
+            appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=session_not_business_ready")
+            return
+        }
+        if strictPQCRequestedBySessionId[sessionId] == true,
+           !keys.negotiatedSuite.isPQCGroup {
+            appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=strict_pqc_rekey_pending")
+            return
+        }
+
+        do {
+            guard let remoteAuthority = currentPathExpectedRemoteAuthorityBySessionId[sessionId] else {
+                appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=missing_remote_authority")
+                return
+            }
+            try await FileTransferRuntime.shared.ensureHealthy()
+            guard let localFingerprint = await localRouteAuthorityProtocolFingerprint() else {
+                appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=missing_local_protocol_fingerprint")
+                return
+            }
+            let messages = try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedFileTransferRouteBindingMessages(
+                keys: keys,
+                localDeviceId: localDeviceId,
+                remoteAuthority: remoteAuthority,
+                localRouteAuthorityProtocolPublicKeyFingerprint: localFingerprint
+            )
+            guard !messages.isEmpty else {
+                appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=no_registered_product_routes")
+                return
+            }
+
+            for message in messages {
+                try await sendAppMessageOverWebRTC(
+                    message,
+                    sessionId: sessionId,
+                    session: session,
+                    label: "tx/webrtc-authenticated-route-binding"
+                )
+            }
+            appendSmokeTrace("authenticated-route-binding-send session=\(sessionId) stage=\(stage) routes=\(messages.count)")
+            SkyBridgeLogger.shared.info(
+                "🔐 WebRTC authenticatedRouteBinding sent: session=\(sessionId), stage=\(stage), routes=\(messages.count)"
+            )
+        } catch {
+            appendSmokeTrace(
+                "authenticated-route-binding-send-failed session=\(sessionId) stage=\(stage) error=\(CrossNetworkWebRTCTraceDescription.smokeTraceToken(error.localizedDescription))"
+            )
+            SkyBridgeLogger.shared.warning(
+                "⚠️ WebRTC authenticatedRouteBinding send failed: session=\(sessionId), stage=\(stage), err=\(error.localizedDescription)"
+            )
+        }
     }
 
     private func currentPathTrustedProtocolFingerprints(for sessionId: String) -> Set<String> {
@@ -1621,6 +1695,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         latestLocalOfferBySessionId.removeAll()
         latestLocalAnswerBySessionId.removeAll()
         localICECandidatesBySessionId.removeAll()
+        pendingPreSessionSignalingEnvelopesBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
         webrtcTurnAdmissionTokenBySessionId.removeAll()
         webrtcMediaAdmissionTokenBySessionId.removeAll()
@@ -2669,7 +2744,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return
         }
 
-        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=present failure_code=\(failureCode) failure_class=\(publicFailureClass)")
+        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session_ref=\(sessionLabel) failure_code=\(failureCode) failure_class=\(publicFailureClass)")
         if Self.isFatalPreTransportFailure(failureClass) {
             applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
             lastError = "Signaling error: \(failureCode)"
@@ -3659,6 +3734,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         try s.start()
         SkyBridgeLogger.shared.info("🌐 cross-network phase=session_started session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer")")
         appendSmokeTrace("session-started session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer")")
+        drainPendingPreSessionSignalingEnvelopes(sessionId: sessionId)
 
         screenReceiveTask?.cancel()
         let screenSessionObjectIdentifier = ObjectIdentifier(s)
@@ -3705,7 +3781,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case .offer:
             if let sdp = env.payload?.sdp {
                 appendSmokeTrace("remote-offer session=\(env.sessionId) \(CrossNetworkWebRTCTraceDescription.describeSDPCandidates(sdp))")
-                session?.setRemoteOffer(sdp)
+                guard let session else {
+                    enqueuePreSessionSignalingEnvelope(env)
+                    return
+                }
+                session.setRemoteOffer(sdp)
             }
             let localId = localDeviceId
             Task { @MainActor [weak self] in
@@ -3716,7 +3796,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             stopOfferResendLoop()
             if let sdp = env.payload?.sdp {
                 appendSmokeTrace("remote-answer session=\(env.sessionId) \(CrossNetworkWebRTCTraceDescription.describeSDPCandidates(sdp))")
-                session?.setRemoteAnswer(sdp)
+                guard let session else {
+                    enqueuePreSessionSignalingEnvelope(env)
+                    return
+                }
+                session.setRemoteAnswer(sdp)
             }
             let localId = localDeviceId
             Task { @MainActor [weak self] in
@@ -3727,7 +3811,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 appendSmokeTrace(
                     "remote-ice session=\(env.sessionId) kind=\(CrossNetworkWebRTCTraceDescription.describeCandidateKind(p.candidate)) mid=\(p.sdpMid ?? "-") index=\(p.sdpMLineIndex ?? -1)"
                 )
-                session?.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
+                guard let session else {
+                    enqueuePreSessionSignalingEnvelope(env)
+                    return
+                }
+                session.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
             }
         case .join:
             appendSmokeTrace("remote-join session=\(env.sessionId) from=\(env.from)")
@@ -3752,6 +3840,44 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     reason: "remote_leave"
                 )
             }
+        }
+    }
+
+    private func enqueuePreSessionSignalingEnvelope(_ env: WebRTCSignalingEnvelope) {
+        guard isPreSessionSignalingEnvelope(env) else { return }
+
+        var pending = pendingPreSessionSignalingEnvelopesBySessionId[env.sessionId] ?? []
+        guard pending.count < Self.maxPendingPreSessionSignalingEnvelopes else {
+            let message = "pre-session signaling queue overflow"
+            appendSmokeTrace("pre-session-drop session=\(env.sessionId) type=\(env.type.rawValue) reason=queue-overflow max=\(Self.maxPendingPreSessionSignalingEnvelopes)")
+            SkyBridgeLogger.shared.error("⛔️ \(message): session=\(env.sessionId) type=\(env.type.rawValue)")
+            lastError = message
+            state = .failed(message)
+            readiness = .idle
+            return
+        }
+
+        pending.append(env)
+        pendingPreSessionSignalingEnvelopesBySessionId[env.sessionId] = pending
+        appendSmokeTrace("pre-session-queued session=\(env.sessionId) type=\(env.type.rawValue) pending=\(pending.count)")
+    }
+
+    private func drainPendingPreSessionSignalingEnvelopes(sessionId: String) {
+        guard let pending = pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionId),
+              !pending.isEmpty else { return }
+
+        appendSmokeTrace("pre-session-drain session=\(sessionId) count=\(pending.count)")
+        for env in pending {
+            handleEnvelope(env)
+        }
+    }
+
+    private func isPreSessionSignalingEnvelope(_ env: WebRTCSignalingEnvelope) -> Bool {
+        switch env.type {
+        case .offer, .answer, .iceCandidate:
+            return true
+        case .join, .leave:
+            return false
         }
     }
 }
@@ -3918,10 +4044,10 @@ extension CrossNetworkWebRTCManager {
                     for candidate in peerIdCandidates {
                         await KEMTrustStore.shared.clear(deviceId: candidate)
                     }
-                    self.appendSmokeTrace("bootstrap retry classic peer=\(peerDeviceId)")
+                    self.appendSmokeTrace("bootstrap retry classic peer_ref=\(SkyBridgeTraceRedaction.stableReference(peerDeviceId))")
                     SkyBridgeLogger.shared.warning(
                         "⚠️ WebRTC trusted KEM bootstrap failed; cleared cached peer KEM keys and retrying classic bootstrap. " +
-                        "session=\(sessionId), peer=\(peerDeviceId), error=\(CrossNetworkWebRTCPQCHandshakePolicy.describeHandshakeError(error))"
+                        "session_ref=\(SkyBridgeTraceRedaction.stableReference(sessionId)), peer_ref=\(SkyBridgeTraceRedaction.stableReference(peerDeviceId)), error=\(CrossNetworkWebRTCPQCHandshakePolicy.describeHandshakeError(error))"
                     )
                     keys = try await attemptInitialHandshake(
                         selection: .classicOnly,
@@ -3962,6 +4088,12 @@ extension CrossNetworkWebRTCManager {
                 }
             }
             self.persistCurrentPathTrust(sessionId: sessionId)
+            await self.sendLocalAuthenticatedRouteBindings(
+                keys: keys,
+                sessionId: sessionId,
+                session: session,
+                stage: "initial-handshake"
+            )
             SkyBridgeLogger.shared.info(
                 "✅ WebRTC 握手完成（DataChannel） session=\(sessionId) suite=\(keys.negotiatedSuite.rawValue)"
             )
@@ -4440,6 +4572,15 @@ extension CrossNetworkWebRTCManager {
                 }
             }
             persistCurrentPathTrust(sessionId: sessionId)
+            if currentSessionId == sessionId,
+               let activeSession = self.session {
+                await sendLocalAuthenticatedRouteBindings(
+                    keys: keys,
+                    sessionId: sessionId,
+                    session: activeSession,
+                    stage: "inbound-rekey"
+                )
+            }
             let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup
                 ? "pqcRekeyComplete"
                 : "classicRekeyComplete"
@@ -4583,6 +4724,15 @@ extension CrossNetworkWebRTCManager {
                 }
             }
             persistCurrentPathTrust(sessionId: sessionId)
+            if currentSessionId == sessionId,
+               let activeSession = self.session {
+                await sendLocalAuthenticatedRouteBindings(
+                    keys: keys,
+                    sessionId: sessionId,
+                    session: activeSession,
+                    stage: "inbound-initial-handshake"
+                )
+            }
             SkyBridgeLogger.shared.info(
                 "✅ inbound WebRTC 初始握手完成: session=\(sessionId), suite=\(keys.negotiatedSuite.rawValue)"
             )
@@ -4673,7 +4823,7 @@ extension CrossNetworkWebRTCManager {
         )
         lastPairingIdentityExchangeSentAtByPeerId[peerDeviceId] = Date()
         SkyBridgeLogger.shared.info(
-            "📤 WebRTC pairingIdentityExchange sent: session=\(sessionId), peer=\(peerDeviceId), keys=\(kemKeys.count)"
+            "📤 WebRTC pairingIdentityExchange sent: session_ref=\(SkyBridgeTraceRedaction.stableReference(sessionId)), peer_ref=\(SkyBridgeTraceRedaction.stableReference(peerDeviceId)), keys=\(kemKeys.count)"
         )
     }
 
@@ -4688,7 +4838,7 @@ extension CrossNetworkWebRTCManager {
         case .pairingIdentityExchange(let payload):
             guard let payload = payload.normalizedBootstrapPayload else {
                 SkyBridgeLogger.shared.warning(
-                    "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session=\(sessionId) peer=\(peerDeviceId)"
+                    "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session_ref=\(SkyBridgeTraceRedaction.stableReference(sessionId)) peer_ref=\(SkyBridgeTraceRedaction.stableReference(peerDeviceId))"
                 )
                 return
             }
@@ -4713,7 +4863,7 @@ extension CrossNetworkWebRTCManager {
                 handshakePeerId = payload.deviceId
             }
             SkyBridgeLogger.shared.info(
-                "🔑 WebRTC bootstrap KEM cache updated: peer=\(peerDeviceId), declared=\(payload.deviceId), keys=\(payload.kemPublicKeys.count)"
+                "🔑 WebRTC bootstrap KEM cache updated: peer_ref=\(SkyBridgeTraceRedaction.stableReference(peerDeviceId)), declared_ref=\(SkyBridgeTraceRedaction.stableReference(payload.deviceId)), keys=\(payload.kemPublicKeys.count)"
             )
 
             do {
@@ -4740,6 +4890,32 @@ extension CrossNetworkWebRTCManager {
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
              .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
             break
+        case .textMessage(let payload):
+            noteRemoteAppActivity(sessionId: sessionId)
+            do {
+                if let fingerprint = currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolPublicKeyFingerprint {
+                    try DeviceMessagingService.shared.handleIncoming(
+                        payload,
+                        conversationFingerprint: fingerprint
+                    )
+                } else {
+                    try DeviceMessagingService.shared.handleIncoming(
+                        payload,
+                        fromPeerIds: [
+                            peerDeviceId,
+                            remoteDeviceId,
+                            handshakePeerId
+                        ].compactMap { $0 }
+                    )
+                }
+                SkyBridgeLogger.shared.info(
+                    "📨 WebRTC textMessage received: session=\(Self.protocolIdentityLogRedaction), peer=\(Self.protocolIdentityLogRedaction), messageId=\(payload.id.uuidString)"
+                )
+            } catch {
+                SkyBridgeLogger.shared.error(
+                    "⛔️ WebRTC textMessage not persisted: session=\(Self.protocolIdentityLogRedaction), peer=\(Self.protocolIdentityLogRedaction), messageId=\(payload.id.uuidString), reason=\(DeviceMessagingService.logSafeErrorSummary(error))"
+                )
+            }
         case .heartbeat(let payload):
             noteRemoteAppActivity(sessionId: sessionId)
             if let deviceId = payload.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -4769,6 +4945,8 @@ extension CrossNetworkWebRTCManager {
                     return nil
                 }()
             )
+        case .authenticatedRouteBinding:
+            noteRemoteAppActivity(sessionId: sessionId)
         case .peerDisconnecting:
             noteRemoteAppActivity(sessionId: sessionId)
         case .ping(let payload):
@@ -5045,6 +5223,7 @@ extension CrossNetworkWebRTCManager {
             let rekeyed = try await driver.initiateHandshake(with: peer)
             sessionKeys = rekeyed
             rekeyCompletedSessionIds.insert(sessionId)
+            rekeyInProgressSessionIds.remove(sessionId)
             clearStrictPQCClassicBootstrapOnly(sessionId: sessionId)
             lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
 
@@ -5069,6 +5248,12 @@ extension CrossNetworkWebRTCManager {
                 }
             }
             persistCurrentPathTrust(sessionId: sessionId)
+            await sendLocalAuthenticatedRouteBindings(
+                keys: rekeyed,
+                sessionId: sessionId,
+                session: session,
+                stage: "outbound-rekey"
+            )
 
             let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup
                 ? "pqcRekeyComplete"

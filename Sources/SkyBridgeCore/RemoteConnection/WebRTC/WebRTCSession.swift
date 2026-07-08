@@ -286,6 +286,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var lastOutgoingNativeVideoFrameLogAt: Date = .distantPast
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
+    private var latestObservedRemoteICECandidateAddress: String?
 #endif
     
     private var isClosed = false
@@ -294,6 +295,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var didNotifyReady = false
     private var hasRemoteDescription = false
     private var isSettingRemoteDescription = false
+    private var acceptedRemoteDescriptionValidation: ValidatedRemoteSessionDescription?
     private var lastEmittedLocalSDP: String?
     private var lifecycleToken: UInt64 = 0
     private let inboundDataLock = NSLock()
@@ -472,12 +474,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             didNotifyReady = false
             hasRemoteDescription = false
             isSettingRemoteDescription = false
+            acceptedRemoteDescriptionValidation = nil
             lastEmittedLocalSDP = nil
             lifecycleToken &+= 1
             onDisconnected = nil
 #if canImport(WebRTC)
             pendingRemoteICECandidates.removeAll(keepingCapacity: false)
             seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
+            latestObservedRemoteICECandidateAddress = nil
             dataChannel?.close()
             dataChannel = nil
             screenDataChannel?.close()
@@ -627,11 +631,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didNotifyDisconnected = false
         didNotifyReady = false
         hasRemoteDescription = false
+        isSettingRemoteDescription = false
+        acceptedRemoteDescriptionValidation = nil
         lastEmittedLocalSDP = nil
         lifecycleToken &+= 1
 #if canImport(WebRTC)
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
+        latestObservedRemoteICECandidateAddress = nil
         WebRTCSSL.retain()
         sslHeld = true
         let factory = WebRTCPeerConnectionFactoryProvider.factory(
@@ -800,8 +807,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
         var overflowReason: String?
-        inboundDataLock.lock()
         let activeHandler = onData
+        inboundDataLock.lock()
         switch Self.pendingInboundDeliveryPlan(
             hasHandlerInstalled: activeHandler != nil,
             pendingCount: pendingInboundDataBuffers.count
@@ -853,8 +860,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
         var overflowReason: String?
-        inboundScreenDataLock.lock()
         let activeHandler = onScreenData
+        inboundScreenDataLock.lock()
         switch Self.pendingInboundDeliveryPlan(
             hasHandlerInstalled: activeHandler != nil,
             pendingCount: pendingInboundScreenDataBuffers.count
@@ -922,6 +929,19 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         scheduleState { [weak self] in
             guard let self, !self.isClosed else { return }
+            let remoteDescriptionValidation: ValidatedRemoteSessionDescription
+            do {
+                remoteDescriptionValidation = try Self.validateRemoteSessionDescription(
+                    sdp,
+                    expectedKind: "remote offer"
+                )
+            } catch {
+                self.logger.error("❌ rejected invalid remote offer. sessionId=\(self.sessionId, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                self._onTrace?("set-remote-offer rejected session=\(self.sessionId) reason=invalid_remote_sdp")
+                self.notifyDisconnectedIfNeeded(reason: "invalid_remote_offer")
+                self.close()
+                return
+            }
             let normalizedOffer = Self.normalizedRemoteSDP(sdp)
             if self.hasRemoteDescription || self.isSettingRemoteDescription {
                 self.absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp)
@@ -930,7 +950,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
             guard let pc = self.peerConnection else { return }
             if pc.remoteDescription != nil {
-                self.hasRemoteDescription = true
+                guard self.acceptAppliedRemoteDescriptionFromPeerConnection(
+                    pc,
+                    expectedKind: "applied remote offer"
+                ) else { return }
                 self.absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp)
                 self.flushPendingRemoteICECandidates()
                 self.logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
@@ -953,6 +976,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                         return
                     }
                     self.hasRemoteDescription = true
+                    self.acceptedRemoteDescriptionValidation = remoteDescriptionValidation
                     self.logRemoteSDPSummary(kind: "offer", sdp: normalizedOffer.sdp)
                     self.flushPendingRemoteICECandidates()
                     self.createAnswer()
@@ -967,12 +991,34 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         scheduleState { [weak self] in
             guard let self, !self.isClosed else { return }
             guard let pc = self.peerConnection else { return }
+            let remoteDescriptionValidation: ValidatedRemoteSessionDescription
+            do {
+                remoteDescriptionValidation = try Self.validateRemoteSessionDescription(
+                    sdp,
+                    expectedKind: "remote answer"
+                )
+            } catch {
+                self.logger.error("❌ rejected invalid remote answer. sessionId=\(self.sessionId, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                self._onTrace?("set-remote-answer rejected session=\(self.sessionId) reason=invalid_remote_sdp")
+                self.notifyDisconnectedIfNeeded(reason: "invalid_remote_answer")
+                self.close()
+                return
+            }
             let normalizedAnswer = Self.normalizedRemoteSDP(sdp)
-            if self.hasRemoteDescription || self.isSettingRemoteDescription || pc.remoteDescription != nil {
-                self.hasRemoteDescription = true
+            if self.hasRemoteDescription || self.isSettingRemoteDescription {
                 self.absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp)
                 self.flushPendingRemoteICECandidates()
                 self.logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
+                return
+            }
+            if pc.remoteDescription != nil {
+                guard self.acceptAppliedRemoteDescriptionFromPeerConnection(
+                    pc,
+                    expectedKind: "applied remote answer"
+                ) else { return }
+                self.absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp)
+                self.flushPendingRemoteICECandidates()
+                self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
                 return
             }
             let desc = RTCSessionDescription(type: .answer, sdp: normalizedAnswer.sdp)
@@ -989,7 +1035,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.isSettingRemoteDescription = false
                     if let error {
                         if pc.signalingState == .stable || pc.remoteDescription != nil {
-                            self.hasRemoteDescription = true
+                            guard self.acceptAppliedRemoteDescriptionFromPeerConnection(
+                                pc,
+                                expectedKind: "applied remote answer"
+                            ) else { return }
                             self.flushPendingRemoteICECandidates()
                             self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
                             return
@@ -998,6 +1047,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                         return
                     }
                     self.hasRemoteDescription = true
+                    self.acceptedRemoteDescriptionValidation = remoteDescriptionValidation
                     self.logRemoteSDPSummary(kind: "answer", sdp: normalizedAnswer.sdp)
                     self.flushPendingRemoteICECandidates()
                 }
@@ -1010,7 +1060,23 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         scheduleState { [weak self] in
             guard let self, !self.isClosed else { return }
-            let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
+            let validated: ValidatedRemoteICECandidate
+            do {
+                validated = try Self.validatedRemoteICECandidate(
+                    candidate: candidate,
+                    sdpMid: sdpMid,
+                    sdpMLineIndex: sdpMLineIndex
+                )
+                try self.ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(validated)
+            } catch {
+                self.rejectInvalidRemoteICECandidate(error, source: "trickle")
+                return
+            }
+            let cand = RTCIceCandidate(
+                sdp: validated.candidate,
+                sdpMLineIndex: validated.sdpMLineIndex,
+                sdpMid: validated.sdpMid
+            )
             switch Self.pendingRemoteICEPlan(
                 isDuplicate: !self.trackRemoteICECandidateIfNeeded(cand),
                 hasRemoteDescription: self.hasRemoteDescription,
@@ -1873,6 +1939,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+    public func currentObservedRemoteCandidateAddress() async -> String? {
+#if canImport(WebRTC)
+        if let selected = await currentSelectedRemoteCandidateAddress() {
+            return selected
+        }
+        return withState { latestObservedRemoteICECandidateAddress }
+#else
+        return nil
+#endif
+    }
+
     private func waitForBufferedAmountBelow(
         _ threshold: UInt64,
         pollInterval: Duration,
@@ -2186,7 +2263,51 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
         let mid = candidate.sdpMid?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let key = "\(candidate.sdpMLineIndex)|\(mid)|\(normalizedSDP)"
-        return seenRemoteICECandidateKeys.insert(key).inserted
+        let inserted = seenRemoteICECandidateKeys.insert(key).inserted
+        if inserted, let address = Self.remoteICECandidateAddress(from: normalizedSDP) {
+            latestObservedRemoteICECandidateAddress = address
+        }
+        return inserted
+    }
+
+    private func ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(
+        _ candidate: ValidatedRemoteICECandidate
+    ) throws {
+        guard hasRemoteDescription else { return }
+        guard let acceptedRemoteDescriptionValidation else {
+            throw WebRTCError.sdpFailed("accepted remote SDP validation state is missing")
+        }
+        try acceptedRemoteDescriptionValidation.validate(candidate: candidate)
+    }
+
+    private func ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(
+        _ candidate: RTCIceCandidate
+    ) throws {
+        let validated = try Self.validatedRemoteICECandidate(
+            candidate: candidate.sdp,
+            sdpMid: candidate.sdpMid,
+            sdpMLineIndex: candidate.sdpMLineIndex
+        )
+        try ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(validated)
+    }
+
+    private func rejectInvalidRemoteICECandidate(_ error: Error, source: String) {
+        logger.error("❌ rejected invalid remote ICE candidate. sessionId=\(self.sessionId, privacy: .public) source=\(source, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        _onTrace?("remote-ice rejected session=\(sessionId) source=\(source) reason=invalid_remote_ice")
+        notifyDisconnectedIfNeeded(reason: "invalid_remote_ice")
+        close()
+    }
+
+    private static func remoteICECandidateAddress(from candidateSDP: String) -> String? {
+        let fields = candidateSDP.split(separator: " ").map(String.init)
+        guard fields.count > 4 else { return nil }
+        let address = fields[4].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty,
+              address != "0.0.0.0",
+              address != "::" else {
+            return nil
+        }
+        return address
     }
 
     private func addRemoteICECandidateInternal(_ candidate: RTCIceCandidate) {
@@ -2199,6 +2320,32 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
+    private func acceptAppliedRemoteDescriptionFromPeerConnection(
+        _ peerConnection: RTCPeerConnection,
+        expectedKind: String
+    ) -> Bool {
+        guard let appliedSDP = peerConnection.remoteDescription?.sdp else {
+            logger.error("❌ remoteDescription missing while accepting applied SDP. sessionId=\(self.sessionId, privacy: .public) kind=\(expectedKind, privacy: .public)")
+            notifyDisconnectedIfNeeded(reason: "missing_applied_remote_sdp")
+            close()
+            return false
+        }
+        do {
+            acceptedRemoteDescriptionValidation = try Self.validateRemoteSessionDescription(
+                appliedSDP,
+                expectedKind: expectedKind
+            )
+            hasRemoteDescription = true
+            return true
+        } catch {
+            logger.error("❌ applied remoteDescription failed validation. sessionId=\(self.sessionId, privacy: .public) kind=\(expectedKind, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            _onTrace?("remote-description rejected session=\(sessionId) source=peerConnection reason=invalid_applied_remote_sdp")
+            notifyDisconnectedIfNeeded(reason: "invalid_applied_remote_sdp")
+            close()
+            return false
+        }
+    }
+
     private func flushPendingRemoteICECandidates() {
         guard hasRemoteDescription else { return }
         guard !pendingRemoteICECandidates.isEmpty else { return }
@@ -2207,6 +2354,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         logger.info("🔄 applying queued remote ICE candidates. sessionId=\(self.sessionId, privacy: .public) count=\(pending.count, privacy: .public)")
         for candidate in pending {
+            do {
+                try ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(candidate)
+            } catch {
+                rejectInvalidRemoteICECandidate(error, source: "queued")
+                return
+            }
             addRemoteICECandidateInternal(candidate)
         }
     }
@@ -2219,6 +2372,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         for candidate in extracted where trackRemoteICECandidateIfNeeded(candidate) {
             absorbed += 1
             if hasRemoteDescription {
+                do {
+                    try ensureRemoteICECandidateIsBoundToAcceptedRemoteDescription(candidate)
+                } catch {
+                    rejectInvalidRemoteICECandidate(error, source: "sdp")
+                    return
+                }
                 addRemoteICECandidateInternal(candidate)
             } else {
                 pendingRemoteICECandidates.append(candidate)

@@ -125,6 +125,48 @@ test('local compat websocket rejects empty legacy query token when header creden
   assertNoSecretInLogs(session.sessionToken);
 });
 
+test('local compat lookup rejects legacy identity binding by default', async () => {
+  const session = await registerInitiatorSession();
+  const lookup = await getJSON(
+    `/api/webrtc/lookup/${encodeURIComponent(session.code)}?deviceId=legacy-responder&protocolSigningAlgorithm=ED25519&protocolPublicKeyFingerprint=${randomFingerprint()}`
+  );
+
+  assert.equal(lookup.status, 401);
+  assert.deepEqual(lookup.json, { error: 'missing_admission_token' });
+  assertNoSecretInLogs(session.sessionToken);
+});
+
+test('local compat lookup legacy identity binding requires explicit opt-in and never downgrades invalid admission', async () => {
+  const legacyRuntime = await startLocalCompatServer({
+    SKYBRIDGE_LOCAL_COMPAT_ALLOW_LEGACY_LOOKUP_IDENTITY_BINDING: 'true'
+  });
+  try {
+    const session = await registerInitiatorSession(legacyRuntime);
+    const legacyPath = `/api/webrtc/lookup/${encodeURIComponent(session.code)}?deviceId=legacy-responder&protocolSigningAlgorithm=ED25519&protocolPublicKeyFingerprint=${randomFingerprint()}`;
+
+    const invalidAdmission = await getJSON(legacyPath, {
+      'X-SkyBridge-Admission': 'invalid-admission-token'
+    }, legacyRuntime);
+    assert.equal(invalidAdmission.status, 401);
+    assert.deepEqual(invalidAdmission.json, { error: 'admission_token_expired' });
+
+    const legacyLookup = await getJSON(legacyPath, {}, legacyRuntime);
+    assert.equal(legacyLookup.status, 200);
+    assert.equal(legacyLookup.json.wsPath, SIGNALING_PATH);
+    assert.ok(legacyLookup.json.sessionToken);
+    assert.equal(legacyLookup.json.initiatorDeviceId, session.initiatorDeviceId);
+
+    assertNoSecretInLogs(session.sessionToken, legacyRuntime);
+    assertNoSecretInLogs(legacyLookup.json.sessionToken, legacyRuntime);
+  } finally {
+    legacyRuntime.child.kill('SIGTERM');
+    await Promise.race([
+      once(legacyRuntime.child, 'exit'),
+      new Promise((resolve) => setTimeout(resolve, 2_000))
+    ]);
+  }
+});
+
 test('local compat websocket reclaims superseded same-role sockets', async () => {
   const session = await registerInitiatorSession();
   const wsURL = `${runtime.wsOrigin}${SIGNALING_PATH}?shard=${encodeURIComponent(session.sessionId)}`;
@@ -181,6 +223,46 @@ test('local compat websocket rejects messages over the configured byte limit', a
   assertNoSecretInLogs(oversizedPayload);
 });
 
+test('local compat websocket relays bounded pending initiator frames when responder binds later', async () => {
+  const session = await registerInitiatorSession();
+  const initiator = new WebSocket(`${runtime.wsOrigin}${SIGNALING_PATH}?shard=${encodeURIComponent(session.sessionId)}`, {
+    headers: {
+      'X-SkyBridge-Session-Id': session.sessionId,
+      'X-SkyBridge-Session': session.sessionToken
+    }
+  });
+  let responder = null;
+
+  try {
+    const initiatorBound = await waitForWebSocketMessage(initiator, (message) => message.type === 'bound');
+    assert.equal(initiatorBound.role, 'initiator');
+
+    const pendingOffer = { type: 'OFFER', sdp: 'queued-local-compat-offer' };
+    initiator.send(JSON.stringify(pendingOffer));
+
+    const responderSession = await lookupResponderSession(session.code);
+    responder = new WebSocket(`${runtime.wsOrigin}${SIGNALING_PATH}?shard=${encodeURIComponent(responderSession.sessionId)}`, {
+      headers: {
+        'X-SkyBridge-Session-Id': responderSession.sessionId,
+        'X-SkyBridge-Session': responderSession.sessionToken
+      }
+    });
+    const responderOffer = waitForWebSocketMessage(responder, (message) => message.type === 'OFFER');
+    const responderBound = await waitForWebSocketMessage(responder, (message) => message.type === 'bound');
+    assert.equal(responderBound.role, 'responder');
+    assert.deepEqual(await responderOffer, pendingOffer);
+
+    await waitForLog(/pending queued/);
+    await waitForLog(/pending relay/);
+    assertNoSecretInLogs(responderSession.sessionToken);
+  } finally {
+    await closeWebSocket(initiator);
+    await closeWebSocket(responder);
+  }
+
+  assertNoSecretInLogs(session.sessionToken);
+});
+
 async function registerInitiatorSession(targetRuntime = runtime) {
   const challenge = await postJSON('/api/webrtc/admission/challenge', {
     deviceId: `device-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -208,6 +290,31 @@ async function registerInitiatorSession(targetRuntime = runtime) {
   return registered.json;
 }
 
+async function lookupResponderSession(code, targetRuntime = runtime) {
+  const challenge = await postJSON('/api/webrtc/admission/challenge', {
+    deviceId: `responder-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    protocolSigningAlgorithm: 'ED25519',
+    protocolPublicKeyFingerprint: randomFingerprint(),
+    clientVersion: '1.2.3',
+    protocolVersion: '2'
+  }, {}, targetRuntime);
+  assert.equal(challenge.status, 200);
+
+  const admission = await postJSON('/api/webrtc/admission', {
+    challengeId: challenge.json.challengeId,
+    protocolPublicKeyBytes: [5, 6, 7, 8]
+  }, {}, targetRuntime);
+  assert.equal(admission.status, 200);
+
+  const lookup = await getJSON(`/api/webrtc/lookup/${encodeURIComponent(code)}`, {
+    'X-SkyBridge-Admission': admission.json.admissionToken
+  }, targetRuntime);
+  assert.equal(lookup.status, 200);
+  assert.equal(lookup.json.wsPath, SIGNALING_PATH);
+  assert.ok(lookup.json.sessionToken);
+  return lookup.json;
+}
+
 async function postJSON(path, body, headers = {}, targetRuntime = runtime) {
   const response = await fetch(`${targetRuntime.httpOrigin}${path}`, {
     method: 'POST',
@@ -217,6 +324,17 @@ async function postJSON(path, body, headers = {}, targetRuntime = runtime) {
       ...headers
     },
     body: JSON.stringify(body)
+  });
+  const json = await response.json();
+  return { status: response.status, json };
+}
+
+async function getJSON(path, headers = {}, targetRuntime = runtime) {
+  const response = await fetch(`${targetRuntime.httpOrigin}${path}`, {
+    headers: {
+      Authorization: 'Bearer local-compat-test-token',
+      ...headers
+    }
   });
   const json = await response.json();
   return { status: response.status, json };
@@ -351,6 +469,15 @@ function waitForWebSocketClose(ws, timeoutMs = 1_500) {
   });
 }
 
+async function waitForLog(pattern, targetRuntime = runtime, timeoutMs = 1_500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pattern.test(targetRuntime.logs.join(''))) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.match(targetRuntime.logs.join(''), pattern);
+}
+
 async function closeWebSocket(ws) {
   if (!ws || ws.readyState === WebSocket.CLOSED) return;
   if (ws.readyState === WebSocket.CLOSING) {
@@ -369,7 +496,7 @@ function cryptoRandomBytes(length) {
   return require('node:crypto').randomBytes(length);
 }
 
-function assertNoSecretInLogs(secret) {
+function assertNoSecretInLogs(secret, targetRuntime = runtime) {
   assert.ok(secret, 'secret under test must be non-empty');
-  assert.equal(runtime.logs.join('').includes(secret), false, 'local compat logs must not contain raw session tokens');
+  assert.equal(targetRuntime.logs.join('').includes(secret), false, 'local compat logs must not contain raw session tokens');
 }

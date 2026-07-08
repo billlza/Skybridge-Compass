@@ -5,6 +5,7 @@ mod integration_tests;
 mod p2p_remote;
 mod performance_tests;
 mod release;
+mod remote_desktop_registry;
 mod smoke_suite;
 mod webrtc_media;
 mod webrtc_media_doctor;
@@ -32,6 +33,7 @@ pub(super) fn check_coverage_evidence_fragments()
 -> impl Iterator<Item = (&'static str, &'static str)> {
     release::SOURCE_FRAGMENTS
         .iter()
+        .chain(remote_desktop_registry::SOURCE_FRAGMENTS.iter())
         .chain(integration_tests::SOURCE_FRAGMENTS.iter())
         .copied()
 }

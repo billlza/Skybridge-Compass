@@ -562,18 +562,12 @@ public actor ServiceAdvertiserCenter {
         }
 
         // Capabilities are optional strings used by non-Apple clients for UI hints.
-        record["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
         let endpoints = ServiceEndpointRegistry.shared.snapshot()
-        if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
-            let port = String(transferPort)
-            record["transferPort"] = port
-            record["fileTransferPort"] = port
-        }
-        if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
-            let port = String(remotePort)
-            record["remotePort"] = port
-            record["remoteControlPort"] = port
-        }
+        BonjourInteropContract.attachPrimaryAdvertisementTXT(
+            to: &record,
+            transferPort: endpoints.fileTransferPort,
+            remoteControlPort: endpoints.remoteControlPort
+        )
         record["hs_soa"] = "1"
         return record
     }

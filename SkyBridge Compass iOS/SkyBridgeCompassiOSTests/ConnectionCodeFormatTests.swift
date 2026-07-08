@@ -84,6 +84,32 @@ final class ConnectionCodeFormatTests: XCTestCase {
         )
     }
 
+    func testPreSessionSignalingFramesAreBoundedAndDrainedAfterSessionStart() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+
+        XCTAssertTrue(source.contains("maxPendingPreSessionSignalingEnvelopes = 32"))
+        XCTAssertTrue(source.contains("pendingPreSessionSignalingEnvelopesBySessionId"))
+        XCTAssertTrue(source.contains("pending.count < Self.maxPendingPreSessionSignalingEnvelopes"))
+        XCTAssertTrue(source.contains("state = .failed(message)"))
+        XCTAssertTrue(source.contains("pre-session-queued"))
+        XCTAssertTrue(source.contains("pre-session-drain"))
+        XCTAssertTrue(source.contains("case .offer, .answer, .iceCandidate:\n            return true"))
+
+        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.setRemoteOffer(sdp)"))
+        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.setRemoteAnswer(sdp)"))
+        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.addRemoteICECandidate"))
+        XCTAssertFalse(source.contains("session?.setRemoteOffer"))
+        XCTAssertFalse(source.contains("session?.setRemoteAnswer"))
+        XCTAssertFalse(source.contains("session?.addRemoteICECandidate"))
+
+        let sessionStart = try XCTUnwrap(source.range(of: "try s.start()"))
+        let drain = try XCTUnwrap(source.range(of: "drainPendingPreSessionSignalingEnvelopes(sessionId: sessionId)"))
+        let join = try XCTUnwrap(source.range(of: "await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join"))
+
+        XCTAssertLessThan(sessionStart.lowerBound, drain.lowerBound)
+        XCTAssertLessThan(drain.lowerBound, join.lowerBound)
+    }
+
     func testTenantIDPrefersJWTDerivedTenantBeforeUserIdentifierFallback() throws {
         let source = try Self.crossNetworkSignalServerClientSource()
 
@@ -342,6 +368,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
             platformSource.contains("throw SkyBridgeError.keychainError(status: status)") &&
             platformSource.contains("Stored identity key failed self-test"),
             "Platform identity storage must propagate Keychain failures and fail closed on corrupt stored signing keys."
+        )
+        XCTAssertTrue(
+            platformSource.contains("SKYBRIDGE_KEYCHAIN_IN_MEMORY") &&
+            platformSource.contains("inMemoryIdentityKeys[tag] = keyData"),
+            "Simulator smoke identity storage must honor the same in-memory keychain gate as KeychainManager."
         )
         XCTAssertFalse(
             kemStoreSource.contains("try? keychain.loadPrivateKey") ||

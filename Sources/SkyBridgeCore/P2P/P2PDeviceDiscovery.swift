@@ -156,6 +156,8 @@ public struct P2PDiscoveredDevice: Identifiable, Sendable, Equatable {
 
 /// P2P TXT 记录解析器
 public struct P2PTXTRecordParser {
+    private static let deviceIdKeys = ["deviceId", "id", "deviceID", "device_id", "uuid", "uniqueId", "unique_id"]
+    private static let pubKeyFingerprintKeys = ["pubKeyFP", "pubKeyFp", "pub_key_fp", "identityFingerprint"]
     
  /// 解析 TXT 记录数据
  /// - Parameter data: TXT 记录数据
@@ -194,8 +196,9 @@ public struct P2PTXTRecordParser {
         endpoint: NWEndpoint
     ) -> P2PDiscoveredDevice? {
  // 必需字段
-        guard let deviceId = txtRecord["deviceId"], !deviceId.isEmpty,
-              let pubKeyFP = txtRecord["pubKeyFP"], !pubKeyFP.isEmpty else {
+        guard let deviceId = firstNonEmptyValue(in: txtRecord, keys: deviceIdKeys),
+              let pubKeyFP = firstNonEmptyValue(in: txtRecord, keys: pubKeyFingerprintKeys),
+              isValidPubKeyFingerprint(pubKeyFP) else {
             return nil
         }
         
@@ -228,24 +231,23 @@ public struct P2PTXTRecordParser {
         var invalidFields: [String] = []
         
  // 必需字段
-        let requiredFields = ["deviceId", "pubKeyFP"]
-        for field in requiredFields {
-            if let value = txtRecord[field] {
-                if value.isEmpty {
-                    invalidFields.append("\(field): cannot be empty")
-                }
+        if firstNonEmptyValue(in: txtRecord, keys: deviceIdKeys) == nil {
+            if containsEmptyValue(in: txtRecord, keys: deviceIdKeys) {
+                invalidFields.append("deviceId: cannot be empty")
             } else {
-                missingFields.append(field)
+                missingFields.append("deviceId")
             }
         }
-        
- // 验证 pubKeyFP 格式
-        if let pubKeyFP = txtRecord["pubKeyFP"], !pubKeyFP.isEmpty {
+
+        if let pubKeyFP = firstNonEmptyValue(in: txtRecord, keys: pubKeyFingerprintKeys) {
  // 应为 hex 小写，长度 64
-            let hexPattern = "^[0-9a-f]{64}$"
-            if pubKeyFP.range(of: hexPattern, options: .regularExpression) == nil {
+            if !isValidPubKeyFingerprint(pubKeyFP) {
                 invalidFields.append("pubKeyFP: should be 64 hex lowercase characters")
             }
+        } else if containsEmptyValue(in: txtRecord, keys: pubKeyFingerprintKeys) {
+            invalidFields.append("pubKeyFP: cannot be empty")
+        } else {
+            missingFields.append("pubKeyFP")
         }
         
         if missingFields.isEmpty && invalidFields.isEmpty {
@@ -253,6 +255,26 @@ public struct P2PTXTRecordParser {
         } else {
             return .invalid(missing: missingFields, invalid: invalidFields)
         }
+    }
+
+    private static func firstNonEmptyValue(in txtRecord: [String: String], keys: [String]) -> String? {
+        for key in keys {
+            guard let value = txtRecord[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else { continue }
+            return value
+        }
+        return nil
+    }
+
+    private static func containsEmptyValue(in txtRecord: [String: String], keys: [String]) -> Bool {
+        keys.contains { key in
+            guard let value = txtRecord[key] else { return false }
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private static func isValidPubKeyFingerprint(_ value: String) -> Bool {
+        BonjourInteropContract.isValidPubKeyFingerprint(value)
     }
 }
 

@@ -20,9 +20,18 @@ pub(super) fn append_entries(
                 "expires_at",
                 "manifestSequenceRollback",
                 "recordAcceptedSequence(decision.manifest.sequence)",
+                "validate_macos_update_manifest.sh",
+                "does not match DMG sha256",
+                "apple_pqc_sdk_build must be present and signed",
+                "validate_macos_release_artifact_run.sh",
+                "--require-public-redacted-artifacts",
+                "validate_macos_release_public_artifacts.sh",
+                "release-artifact-run-provenance.json",
+                "Artifacts/release-gate-public/connectivity",
+                "dmg_path=\"dist/SkyBridgeCompassPro-${app_version}.dmg\"",
             ],
         ),
-        evidence: "release readiness and app update evaluation require a GitHub Releases manifest with trusted Ed25519 signature verification and signed anti-replay metadata".to_owned(),
+        evidence: "release readiness, publishing, and workflow gates require an exact GitHub Releases manifest/DMG/app match, trusted Ed25519 signature verification, signed anti-replay metadata, run provenance, and public-redacted release artifacts".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "release_swift_63_toolchain_gate",
@@ -32,7 +41,7 @@ pub(super) fn append_entries(
             source,
             &[
                 "validate_swift_toolchain_baseline",
-                "EXPECTED_SWIFT_VERSION=\"${SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION:-6.3.2}\"",
+                "EXPECTED_SWIFT_VERSION=\"${SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION:-6.3.3}\"",
                 "Apple Swift version ${EXPECTED_SWIFT_VERSION}",
                 "swift-tools-version: 6.3",
             ],

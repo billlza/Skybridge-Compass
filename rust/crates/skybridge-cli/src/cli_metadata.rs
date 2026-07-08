@@ -3,6 +3,8 @@ use serde_json::json;
 
 pub(crate) fn version() -> Result<()> {
     let payload = json!({
+        "product_name": "SkyBridge CLI",
+        "binary_name": "skybridge",
         "cli_version": env!("CARGO_PKG_VERSION"),
         "workspace": "rust",
         "contracts_schema_version": 1u32,

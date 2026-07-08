@@ -32,6 +32,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("release.rs"),
     ),
     (
+        "check_source_catalog/source_fragments/remote_desktop_registry.rs",
+        include_str!("remote_desktop_registry.rs"),
+    ),
+    (
         "check_source_catalog/source_fragments/smoke_suite.rs",
         include_str!("smoke_suite.rs"),
     ),

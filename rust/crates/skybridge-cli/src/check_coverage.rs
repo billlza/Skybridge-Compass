@@ -169,6 +169,12 @@ mod tests {
             report
                 .checks
                 .iter()
+                .any(|entry| entry.id == "release_swift_63_toolchain_gate" && entry.covered)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
                 .any(|entry| entry.id == "coverage_threshold_gate" && entry.covered)
         );
         assert!(
@@ -195,6 +201,9 @@ mod tests {
                 .iter()
                 .any(|entry| entry.id == "remote_desktop_contract_gate" && entry.covered)
         );
+        assert!(report.checks.iter().any(|entry| {
+            entry.id == "remote_desktop_capability_snapshot_registry_gate" && entry.covered
+        }));
         assert!(report.checks.iter().any(|entry| {
             entry.id == "remote_desktop_pending_request_registry_gate" && entry.covered
         }));

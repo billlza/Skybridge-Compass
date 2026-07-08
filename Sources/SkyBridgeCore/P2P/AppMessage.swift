@@ -15,6 +15,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case protocolIdentityBindingRequest(ProtocolIdentityBindingRequestPayload)
     case signedProtocolIdentityBinding(SignedProtocolIdentityBindingPayload)
     case heartbeat(HeartbeatPayload)
+    case authenticatedRouteBinding(AuthenticatedRouteBindingPayload)
     case peerDisconnecting(PeerDisconnectingPayload)
     /// Lightweight RTT probe (request).
     case ping(PingPayload)
@@ -1121,6 +1122,63 @@ public enum AppMessage: Codable, Sendable, Equatable {
         }
     }
 
+    public struct AuthenticatedRouteBindingPayload: Codable, Sendable, Equatable {
+        public static let currentVersion = 1
+
+        public let version: Int
+        public let kind: String
+        public let serviceType: String
+        public let instanceName: String
+        public let hostName: String
+        public let port: UInt16
+        public let endpointProvenance: String
+        public let localDeviceId: String
+        public let remoteDeviceId: String
+        public let routeAuthorityProtocolPublicKeyFingerprint: String
+        public let remoteProtocolPublicKeyFingerprint: String
+        public let sessionHashHex: String
+        public let transcriptPrefixHex: String
+        public let sentAt: Date
+        public let expiresAt: Date
+        public let nonce: Data
+
+        public init(
+            version: Int = Self.currentVersion,
+            kind: String,
+            serviceType: String,
+            instanceName: String,
+            hostName: String,
+            port: UInt16,
+            endpointProvenance: String,
+            localDeviceId: String,
+            remoteDeviceId: String,
+            routeAuthorityProtocolPublicKeyFingerprint: String,
+            remoteProtocolPublicKeyFingerprint: String,
+            sessionHashHex: String,
+            transcriptPrefixHex: String,
+            sentAt: Date = Date(),
+            expiresAt: Date,
+            nonce: Data
+        ) {
+            self.version = version
+            self.kind = kind
+            self.serviceType = serviceType
+            self.instanceName = instanceName
+            self.hostName = hostName
+            self.port = port
+            self.endpointProvenance = endpointProvenance
+            self.localDeviceId = localDeviceId
+            self.remoteDeviceId = remoteDeviceId
+            self.routeAuthorityProtocolPublicKeyFingerprint = routeAuthorityProtocolPublicKeyFingerprint
+            self.remoteProtocolPublicKeyFingerprint = remoteProtocolPublicKeyFingerprint
+            self.sessionHashHex = sessionHashHex
+            self.transcriptPrefixHex = transcriptPrefixHex
+            self.sentAt = sentAt
+            self.expiresAt = expiresAt
+            self.nonce = nonce
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case clipboard
         case textMessage
@@ -1131,6 +1189,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case protocolIdentityBindingRequest
         case signedProtocolIdentityBinding
         case heartbeat
+        case authenticatedRouteBinding
         case peerDisconnecting
         case ping
         case pong
@@ -1179,6 +1238,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self = .heartbeat(payload)
             return
         }
+        if let payload = try? container.decode(AuthenticatedRouteBindingPayload.self, forKey: .authenticatedRouteBinding) {
+            self = .authenticatedRouteBinding(payload)
+            return
+        }
         if let payload = try? container.decode(PeerDisconnectingPayload.self, forKey: .peerDisconnecting) {
             self = .peerDisconnecting(payload)
             return
@@ -1224,6 +1287,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self = .heartbeat(payload)
             return
         }
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<AuthenticatedRouteBindingPayload>.self, forKey: .authenticatedRouteBinding))?._0 {
+            self = .authenticatedRouteBinding(payload)
+            return
+        }
         if let payload = (try? container.decode(LegacyAssociatedValueBox<PeerDisconnectingPayload>.self, forKey: .peerDisconnecting))?._0 {
             self = .peerDisconnecting(payload)
             return
@@ -1266,6 +1333,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .signedProtocolIdentityBinding)
         case .heartbeat(let payload):
             try container.encode(payload, forKey: .heartbeat)
+        case .authenticatedRouteBinding(let payload):
+            try container.encode(payload, forKey: .authenticatedRouteBinding)
         case .peerDisconnecting(let payload):
             try container.encode(payload, forKey: .peerDisconnecting)
         case .ping(let payload):

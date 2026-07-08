@@ -1,4 +1,237 @@
+import CryptoKit
 import Foundation
+
+enum SkyBridgeTraceRedaction {
+    private static let assignmentRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?i)(?<![A-Za-z0-9_-])(session|sessionId|session_id|from|to|peer|peerDeviceId|targetDeviceId|p2pDeviceId|remoteId|remoteName|device|deviceId|device_id|identityKey|fingerprint|pubKeyFP|publicKeyBase64|xwingPublicKey|mlkemPublicKey|token|accessToken|refreshToken|bearerToken|authorization|tenantId|userIdentifier|userId|sub|nebulaId|displayName|accountDisplayName|relay|routeIdentifier|bonjourServiceName|endpoint|endpointHost|controlEndpoint|host|ip|address|url|path|trackId|connectionCode|status-file|statusFile)=([^\s,]+)"#
+        )
+    }()
+
+    private static let diagnosticReferenceKeys: [String: String] = [
+        "session": "session_ref",
+        "sessionid": "session_ref",
+        "session_id": "session_ref",
+        "from": "from_ref",
+        "to": "to_ref",
+        "peer": "peer_ref",
+        "peerdeviceid": "peer_ref",
+        "targetdeviceid": "peer_ref",
+        "p2pdeviceid": "peer_ref",
+        "remoteid": "remote_ref",
+        "remotename": "remote_ref",
+        "device": "device_ref",
+        "deviceid": "device_ref",
+        "device_id": "device_ref",
+        "identitykey": "identity_key_ref",
+        "fingerprint": "fingerprint_ref",
+        "pubkeyfp": "fingerprint_ref",
+        "publickeybase64": "public_key_ref",
+        "xwingpublickey": "public_key_ref",
+        "mlkempublickey": "public_key_ref",
+        "token": "token_ref",
+        "accesstoken": "token_ref",
+        "refreshtoken": "token_ref",
+        "bearertoken": "token_ref",
+        "authorization": "token_ref",
+        "tenantid": "tenant_ref",
+        "userid": "user_ref",
+        "useridentifier": "user_ref",
+        "sub": "user_ref",
+        "nebulaid": "nebula_ref",
+        "displayname": "display_name_ref",
+        "accountdisplayname": "display_name_ref",
+        "relay": "relay_ref",
+        "routeidentifier": "route_ref",
+        "bonjourservicename": "bonjour_service_ref",
+        "endpoint": "endpoint_ref",
+        "endpointhost": "endpoint_ref",
+        "controlendpoint": "endpoint_ref",
+        "host": "host_ref",
+        "ip": "host_ref",
+        "address": "host_ref",
+        "url": "url_ref",
+        "path": "path_ref",
+        "trackid": "track_ref",
+        "statusfile": "status_file_ref",
+        "status-file": "status_file_ref",
+        "connectioncode": "connection_code_ref"
+    ]
+
+    static func stableReference(_ rawValue: String?) -> String {
+        guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return "-"
+        }
+        if value == "-" {
+            return "-"
+        }
+        if value == "<redacted>" {
+            return "redacted"
+        }
+        if value == "present" || value == "missing" {
+            return value
+        }
+
+        let digest = SHA256.hash(data: Data(value.utf8))
+        let prefix = digest.prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "ref:\(prefix)"
+    }
+
+    static func redactKnownAssignments(in line: String) -> String {
+        guard let regex = assignmentRegex else {
+            return "trace_redaction_failed"
+        }
+
+        let source = line as NSString
+        let range = NSRange(location: 0, length: source.length)
+        let matches = regex.matches(in: line, range: range)
+        guard !matches.isEmpty else {
+            return line
+        }
+
+        let redacted = NSMutableString(string: line)
+        for match in matches.reversed() {
+            guard match.numberOfRanges == 3 else {
+                return "trace_redaction_failed"
+            }
+            let key = source.substring(with: match.range(at: 1))
+            let value = source.substring(with: match.range(at: 2))
+            redacted.replaceCharacters(
+                in: match.range(at: 0),
+                with: "\(key)_ref=\(stableReference(value))"
+            )
+        }
+        return redacted as String
+    }
+
+    static func sanitizedMediaDiagnosticFields(
+        _ fields: [String: Any],
+        timestamp: String
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "schema_version": 1,
+            "timestamp": timestamp
+        ]
+
+        for (rawKey, rawValue) in fields {
+            let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+
+            if key == "schema_version" || key == "timestamp" {
+                continue
+            }
+
+            if let entry = sanitizedMediaDiagnosticEntry(key: key, value: rawValue) {
+                payload[entry.key] = entry.value
+            }
+        }
+
+        return payload
+    }
+
+    private static func sanitizedMediaDiagnosticEntry(key: String, value: Any) -> (key: String, value: Any)? {
+        let referenceKey = diagnosticReferenceKey(for: key)
+        if let referenceKey {
+            return (referenceKey, stableReference(diagnosticScalarDescription(value)))
+        }
+
+        switch value {
+        case let stringValue as String:
+            let trimmed = stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isLikelySensitiveDiagnosticString(trimmed) {
+                return ("\(key)_ref", stableReference(trimmed))
+            }
+            return (key, trimmed)
+        case let boolValue as Bool:
+            return (key, boolValue)
+        case let intValue as Int:
+            return (key, intValue)
+        case let intValue as Int64:
+            return (key, intValue)
+        case let doubleValue as Double:
+            guard doubleValue.isFinite else { return nil }
+            return (key, doubleValue)
+        case let floatValue as Float:
+            guard floatValue.isFinite else { return nil }
+            return (key, Double(floatValue))
+        case let numberValue as NSNumber:
+            return (key, numberValue)
+        default:
+            return ("\(key)_redacted", "unsupported_non_scalar")
+        }
+    }
+
+    private static func diagnosticReferenceKey(for key: String) -> String? {
+        let normalized = key
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let replacement = diagnosticReferenceKeys[normalized] {
+            return replacement
+        }
+        let compact = normalized
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        return diagnosticReferenceKeys[compact]
+    }
+
+    private static func diagnosticScalarDescription(_ value: Any) -> String {
+        switch value {
+        case let stringValue as String:
+            return stringValue
+        case let boolValue as Bool:
+            return boolValue ? "true" : "false"
+        case let intValue as Int:
+            return String(intValue)
+        case let intValue as Int64:
+            return String(intValue)
+        case let doubleValue as Double:
+            return String(doubleValue)
+        case let floatValue as Float:
+            return String(floatValue)
+        case let numberValue as NSNumber:
+            return numberValue.stringValue
+        default:
+            return String(describing: type(of: value))
+        }
+    }
+
+    private static func isLikelySensitiveDiagnosticString(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        let lowercased = value.lowercased()
+        if lowercased.contains("://") ||
+            lowercased.contains("/users/") ||
+            lowercased.contains("/private/var/") ||
+            lowercased.contains("/var/folders/") ||
+            lowercased.contains("/data/user/") ||
+            lowercased.contains("token=") ||
+            lowercased.contains("authorization: bearer") ||
+            lowercased.contains("authorization=") ||
+            lowercased.contains("bearer ") ||
+            lowercased.contains("session=") ||
+            lowercased.contains("peer=") ||
+            lowercased.contains("device=") ||
+            lowercased.hasPrefix("sk-") {
+            return true
+        }
+        if value.count >= 32 {
+            let allowed = CharacterSet(charactersIn: "0123456789abcdefABCDEF-")
+            return value.unicodeScalars.allSatisfy { allowed.contains($0) }
+        }
+        if value.contains("@") {
+            return true
+        }
+        if value.range(of: #"^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if value.range(of: #"^[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d{1,5})?$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+}
 
 enum SkyBridgeSmokeTraceWriter {
     private struct Destination {
@@ -61,7 +294,7 @@ enum SkyBridgeSmokeTraceWriter {
     }
 
     static func append(_ line: String) {
-        enqueueLine(line, suffix: ".trace.log")
+        enqueueLine(SkyBridgeTraceRedaction.redactKnownAssignments(in: line), suffix: ".trace.log")
     }
 
     private static func enqueueLine(_ line: String, suffix: String) {
@@ -79,9 +312,10 @@ enum SkyBridgeSmokeTraceWriter {
         let url = destination.url(suffix: ".webrtc-media.jsonl")
         let snapshot = MediaDiagnosticFields(values: fields)
         writerQueue.async {
-            var payload = snapshot.values
-            payload["schema_version"] = payload["schema_version"] ?? 1
-            payload["timestamp"] = payload["timestamp"] ?? writerState.timestamp()
+            let payload = SkyBridgeTraceRedaction.sanitizedMediaDiagnosticFields(
+                snapshot.values,
+                timestamp: writerState.timestamp()
+            )
             guard JSONSerialization.isValidJSONObject(payload),
                   let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
                 return

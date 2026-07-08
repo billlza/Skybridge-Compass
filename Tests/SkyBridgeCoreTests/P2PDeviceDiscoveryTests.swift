@@ -101,6 +101,38 @@ final class P2PDeviceDiscoveryTests: XCTestCase {
         let emptyResult = P2PTXTRecordParser.validate(emptyDeviceId)
         XCTAssertFalse(emptyResult.isValid, "Empty deviceId should fail validation")
     }
+
+    func testTXTRecordParserAcceptsInteropIdentityAliasesWithoutWeakeningFingerprintValidation() {
+        let validFP = String(repeating: "c", count: 64)
+        let aliasRecord: [String: String] = [
+            "uniqueId": "android-peer-123",
+            "identityFingerprint": validFP,
+            "platform": "android",
+            "capabilities": "file_transfer,remote_desktop",
+            "name": "Android Phone"
+        ]
+
+        let device = P2PTXTRecordParser.createDevice(
+            from: aliasRecord,
+            endpoint: createMockEndpoint()
+        )
+
+        XCTAssertEqual(device?.deviceId, "android-peer-123")
+        XCTAssertEqual(device?.pubKeyFP, validFP)
+        XCTAssertEqual(device?.platform, .android)
+        XCTAssertEqual(device?.capabilities, ["file_transfer", "remote_desktop"])
+        XCTAssertTrue(P2PTXTRecordParser.validate(aliasRecord).isValid)
+
+        let invalidAliasRecord: [String: String] = [
+            "uuid": "windows-peer-456",
+            "pub_key_fp": "ABCDEF"
+        ]
+        XCTAssertNil(P2PTXTRecordParser.createDevice(
+            from: invalidAliasRecord,
+            endpoint: createMockEndpoint()
+        ))
+        XCTAssertFalse(P2PTXTRecordParser.validate(invalidAliasRecord).isValid)
+    }
     
  /// Test TXT record binary parsing
     func testTXTRecordBinaryParsing() {

@@ -20,6 +20,34 @@ final class BonjourTXTParsingTests: XCTestCase {
         XCTAssertEqual(deviceInfo.remoteVideoFormats, ["jpeg", "h264", "hevc"])
     }
 
+    func testRemoteVideoFormatInteropAliasesParseFromTXTDictionaryAndRegex() {
+        let typoInfo = BonjourTXTParser.extractDeviceInfo(from: [
+            "remotevideformats": "jpeg,h264",
+            "name": "Android Viewer"
+        ])
+        XCTAssertEqual(typoInfo.remoteVideoFormats, ["jpeg", "h264"])
+
+        let lowercaseInfo = BonjourTXTParser.extractDeviceInfo(from: [
+            "remotevideoformats": "hevc,jpeg",
+            "name": "Windows Viewer"
+        ])
+        XCTAssertEqual(lowercaseInfo.remoteVideoFormats, ["hevc", "jpeg"])
+
+        let regexParsed = BonjourTXTParser.parseWithRegex(
+            "name=Windows Viewer,remoteformats=jpeg,h264,hevc,platform=windows"
+        )
+        XCTAssertEqual(regexParsed["remoteformats"], "jpeg,h264,hevc")
+        XCTAssertEqual(
+            BonjourTXTParser.extractDeviceInfo(from: regexParsed).remoteVideoFormats,
+            ["jpeg", "h264", "hevc"]
+        )
+
+        let untrustedInfo = BonjourTXTParser.extractDeviceInfo(from: [
+            "remoteVideoFormats": "vp9,hevc,av1,h264,../../../tmp,jpeg,h264"
+        ])
+        XCTAssertEqual(untrustedInfo.remoteVideoFormats, ["hevc", "h264", "jpeg"])
+    }
+
     func testDeviceInfoTreatsUUIDAndUniqueIdAsStableIdentityFallbacks() {
         let uuidOnly = BonjourTXTParser.extractDeviceInfo(from: [
             "uuid": "F951B140-A4D8-4664-AB9D-D90118738C54",

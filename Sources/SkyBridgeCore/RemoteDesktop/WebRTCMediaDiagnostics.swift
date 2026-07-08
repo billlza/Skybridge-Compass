@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
@@ -268,15 +269,13 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
 public enum WebRTCMediaDiagnosticWriter {
     public static func append(_ event: WebRTCMediaDiagnosticEvent) {
 #if os(macOS)
-        let safeSessionID = event.sessionId
-            .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        guard !safeSessionID.isEmpty else { return }
+        let safeSessionRef = safeSessionReference(event.sessionId)
         let logsDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("SkyBridge", isDirectory: true)
-        let logURL = logsDirectory.appendingPathComponent("webrtc-media-\(safeSessionID).jsonl")
-        guard let encoded = try? JSONEncoder().encode(event) else { return }
+        let logURL = logsDirectory.appendingPathComponent("webrtc-media-\(safeSessionRef).jsonl")
+        guard let encoded = publicDiagnosticJSONData(for: event) else { return }
         var line = encoded
         line.append(0x0a)
         try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
@@ -296,6 +295,34 @@ public enum WebRTCMediaDiagnosticWriter {
         _ = event
 #endif
     }
+
+#if os(macOS)
+    private static func safeSessionReference(_ sessionId: String) -> String {
+        let value = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            return "ref-missing"
+        }
+        let digest = SHA256.hash(data: Data(value.utf8))
+        let prefix = digest.prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "ref-\(prefix)"
+    }
+
+    private static func publicDiagnosticJSONData(for event: WebRTCMediaDiagnosticEvent) -> Data? {
+        guard let encoded = try? JSONEncoder().encode(event),
+              let jsonObject = try? JSONSerialization.jsonObject(with: encoded),
+              var payload = jsonObject as? [String: Any] else {
+            return nil
+        }
+        payload.removeValue(forKey: "session_id")
+        payload["session_ref"] = safeSessionReference(event.sessionId)
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+    }
+#endif
 }
 
 public struct RealtimeMediaAudioSenderDiagnosticSnapshot: Codable, Equatable, Sendable {

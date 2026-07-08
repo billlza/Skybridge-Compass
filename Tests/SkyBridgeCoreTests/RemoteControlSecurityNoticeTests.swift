@@ -28,7 +28,7 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
                 isApproved: false
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
                 .streamConfiguration,
                 isApproved: false
@@ -61,7 +61,7 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
                 isApproved: false
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             RemoteControlSecurityAdmissionPolicy.allowsInboundWebRTCPayload(
                 .streamConfiguration,
                 isApproved: false
@@ -136,11 +136,37 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "X-Wing PQC"
         )
+        let concreteQPeriaptSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-suite",
+            transportKind: .webrtc,
+            remoteIPAddress: "192.0.2.11",
+            remoteDeviceId: "android-1",
+            remoteDeviceName: "Android",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "Q-Periapt-ContextBound PQC"
+        )
+        let concreteQPeriaptWireSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-wire-suite",
+            transportKind: .webrtc,
+            remoteIPAddress: "192.0.2.12",
+            remoteDeviceId: "android-2",
+            remoteDeviceName: "Android",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "0x0011 PQC"
+        )
 
         XCTAssertEqual(missingSuite.cryptoSuite, "missing")
         XCTAssertTrue(missingSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertTrue(genericSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertFalse(concreteQPeriaptSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertFalse(concreteQPeriaptWireSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
     }
 
     func testPeerIdentityStoreResolvesRemoteIdentityByEndpointAlias() {
@@ -424,6 +450,13 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             source.contains("remoteControlClipboardSendBlocked session=\\(peer.id) transport=p2p reason=awaiting_security_notice"),
             "local pasteboard forwarding must also be blocked if a pre-approval stream configuration enabled clipboard sync earlier."
         )
+        XCTAssertTrue(
+            source.contains("var pendingRequestedStreamConfiguration: RemoteDesktopStreamConfiguration?") &&
+                source.contains("peer.pendingRequestedStreamConfiguration = config") &&
+                source.contains("await applyViewerStreamConfiguration(pendingConfiguration, for: peer)") &&
+                source.contains("remoteControlStreamConfigDeferred session=\\(peer.id) transport=p2p reason=awaiting_security_notice"),
+            "P2P streamConfiguration may be staged before approval, but must not be applied until the security notice is approved."
+        )
     }
 
     func testWebRTCClipboardSyncCannotBeSentBeforeApproval() throws {
@@ -434,6 +467,13 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             source.contains("stopWebRTCClipboardSyncIfNeeded(for: sessionID)") &&
             source.contains("remoteControlClipboardSendBlocked session=\\(sessionID) transport=webrtc reason=awaiting_security_notice"),
             "WebRTC local pasteboard forwarding must fail closed even if a stale clipboard callback fires before notice approval."
+        )
+        XCTAssertTrue(
+            source.contains("webrtcPendingRemoteStreamConfigurationBySessionId") &&
+                source.contains("self.webrtcPendingRemoteStreamConfigurationBySessionId[sessionID] = config") &&
+                source.contains("await applyApprovedWebRTCStreamConfiguration(") &&
+                source.contains("remoteControlStreamConfigDeferred session=\\(sessionID) transport=webrtc reason=awaiting_security_notice"),
+            "WebRTC streamConfiguration may be staged before approval, but must not be applied or acknowledged until the security notice is approved."
         )
     }
 

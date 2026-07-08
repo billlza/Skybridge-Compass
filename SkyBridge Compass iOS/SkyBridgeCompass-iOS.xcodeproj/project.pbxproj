@@ -55,8 +55,14 @@
 		345002A115AD0F87BED1AB9B /* CrossNetworkWebRTCManager+FileTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98D553E1FC6A34FBF3E3CD0E /* CrossNetworkWebRTCManager+FileTransfer.swift */; };
 		3791BAA6FC4869628D7C0283 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */; };
 		39A3F1AFC760872099A7DC36 /* CrossNetworkWebRTCConnectionCodePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2A2FAE317582E218902EFD /* CrossNetworkWebRTCConnectionCodePolicy.swift */; };
+		D16A00000000000000000001 /* CrossNetworkWebRTCLocalAppMessageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D16A00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactory.swift */; };
+		D16B00000000000000000001 /* CrossNetworkWebRTCLocalAppMessageFactoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D16B00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactoryTests.swift */; };
 		3A10C791C654AABB4B2F37AA /* P2PError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 625612618E7302D401035FAB /* P2PError.swift */; };
 		3BB7359087A9EF49C86CE078 /* OfflineMessageQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */; };
+		D15A00000000000000000001 /* DeviceMessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15A00000000000000000011 /* DeviceMessageStore.swift */; };
+		D15A00000000000000000002 /* DeviceMessagingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15A00000000000000000012 /* DeviceMessagingService.swift */; };
+		D15A00000000000000000003 /* DeviceMessagingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15A00000000000000000013 /* DeviceMessagingView.swift */; };
+		D15A00000000000000000004 /* DeviceMessagingServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15A00000000000000000014 /* DeviceMessagingServiceTests.swift */; };
 		3D4AE0820CA4A146EBE72AA6 /* WeatherManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF1477AA66D565DCBFC1FB /* WeatherManager.swift */; };
 		3D76475FBC024939F1931522 /* WeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 588909BCF563A11B86AF8634 /* WeatherService.swift */; };
 		404680039CB34D5EC03789D1 /* HandshakeDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2DD43FFE9C9B153C2496625 /* HandshakeDriver.swift */; };
@@ -296,6 +302,12 @@
 		2CBEE9E48B35160C9FDCE0F1 /* WeatherEffectsPerformanceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherEffectsPerformanceContractTests.swift; sourceTree = "<group>"; };
 		2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SkyBridgeCompassiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineMessageQueue.swift; sourceTree = "<group>"; };
+		D15A00000000000000000011 /* DeviceMessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessageStore.swift; sourceTree = "<group>"; };
+		D15A00000000000000000012 /* DeviceMessagingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingService.swift; sourceTree = "<group>"; };
+		D15A00000000000000000013 /* DeviceMessagingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingView.swift; sourceTree = "<group>"; };
+		D15A00000000000000000014 /* DeviceMessagingServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingServiceTests.swift; sourceTree = "<group>"; };
+		D16A00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkWebRTCLocalAppMessageFactory.swift; sourceTree = "<group>"; };
+		D16B00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkWebRTCLocalAppMessageFactoryTests.swift; sourceTree = "<group>"; };
 		370638A46C0CA33E8A9B30B4 /* P2PBootstrapPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PBootstrapPolicyTests.swift; sourceTree = "<group>"; };
 		37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeActivityAttributes.swift; sourceTree = "<group>"; };
 		380347E9DAA089B6533D6F89 /* TrustedDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceStore.swift; sourceTree = "<group>"; };
@@ -593,11 +605,13 @@
 				24F23783410F5E90DFA7192E /* ConnectLinkFormatTests.swift */,
 				AD4191C1EC9823156E067462 /* CrossNetworkConnectPayloadDecodingTests.swift */,
 				291D3258447A23ACB27D7915 /* CrossNetworkQRCodeVerificationPolicyTests.swift */,
-				F341786F08530A40185484F9 /* CrossNetworkWebRTCManager+TestSupport.swift */,
-				011E95C36447B9AFE62080C1 /* CrossNetworkWebRTCManagerDirectProbeTests.swift */,
-				CAA25EE2004133095AF6F4A0 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift */,
+					F341786F08530A40185484F9 /* CrossNetworkWebRTCManager+TestSupport.swift */,
+					011E95C36447B9AFE62080C1 /* CrossNetworkWebRTCManagerDirectProbeTests.swift */,
+					D16B00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactoryTests.swift */,
+					CAA25EE2004133095AF6F4A0 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift */,
 				3CBCE0020F567A4861450E17 /* CrossNetworkWebRTCTraceDescriptionTests.swift */,
 				4070718AFE727B04D180A3BB /* CurrentPathTrustedDeviceStoreTests.swift */,
+				D15A00000000000000000014 /* DeviceMessagingServiceTests.swift */,
 				4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */,
 				E702E9A3AC9F6266ABD535AF /* FileTransferLANRoutePolicyTests.swift */,
 				65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */,
@@ -764,10 +778,11 @@
 				155565F617393E35D152C0B5 /* CrossNetworkQRCodeVerificationPolicy.swift */,
 				F3706132C6E72D1A77A3CAB0 /* CrossNetworkServerConfig.swift */,
 				72A1A26AC8E750D7E86B082B /* CrossNetworkSignalServerClient.swift */,
-				9A2A2FAE317582E218902EFD /* CrossNetworkWebRTCConnectionCodePolicy.swift */,
-				0C69EB15663E9C0229C9F1A1 /* CrossNetworkWebRTCControlChannelCodec.swift */,
-				1C9217A1F130E0B002F749A2 /* CrossNetworkWebRTCInboundFileTransferSupport.swift */,
-				C4568D926CA0A380B78D4D3A /* CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift */,
+					9A2A2FAE317582E218902EFD /* CrossNetworkWebRTCConnectionCodePolicy.swift */,
+					0C69EB15663E9C0229C9F1A1 /* CrossNetworkWebRTCControlChannelCodec.swift */,
+					1C9217A1F130E0B002F749A2 /* CrossNetworkWebRTCInboundFileTransferSupport.swift */,
+					D16A00000000000000000011 /* CrossNetworkWebRTCLocalAppMessageFactory.swift */,
+					C4568D926CA0A380B78D4D3A /* CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift */,
 				DAD06D68CB12DF356124B655 /* CrossNetworkWebRTCManager+ScreenChannelWire.swift */,
 				FE81F8C0CF7F6D51E5BFA894 /* CrossNetworkWebRTCManagerModels.swift */,
 				5817559350F79BFC87F6C050 /* CrossNetworkWebRTCNativeVideoPolicy.swift */,
@@ -892,6 +907,7 @@
 				B68E3A442804F03C62887E08 /* AuthenticationView.swift */,
 				392C43BFC3AF2C36DD4D7E06 /* BetaBannerView.swift */,
 				E8C00600750038AF17C8EB31 /* DeviceDiscoveryView.swift */,
+				D15A00000000000000000013 /* DeviceMessagingView.swift */,
 				8B1F73F6E61ED9E9E8F5CD17 /* FileTransferView.swift */,
 				11836F0EEEF86B3B57A2F4CE /* PQCMicroBenchView.swift */,
 				5E39D6C541D431957B758E14 /* PQCVerificationView.swift */,
@@ -1045,6 +1061,8 @@
 				65EDD47FB40C675DA9636DDF /* AppMessage+KEMRefreshFailurePayload.swift */,
 				CB0E0B321FFC9ED9B33B2E5D /* AppMessage+LivenessPayloads.swift */,
 				C2F654AAFCB21578727AE8BD /* AppMessage+PairingIdentityPayloads.swift */,
+				D15A00000000000000000011 /* DeviceMessageStore.swift */,
+				D15A00000000000000000012 /* DeviceMessagingService.swift */,
 				3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */,
 			);
 			path = Messaging;
@@ -1208,11 +1226,13 @@
 				04076E229294D9656744F5A1 /* ConnectionCodeFormatTests.swift in Sources */,
 				477C7D982841FA810C806D81 /* CrossNetworkConnectPayloadDecodingTests.swift in Sources */,
 				1EFDD3C9D82C5DFFC7572DAE /* CrossNetworkQRCodeVerificationPolicyTests.swift in Sources */,
-				81E58D81A5B2561546DA5F9D /* CrossNetworkWebRTCManager+TestSupport.swift in Sources */,
-				2CE8B8409520F4692ABAC59F /* CrossNetworkWebRTCManagerDirectProbeTests.swift in Sources */,
-				0250313E65CDD5EFC68A0DA7 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift in Sources */,
+					81E58D81A5B2561546DA5F9D /* CrossNetworkWebRTCManager+TestSupport.swift in Sources */,
+					2CE8B8409520F4692ABAC59F /* CrossNetworkWebRTCManagerDirectProbeTests.swift in Sources */,
+					D16B00000000000000000001 /* CrossNetworkWebRTCLocalAppMessageFactoryTests.swift in Sources */,
+					0250313E65CDD5EFC68A0DA7 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift in Sources */,
 				AFB6F6B674A3D690B5C1F883 /* CrossNetworkWebRTCTraceDescriptionTests.swift in Sources */,
 				5DCD1595987CE16988ACC125 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */,
+				D15A00000000000000000004 /* DeviceMessagingServiceTests.swift in Sources */,
 				B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */,
 				DE19D5E16D0FAAF7C039E43A /* FileTransferLANRoutePolicyTests.swift in Sources */,
 				CA33646C6E8E1E7769FAE1CB /* HandshakeCryptoPolicyParityTests.swift in Sources */,
@@ -1277,10 +1297,11 @@
 				B324E6DDA3A16D68E07A40DC /* CrossNetworkQRCodeVerificationPolicy.swift in Sources */,
 				5D559012DCD219052AD7BC5B /* CrossNetworkServerConfig.swift in Sources */,
 				88FA029FF6DA05AC232C5C34 /* CrossNetworkSignalServerClient.swift in Sources */,
-				39A3F1AFC760872099A7DC36 /* CrossNetworkWebRTCConnectionCodePolicy.swift in Sources */,
-				F37EFD19A266A400CE84E947 /* CrossNetworkWebRTCControlChannelCodec.swift in Sources */,
-				EF61DA6E15BA763D73386521 /* CrossNetworkWebRTCInboundFileTransferSupport.swift in Sources */,
-				9FFC1B8069947A9175CE78E4 /* CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift in Sources */,
+					39A3F1AFC760872099A7DC36 /* CrossNetworkWebRTCConnectionCodePolicy.swift in Sources */,
+					F37EFD19A266A400CE84E947 /* CrossNetworkWebRTCControlChannelCodec.swift in Sources */,
+					EF61DA6E15BA763D73386521 /* CrossNetworkWebRTCInboundFileTransferSupport.swift in Sources */,
+					D16A00000000000000000001 /* CrossNetworkWebRTCLocalAppMessageFactory.swift in Sources */,
+					9FFC1B8069947A9175CE78E4 /* CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift in Sources */,
 				345002A115AD0F87BED1AB9B /* CrossNetworkWebRTCManager+FileTransfer.swift in Sources */,
 				D4EDCF0F3707A1EE25A8409D /* CrossNetworkWebRTCManager+ScreenChannelWire.swift in Sources */,
 				AE8919E0A149251A09F85FAB /* CrossNetworkWebRTCManager.swift in Sources */,
@@ -1300,7 +1321,10 @@
 				8C6C9679F0D78AAA99FC7869 /* DashboardWeatherEffectsView.swift in Sources */,
 				285C668B7A4949FAF3AC8CDE /* DeviceDiscoveryManager.swift in Sources */,
 				7BC94778280AA36EC50960A4 /* DeviceDiscoveryView.swift in Sources */,
+				D15A00000000000000000003 /* DeviceMessagingView.swift in Sources */,
 				78AAB5A796C451E94DDE8A89 /* DeviceRowView.swift in Sources */,
+				D15A00000000000000000001 /* DeviceMessageStore.swift in Sources */,
+				D15A00000000000000000002 /* DeviceMessagingService.swift in Sources */,
 				C732B478E7962ACA4DAC78A3 /* FileTransferClassicPeerResolutionPolicy.swift in Sources */,
 				AA29524FCAC01A41081CE6DC /* FileTransferDeviceResolution.swift in Sources */,
 				178531821F25CB075B0DB79E /* FileTransferLANRoutePolicy.swift in Sources */,

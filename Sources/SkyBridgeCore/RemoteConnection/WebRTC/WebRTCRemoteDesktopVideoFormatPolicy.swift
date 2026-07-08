@@ -10,9 +10,9 @@ enum WebRTCRemoteDesktopVideoFormatPolicy {
             return ["jpeg"]
         }
 
-        var formats = Set(advertisedFormats.map { $0.lowercased() })
+        var formats = Set(BonjourInteropContract.normalizedRemoteVideoFormats(advertisedFormats))
         if let config {
-            formats.formUnion(config.supportedVideoFormats.map { $0.lowercased() })
+            formats.formUnion(BonjourInteropContract.normalizedRemoteVideoFormats(config.supportedVideoFormats))
             if let preferred = config.preferredCodec?.lowercased(),
                preferred == "h264" || preferred == "hevc" || preferred == "jpeg" {
                 formats.insert(preferred)
@@ -25,9 +25,9 @@ enum WebRTCRemoteDesktopVideoFormatPolicy {
         localSupportedFormats: [String],
         streamConfiguration config: RemoteDesktopStreamConfiguration?
     ) -> Set<String> {
-        var formats = Set(localSupportedFormats.map { $0.lowercased() })
+        var formats = Set(BonjourInteropContract.normalizedRemoteVideoFormats(localSupportedFormats))
         if let config {
-            for format in config.supportedVideoFormats.map({ $0.lowercased() }) where format != "jpeg" {
+            for format in BonjourInteropContract.normalizedRemoteVideoFormats(config.supportedVideoFormats) where format != "jpeg" {
                 formats.insert(format)
             }
             if let preferred = config.preferredCodec?.lowercased(),

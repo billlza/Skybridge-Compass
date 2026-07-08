@@ -37,6 +37,41 @@ public actor FileTransferNetworkService {
         case failed
         case cancelled
     }
+
+    private enum InboundInitialMetadataError: Error, Equatable, Sendable {
+        case headerReceiveFailed
+        case missingHeader
+        case malformedHeader
+        case unsupportedResumeRequest
+        case unexpectedInitialMessage
+        case invalidMetadataLength
+        case metadataReceiveFailed
+        case missingMetadataPayload
+        case malformedMetadataJSON
+
+        var rejectionReason: String {
+            switch self {
+            case .headerReceiveFailed:
+                return "header_receive_failed"
+            case .missingHeader:
+                return "missing_header"
+            case .malformedHeader:
+                return "malformed_header"
+            case .unsupportedResumeRequest:
+                return "unsupported_resume_request"
+            case .unexpectedInitialMessage:
+                return "unexpected_initial_message"
+            case .invalidMetadataLength:
+                return "invalid_metadata_length"
+            case .metadataReceiveFailed:
+                return "metadata_receive_failed"
+            case .missingMetadataPayload:
+                return "missing_metadata_payload"
+            case .malformedMetadataJSON:
+                return "malformed_metadata_json"
+            }
+        }
+    }
     
     // MARK: - Properties
     
@@ -219,7 +254,7 @@ public actor FileTransferNetworkService {
             "uuid": Data(deviceId.utf8),
             "model": Data(model.utf8),
             "osVersion": Data(systemVersion.utf8),
-            "capabilities": Data("file_transfer".utf8),
+            "capabilities": Data("file,file_transfer,\(ClassicTransferCapability.classicResume)".utf8),
             "transferPort": Data(portString.utf8),
             "fileTransferPort": Data(portString.utf8),
             "file_transfer_port": Data(portString.utf8),
@@ -276,6 +311,7 @@ public actor FileTransferNetworkService {
         }
         
         let connection = NWConnection(to: endpoint, using: parameters)
+        let endpointDescription = "\(normalizedIP):\(port)"
         
         final class ContinuationGate: @unchecked Sendable {
             private let lock = NSLock()
@@ -307,11 +343,20 @@ public actor FileTransferNetworkService {
                     
                 case .failed(let error):
                     finishOnce {
-                        continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
+                        continuation.resume(throwing: FileTransferError.networkStageFailed(
+                            stage: "connect_failed",
+                            endpoint: endpointDescription,
+                            details: error.localizedDescription
+                        ))
                     }
                     
                 case .cancelled:
                     finishOnce { continuation.resume(throwing: FileTransferError.transferCancelled) }
+
+                case .waiting(let error):
+                    SkyBridgeLogger.shared.warning(
+                        "⏳ 文件传输连接等待: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                    )
                     
                 default:
                     break
@@ -319,6 +364,21 @@ public actor FileTransferNetworkService {
             }
             
             connection.start(queue: queue)
+
+            queue.asyncAfter(deadline: .now() + FileTransferConstants.connectionTimeout) {
+                gate.runOnce {
+                    connection.stateUpdateHandler = nil
+                    SkyBridgeLogger.shared.error(
+                        "❌ 文件传输连接超时: endpoint=\(endpointDescription) timeout=\(Int(FileTransferConstants.connectionTimeout))s"
+                    )
+                    connection.cancel()
+                    continuation.resume(throwing: FileTransferError.networkStageFailed(
+                        stage: "connect_timeout",
+                        endpoint: endpointDescription,
+                        details: "\(Int(FileTransferConstants.connectionTimeout))s"
+                    ))
+                }
+            }
         }
     }
     
@@ -403,26 +463,16 @@ public actor FileTransferNetworkService {
         connection.receive(minimumIncompleteLength: 8, maximumLength: 8) { [weak self] data, _, _, error in
             guard let self = self else { return }
             
-            if let error = error {
-                SkyBridgeLogger.shared.error("❌ 接收头部失败: \(error.localizedDescription)")
+            if error != nil {
+                Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: .headerReceiveFailed) }
                 return
             }
-            
-            guard let headerData = data,
-                  let header = TransferHeader.decode(from: headerData) else {
-                return
-            }
-            if header.type == .resumeRequest {
-                SkyBridgeLogger.shared.warning("⚠️ iOS classic TCP listener 不支持 resumeRequest，已拒绝该连接")
-                connection.cancel()
-                return
-            }
-            guard header.type == .metadata else {
-                return
-            }
-            if header.length <= 0 || header.length > 2_000_000 {
-                SkyBridgeLogger.shared.error("❌ 元数据长度异常: \(header.length)")
-                connection.cancel()
+
+            let headerResult = Self.decodeInboundInitialMetadataHeader(data)
+            guard case let .success(header) = headerResult else {
+                if case let .failure(validationError) = headerResult {
+                    Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: validationError) }
+                }
                 return
             }
             
@@ -430,13 +480,16 @@ public actor FileTransferNetworkService {
             connection.receive(minimumIncompleteLength: header.length, maximumLength: header.length) { [weak self] metaData, _, _, error in
                 guard let self = self else { return }
                 
-                if let error = error {
-                    SkyBridgeLogger.shared.error("❌ 接收元数据失败: \(error.localizedDescription)")
+                if error != nil {
+                    Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: .metadataReceiveFailed) }
                     return
                 }
-                
-                guard let data = metaData,
-                      let metadata = try? JSONDecoder().decode(FileMetadata.self, from: data) else {
+
+                let metadataResult = Self.decodeInboundInitialMetadataPayload(metaData)
+                guard case let .success(metadata) = metadataResult else {
+                    if case let .failure(validationError) = metadataResult {
+                        Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: validationError) }
+                    }
                     return
                 }
                 
@@ -454,11 +507,57 @@ public actor FileTransferNetworkService {
                     do {
                         try await self.onFileReceiveRequest?(metadata, connection, peerContext)
                     } catch {
-                        SkyBridgeLogger.shared.error("❌ 处理文件接收请求失败: \(error.localizedDescription)")
+                        SkyBridgeLogger.shared.error("❌ 处理文件接收请求失败: reason=file_receive_request_handler_failed")
                     }
                 }
             }
         }
+    }
+
+    private nonisolated static func decodeInboundInitialMetadataHeader(
+        _ data: Data?
+    ) -> Result<TransferHeader, InboundInitialMetadataError> {
+        guard let data else {
+            return .failure(.missingHeader)
+        }
+        guard let header = TransferHeader.decode(from: data) else {
+            return .failure(.malformedHeader)
+        }
+        switch header.type {
+        case .metadata:
+            guard header.length > 0 && header.length <= 2_000_000 else {
+                return .failure(.invalidMetadataLength)
+            }
+            return .success(header)
+        case .resumeRequest:
+            return .failure(.unsupportedResumeRequest)
+        case .chunk, .complete, .receipt, .resumeAck, .unknown:
+            return .failure(.unexpectedInitialMessage)
+        }
+    }
+
+    private nonisolated static func decodeInboundInitialMetadataPayload(
+        _ data: Data?
+    ) -> Result<FileMetadata, InboundInitialMetadataError> {
+        guard let data else {
+            return .failure(.missingMetadataPayload)
+        }
+        do {
+            return .success(try JSONDecoder().decode(FileMetadata.self, from: data))
+        } catch {
+            return .failure(.malformedMetadataJSON)
+        }
+    }
+
+    private func rejectInboundMetadataConnection(
+        _ connection: NWConnection,
+        connectionId: String,
+        error: InboundInitialMetadataError
+    ) {
+        SkyBridgeLogger.shared.error("❌ 拒绝文件传输入站元数据: reason=\(error.rejectionReason)")
+        connection.stateUpdateHandler = nil
+        activeConnections.removeValue(forKey: connectionId)
+        connection.cancel()
     }
 
     private nonisolated func getPeerName(from connection: NWConnection) -> String {

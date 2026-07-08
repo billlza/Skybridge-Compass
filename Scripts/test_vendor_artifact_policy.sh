@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_READINESS_WORKFLOW="${ROOT_DIR}/.github/workflows/macos-release-readiness.yml"
 
 fail() {
   echo "[test-vendor-artifact-policy] $1" >&2
@@ -55,6 +56,15 @@ assert_no_user_home_paths_in_static_library() {
 if grep -Fq "/Users/" "${ROOT_DIR}/Scripts/build_qperiapt_xcframework.sh"; then
   fail "build_qperiapt_xcframework.sh must not hard-code a local user path; use QPERIAPT_REPO or External/pqt_hybrid_suite"
 fi
+
+grep -Fq "repository: billlza/q-periapt" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness must checkout q-periapt explicitly for clean CI source contracts"
+grep -Fq "ref: d0475a94276bc5ff65deb1c5367d1f56ca436f5b" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness q-periapt checkout must be pinned to a full commit SHA"
+grep -Fq "path: External/pqt_hybrid_suite" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness q-periapt checkout must land in External/pqt_hybrid_suite"
+grep -Fq "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness must prove the q-periapt sibling path dependency is reachable"
 
 assert_no_modulemaps "Sources/Vendor/qperiapt.xcframework"
 assert_no_modulemaps "SkyBridge Compass iOS/Vendor/qperiapt.xcframework"

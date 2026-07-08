@@ -1426,9 +1426,9 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func capabilitiesInferred(from serviceType: DiscoveryServiceType) -> Set<String> {
         switch serviceType {
         case .skybridgeTransfer:
-            return ["file_transfer"]
+            return ["file", "file_transfer"]
         case .skybridgeRemote:
-            return ["remote_desktop"]
+            return ["screen_sharing", "remote_desktop", "rdview", "remote_control", "rdcontrol"]
         default:
             return []
         }
@@ -1437,8 +1437,12 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func recomputeCapabilities(existing: DiscoveredDevice) -> [String] {
         var caps = Set(existing.advertisedCapabilities)
         for s in existing.services {
-            if s == DiscoveryServiceType.skybridgeTransfer.rawValue { caps.insert("file_transfer") }
-            if s == DiscoveryServiceType.skybridgeRemote.rawValue { caps.insert("remote_desktop") }
+            if s == DiscoveryServiceType.skybridgeTransfer.rawValue {
+                caps.formUnion(["file", "file_transfer"])
+            }
+            if s == DiscoveryServiceType.skybridgeRemote.rawValue {
+                caps.formUnion(["screen_sharing", "remote_desktop", "rdview", "remote_control", "rdcontrol"])
+            }
         }
         return Array(caps).sorted()
     }

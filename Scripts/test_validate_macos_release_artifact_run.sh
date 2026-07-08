@@ -48,12 +48,12 @@ EVENT="workflow_dispatch"
 HEAD_SHA="0123456789abcdef0123456789abcdef01234567"
 HEAD_BRANCH="release/os27"
 ARTIFACT_NAMES=(
-  "real-device-connectivity-matrix"
-  "real-device-p2p-remote-smoke"
-  "real-device-file-transfer-smoke"
-  "real-device-p2p-security-notice"
-  "local-webrtc-security-notice"
-  "local-macos-security-notice-panel"
+  "real-device-connectivity-matrix-public-redacted"
+  "real-device-p2p-remote-smoke-public-redacted"
+  "real-device-file-transfer-smoke-public-redacted"
+  "real-device-p2p-security-notice-public-redacted"
+  "local-webrtc-security-notice-public-redacted"
+  "local-macos-security-notice-panel-public-redacted"
 )
 
 write_payloads() {
@@ -165,6 +165,7 @@ run_target() {
       --artifact "${ARTIFACT_NAMES[3]}" \
       --artifact "${ARTIFACT_NAMES[4]}" \
       --artifact "${ARTIFACT_NAMES[5]}" \
+      --require-public-redacted-artifacts \
       --provenance-output "${output_path}" \
       "$@"
 }
@@ -225,6 +226,13 @@ expect_failure_contains \
       --expected-head-sha "${HEAD_SHA}" \
       --expected-head-branch "${HEAD_BRANCH}" \
       --artifact "${ARTIFACT_NAMES[0]}"
+
+write_payloads "${TMP_DIR}/run.json" "${TMP_DIR}/artifacts.json"
+expect_failure_contains \
+  "raw artifact name rejected" \
+  "must declare the public-redaction contract" \
+  run_target "${TMP_DIR}/raw-artifact-name.json" \
+    --artifact "real-device-connectivity-matrix"
 
 RUN_ATTEMPT_VALUE=3 write_payloads "${TMP_DIR}/run.json" "${TMP_DIR}/artifacts.json"
 expect_failure_contains "run attempt mismatch" "run attempt mismatch" run_target "${TMP_DIR}/attempt.json"

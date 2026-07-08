@@ -20,6 +20,11 @@ struct WebRTCAppSecureOpenedPayload: Sendable {
     let payload: Data
 }
 
+struct WebRTCAppSecureSessionBindingDescriptor: Sendable, Equatable {
+    let sessionHashHex: String
+    let transcriptPrefixHex: String
+}
+
 enum WebRTCAppSecureReplayRejectionReason: String, Sendable {
     case duplicateCounter = "duplicate-counter"
     case counterOutsideWindow = "counter-outside-window"
@@ -204,6 +209,13 @@ enum WebRTCAppSecureEnvelope {
         return output
     }
 
+    static func sessionBindingDescriptor(for keys: SessionKeys) -> WebRTCAppSecureSessionBindingDescriptor {
+        WebRTCAppSecureSessionBindingDescriptor(
+            sessionHashHex: lowerHex16(sessionIdHash(keys.sessionId)),
+            transcriptPrefixHex: lowerHex16(transcriptPrefix(keys.transcriptHash))
+        )
+    }
+
     static func open(
         _ packet: Data,
         keys: SessionKeys,
@@ -334,6 +346,10 @@ enum WebRTCAppSecureEnvelope {
         return firstUInt64(of: SHA256.hash(data: input))
     }
 
+    private static func lowerHex16(_ value: UInt64) -> String {
+        String(format: "%016llx", value)
+    }
+
     private static func firstUInt64<D: Sequence>(of digest: D) -> UInt64 where D.Element == UInt8 {
         digest.prefix(8).reduce(UInt64(0)) { partial, byte in
             (partial << 8) | UInt64(byte)
@@ -400,6 +416,10 @@ enum WebRTCControlChannelCodec {
         )
     }
 
+    static func sessionBindingDescriptor(for keys: SessionKeys) -> WebRTCAppSecureSessionBindingDescriptor {
+        WebRTCAppSecureEnvelope.sessionBindingDescriptor(for: keys)
+    }
+
     static func decryptAppPayload(
         _ ciphertext: Data,
         with keys: SessionKeys,
@@ -430,6 +450,9 @@ enum WebRTCControlChannelCodec {
         if let payload = fallback.heartbeat {
             return .heartbeat(payload)
         }
+        if let payload = fallback.authenticatedRouteBinding {
+            return .authenticatedRouteBinding(payload)
+        }
         if let payload = fallback.ping {
             return .ping(payload)
         }
@@ -459,6 +482,8 @@ enum WebRTCControlChannelCodec {
             return "signedProtocolIdentityBinding"
         case .heartbeat:
             return "heartbeat"
+        case .authenticatedRouteBinding:
+            return "authenticatedRouteBinding"
         case .peerDisconnecting:
             return "peerDisconnecting"
         case .ping:
@@ -502,6 +527,7 @@ enum WebRTCControlChannelCodec {
         let clipboard: AppMessage.ClipboardPayload?
         let pairingIdentityExchange: AppMessage.PairingIdentityExchangePayload?
         let heartbeat: AppMessage.HeartbeatPayload?
+        let authenticatedRouteBinding: AppMessage.AuthenticatedRouteBindingPayload?
         let ping: AppMessage.PingPayload?
         let pong: AppMessage.PongPayload?
     }

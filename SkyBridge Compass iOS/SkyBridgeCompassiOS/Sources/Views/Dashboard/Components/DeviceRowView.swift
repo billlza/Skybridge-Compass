@@ -372,6 +372,7 @@ struct DeviceDetailSheet: View {
     @State private var isConnecting = false
     @State private var connectError: String?
     @State private var showPQCVerification: Bool = false
+    @State private var showMessaging: Bool = false
     
     var body: some View {
         NavigationStack {
@@ -412,6 +413,14 @@ struct DeviceDetailSheet: View {
                                 .foregroundStyle(.green)
                             Text(RuntimeLocalization.string("已受信任（PQC 引导）"))
                                 .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            showMessaging = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                Text(RuntimeLocalization.string("发送消息"))
+                            }
                         }
                     } else {
                         Button {
@@ -474,6 +483,9 @@ struct DeviceDetailSheet: View {
             }
             .sheet(isPresented: $showPQCVerification) {
                 PQCVerificationView(device: device)
+            }
+            .sheet(isPresented: $showMessaging) {
+                DeviceMessagingView(device: device)
             }
         }
     }

@@ -39,7 +39,7 @@ public enum FileTransferReceiptWaitStage: String, Sendable, Equatable {
 }
 
 enum ClassicTransferCapability {
-    static let classicResume = "classic_resume"
+    static let classicResume = BonjourInteropContract.classicResumeCapability
 
     static func supportsClassicResume(in capabilities: [String]) -> Bool {
         capabilities.contains { capability in

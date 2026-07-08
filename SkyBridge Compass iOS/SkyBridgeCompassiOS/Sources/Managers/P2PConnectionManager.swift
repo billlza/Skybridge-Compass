@@ -3183,6 +3183,20 @@ public class P2PConnectionManager: ObservableObject {
             ClipboardManager.shared.setRemoteClipboard(data: data, mimeType: payload.mimeType, fromDeviceId: peerId)
             ClipboardManager.shared.recordDeviceSync(deviceId: peerId, mimeType: payload.mimeType, bytes: data.count)
             SkyBridgeLogger.shared.info("📋 已接收远端剪贴板：\(Self.protocolIdentityLogRedaction)")
+        case .textMessage(let payload):
+            do {
+                try DeviceMessagingService.shared.handleIncoming(
+                    payload,
+                    fromPeerIds: textMessageConversationLookupCandidates(for: peerId)
+                )
+                SkyBridgeLogger.shared.info(
+                    "📨 已接收设备文本消息：peer=\(Self.protocolIdentityLogRedaction) messageId=\(payload.id.uuidString)"
+                )
+            } catch {
+                SkyBridgeLogger.shared.error(
+                    "⛔️ 设备文本消息未落库：peer=\(Self.protocolIdentityLogRedaction) messageId=\(payload.id.uuidString) reason=\(DeviceMessagingService.logSafeErrorSummary(error))"
+                )
+            }
         case .pairingIdentityExchange(let payload):
             await handlePairingIdentityExchangeRequest(from: peerId, payload: payload)
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
@@ -3204,6 +3218,8 @@ public class P2PConnectionManager: ObservableObject {
                 fileTransferPort: payload.fileTransferPort,
                 remoteControlPort: payload.remoteControlPort
             )
+        case .authenticatedRouteBinding:
+            break
         case .peerDisconnecting(let payload):
             let runtimePeerId = promotePeerPresentationIdentityIfNeeded(
                 runtimePeerId: peerId,
@@ -4034,6 +4050,39 @@ public class P2PConnectionManager: ObservableObject {
         ClipboardManager.shared.recordDeviceSync(deviceId: deviceId, mimeType: mimeType, bytes: data.count)
     }
 
+    public func sendTextMessage(
+        to deviceId: String,
+        payload: AppMessage.TextMessagePayload
+    ) async throws {
+        let deviceId = canonicalPeerLookupKey(deviceId)
+        guard !rekeyInProgress.contains(deviceId) else { throw P2PError.noSessionKey }
+        guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
+        guard sessionKeys[deviceId] != nil else { throw P2PError.noSessionKey }
+
+        let encoded: Data
+        do {
+            encoded = try JSONEncoder().encode(AppMessage.textMessage(payload))
+        } catch {
+            SkyBridgeLogger.shared.error("⛔️ 设备文本消息编码失败: \(Self.diagnosticErrorSummary(error))")
+            throw P2PError.encryptionFailed
+        }
+
+        let ciphertext: Data
+        do {
+            ciphertext = try encryptForDevice(encoded, deviceId: deviceId)
+        } catch {
+            SkyBridgeLogger.shared.error("⛔️ 设备文本消息加密失败: \(Self.diagnosticErrorSummary(error))")
+            throw P2PError.encryptionFailed
+        }
+
+        do {
+            try await send(data: ciphertext, over: connection)
+        } catch {
+            SkyBridgeLogger.shared.warning("⚠️ 设备文本消息发送失败: \(Self.diagnosticErrorSummary(error))")
+            throw P2PError.connectionFailed
+        }
+    }
+
     /// 广播剪贴板到所有已建立会话的连接
     public func broadcastClipboard(data: Data, mimeType: String) async {
         for deviceId in connections.keys {
@@ -4551,6 +4600,33 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         return aliases
+    }
+
+    private func textMessageConversationLookupCandidates(for peerId: String) -> [String] {
+        let runtimePeerId = runtimePeerId(forAnyPeerId: peerId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        var ordered: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String?) {
+            guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  seen.insert(value).inserted else {
+                return
+            }
+            ordered.append(value)
+        }
+
+        append(peerId)
+        append(runtimePeerId)
+        append(presentationPeerId)
+        append(lastAcceptedPairingIdentityDeviceIdByPeerId[peerId])
+        append(lastAcceptedPairingIdentityDeviceIdByPeerId[runtimePeerId])
+
+        for candidate in connectionStatePeerIds(for: runtimePeerId) {
+            append(candidate)
+        }
+        return ordered
     }
 
     private func stateKeysMatchingAliases<S: Sequence>(

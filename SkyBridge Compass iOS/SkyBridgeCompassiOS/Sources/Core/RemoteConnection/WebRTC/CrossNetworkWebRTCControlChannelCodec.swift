@@ -22,6 +22,12 @@ struct WebRTCAppSecureOpenedPayload: Sendable {
 }
 
 @available(iOS 17.0, *)
+struct WebRTCAppSecureSessionBindingDescriptor: Sendable, Equatable {
+    let sessionHashHex: String
+    let transcriptPrefixHex: String
+}
+
+@available(iOS 17.0, *)
 enum WebRTCAppSecureReplayRejectionReason: String, Sendable {
     case duplicateCounter = "duplicate-counter"
     case counterOutsideWindow = "counter-outside-window"
@@ -209,6 +215,13 @@ enum WebRTCAppSecureEnvelope {
         return output
     }
 
+    static func sessionBindingDescriptor(for keys: SessionKeys) -> WebRTCAppSecureSessionBindingDescriptor {
+        WebRTCAppSecureSessionBindingDescriptor(
+            sessionHashHex: lowerHex16(sessionIdHash(keys.sessionId)),
+            transcriptPrefixHex: lowerHex16(transcriptPrefix(keys.transcriptHash))
+        )
+    }
+
     static func open(
         _ packet: Data,
         keys: SessionKeys,
@@ -345,6 +358,10 @@ enum WebRTCAppSecureEnvelope {
         }
     }
 
+    private static func lowerHex16(_ value: UInt64) -> String {
+        String(format: "%016llx", value)
+    }
+
     private static func appendUInt32(_ value: UInt32, to data: inout Data) {
         data.append(UInt8((value >> 24) & 0xff))
         data.append(UInt8((value >> 16) & 0xff))
@@ -402,10 +419,16 @@ enum CrossNetworkWebRTCControlChannelCodec {
         )
     }
 
+    nonisolated static func sessionBindingDescriptor(for keys: SessionKeys) -> WebRTCAppSecureSessionBindingDescriptor {
+        WebRTCAppSecureEnvelope.sessionBindingDescriptor(for: keys)
+    }
+
     nonisolated static func bootstrapAppMessageKind(_ message: AppMessage) -> String {
         switch message {
         case .clipboard:
             return "clipboard"
+        case .textMessage:
+            return "textMessage"
         case .pairingIdentityExchange:
             return "pairingIdentityExchange"
         case .kemRefreshRequest:
@@ -420,6 +443,8 @@ enum CrossNetworkWebRTCControlChannelCodec {
             return "signedProtocolIdentityBinding"
         case .heartbeat:
             return "heartbeat"
+        case .authenticatedRouteBinding:
+            return "authenticatedRouteBinding"
         case .peerDisconnecting:
             return "peerDisconnecting"
         case .ping:

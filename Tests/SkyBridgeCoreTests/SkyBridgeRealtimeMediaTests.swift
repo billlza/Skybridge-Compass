@@ -1426,7 +1426,9 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteDesktop/WebRTCMediaDiagnostics.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(diagnosticsSource.contains("webrtc-media-\\(safeSessionID).jsonl"))
+        XCTAssertTrue(diagnosticsSource.contains("webrtc-media-\\(safeSessionRef).jsonl"))
+        XCTAssertTrue(diagnosticsSource.contains("payload.removeValue(forKey: \"session_id\")"))
+        XCTAssertTrue(diagnosticsSource.contains("payload[\"session_ref\"] = safeSessionReference(event.sessionId)"))
         XCTAssertTrue(diagnosticsSource.contains("case videoFPS = \"video_fps\""))
         XCTAssertTrue(diagnosticsSource.contains("case framesEncoded"))
         XCTAssertTrue(diagnosticsSource.contains("case framesSent"))

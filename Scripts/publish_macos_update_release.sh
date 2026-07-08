@@ -20,17 +20,20 @@ Options:
   --published-at <iso8601>       Publication timestamp (default: current UTC)
   --expires-at <iso8601>         Expiration timestamp (default: published_at + 30 days)
   --release-notes-url <url>      Release notes URL (default: GitHub release URL)
-  --skip-upload                  Generate and verify the manifest but do not call gh release upload
+  --proof-summary-path <path>    Machine-readable publish proof summary
+  --skip-upload                  Generate and locally verify only; no upload/read-back release proof
   -h, --help                     Show this help
 
-The generated manifest is uploaded as macos-stable.json. The manifest private key
-is never accepted as a command-line value.
+Without --skip-upload, the generated manifest is uploaded as macos-stable.json
+and downloaded back before release_proof=true is written. The manifest private
+key is never accepted as a command-line value.
 USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "${PROJECT_ROOT}/Scripts/package_build_policy.sh"
+MANIFEST_VALIDATOR="${PROJECT_ROOT}/Scripts/validate_macos_update_manifest.sh"
 
 REPOSITORY="${GITHUB_REPOSITORY:-billlza/Skybridge-Compass}"
 TAG_NAME="stable"
@@ -43,6 +46,7 @@ SEQUENCE=""
 PUBLISHED_AT=""
 EXPIRES_AT=""
 RELEASE_NOTES_URL=""
+PROOF_SUMMARY_PATH=""
 SKIP_UPLOAD=0
 
 while [[ $# -gt 0 ]]; do
@@ -89,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release-notes-url)
       RELEASE_NOTES_URL="${2:-}"
+      shift 2
+      ;;
+    --proof-summary-path)
+      PROOF_SUMMARY_PATH="${2:-}"
       shift 2
       ;;
     --skip-upload)
@@ -149,6 +157,69 @@ sha256_file() {
   shasum -a 256 "$1" | awk '{ print $1 }'
 }
 
+write_publish_proof_summary() {
+  local status="$1"
+  local uploaded="$2"
+  local remote_verified="$3"
+  local release_proof="$4"
+  local proof_summary_path="$5"
+
+  [[ -n "$proof_summary_path" ]] || return 0
+
+  python3 - \
+    "$proof_summary_path" \
+    "$status" \
+    "$uploaded" \
+    "$remote_verified" \
+    "$release_proof" \
+    "$REPOSITORY" \
+    "$TAG_NAME" \
+    "$(basename "$APP_PATH")" \
+    "$DMG_ASSET_NAME" \
+    "$(basename "$MANIFEST_PATH")" \
+    "$EXPECTED_DMG_SHA" <<'PY'
+import json
+import pathlib
+import sys
+from datetime import datetime, timezone
+
+(
+    proof_path,
+    status,
+    uploaded,
+    remote_verified,
+    release_proof,
+    repository,
+    tag_name,
+    app_bundle_name,
+    dmg_asset_name,
+    manifest_asset_name,
+    expected_dmg_sha,
+) = sys.argv[1:]
+
+summary = {
+    "profile": "macos-update-release-publish-proof",
+    "status": status,
+    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "repository": repository,
+    "tag": tag_name,
+    "app_bundle_name": app_bundle_name,
+    "dmg_asset_name": dmg_asset_name,
+    "dmg_sha256": expected_dmg_sha,
+    "manifest_asset_name": manifest_asset_name,
+    "local_manifest_validated": True,
+    "uploaded": uploaded == "true",
+    "remote_verified": remote_verified == "true",
+    "release_proof": release_proof == "true",
+}
+path = pathlib.Path(proof_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+  echo "[publish-update] proof summary: $proof_summary_path"
+}
+
 resolve_default_sequence() {
   local app_info_plist="$1"
   local build=""
@@ -191,6 +262,7 @@ verify_uploaded_release_assets() {
   local dmg_asset_name="$2"
   local expected_dmg_sha="$3"
   local manifest_path="$4"
+  local app_path="$5"
   local downloaded_dmg="${verify_dir}/${dmg_asset_name}"
   local downloaded_manifest="${verify_dir}/macos-stable.json"
   local manifest_sha=""
@@ -221,6 +293,12 @@ PY
   )"
   [[ "$manifest_sha" == "$expected_dmg_sha" ]] \
     || fail "manifest sha256 (${manifest_sha:-missing}) does not match uploaded DMG sha256"
+
+  bash "$MANIFEST_VALIDATOR" \
+    --manifest-path "$downloaded_manifest" \
+    --app-path "$app_path" \
+    --dmg-path "$downloaded_dmg" \
+    --require-apple-pqc-sdk-build
 
   if ! python3 - "$downloaded_manifest" <<'PY'
 import json
@@ -295,6 +373,9 @@ MANIFEST_ASSET_PATH="$(dirname "$MANIFEST_PATH")/macos-stable.json"
 if [[ "$MANIFEST_PATH" != "$MANIFEST_ASSET_PATH" ]]; then
   MANIFEST_PATH="$MANIFEST_ASSET_PATH"
 fi
+if [[ -z "$PROOF_SUMMARY_PATH" ]]; then
+  PROOF_SUMMARY_PATH="${MANIFEST_PATH%.json}.publish-proof.json"
+fi
 DOWNLOAD_URL="https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}/${DMG_ASSET_NAME}"
 EXPECTED_DMG_SHA="$(sha256_file "$DMG_PATH")"
 VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-update-publish.XXXXXX")"
@@ -322,8 +403,15 @@ fi
 
 swift "${GENERATOR_ARGS[@]}"
 
+bash "$MANIFEST_VALIDATOR" \
+  --manifest-path "$MANIFEST_PATH" \
+  --app-path "$APP_PATH" \
+  --dmg-path "$DMG_PATH" \
+  --require-apple-pqc-sdk-build
+
 if [[ "$SKIP_UPLOAD" == "1" ]]; then
-  echo "[publish-update] generated manifest without upload: $MANIFEST_PATH"
+  write_publish_proof_summary "local-manifest-only" "false" "false" "false" "$PROOF_SUMMARY_PATH"
+  echo "[publish-update] local manifest only: manifest=$MANIFEST_PATH uploaded=false remote_verified=false release_proof=false"
   exit 0
 fi
 
@@ -344,6 +432,7 @@ gh release upload "$TAG_NAME" \
   --repo "$REPOSITORY" \
   --clobber
 
-verify_uploaded_release_assets "$VERIFY_DIR" "$DMG_ASSET_NAME" "$EXPECTED_DMG_SHA" "$MANIFEST_PATH"
+verify_uploaded_release_assets "$VERIFY_DIR" "$DMG_ASSET_NAME" "$EXPECTED_DMG_SHA" "$MANIFEST_PATH" "$APP_PATH"
+write_publish_proof_summary "uploaded-and-verified" "true" "true" "true" "$PROOF_SUMMARY_PATH"
 
 echo "[publish-update] uploaded $DMG_ASSET_NAME and macos-stable.json to ${REPOSITORY}@${TAG_NAME}"

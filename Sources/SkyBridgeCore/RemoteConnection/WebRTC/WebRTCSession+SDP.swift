@@ -3,6 +3,302 @@ import Foundation
 @preconcurrency import WebRTC
 
 extension WebRTCSession {
+    private static let maxRemoteSDPBytes = 512 * 1024
+    private static let maxRemoteSDPLines = 4_096
+    private static let maxRemoteSDPLineBytes = 4_096
+    private static let maxRemoteSDPMediaSections = 16
+    private static let maxRemoteSDPCandidates = 256
+    private static let maxRemoteICECandidateBytes = 4_096
+    private static let maxRemoteICEMidBytes = 128
+
+    struct ValidatedRemoteICECandidate: Equatable {
+        let candidate: String
+        let sdpMid: String?
+        let sdpMLineIndex: Int32
+    }
+
+    struct ValidatedRemoteSDPMediaSection: Equatable, Sendable {
+        let index: Int32
+        let mid: String
+    }
+
+    struct ValidatedRemoteSessionDescription: Equatable, Sendable {
+        let mediaSections: [ValidatedRemoteSDPMediaSection]
+
+        func validate(candidate: ValidatedRemoteICECandidate) throws {
+            let index = Int(candidate.sdpMLineIndex)
+            guard mediaSections.indices.contains(index) else {
+                throw WebRTCError.sdpFailed("remote ICE candidate m-line index is not present in accepted remote SDP")
+            }
+            guard let mid = candidate.sdpMid else { return }
+            let section = mediaSections[index]
+            guard section.mid == mid else {
+                throw WebRTCError.sdpFailed("remote ICE candidate sdpMid does not match accepted remote SDP m-line")
+            }
+        }
+    }
+
+    @discardableResult
+    nonisolated static func validateRemoteSessionDescription(
+        _ sdp: String,
+        expectedKind: String
+    ) throws -> ValidatedRemoteSessionDescription {
+        let kind = expectedKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "remote"
+            : expectedKind
+        let byteCount = sdp.utf8.count
+        guard byteCount > 0 else {
+            throw WebRTCError.sdpFailed("\(kind) SDP is empty")
+        }
+        guard byteCount <= maxRemoteSDPBytes else {
+            throw WebRTCError.sdpFailed("\(kind) SDP exceeds \(maxRemoteSDPBytes) bytes")
+        }
+        guard !sdp.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw WebRTCError.sdpFailed("\(kind) SDP contains NUL")
+        }
+
+        let lines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else {
+            throw WebRTCError.sdpFailed("\(kind) SDP has no lines")
+        }
+        guard lines.count <= maxRemoteSDPLines else {
+            throw WebRTCError.sdpFailed("\(kind) SDP exceeds \(maxRemoteSDPLines) lines")
+        }
+        guard lines.first == "v=0" else {
+            throw WebRTCError.sdpFailed("\(kind) SDP must start with v=0")
+        }
+        guard lines.contains(where: { $0.hasPrefix("o=") }),
+              lines.contains(where: { $0.hasPrefix("s=") }),
+              lines.contains(where: { $0.hasPrefix("t=") }) else {
+            throw WebRTCError.sdpFailed("\(kind) SDP is missing required session fields")
+        }
+
+        var mediaSectionCount = 0
+        var candidateCount = 0
+        var currentSectionMid: String?
+        var mediaSections: [ValidatedRemoteSDPMediaSection] = []
+        var seenMids = Set<String>()
+        var hasFingerprint = false
+        var hasICEUfrag = false
+        var hasICEPwd = false
+
+        func finishMediaSection() throws {
+            guard mediaSectionCount > 0 else { return }
+            guard let currentSectionMid else {
+                throw WebRTCError.sdpFailed("\(kind) SDP media section is missing a=mid")
+            }
+            mediaSections.append(
+                ValidatedRemoteSDPMediaSection(
+                    index: Int32(mediaSections.count),
+                    mid: currentSectionMid
+                )
+            )
+        }
+
+        for line in lines {
+            try validateRemoteSDPLine(line, kind: kind)
+            if line.hasPrefix("m=") {
+                try finishMediaSection()
+                mediaSectionCount += 1
+                guard mediaSectionCount <= maxRemoteSDPMediaSections else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP exceeds \(maxRemoteSDPMediaSections) media sections")
+                }
+                currentSectionMid = nil
+                try validateRemoteSDPMediaLine(line, kind: kind)
+                continue
+            }
+            if line.hasPrefix("a=fingerprint:") {
+                hasFingerprint = true
+            } else if line.hasPrefix("a=ice-ufrag:") {
+                hasICEUfrag = true
+            } else if line.hasPrefix("a=ice-pwd:") {
+                hasICEPwd = true
+            }
+            if line.hasPrefix("a=mid:") {
+                guard mediaSectionCount > 0 else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP has session-level a=mid")
+                }
+                let mid = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                _ = try validatedRemoteICEMid(mid)
+                guard currentSectionMid == nil else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP media section has multiple a=mid lines")
+                }
+                guard seenMids.insert(mid).inserted else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP has duplicate a=mid")
+                }
+                currentSectionMid = mid
+                continue
+            }
+            if line.hasPrefix("a=candidate:") {
+                guard mediaSectionCount > 0 else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP has session-level ICE candidate")
+                }
+                candidateCount += 1
+                guard candidateCount <= maxRemoteSDPCandidates else {
+                    throw WebRTCError.sdpFailed("\(kind) SDP exceeds \(maxRemoteSDPCandidates) ICE candidates")
+                }
+                _ = try normalizedRemoteICECandidateSDP(line, context: "\(kind) SDP candidate")
+            }
+        }
+
+        guard mediaSectionCount > 0 else {
+            throw WebRTCError.sdpFailed("\(kind) SDP has no media sections")
+        }
+        guard hasFingerprint else {
+            throw WebRTCError.sdpFailed("\(kind) SDP is missing DTLS fingerprint")
+        }
+        guard hasICEUfrag, hasICEPwd else {
+            throw WebRTCError.sdpFailed("\(kind) SDP is missing ICE credentials")
+        }
+        try finishMediaSection()
+        return ValidatedRemoteSessionDescription(mediaSections: mediaSections)
+    }
+
+    nonisolated static func validatedRemoteICECandidate(
+        candidate: String,
+        sdpMid: String?,
+        sdpMLineIndex: Int32?,
+        acceptedRemoteDescription: ValidatedRemoteSessionDescription? = nil
+    ) throws -> ValidatedRemoteICECandidate {
+        let normalizedCandidate = try normalizedRemoteICECandidateSDP(
+            candidate,
+            context: "remote ICE candidate"
+        )
+        let normalizedMid = try validatedRemoteICEMid(sdpMid)
+        guard normalizedMid != nil || sdpMLineIndex != nil else {
+            throw WebRTCError.sdpFailed("remote ICE candidate is missing sdpMid and sdpMLineIndex")
+        }
+        let normalizedIndex = try validatedRemoteICEMLineIndex(sdpMLineIndex)
+        let validated = ValidatedRemoteICECandidate(
+            candidate: normalizedCandidate,
+            sdpMid: normalizedMid,
+            sdpMLineIndex: normalizedIndex
+        )
+        try acceptedRemoteDescription?.validate(candidate: validated)
+        return validated
+    }
+
+    private nonisolated static func validateRemoteSDPLine(_ line: String, kind: String) throws {
+        guard line.utf8.count <= maxRemoteSDPLineBytes else {
+            throw WebRTCError.sdpFailed("\(kind) SDP line exceeds \(maxRemoteSDPLineBytes) bytes")
+        }
+        guard line.count >= 2,
+              line[line.index(after: line.startIndex)] == "=" else {
+            throw WebRTCError.sdpFailed("\(kind) SDP contains malformed line")
+        }
+        guard line.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F }) else {
+            throw WebRTCError.sdpFailed("\(kind) SDP contains control characters")
+        }
+    }
+
+    private nonisolated static func validateRemoteSDPMediaLine(_ line: String, kind: String) throws {
+        let body = String(line.dropFirst(2))
+        let parts = body.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 4 else {
+            throw WebRTCError.sdpFailed("\(kind) SDP media line is incomplete")
+        }
+        guard let port = Int(parts[1]), (0...65_535).contains(port) else {
+            throw WebRTCError.sdpFailed("\(kind) SDP media line has invalid port")
+        }
+        guard !parts[0].isEmpty, !parts[2].isEmpty else {
+            throw WebRTCError.sdpFailed("\(kind) SDP media line has empty media/protocol")
+        }
+    }
+
+    private nonisolated static func normalizedRemoteICECandidateSDP(
+        _ candidate: String,
+        context: String
+    ) throws -> String {
+        let raw = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            throw WebRTCError.sdpFailed("\(context) is empty")
+        }
+        guard raw.utf8.count <= maxRemoteICECandidateBytes else {
+            throw WebRTCError.sdpFailed("\(context) exceeds \(maxRemoteICECandidateBytes) bytes")
+        }
+        guard !raw.contains(where: { $0 == "\n" || $0 == "\r" }),
+              raw.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F }) else {
+            throw WebRTCError.sdpFailed("\(context) contains control characters")
+        }
+
+        let normalized = raw.hasPrefix("a=") ? String(raw.dropFirst(2)) : raw
+        guard normalized.hasPrefix("candidate:") else {
+            throw WebRTCError.sdpFailed("\(context) must start with candidate:")
+        }
+
+        let fields = normalized.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard fields.count >= 8 else {
+            throw WebRTCError.sdpFailed("\(context) is incomplete")
+        }
+        let foundation = String(fields[0].dropFirst("candidate:".count))
+        guard !foundation.isEmpty else {
+            throw WebRTCError.sdpFailed("\(context) has empty foundation")
+        }
+        guard let component = Int(fields[1]), component > 0 else {
+            throw WebRTCError.sdpFailed("\(context) has invalid component")
+        }
+        let transport = fields[2].lowercased()
+        guard transport == "udp" || transport == "tcp" else {
+            throw WebRTCError.sdpFailed("\(context) has unsupported transport")
+        }
+        guard UInt64(fields[3]) != nil else {
+            throw WebRTCError.sdpFailed("\(context) has invalid priority")
+        }
+        guard isValidICEAddressToken(fields[4]) else {
+            throw WebRTCError.sdpFailed("\(context) has invalid address")
+        }
+        guard let port = Int(fields[5]), (1...65_535).contains(port) else {
+            throw WebRTCError.sdpFailed("\(context) has invalid port")
+        }
+        guard fields[6].lowercased() == "typ" else {
+            throw WebRTCError.sdpFailed("\(context) is missing typ")
+        }
+        let candidateType = fields[7].lowercased()
+        guard ["host", "srflx", "prflx", "relay"].contains(candidateType) else {
+            throw WebRTCError.sdpFailed("\(context) has unsupported type")
+        }
+        return normalized
+    }
+
+    private nonisolated static func validatedRemoteICEMid(_ value: String?) throws -> String? {
+        guard let value else { return nil }
+        let mid = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mid.isEmpty else {
+            throw WebRTCError.sdpFailed("remote ICE candidate has empty sdpMid")
+        }
+        guard mid.utf8.count <= maxRemoteICEMidBytes else {
+            throw WebRTCError.sdpFailed("remote ICE candidate sdpMid exceeds \(maxRemoteICEMidBytes) bytes")
+        }
+        guard mid.unicodeScalars.allSatisfy({ $0.value >= 0x21 && $0.value <= 0x7E }) else {
+            throw WebRTCError.sdpFailed("remote ICE candidate sdpMid is not an SDP token")
+        }
+        return mid
+    }
+
+    private nonisolated static func validatedRemoteICEMLineIndex(
+        _ value: Int32?
+    ) throws -> Int32 {
+        guard let value else {
+            throw WebRTCError.sdpFailed("remote ICE candidate is missing sdpMLineIndex")
+        }
+        guard value >= 0 else {
+            throw WebRTCError.sdpFailed("remote ICE candidate has negative sdpMLineIndex")
+        }
+        return value
+    }
+
+    private nonisolated static func isValidICEAddressToken(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 253 else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            scalar.value >= 0x21 && scalar.value <= 0x7E
+        }
+    }
+
     static func sdpWithNativeScreenH264LevelSupport(
         _ sdp: String,
         requiredLevelHex: String,

@@ -79,6 +79,222 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
         }
     }
 
+    func testSessionBindingDescriptorMatchesOpenedEnvelopeHeader() throws {
+        let (sender, receiver) = makePairedSessionKeys()
+        let packet = try WebRTCControlChannelCodec.encryptAppPayload(
+            Data("descriptor".utf8),
+            with: sender,
+            packetType: .appControl,
+            counter: 9
+        )
+        let opened = try WebRTCControlChannelCodec.decryptAppPayload(
+            packet,
+            with: receiver,
+            allowedPacketTypes: [.appControl]
+        )
+        let descriptor = WebRTCControlChannelCodec.sessionBindingDescriptor(for: sender)
+        XCTAssertEqual(descriptor.sessionHashHex, String(format: "%016llx", opened.sessionHash))
+        XCTAssertEqual(descriptor.transcriptPrefixHex, String(format: "%016llx", opened.transcriptPrefix))
+    }
+
+    func testLocalAuthenticatedRouteBindingFactoryUsesRegisteredProductRoutes() throws {
+        let routes = CrossNetworkWebRTCLocalAppMessageFactory.localAuthenticatedRouteBindingRoutes(
+            endpointSnapshot: ServiceEndpointSnapshot(fileTransferPort: 9443, remoteControlPort: 5901),
+            serviceName: "Desk Mac",
+            hostName: "desk-mac.local."
+        )
+        XCTAssertEqual(routes.count, 2)
+        XCTAssertEqual(routes[0].kind, "fileTransfer")
+        XCTAssertEqual(routes[0].serviceType, "_skybridge-transfer._tcp")
+        XCTAssertEqual(routes[0].instanceName, "Desk Mac._skybridge-transfer._tcp.local")
+        XCTAssertEqual(routes[0].hostName, "desk-mac.local")
+        XCTAssertEqual(routes[0].port, 9443)
+        XCTAssertEqual(routes[1].kind, "remoteDesktop")
+        XCTAssertEqual(routes[1].serviceType, "_skybridge-remote._tcp")
+        XCTAssertEqual(routes[1].instanceName, "Desk Mac._skybridge-remote._tcp.local")
+        XCTAssertEqual(routes[1].hostName, "desk-mac.local")
+        XCTAssertEqual(routes[1].port, 5901)
+
+        let messages = try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
+            routes: routes,
+            localDeviceId: "mac-device",
+            remoteDeviceId: "windows-device",
+            localProtocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            remoteProtocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+            sessionBinding: .init(
+                sessionHashHex: "0123456789abcdef",
+                transcriptPrefixHex: "fedcba9876543210"
+            ),
+            sentAt: Date(timeIntervalSinceReferenceDate: 42),
+            ttl: 30
+        )
+        XCTAssertEqual(messages.count, 2)
+        guard case .authenticatedRouteBinding(let filePayload) = messages[0],
+              case .authenticatedRouteBinding(let remotePayload) = messages[1] else {
+            return XCTFail("expected authenticatedRouteBinding messages")
+        }
+        XCTAssertEqual(filePayload.kind, "fileTransfer")
+        XCTAssertEqual(filePayload.endpointProvenance, "resolved-dns-sd-endpoint")
+        XCTAssertEqual(filePayload.localDeviceId, "mac-device")
+        XCTAssertEqual(filePayload.remoteDeviceId, "windows-device")
+        XCTAssertEqual(filePayload.routeAuthorityProtocolPublicKeyFingerprint, String(repeating: "a", count: 64))
+        XCTAssertEqual(filePayload.remoteProtocolPublicKeyFingerprint, String(repeating: "b", count: 64))
+        XCTAssertEqual(filePayload.sessionHashHex, "0123456789abcdef")
+        XCTAssertEqual(filePayload.transcriptPrefixHex, "fedcba9876543210")
+        XCTAssertEqual(filePayload.sentAt, Date(timeIntervalSinceReferenceDate: 42))
+        XCTAssertEqual(filePayload.expiresAt, Date(timeIntervalSinceReferenceDate: 72))
+        XCTAssertEqual(filePayload.nonce.count, 16)
+        XCTAssertEqual(remotePayload.kind, "remoteDesktop")
+        XCTAssertEqual(remotePayload.port, 5901)
+    }
+
+    func testAuthenticatedRouteBindingPolicyPublishesOnlyVerifiedFileTransferRoutes() throws {
+        let payload = authenticatedRouteBindingPayload(kind: "fileTransfer", serviceType: "_skybridge-transfer._tcp", port: 9443)
+
+        let decision = WebRTCAuthenticatedRouteBindingPolicy.evaluate(
+            payload,
+            context: routeBindingContext(now: Date(timeIntervalSinceReferenceDate: 60))
+        )
+
+        XCTAssertEqual(
+            decision,
+            .fileTransfer(.init(
+                peerId: "windows-device",
+                deviceName: "Windows PC",
+                displayAddress: "windows-pc.local",
+                transferAddress: "windows-pc.local",
+                transferPort: 9443
+            ))
+        )
+    }
+
+    func testAuthenticatedRouteBindingPolicyRejectsSessionBindingMismatch() throws {
+        let payload = authenticatedRouteBindingPayload(
+            kind: "fileTransfer",
+            serviceType: "_skybridge-transfer._tcp",
+            port: 9443,
+            sessionHashHex: "badbadbadbadbadb"
+        )
+
+        XCTAssertEqual(
+            WebRTCAuthenticatedRouteBindingPolicy.evaluate(
+                payload,
+                context: routeBindingContext(now: Date(timeIntervalSinceReferenceDate: 60))
+            ),
+            .rejected(reason: "session_binding_mismatch")
+        )
+    }
+
+    func testAuthenticatedRouteBindingPolicyDoesNotPublishRemoteDesktopAsFileRoute() throws {
+        let payload = authenticatedRouteBindingPayload(kind: "remoteDesktop", serviceType: "_skybridge-remote._tcp", port: 5901)
+
+        XCTAssertEqual(
+            WebRTCAuthenticatedRouteBindingPolicy.evaluate(
+                payload,
+                context: routeBindingContext(now: Date(timeIntervalSinceReferenceDate: 60))
+            ),
+            .verifiedButUnsupported(kind: "remoteDesktop")
+        )
+    }
+
+    func testLocalAuthenticatedRouteBindingFactoryFailsClosedForInvalidIdentityInputs() throws {
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
+                routes: [.init(
+                    kind: "fileTransfer",
+                    serviceType: "_skybridge-transfer._tcp",
+                    instanceName: "Desk Mac._skybridge-transfer._tcp.local",
+                    hostName: "desk-mac.local",
+                    port: 9443
+                )],
+                localDeviceId: "",
+                remoteDeviceId: "windows-device",
+                localProtocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                remoteProtocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+                sessionBinding: .init(
+                    sessionHashHex: "0123456789abcdef",
+                    transcriptPrefixHex: "fedcba9876543210"
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkWebRTCLocalAppMessageFactoryError,
+                .missingRequiredToken("local route-binding device id")
+            )
+        }
+
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
+                routes: [.init(
+                    kind: "fileTransfer",
+                    serviceType: "_skybridge-transfer._tcp",
+                    instanceName: "Desk Mac._skybridge-transfer._tcp.local",
+                    hostName: "desk-mac.local",
+                    port: 9443
+                )],
+                localDeviceId: "mac-device",
+                remoteDeviceId: "windows-device",
+                localProtocolPublicKeyFingerprint: String(repeating: "A", count: 64),
+                remoteProtocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+                sessionBinding: .init(
+                    sessionHashHex: "0123456789abcdef",
+                    transcriptPrefixHex: "fedcba9876543210"
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkWebRTCLocalAppMessageFactoryError,
+                .invalidProtocolFingerprint("local route-binding protocol fingerprint")
+            )
+        }
+    }
+
+    private func authenticatedRouteBindingPayload(
+        kind: String,
+        serviceType: String,
+        port: UInt16,
+        sessionHashHex: String = "0123456789abcdef"
+    ) -> AppMessage.AuthenticatedRouteBindingPayload {
+        AppMessage.AuthenticatedRouteBindingPayload(
+            kind: kind,
+            serviceType: serviceType,
+            instanceName: serviceType == "_skybridge-transfer._tcp"
+                ? "Windows PC._skybridge-transfer._tcp.local"
+                : "Windows PC._skybridge-remote._tcp.local",
+            hostName: "windows-pc.local.",
+            port: port,
+            endpointProvenance: CrossNetworkWebRTCLocalAppMessageFactory.routeBindingEndpointProvenance,
+            localDeviceId: "windows-device",
+            remoteDeviceId: "mac-device",
+            routeAuthorityProtocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            remoteProtocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+            sessionHashHex: sessionHashHex,
+            transcriptPrefixHex: "fedcba9876543210",
+            sentAt: Date(timeIntervalSinceReferenceDate: 42),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 72),
+            nonce: Data(1...16)
+        )
+    }
+
+    private func routeBindingContext(now: Date) -> WebRTCAuthenticatedRouteBindingPolicy.Context {
+        .init(
+            localDeviceId: "mac-device",
+            localProtocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+            expectedRemoteAuthority: CurrentPathRemoteAuthority(
+                deviceId: "windows-device",
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                protocolPublicKeyBytes: nil,
+                deviceName: "Windows PC"
+            ),
+            sessionBinding: .init(
+                sessionHashHex: "0123456789abcdef",
+                transcriptPrefixHex: "fedcba9876543210"
+            ),
+            now: now
+        )
+    }
+
     func testEnvelopeRejectsHeaderAndCiphertextTampering() throws {
         let (sender, receiver) = makePairedSessionKeys()
         let packet = try WebRTCControlChannelCodec.encryptAppPayload(

@@ -12,6 +12,23 @@ enum CrossNetworkWebRTCInboundFileTransferPathError: Error {
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
     private nonisolated static let inboundFileNameFallback = "SkyBridgeFile"
+    nonisolated static let inboundFileTransferExplicitApprovalRequiredMessage = "inbound_file_transfer_requires_explicit_approval"
+    nonisolated static let inboundFileTransferMissingSenderIdentityMessage = "inbound_file_transfer_missing_sender_identity"
+
+    struct InboundFileTransferApprovalRequest: Sendable, Equatable {
+        let transferId: String
+        let fileName: String
+        let fileSize: Int64
+        let chunkSize: Int
+        let totalChunks: Int
+        let senderDeviceId: String
+        let senderDeviceName: String
+    }
+
+    enum InboundFileTransferApprovalDecision: Sendable, Equatable {
+        case approved
+        case rejected(reason: String)
+    }
 
     nonisolated static func fileTransferWaiterKey(
         transferId: String,
@@ -27,6 +44,26 @@ extension CrossNetworkWebRTCManager {
         let dir = docs.appendingPathComponent("Downloads", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    nonisolated static func validateInboundTransferId(_ transferId: String) -> String? {
+        guard transferId.count == 36,
+              transferId.trimmingCharacters(in: .whitespacesAndNewlines) == transferId,
+              UUID(uuidString: transferId) != nil else {
+            return "Invalid metadata (invalid transferId)"
+        }
+        return nil
+    }
+
+    nonisolated static func normalizedInboundApprovalRejectionMessage(_ reason: String) -> String {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? inboundFileTransferExplicitApprovalRequiredMessage : trimmed
+    }
+
+    nonisolated static func requiredInboundSenderDeviceId(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     nonisolated static func sanitizeFileName(_ name: String) -> String {

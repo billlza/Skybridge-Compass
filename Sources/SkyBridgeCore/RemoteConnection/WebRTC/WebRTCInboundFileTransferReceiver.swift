@@ -6,18 +6,36 @@ final class WebRTCInboundFileTransferReceiver {
     typealias SendMessage = (CrossNetworkFileTransferMessage, String) async throws -> Void
     typealias FailSenderWaiters = (String, String) -> Void
     typealias ResumeSenderWaiter = (CrossNetworkFileTransferMessage) -> Void
+    typealias ApprovalProvider = @MainActor (WebRTCInboundFileTransferApprovalRequest) async -> WebRTCInboundFileTransferApprovalDecision
+
+    private static let defaultMaxConcurrentInboundTransfers = 8
+    private static let defaultTransferIdleTimeout: Duration = .seconds(120)
 
     private let destinationBaseDirectory: () -> URL?
+    private let approvalProvider: ApprovalProvider
+    private let maxConcurrentInboundTransfers: Int
+    private let transferIdleTimeout: Duration
     private var transfers: [String: WebRTCInboundFileTransferState] = [:]
     private var completeTimers: [String: Task<Void, Never>] = [:]
+    private var idleTimers: [String: Task<Void, Never>] = [:]
 
-    init(destinationBaseDirectory: @escaping () -> URL? = {
-        FileManager.default
-            .urls(for: .downloadsDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("SkyBridge", isDirectory: true)
-    }) {
+    init(
+        destinationBaseDirectory: @escaping () -> URL? = {
+            FileManager.default
+                .urls(for: .downloadsDirectory, in: .userDomainMask)
+                .first?
+                .appendingPathComponent("SkyBridge", isDirectory: true)
+        },
+        maxConcurrentInboundTransfers: Int = WebRTCInboundFileTransferReceiver.defaultMaxConcurrentInboundTransfers,
+        transferIdleTimeout: Duration = WebRTCInboundFileTransferReceiver.defaultTransferIdleTimeout,
+        approvalProvider: @escaping ApprovalProvider = { _ in
+            .rejected(reason: WebRTCInboundFileTransferSupport.explicitApprovalRequiredMessage)
+        }
+    ) {
         self.destinationBaseDirectory = destinationBaseDirectory
+        self.approvalProvider = approvalProvider
+        self.maxConcurrentInboundTransfers = max(1, maxConcurrentInboundTransfers)
+        self.transferIdleTimeout = transferIdleTimeout
     }
 
     func cleanupOnChannelClosed() {
@@ -25,6 +43,10 @@ final class WebRTCInboundFileTransferReceiver {
             task.cancel()
         }
         completeTimers.removeAll()
+        for (_, task) in idleTimers {
+            task.cancel()
+        }
+        idleTimers.removeAll()
 
         if !transfers.isEmpty {
             for state in transfers.values {
@@ -101,6 +123,18 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
+        guard transfers.count < maxConcurrentInboundTransfers else {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: "Too many concurrent inbound file transfers"
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+
         guard
             let fileName = message.fileName,
             let fileSize = message.fileSize,
@@ -161,10 +195,63 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
-        let finalURL = try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
-            baseDirectory: baseDirectory,
-            fileName: fileName
+        let finalURL: URL
+        do {
+            finalURL = try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
+                baseDirectory: baseDirectory,
+                fileName: fileName
+            )
+        } catch {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: "Destination file unavailable"
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+
+        guard let senderId = WebRTCInboundFileTransferSupport.requiredSenderDeviceId(message.senderDeviceId) else {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: WebRTCInboundFileTransferSupport.missingSenderIdentityMessage
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+        let senderName = message.senderDeviceName ?? senderId
+        let approvalRequest = WebRTCInboundFileTransferApprovalRequest(
+            transferId: message.transferId,
+            fileName: fileName,
+            fileSize: fileSize,
+            chunkSize: chunkSize,
+            totalChunks: totalChunks,
+            senderDeviceId: senderId,
+            senderDeviceName: senderName,
+            endpointDescription: endpointDescription,
+            destinationDirectoryPath: baseDirectory.path,
+            proposedSavePath: finalURL.path
         )
+        switch await approvalProvider(approvalRequest) {
+        case .approved:
+            break
+        case .rejected(let reason):
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: WebRTCInboundFileTransferSupport.normalizedApprovalRejectionMessage(reason)
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+
         let tempURL = baseDirectory.appendingPathComponent(".skybridge-\(message.transferId).partial")
         guard !FileManager.default.fileExists(atPath: tempURL.path),
               FileManager.default.createFile(atPath: tempURL.path, contents: nil) else {
@@ -180,8 +267,6 @@ final class WebRTCInboundFileTransferReceiver {
         }
 
         let handle = try FileHandle(forWritingTo: tempURL)
-        let senderId = message.senderDeviceId ?? endpointDescription
-        let senderName = message.senderDeviceName ?? senderId
 
         transfers[message.transferId] = WebRTCInboundFileTransferState(
             transferId: message.transferId,
@@ -196,6 +281,8 @@ final class WebRTCInboundFileTransferReceiver {
             handle: handle,
             receivedBytes: 0
         )
+
+        scheduleIdleTimeout(transferId: message.transferId)
 
         FileTransferManager.shared.beginExternalInboundTransfer(
             transferId: message.transferId,
@@ -325,6 +412,8 @@ final class WebRTCInboundFileTransferReceiver {
             state.receivedBytes += Int64(rawSize)
         }
 
+        scheduleIdleTimeout(transferId: state.transferId)
+
         if state.completeRequestedAt != nil && state.receivedBytes >= state.fileSize {
             do {
                 try state.handle.close()
@@ -348,16 +437,13 @@ final class WebRTCInboundFileTransferReceiver {
                     )
                     return
                 }
-                if FileManager.default.fileExists(atPath: state.finalURL.path) {
-                    try? FileManager.default.removeItem(at: state.finalURL)
-                }
-                try FileManager.default.moveItem(at: state.tempURL, to: state.finalURL)
+                let savedURL = try saveCompletedTransfer(state)
                 FileTransferManager.shared.completeExternalInboundTransfer(
                     transferId: state.transferId,
-                    savedTo: state.finalURL
+                    savedTo: savedURL
                 )
                 removeTransfer(state.transferId)
-                try await sendCompleteAck(for: state, sendMessage: sendMessage)
+                try await sendCompleteAck(for: state, savedTo: savedURL, sendMessage: sendMessage)
                 return
             } catch {
                 FileTransferManager.shared.failExternalTransfer(
@@ -443,6 +529,7 @@ final class WebRTCInboundFileTransferReceiver {
 
             if state.completeRequestedAt == nil { state.completeRequestedAt = Date() }
             transfers[state.transferId] = state
+            scheduleIdleTimeout(transferId: state.transferId)
             scheduleIncompleteTimeoutIfNeeded(transferId: state.transferId)
             return
         }
@@ -470,10 +557,15 @@ final class WebRTCInboundFileTransferReceiver {
                 )
                 return
             }
-            if FileManager.default.fileExists(atPath: state.finalURL.path) {
-                try? FileManager.default.removeItem(at: state.finalURL)
-            }
-            try FileManager.default.moveItem(at: state.tempURL, to: state.finalURL)
+            let savedURL = try saveCompletedTransfer(state)
+            FileTransferManager.shared.completeExternalInboundTransfer(
+                transferId: state.transferId,
+                savedTo: savedURL
+            )
+            removeTransfer(state.transferId)
+
+            try await sendCompleteAck(for: state, savedTo: savedURL, sendMessage: sendMessage)
+            return
         } catch {
             FileTransferManager.shared.failExternalTransfer(
                 transferId: state.transferId,
@@ -491,14 +583,6 @@ final class WebRTCInboundFileTransferReceiver {
             )
             return
         }
-
-        FileTransferManager.shared.completeExternalInboundTransfer(
-            transferId: state.transferId,
-            savedTo: state.finalURL
-        )
-        removeTransfer(state.transferId)
-
-        try await sendCompleteAck(for: state, sendMessage: sendMessage)
     }
 
     private func handleCancel(_ message: CrossNetworkFileTransferMessage) {
@@ -509,7 +593,7 @@ final class WebRTCInboundFileTransferReceiver {
                 transferId: state.transferId,
                 errorMessage: message.message ?? "Cancelled"
             )
-            transfers.removeValue(forKey: state.transferId)
+            removeTransfer(state.transferId)
         }
     }
 
@@ -527,6 +611,25 @@ final class WebRTCInboundFileTransferReceiver {
             FileTransferManager.shared.failExternalTransfer(
                 transferId: current.transferId,
                 errorMessage: "Incomplete file (timeout): \(current.receivedBytes)/\(current.fileSize)"
+            )
+            self.removeTransfer(current.transferId)
+        }
+    }
+
+    private func scheduleIdleTimeout(transferId: String) {
+        let timeout = transferIdleTimeout
+        idleTimers[transferId]?.cancel()
+        idleTimers[transferId] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard let self,
+                  let current = self.transfers[transferId] else {
+                return
+            }
+            do { try current.handle.close() } catch {}
+            try? FileManager.default.removeItem(at: current.tempURL)
+            FileTransferManager.shared.failExternalTransfer(
+                transferId: current.transferId,
+                errorMessage: "Inbound file transfer idle timeout"
             )
             self.removeTransfer(current.transferId)
         }
@@ -557,6 +660,7 @@ final class WebRTCInboundFileTransferReceiver {
 
     private func sendCompleteAck(
         for state: WebRTCInboundFileTransferState,
+        savedTo savedURL: URL,
         sendMessage: SendMessage
     ) async throws {
         try await sendMessage(
@@ -565,15 +669,26 @@ final class WebRTCInboundFileTransferReceiver {
                 transferId: state.transferId,
                 receivedBytes: state.receivedBytes,
                 fileSha256: state.expectedFileSha256
-                    ?? (try? WebRTCInboundFileTransferSupport.sha256File(at: state.finalURL))
+                    ?? (try? WebRTCInboundFileTransferSupport.sha256File(at: savedURL))
             ),
             "tx/webrtc-ft-completeAck"
         )
+    }
+
+    private func saveCompletedTransfer(_ state: WebRTCInboundFileTransferState) throws -> URL {
+        let destinationURL = try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
+            baseDirectory: state.finalURL.deletingLastPathComponent(),
+            fileName: state.fileName
+        )
+        try FileManager.default.moveItem(at: state.tempURL, to: destinationURL)
+        return destinationURL
     }
 
     private func removeTransfer(_ transferId: String) {
         transfers.removeValue(forKey: transferId)
         completeTimers[transferId]?.cancel()
         completeTimers.removeValue(forKey: transferId)
+        idleTimers[transferId]?.cancel()
+        idleTimers.removeValue(forKey: transferId)
     }
 }

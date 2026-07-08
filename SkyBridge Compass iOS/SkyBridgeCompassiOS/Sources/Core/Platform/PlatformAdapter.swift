@@ -45,6 +45,11 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     /// The last selection policy used to initialize the core.
     /// We must support re-initialization when the user toggles "enforce PQC" / compatibility settings.
     private var currentSelectionPolicy: CryptoProviderFactory.SelectionPolicy?
+    private static var useInMemoryIdentityKeyStore: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
+    }
+    private static let inMemoryIdentityKeyLock = NSLock()
+    private nonisolated(unsafe) static var inMemoryIdentityKeys: [String: Data] = [:]
 
     private static func randomAttemptIdBytes() -> Data {
         var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
@@ -124,13 +129,39 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     public func getProtocolSigningKeyHandle(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> SigningKeyHandle {
-        try await getOrCreateProtocolSigningIdentity(for: algorithm).keyHandle
+        try await ensureInitializedForProtocolSigning(algorithm: algorithm)
+        return try await getOrCreateProtocolSigningIdentity(for: algorithm).keyHandle
     }
 
     public func getProtocolSigningPublicKey(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> Data {
-        try await getOrCreateProtocolSigningIdentity(for: algorithm).publicKey
+        try await ensureInitializedForProtocolSigning(algorithm: algorithm)
+        return try await getOrCreateProtocolSigningIdentity(for: algorithm).publicKey
+    }
+
+    private func ensureInitializedForProtocolSigning(
+        algorithm: ProtocolSigningAlgorithm
+    ) async throws {
+        guard algorithm == .mlDSA65 else {
+            return
+        }
+
+        if isInitialized,
+           let provider = cryptoProvider,
+           provider.tier != .classic,
+           signatureProvider?.signatureAlgorithm == .mlDSA65 {
+            return
+        }
+
+        try await initialize(policy: .requirePQC)
+        guard let provider = cryptoProvider,
+              provider.tier != .classic,
+              signatureProvider?.signatureAlgorithm == .mlDSA65 else {
+            throw SkyBridgeError.handshakeFailed(
+                reason: "ML-DSA identity key requested but requirePQC did not yield a PQC provider"
+            )
+        }
     }
     
     // MARK: - Identity Key Management
@@ -227,6 +258,16 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     
     private func loadIdentityKeyFromKeychain(algorithm: ProtocolSigningAlgorithm) throws -> (keyHandle: SigningKeyHandle, publicKey: Data)? {
         let tag = "com.skybridge.identity.\(algorithm.rawValue)"
+
+        if Self.useInMemoryIdentityKeyStore {
+            Self.inMemoryIdentityKeyLock.lock()
+            let storedKeyData = Self.inMemoryIdentityKeys[tag]
+            Self.inMemoryIdentityKeyLock.unlock()
+            guard let keyData = storedKeyData else {
+                return nil
+            }
+            return try decodeIdentityKeyData(keyData, algorithm: algorithm)
+        }
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
@@ -246,7 +287,14 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         guard let keyData = result as? Data else {
             throw SkyBridgeError.keychainError(status: errSecDecode)
         }
-        
+
+        return try decodeIdentityKeyData(keyData, algorithm: algorithm)
+    }
+
+    private func decodeIdentityKeyData(
+        _ keyData: Data,
+        algorithm: ProtocolSigningAlgorithm
+    ) throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
         // 解析存储的数据（格式: privateKey || publicKey）
         switch algorithm {
         case .ed25519:
@@ -314,6 +362,13 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         // 存储格式: privateKey || publicKey
         var keyData = privateKeyData
         keyData.append(publicKey)
+
+        if Self.useInMemoryIdentityKeyStore {
+            Self.inMemoryIdentityKeyLock.lock()
+            Self.inMemoryIdentityKeys[tag] = keyData
+            Self.inMemoryIdentityKeyLock.unlock()
+            return
+        }
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,

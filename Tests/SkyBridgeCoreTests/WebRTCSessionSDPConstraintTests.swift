@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import SkyBridgeCore
 
@@ -181,5 +182,193 @@ struct WebRTCSessionSDPConstraintTests {
         #expect(upgraded.contains("a=fmtp:97 apt=96"))
         #expect(upgraded.contains("a=fmtp:98 profile-level-id=42e033;level-asymmetry-allowed=1;packetization-mode=1;max-fs=10836;max-mbps=650160"))
         #expect(upgraded.contains("a=fmtp:99 x-google-start-bitrate=8000"))
+    }
+
+    @Test("remote SDP validator accepts bounded DTLS ICE datachannel SDP")
+    func testRemoteSDPValidatorAcceptsBoundedDataChannelSDP() throws {
+        let accepted = try WebRTCSession.validateRemoteSessionDescription(
+            validRemoteDataChannelSDP(),
+            expectedKind: "remote offer"
+        )
+        #expect(accepted.mediaSections == [
+            WebRTCSession.ValidatedRemoteSDPMediaSection(index: 0, mid: "0")
+        ])
+    }
+
+    @Test("remote SDP validator rejects missing DTLS fingerprint and ICE credentials")
+    func testRemoteSDPValidatorRequiresFingerprintAndICECredentials() {
+        assertSDPFailure("missing DTLS fingerprint") {
+            try WebRTCSession.validateRemoteSessionDescription(
+                validRemoteDataChannelSDP().replacingOccurrences(
+                    of: "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF\n",
+                    with: ""
+                ),
+                expectedKind: "remote answer"
+            )
+        }
+        assertSDPFailure("missing ICE credentials") {
+            try WebRTCSession.validateRemoteSessionDescription(
+                validRemoteDataChannelSDP().replacingOccurrences(
+                    of: "a=ice-pwd:abcdefghijklmnopqrstuvwxyz\n",
+                    with: ""
+                ),
+                expectedKind: "remote answer"
+            )
+        }
+    }
+
+    @Test("remote SDP validator rejects session-level candidates and duplicate mids")
+    func testRemoteSDPValidatorRejectsSessionLevelCandidatesAndDuplicateMids() {
+        assertSDPFailure("session-level ICE candidate") {
+            try WebRTCSession.validateRemoteSessionDescription(
+                validRemoteDataChannelSDP().replacingOccurrences(
+                    of: "m=application",
+                    with: "a=candidate:2 1 udp 2122260223 192.168.1.5 50000 typ host\nm=application"
+                ),
+                expectedKind: "remote offer"
+            )
+        }
+        assertSDPFailure("duplicate a=mid") {
+            try WebRTCSession.validateRemoteSessionDescription(
+                validRemoteDataChannelSDP() + """
+                m=audio 9 UDP/TLS/RTP/SAVPF 111
+                a=mid:0
+                a=rtpmap:111 opus/48000/2
+
+                """,
+                expectedKind: "remote offer"
+            )
+        }
+    }
+
+    @Test("remote ICE validator normalizes valid candidate and rejects malformed input")
+    func testRemoteICECandidateValidator() throws {
+        let valid = try WebRTCSession.validatedRemoteICECandidate(
+            candidate: "a=candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host",
+            sdpMid: "0",
+            sdpMLineIndex: 0
+        )
+        #expect(valid.candidate == "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host")
+        #expect(valid.sdpMid == "0")
+        #expect(valid.sdpMLineIndex == 0)
+
+        assertSDPFailure("missing sdpMLineIndex") {
+            _ = try WebRTCSession.validatedRemoteICECandidate(
+                candidate: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: nil
+            )
+        }
+        assertSDPFailure("invalid port") {
+            _ = try WebRTCSession.validatedRemoteICECandidate(
+                candidate: "candidate:1 1 udp 2122260223 192.168.1.5 0 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: 0
+            )
+        }
+        assertSDPFailure("contains control characters") {
+            _ = try WebRTCSession.validatedRemoteICECandidate(
+                candidate: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host\ncandidate:2 1 udp 1 192.168.1.6 54322 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: 0
+            )
+        }
+    }
+
+    @Test("remote ICE validator binds trickle candidates to accepted SDP media sections")
+    func testRemoteICECandidateValidatorRequiresAcceptedSDPMediaBinding() throws {
+        let accepted = try WebRTCSession.validateRemoteSessionDescription(
+            validRemoteDataChannelSDP(),
+            expectedKind: "remote offer"
+        )
+        let valid = try WebRTCSession.validatedRemoteICECandidate(
+            candidate: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host",
+            sdpMid: "0",
+            sdpMLineIndex: 0,
+            acceptedRemoteDescription: accepted
+        )
+        #expect(valid.sdpMid == "0")
+        #expect(valid.sdpMLineIndex == 0)
+
+        assertSDPFailure("sdpMid does not match accepted remote SDP m-line") {
+            _ = try WebRTCSession.validatedRemoteICECandidate(
+                candidate: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host",
+                sdpMid: "9",
+                sdpMLineIndex: 0,
+                acceptedRemoteDescription: accepted
+            )
+        }
+        assertSDPFailure("m-line index is not present in accepted remote SDP") {
+            _ = try WebRTCSession.validatedRemoteICECandidate(
+                candidate: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: 9,
+                acceptedRemoteDescription: accepted
+            )
+        }
+    }
+
+    @Test("duplicate SDP branches do not replace accepted validation state")
+    func testDuplicateSDPBranchesDoNotReplaceAcceptedValidationState() throws {
+        let macSource = try repositorySource("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift")
+        let iosSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift")
+
+        for source in [macSource, iosSource] {
+            #expect(!source.contains("if self.hasRemoteDescription || self.isSettingRemoteDescription || pc.remoteDescription != nil"))
+            #expect(!source.contains("""
+            if self.hasRemoteDescription {
+                                self.acceptedRemoteDescriptionValidation = remoteDescriptionValidation
+                            }
+            """))
+            #expect(source.contains("acceptAppliedRemoteDescriptionFromPeerConnection"))
+            #expect(source.contains("acceptedRemoteDescriptionValidation = try Self.validateRemoteSessionDescription(\n                appliedSDP,"))
+        }
+    }
+
+    private func validRemoteDataChannelSDP() -> String {
+        """
+        v=0
+        o=- 461173305123456789 2 IN IP4 127.0.0.1
+        s=-
+        t=0 0
+        a=group:BUNDLE 0
+        a=msid-semantic: WMS
+        m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        c=IN IP4 0.0.0.0
+        a=mid:0
+        a=ice-ufrag:abcd
+        a=ice-pwd:abcdefghijklmnopqrstuvwxyz
+        a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF
+        a=setup:actpass
+        a=sctp-port:5000
+        a=candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host
+
+        """
+    }
+
+    private func repositorySource(_ relativePath: String) throws -> String {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let repositoryRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: repositoryRoot.appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
+    }
+
+    private func assertSDPFailure(
+        _ expectedMessageFragment: String,
+        operation: () throws -> Void
+    ) {
+        do {
+            try operation()
+            Issue.record("Expected WebRTCError.sdpFailed containing \(expectedMessageFragment)")
+        } catch WebRTCSession.WebRTCError.sdpFailed(let message) {
+            #expect(message.contains(expectedMessageFragment))
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
     }
 }

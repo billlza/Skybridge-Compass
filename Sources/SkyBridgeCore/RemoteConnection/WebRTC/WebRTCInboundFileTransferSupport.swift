@@ -24,6 +24,26 @@ struct WebRTCInboundFileTransferState {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
+struct WebRTCInboundFileTransferApprovalRequest: Sendable, Equatable {
+    let transferId: String
+    let fileName: String
+    let fileSize: Int64
+    let chunkSize: Int
+    let totalChunks: Int
+    let senderDeviceId: String
+    let senderDeviceName: String
+    let endpointDescription: String
+    let destinationDirectoryPath: String
+    let proposedSavePath: String
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+enum WebRTCInboundFileTransferApprovalDecision: Sendable, Equatable {
+    case approved
+    case rejected(reason: String)
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 enum WebRTCInboundFileTransferIntegrityFailure: Equatable {
     case merkleRootMismatch
     case unknownMerkleSignatureAlgorithm
@@ -54,6 +74,19 @@ enum WebRTCInboundFileTransferIntegrityFailure: Equatable {
 enum WebRTCInboundFileTransferSupport {
     static let maxChunkSize = 512 * 1024
     static let transferIdLength = 36
+    static let explicitApprovalRequiredMessage = "inbound_file_transfer_requires_explicit_approval"
+    static let missingSenderIdentityMessage = "inbound_file_transfer_missing_sender_identity"
+
+    static func normalizedApprovalRejectionMessage(_ reason: String) -> String {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? explicitApprovalRequiredMessage : trimmed
+    }
+
+    static func requiredSenderDeviceId(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     static func sanitizedFileName(_ name: String) -> String {
         FileTransferPathPolicy.sanitizedFileName(name)

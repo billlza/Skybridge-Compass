@@ -175,9 +175,7 @@ public final class RemoteControlServer: ObservableObject {
         txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         txt["name"] = serviceName
         txt["model"] = "Mac"
-        txt["capabilities"] = "remote_desktop"
-        txt["remotePort"] = String(port)
-        txt["port"] = String(port)
+        BonjourInteropContract.attachRemoteControlAdvertisementTXT(to: &txt, port: port)
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
 
         var txtData = makeNetServiceTXTData(
@@ -231,11 +229,9 @@ public final class RemoteControlServer: ObservableObject {
             "platform": Data("macos".utf8),
             "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
             "name": Data(serviceName.utf8),
-            "model": Data("Mac".utf8),
-            "capabilities": Data("remote_desktop".utf8),
-            "remotePort": Data(String(port).utf8),
-            "port": Data(String(port).utf8)
+            "model": Data("Mac".utf8)
         ]
+        BonjourInteropContract.attachRemoteControlAdvertisementTXT(to: &txt, port: port)
         let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
         txt["deviceId"] = Data(stableId.utf8)
         txt["uniqueId"] = Data(stableId.utf8)

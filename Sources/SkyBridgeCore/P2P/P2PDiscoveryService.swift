@@ -66,8 +66,9 @@ public class P2PDiscoveryService: BaseManager {
 
  /// 服务类型瘦身策略 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
-        "_skybridge._tcp",
-        "_skybridge-transfer._tcp",
+        BonjourInteropContract.controlServiceType,
+        BonjourInteropContract.fileTransferServiceType,
+        BonjourInteropContract.remoteControlServiceType,
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -78,7 +79,7 @@ public class P2PDiscoveryService: BaseManager {
     public var enableCompanionLink: Bool = false
     private var activeBrowserServiceTypes: Set<String> = []
     private func effectiveServiceTypes() -> [String] {
-        var base = ["_skybridge._tcp", "_skybridge-transfer._tcp"]
+        var base = BonjourInteropContract.defaultDiscoveryServiceTypes
         if enableCompanionLink { base.append("_companion-link._tcp") }
         if enableCompatibilityMode {
             base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
@@ -105,7 +106,7 @@ public class P2PDiscoveryService: BaseManager {
     }
     #endif
 
-    private static let controlServiceType = "_skybridge._tcp"
+    private static let controlServiceType = BonjourInteropContract.controlServiceType
     private static let controlAdvertisementOwner = "P2PDiscoveryService"
 
     public func activeAuthenticatedConnectionsForClassicTransfer() -> [P2PConnection] {
@@ -541,7 +542,7 @@ public class P2PDiscoveryService: BaseManager {
 
         let preferUSBRoute = routePreference == .preferUSB
         let disableDirectRoute = routePreference == .managedRelayOnly
-        let primaryServiceType = "_skybridge._tcp"
+        let primaryServiceType = BonjourInteropContract.controlServiceType
         let connectableServiceTypes = P2PDiscoveryBonjourPolicy.normalizedConnectableServiceTypes(from: device.services)
         let preferredServiceType = connectableServiceTypes.contains(primaryServiceType) ? primaryServiceType : connectableServiceTypes.first
         let hasStrongRouteIdentity =
@@ -2110,13 +2111,7 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func sanitizePubKeyFingerprint(_ raw: String?) -> String? {
-        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty else {
-            return nil
-        }
-        guard value.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
-            return nil
-        }
-        return value
+        BonjourInteropContract.normalizedPubKeyFingerprint(raw)
     }
 
     private func extractSOAFlag(from result: NWBrowser.Result) -> Bool {
@@ -3460,6 +3455,9 @@ public class P2PDiscoveryService: BaseManager {
 
                             case .heartbeat(let payload):
                                 await refreshInboundRouteFromHeartbeat(payload, keys: keys)
+
+                            case .authenticatedRouteBinding:
+                                break
 
                             case .textMessage(let payload):
                                 // 设备间文本消息：按发送者稳定公钥指纹归档（此入站会话路径同样可能收到）。

@@ -26,7 +26,7 @@ enum CrossNetworkWebRTCTraceDescription {
         case .join, .leave:
             payloadSummary = "payload=0"
         }
-        return "session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1) \(payloadSummary)"
+        return "session_ref=\(SkyBridgeTraceRedaction.stableReference(envelope.sessionId)) type=\(envelope.type.rawValue) from_ref=\(SkyBridgeTraceRedaction.stableReference(envelope.from)) to_ref=\(SkyBridgeTraceRedaction.stableReference(envelope.to)) auth=\(envelope.authToken == nil ? 0 : 1) \(payloadSummary)"
     }
 
     static func describeCandidateKind(_ candidate: String?) -> String {

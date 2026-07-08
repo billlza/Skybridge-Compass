@@ -15,6 +15,7 @@ Usage:
     --expected-head-sha <sha> \
     --expected-head-branch <branch> \
     --artifact <artifact-name> [--artifact <artifact-name> ...] \
+    [--require-public-redacted-artifacts] \
     [--provenance-output <path>]
 
 Validates the GitHub Actions run and artifact metadata used by the macOS release
@@ -35,6 +36,7 @@ expected_event=""
 expected_head_sha=""
 expected_head_branch=""
 provenance_output=""
+require_public_redacted_artifacts=0
 required_artifacts=()
 
 while [[ "$#" -gt 0 ]]; do
@@ -78,6 +80,10 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || fail "missing value for --artifact"
       required_artifacts+=("$2")
       shift 2
+      ;;
+    --require-public-redacted-artifacts)
+      require_public_redacted_artifacts=1
+      shift
       ;;
     --provenance-output)
       [[ "$#" -ge 2 ]] || fail "missing value for --provenance-output"
@@ -156,7 +162,8 @@ python3 - \
   "${expected_workflow_path}" \
   "${expected_event}" \
   "${expected_head_sha}" \
-  "${expected_head_branch}" <<'PY'
+  "${expected_head_branch}" \
+  "${require_public_redacted_artifacts}" <<'PY'
 import collections
 import json
 import os
@@ -175,6 +182,7 @@ import sys
     expected_event,
     expected_head_sha,
     expected_head_branch,
+    require_public_redacted_artifacts,
 ) = sys.argv[1:]
 
 PREFIX = "::error::[validate-macos-release-artifact-run]"
@@ -207,6 +215,12 @@ for name, count in collections.Counter(required_artifacts).items():
         errors.append("required artifact name must not be empty")
     if count != 1:
         errors.append(f"required artifact name must be unique: {name}")
+    if require_public_redacted_artifacts == "1" and (
+        "public-redacted" not in name and "redacted-public" not in name
+    ):
+        errors.append(
+            f"required artifact name must declare the public-redaction contract: {name}"
+        )
 
 if errors:
     for error in errors:

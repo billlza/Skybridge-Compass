@@ -26,6 +26,70 @@ use skybridge_core::{
 };
 
 #[test]
+fn cli_identity_contract_uses_skybridge_cli_display_name_and_stable_binary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let help = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .arg("--help")
+        .output()?;
+    assert!(
+        help.status.success(),
+        "skybridge --help failed with status {:?}; stderr={}",
+        help.status.code(),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        help.stderr.is_empty(),
+        "skybridge --help must not write stderr on success: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help_stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(help_stdout.contains("SkyBridge CLI"), "{help_stdout}");
+    assert!(help_stdout.contains("Usage: skybridge"), "{help_stdout}");
+    assert!(
+        !help_stdout.contains("Usage: skybridge-cli"),
+        "{help_stdout}"
+    );
+
+    let version = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .arg("version")
+        .output()?;
+    assert!(
+        version.status.success(),
+        "skybridge version failed with status {:?}; stderr={}",
+        version.status.code(),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(
+        version.stderr.is_empty(),
+        "skybridge version must not write stderr on success: {}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let version_payload: Value = serde_json::from_slice(&version.stdout)?;
+    assert_eq!(version_payload["product_name"], "SkyBridge CLI");
+    assert_eq!(version_payload["binary_name"], "skybridge");
+    assert_eq!(version_payload["workspace"], "rust");
+
+    let capabilities = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .args(["capabilities", "--json"])
+        .output()?;
+    assert!(
+        capabilities.status.success(),
+        "skybridge capabilities --json failed with status {:?}; stderr={}",
+        capabilities.status.code(),
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    let capability_payload: Value = serde_json::from_slice(&capabilities.stdout)?;
+    assert_eq!(capability_payload["product_name"], "SkyBridge CLI");
+    assert_eq!(capability_payload["binary_name"], "skybridge");
+    assert_eq!(
+        capability_payload["mac_gui_control_protocol"],
+        "crossnet-control/1"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
 -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new(env!("CARGO_BIN_EXE_skybridge"))

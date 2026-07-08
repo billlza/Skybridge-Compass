@@ -22,7 +22,10 @@ pub(crate) use test::*;
 
 #[derive(Debug, Parser)]
 #[command(name = "skybridge")]
-#[command(about = "SkyBridge CLI operator surface")]
+#[command(about = "SkyBridge CLI")]
+#[command(
+    long_about = "SkyBridge CLI operator surface. The `skybridge` binary name remains stable for scripts; Mac app-bound crossnet commands use crossnet-control/1, while native/headless commands use the selected state directory."
+)]
 pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) state_dir: Option<PathBuf>,

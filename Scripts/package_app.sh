@@ -178,6 +178,78 @@ function is_release_distribution_context() {
   [[ "${PACKAGE_CONTEXT}" == "release_dmg" ]]
 }
 
+function git_value_or_unknown() {
+  local git_dir="$1"
+  shift
+
+  if git -C "${git_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "${git_dir}" "$@" 2>/dev/null || true
+  fi
+}
+
+function git_dirty_state() {
+  local git_dir="$1"
+
+  if ! git -C "${git_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "unknown"
+    return
+  fi
+
+  if [[ -n "$(git -C "${git_dir}" status --porcelain --untracked-files=all 2>/dev/null)" ]]; then
+    echo "dirty"
+  else
+    echo "clean"
+  fi
+}
+
+function require_release_git_provenance() {
+  local git_commit="$1"
+  local git_branch="$2"
+  local git_dirty="$3"
+
+  if ! is_release_distribution_context; then
+    return 0
+  fi
+
+  if [[ -z "${git_commit}" || "${git_commit}" == "unknown" ]]; then
+    echo "错误：release_dmg 打包必须记录明确的 Git commit；当前值：${git_commit:-missing}" >&2
+    exit 1
+  fi
+  if [[ -z "${git_branch}" || "${git_branch}" == "unknown" ]]; then
+    echo "错误：release_dmg 打包必须记录明确的 Git branch 状态；当前值：${git_branch:-missing}" >&2
+    exit 1
+  fi
+  if [[ "${git_dirty}" != "clean" ]]; then
+    echo "错误：release_dmg 打包要求 Git worktree 为 clean；当前状态：${git_dirty:-missing}" >&2
+    echo "请先提交或移除会影响产物的源码变更和未跟踪文件，然后重新构建 DMG。" >&2
+    exit 1
+  fi
+}
+
+function stamp_release_git_provenance() {
+  local info_plist="$1"
+  local git_commit=""
+  local git_branch=""
+  local git_dirty=""
+
+  git_commit="$(git_value_or_unknown "${ROOT_DIR}" rev-parse HEAD)"
+  git_branch="$(git_value_or_unknown "${ROOT_DIR}" branch --show-current)"
+  git_dirty="$(git_dirty_state "${ROOT_DIR}")"
+
+  if [[ -z "${git_commit}" ]]; then
+    git_commit="unknown"
+  fi
+  if [[ -z "${git_branch}" ]]; then
+    git_branch="detached"
+  fi
+
+  require_release_git_provenance "${git_commit}" "${git_branch}" "${git_dirty}"
+
+  plutil -replace SkyBridgePackagingGitCommit -string "${git_commit}" "${info_plist}"
+  plutil -replace SkyBridgePackagingGitBranch -string "${git_branch}" "${info_plist}"
+  plutil -replace SkyBridgePackagingGitDirtyState -string "${git_dirty}" "${info_plist}"
+}
+
 function require_release_distribution_identity() {
   if ! is_release_distribution_context; then
     return 0
@@ -1274,6 +1346,7 @@ plutil -replace SkyBridgePackagingBuildSource -string "${BUILD_SOURCE}" "${INFO_
 plutil -replace SkyBridgePackagingBuildScheme -string "SkyBridgeCompassApp" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildConfiguration -string "Release" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildProductPath -string "<redacted:${BUILD_SOURCE}>/${EXECUTABLE}" "${INFO_PLIST_DST}"
+stamp_release_git_provenance "${INFO_PLIST_DST}"
 skybridge_stamp_apple_pqc_sdk_packaging_metadata "${INFO_PLIST_DST}" "${APP_DIR}" "${PACKAGE_CONTEXT}"
 log "记录打包构建来源: ${BUILD_SOURCE}"
 if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then

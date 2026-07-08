@@ -43,32 +43,32 @@ on:
       connectivity_artifact_name:
         description: "Artifact name for the Mac/iOS connectivity matrix"
         required: true
-        default: "real-device-connectivity-matrix"
+        default: "real-device-connectivity-matrix-public-redacted"
         type: string
       p2p_remote_artifact_name:
         description: "Artifact name for the real-device P2P remote smoke"
         required: true
-        default: "real-device-p2p-remote-smoke"
+        default: "real-device-p2p-remote-smoke-public-redacted"
         type: string
       file_transfer_artifact_name:
         description: "Artifact name for the real-device file-transfer smoke"
         required: true
-        default: "real-device-file-transfer-smoke"
+        default: "real-device-file-transfer-smoke-public-redacted"
         type: string
       p2p_notice_artifact_name:
         description: "Artifact name for the P2P remote-control security notice smoke"
         required: true
-        default: "real-device-p2p-security-notice"
+        default: "real-device-p2p-security-notice-public-redacted"
         type: string
       webrtc_notice_artifact_name:
         description: "Artifact name for the WebRTC remote-control security notice smoke"
         required: true
-        default: "local-webrtc-security-notice"
+        default: "local-webrtc-security-notice-public-redacted"
         type: string
       notice_panel_artifact_name:
         description: "Artifact name for the production macOS AppKit remote-control security notice panel probe"
         required: true
-        default: "local-macos-security-notice-panel"
+        default: "local-macos-security-notice-panel-public-redacted"
         type: string
       publish_update_release:
         description: "Upload the notarized DMG and signed macos-stable.json to the stable GitHub Release"
@@ -128,6 +128,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Checkout Pinned Q-Periapt Source
+        uses: actions/checkout@v6
+        with:
+          repository: billlza/q-periapt
+          ref: d0475a94276bc5ff65deb1c5367d1f56ca436f5b
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Link Q-Periapt Cargo Path Dependency
+        run: |
+          [[ -f "External/pqt_hybrid_suite/Cargo.toml" ]] || { echo "::error::Pinned q-periapt checkout is missing Cargo.toml"; exit 1; }
+          [[ -f "External/pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" ]] || { echo "::error::Pinned q-periapt checkout is missing q-periapt-backends"; exit 1; }
+          sibling_path="$PWD/../pqt_hybrid_suite"
+          if [[ -e "$sibling_path" && ! -L "$sibling_path" ]]; then
+            echo "::error::Refusing to replace non-symlink q-periapt sibling path: $sibling_path"
+            exit 1
+          fi
+          ln -sfn "$PWD/External/pqt_hybrid_suite" "$sibling_path"
+          [[ -f "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" ]] || { echo "::error::q-periapt sibling path dependency is not reachable"; exit 1; }
 
       - name: Verify Stable Xcode 26.6 Toolchain
         run: |
@@ -198,6 +218,7 @@ jobs:
             --artifact "${P2P_NOTICE_ARTIFACT_NAME}" \
             --artifact "${WEBRTC_NOTICE_ARTIFACT_NAME}" \
             --artifact "${NOTICE_PANEL_ARTIFACT_NAME}" \
+            --require-public-redacted-artifacts \
             --provenance-output "Artifacts/release-gate/release-artifact-run-provenance.json"
 
       - name: Download Connectivity Matrix Artifact
@@ -205,7 +226,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.connectivity_artifact_name }}
-          path: Artifacts/release-gate/connectivity
+          path: Artifacts/release-gate-raw/connectivity
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
 
@@ -214,7 +235,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.p2p_remote_artifact_name }}
-          path: Artifacts/release-gate/p2p-remote
+          path: Artifacts/release-gate-raw/p2p-remote
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
 
@@ -223,7 +244,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.file_transfer_artifact_name }}
-          path: Artifacts/release-gate/file-transfer
+          path: Artifacts/release-gate-raw/file-transfer
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
 
@@ -232,7 +253,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.p2p_notice_artifact_name }}
-          path: Artifacts/release-gate/p2p-notice
+          path: Artifacts/release-gate-raw/p2p-notice
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
 
@@ -241,7 +262,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.webrtc_notice_artifact_name }}
-          path: Artifacts/release-gate/webrtc-notice
+          path: Artifacts/release-gate-raw/webrtc-notice
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
 
@@ -250,9 +271,27 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.notice_panel_artifact_name }}
-          path: Artifacts/release-gate/notice-panel
+          path: Artifacts/release-gate-raw/notice-panel
           run-id: ${{ inputs.release_artifact_run_id }}
           github-token: ${{ github.token }}
+
+      - name: Validate Public Release Gate Artifacts
+        if: needs.macos-preflight.result == 'success'
+        env:
+          CONNECTIVITY_ARTIFACT_NAME: ${{ inputs.connectivity_artifact_name }}
+          P2P_REMOTE_ARTIFACT_NAME: ${{ inputs.p2p_remote_artifact_name }}
+          FILE_TRANSFER_ARTIFACT_NAME: ${{ inputs.file_transfer_artifact_name }}
+          P2P_NOTICE_ARTIFACT_NAME: ${{ inputs.p2p_notice_artifact_name }}
+          WEBRTC_NOTICE_ARTIFACT_NAME: ${{ inputs.webrtc_notice_artifact_name }}
+          NOTICE_PANEL_ARTIFACT_NAME: ${{ inputs.notice_panel_artifact_name }}
+        run: |
+          bash Scripts/validate_macos_release_public_artifacts.sh \
+            --artifact "connectivity|${CONNECTIVITY_ARTIFACT_NAME}|Artifacts/release-gate-raw/connectivity|Artifacts/release-gate-public/connectivity" \
+            --artifact "p2p-remote|${P2P_REMOTE_ARTIFACT_NAME}|Artifacts/release-gate-raw/p2p-remote|Artifacts/release-gate-public/p2p-remote" \
+            --artifact "file-transfer|${FILE_TRANSFER_ARTIFACT_NAME}|Artifacts/release-gate-raw/file-transfer|Artifacts/release-gate-public/file-transfer" \
+            --artifact "p2p-notice|${P2P_NOTICE_ARTIFACT_NAME}|Artifacts/release-gate-raw/p2p-notice|Artifacts/release-gate/p2p-notice" \
+            --artifact "webrtc-notice|${WEBRTC_NOTICE_ARTIFACT_NAME}|Artifacts/release-gate-raw/webrtc-notice|Artifacts/release-gate/webrtc-notice" \
+            --artifact "notice-panel|${NOTICE_PANEL_ARTIFACT_NAME}|Artifacts/release-gate-raw/notice-panel|Artifacts/release-gate/notice-panel"
 
       - name: Validate Release Signing Secrets
         if: needs.macos-preflight.result == 'success'
@@ -400,9 +439,9 @@ jobs:
         run: |
           bash Scripts/check_macos_release_readiness.sh \
             --require-notarization \
-            --connectivity-artifact-dir "Artifacts/release-gate/connectivity" \
-            --p2p-remote-artifact-dir "Artifacts/release-gate/p2p-remote" \
-            --file-transfer-artifact-dir "Artifacts/release-gate/file-transfer" \
+            --connectivity-artifact-dir "Artifacts/release-gate-public/connectivity" \
+            --p2p-remote-artifact-dir "Artifacts/release-gate-public/p2p-remote" \
+            --file-transfer-artifact-dir "Artifacts/release-gate-public/file-transfer" \
             --p2p-notice-artifact-dir "Artifacts/release-gate/p2p-notice" \
             --webrtc-notice-artifact-dir "Artifacts/release-gate/webrtc-notice" \
             --notice-panel-artifact-dir "Artifacts/release-gate/notice-panel"
@@ -414,8 +453,9 @@ jobs:
           SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
           UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
         run: |
-          dmg_path="$(find dist -maxdepth 1 -type f -name 'SkyBridgeCompassPro-*.dmg' -print | sort | tail -n 1)"
-          [[ -n "$dmg_path" ]] || { echo "::error::Notarized DMG not found under dist"; exit 1; }
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
+          dmg_path="dist/SkyBridgeCompassPro-${app_version}.dmg"
+          [[ -f "$dmg_path" ]] || { echo "::error::Notarized DMG not found at $dmg_path"; exit 1; }
           bash Scripts/publish_macos_update_release.sh \
             --repository "${GITHUB_REPOSITORY}" \
             --tag stable \

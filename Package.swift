@@ -396,6 +396,7 @@ let package = Package(
             name: "SkyBridgeCoreTests",
             dependencies: [
                 "SkyBridgeCore",
+                "SkyBridgeProtocolCore",
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",

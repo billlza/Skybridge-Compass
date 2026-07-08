@@ -19,7 +19,7 @@ enum WebRTCBootstrapAppMessagePolicy {
              .pong,
              .peerDisconnecting:
             return .consumeLivenessLocally
-        case .clipboard, .textMessage:
+        case .clipboard, .textMessage, .authenticatedRouteBinding:
             return .dropUntilPQCRekey
         }
     }

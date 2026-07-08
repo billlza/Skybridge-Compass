@@ -179,9 +179,7 @@ public final class FileTransferListenerService: ObservableObject {
         txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         txt["name"] = serviceName
         txt["model"] = "Mac"
-        txt["capabilities"] = "file_transfer,\(ClassicTransferCapability.classicResume)"
-        txt["transferPort"] = String(port)
-        txt["port"] = String(port)
+        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &txt, port: port)
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
         // Mirror TXT for NetService fallback (Bonjour TXTRecord is [String: Data])
         let txtData = makeNetServiceTXTData(serviceName: serviceName, deviceId: nil, pubKeyFP: nil, port: port)
@@ -237,11 +235,9 @@ public final class FileTransferListenerService: ObservableObject {
             "platform": Data("macos".utf8),
             "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
             "name": Data(serviceName.utf8),
-            "model": Data("Mac".utf8),
-            "capabilities": Data("file_transfer,\(ClassicTransferCapability.classicResume)".utf8),
-            "transferPort": Data(String(port).utf8),
-            "port": Data(String(port).utf8)
+            "model": Data("Mac".utf8)
         ]
+        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &d, port: port)
         // placeholder（启动后异步更新为强身份）；必须唯一，避免 iOS 端“合并错设备”
         let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
         d["deviceId"] = Data(stableId.utf8)

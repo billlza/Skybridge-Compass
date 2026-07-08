@@ -56,6 +56,19 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(manager.contains("CrossNetworkServerConfig.dynamicICEConfig"))
   }
 
+  func testIOSWebRTCSendsAuthenticatedRouteBindingAfterEstablishedBusinessSession() throws {
+    let manager = try crossNetworkWebRTCManagerSource()
+
+    XCTAssertTrue(manager.contains("private func sendLocalAuthenticatedRouteBindings("))
+    XCTAssertTrue(manager.contains("CrossNetworkWebRTCLocalAppMessageFactory.authenticatedFileTransferRouteBindingMessages("))
+    XCTAssertTrue(manager.contains("FileTransferRuntime.shared.ensureHealthy()"))
+    XCTAssertTrue(manager.contains("strict_pqc_rekey_pending"))
+    XCTAssertTrue(manager.contains("stage: \"initial-handshake\""))
+    XCTAssertTrue(manager.contains("stage: \"inbound-initial-handshake\""))
+    XCTAssertTrue(manager.contains("stage: \"inbound-rekey\""))
+    XCTAssertTrue(manager.contains("stage: \"outbound-rekey\""))
+  }
+
   func testInboundFileTransferSupportStaysOutsideManager() throws {
     let manager = try crossNetworkWebRTCManagerSource()
     let fileTransfer = try crossNetworkWebRTCFileTransferSource()
@@ -65,14 +78,41 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(manager.contains("static func expectedInboundChunkSize"))
     XCTAssertFalse(manager.contains("static func sha256File"))
     XCTAssertTrue(support.contains("static func validateInboundMetadata"))
+    XCTAssertTrue(support.contains("static func validateInboundTransferId"))
+    XCTAssertTrue(support.contains("inboundFileTransferExplicitApprovalRequiredMessage"))
+    XCTAssertTrue(support.contains("inboundFileTransferMissingSenderIdentityMessage"))
+    XCTAssertTrue(support.contains("static func requiredInboundSenderDeviceId"))
     XCTAssertTrue(support.contains("static func expectedInboundChunkSize"))
     XCTAssertTrue(support.contains("static func sha256File"))
+    XCTAssertTrue(manager.contains("var inboundFileTransferApprovalProvider"))
     XCTAssertTrue(fileTransfer.contains("Self.validateInboundMetadata"))
+    XCTAssertTrue(fileTransfer.contains("Self.validateInboundTransferId"))
+    XCTAssertTrue(fileTransfer.contains("await inboundFileTransferApprovalProvider(approvalRequest)"))
+    XCTAssertTrue(fileTransfer.contains("Self.normalizedInboundApprovalRejectionMessage(reason)"))
     XCTAssertTrue(fileTransfer.contains("Self.expectedInboundChunkSize"))
     XCTAssertTrue(fileTransfer.contains("Self.sha256File"))
+    XCTAssertTrue(fileTransfer.contains("guard let senderId = Self.requiredInboundSenderDeviceId(msg.senderDeviceId)"))
+    XCTAssertTrue(fileTransfer.contains("Self.inboundFileTransferMissingSenderIdentityMessage"))
+    XCTAssertFalse(fileTransfer.contains("msg.senderDeviceId ?? (remoteDeviceId ?? \"mac\")"))
+  }
+
+  func testInboundFileTransferRequiresProtocolSenderIdentity() {
+    XCTAssertEqual(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(" sender "), "sender")
+    XCTAssertNil(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(nil))
+    XCTAssertNil(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(" \n\t "))
   }
 
   func testInboundFileTransferRejectsUnsafeFileNamesInsteadOfBasenameFallback() throws {
+    XCTAssertNil(CrossNetworkWebRTCManager.validateInboundTransferId(UUID().uuidString))
+    XCTAssertEqual(
+      CrossNetworkWebRTCManager.validateInboundTransferId("../transfer"),
+      "Invalid metadata (invalid transferId)"
+    )
+    XCTAssertEqual(
+      CrossNetworkWebRTCManager.validateInboundTransferId("transfer"),
+      "Invalid metadata (invalid transferId)"
+    )
+
     for unsafeName in ["../secret.txt", "nested/report.pdf", "nested\\report.pdf", "nested⁄report.pdf", "nested∕report.pdf"] {
       XCTAssertEqual(
         CrossNetworkWebRTCManager.validateInboundMetadata(
@@ -3460,10 +3500,16 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testOfflineQueueCleanupRemovesExpiredPendingAndFailedMessages() {
+  func testOfflineQueueCleanupRemovesExpiredPendingAndFailedMessages() throws {
     let queue = OfflineMessageQueue.shared
-    queue.clear()
-    defer { queue.clear() }
+    try queue.clear()
+    defer {
+      do {
+        try queue.clear()
+      } catch {
+        XCTFail("Failed to clear offline queue after test: \(error)")
+      }
+    }
 
     let expiredPending = OfflineMessage(
       id: "expired-pending-\(UUID().uuidString)",
@@ -3489,18 +3535,18 @@ final class RegressionHardeningTests: XCTestCase {
       expiresAt: Date().addingTimeInterval(3600)
     )
 
-    queue.enqueue(expiredPending)
-    queue.enqueue(expiredFailed)
-    queue.enqueue(liveFailed)
+    try queue.enqueue(expiredPending)
+    try queue.enqueue(expiredFailed)
+    try queue.enqueue(liveFailed)
 
     for _ in 0..<3 {
-      queue.markAsFailed(expiredFailed.id)
-      queue.markAsFailed(liveFailed.id)
+      try queue.markAsFailed(expiredFailed.id)
+      try queue.markAsFailed(liveFailed.id)
     }
 
     XCTAssertEqual(queue.totalCount, 3)
 
-    queue.cleanupExpiredMessages()
+    try queue.cleanupExpiredMessages()
 
     XCTAssertEqual(queue.totalCount, 1)
     XCTAssertTrue(queue.pendingMessages.isEmpty)
@@ -3777,6 +3823,47 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(discoverySource.contains("ConnectableAddressCanonicalizer.bestLANAddress(["))
     XCTAssertTrue(discoverySource.contains("避免 Bonjour service 解析退回 link-local"))
+  }
+
+  func testIOSBonjourInteropCapabilitiesStayAlignedWithAndroidAliases() throws {
+    let fileTransferSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
+    )
+    let discoverySource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+    )
+
+    XCTAssertTrue(
+      fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer,\\(ClassicTransferCapability.classicResume)\".utf8)"),
+      "iOS file-transfer Bonjour TXT must advertise both file aliases and classic resume support."
+    )
+    XCTAssertTrue(discoverySource.contains("return [\"file\", \"file_transfer\"]"))
+    XCTAssertTrue(
+      discoverySource.contains("return [\"screen_sharing\", \"remote_desktop\", \"rdview\", \"remote_control\", \"rdcontrol\"]"),
+      "Remote Bonjour service inference must keep Android-compatible screen/control aliases."
+    )
+    XCTAssertTrue(
+      discoverySource.contains("caps.formUnion([\"file\", \"file_transfer\"])")
+    )
+    XCTAssertTrue(
+      discoverySource.contains("caps.formUnion([\"screen_sharing\", \"remote_desktop\", \"rdview\", \"remote_control\", \"rdcontrol\"])")
+    )
+  }
+
+  func testIOSFileTransferNetworkServiceConnectFailsClosedOnOutboundTimeout() throws {
+    let fileTransferSource = try iosFileTransferNetworkServiceSource()
+
+    XCTAssertTrue(fileTransferSource.contains("let endpointDescription = \"\\(normalizedIP):\\(port)\""))
+    XCTAssertTrue(fileTransferSource.contains("case .waiting(let error):"))
+    XCTAssertTrue(fileTransferSource.contains("queue.asyncAfter(deadline: .now() + FileTransferConstants.connectionTimeout)"))
+    XCTAssertTrue(fileTransferSource.contains("gate.runOnce {\n                    connection.stateUpdateHandler = nil"))
+    XCTAssertTrue(fileTransferSource.contains("stage: \"connect_timeout\""))
+    XCTAssertTrue(fileTransferSource.contains("endpoint: endpointDescription"))
+    XCTAssertTrue(fileTransferSource.contains("connection.cancel()"))
+    XCTAssertFalse(
+      fileTransferSource.contains("continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))"),
+      "Outbound connect failures must preserve stage/endpoint context instead of collapsing into a generic networkError."
+    )
   }
 
   func testRemoteDesktopDeviceResolutionLivesOutsideManagerHotPath() throws {

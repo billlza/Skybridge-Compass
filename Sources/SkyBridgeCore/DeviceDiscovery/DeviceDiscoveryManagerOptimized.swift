@@ -83,8 +83,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 服务类型瘦身 - 默认仅SkyBridge，兼容/调试模式可扩展其余类型
     // 服务类型分类 - 核心服务（默认扫描）
     private let coreServiceTypes = [
-        "_skybridge._tcp",
-        "_skybridge-transfer._tcp",
+        BonjourInteropContract.controlServiceType,
+        BonjourInteropContract.fileTransferServiceType,
+        BonjourInteropContract.remoteControlServiceType,
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -294,7 +295,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  // `_skybridge._tcp` 广播由 P2PDiscoveryService 独占，避免监听器与入站处理权冲突。
         if advertisesLocalSkyBridgeService {
-            let serviceTypeForBroadcast = "_skybridge._tcp"
+            let serviceTypeForBroadcast = BonjourInteropContract.controlServiceType
             Task(priority: .utility) { [weak self, serviceTypeForBroadcast] in
                 await self?.startAdvertisingBackground(serviceType: serviceTypeForBroadcast)
             }
@@ -1825,13 +1826,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
     nonisolated private static func sanitizePubKeyFingerprint(_ raw: String?) -> String? {
-        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty else {
-            return nil
-        }
-        guard value.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
-            return nil
-        }
-        return value
+        BonjourInteropContract.normalizedPubKeyFingerprint(raw)
     }
 
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String, browser: NWBrowser? = nil) {
@@ -1880,7 +1875,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             guard let self = self else { return }
  // 使用统一广播中心，确保同一服务类型只存在一个 NWListener，且运行在全局队列
             do {
-                let serviceType = "_skybridge._tcp"
+                let serviceType = BonjourInteropContract.controlServiceType
                 // Strong identity TXT (deviceId/pubKeyFP) enables stable binding on peers.
                 let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
                 var txt = NWTXTRecord()
@@ -1898,19 +1893,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 // model/chip are optional; keep best-effort and cheap.
                 let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
                 if !model.isEmpty { txt["modelName"] = model }
-                txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
-                txt["hs_soa"] = "1"
                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
-                if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
-                    let port = String(transferPort)
-                    txt["transferPort"] = port
-                    txt["fileTransferPort"] = port
-                }
-                if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
-                    let port = String(remotePort)
-                    txt["remotePort"] = port
-                    txt["remoteControlPort"] = port
-                }
+                BonjourInteropContract.attachPrimaryAdvertisementTXT(
+                    to: &txt,
+                    transferPort: endpoints.fileTransferPort,
+                    remoteControlPort: endpoints.remoteControlPort
+                )
+                txt["hs_soa"] = "1"
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: self.getDeviceName(),
                     serviceType: serviceType,
@@ -1961,19 +1950,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
             if !model.isEmpty { txt["modelName"] = model }
-            txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
-            txt["hs_soa"] = "1"
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
-            if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
-                let port = String(transferPort)
-                txt["transferPort"] = port
-                txt["fileTransferPort"] = port
-            }
-            if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
-                let port = String(remotePort)
-                txt["remotePort"] = port
-                txt["remoteControlPort"] = port
-            }
+            BonjourInteropContract.attachPrimaryAdvertisementTXT(
+                to: &txt,
+                transferPort: endpoints.fileTransferPort,
+                remoteControlPort: endpoints.remoteControlPort
+            )
+            txt["hs_soa"] = "1"
             let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                 serviceName: Self.resolveDeviceName(),
                 serviceType: serviceType,

@@ -193,7 +193,11 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
             || normalized.contains("xwing")
             || normalized.contains("ml-kem")
             || normalized.contains("mlkem")
+            || normalized.contains("q-periapt")
+            || normalized.contains("q periapt")
+            || normalized.contains("qperiapt")
             || normalized.contains("0x0001")
+            || normalized.contains("0x0011")
             || normalized.contains("0x0101")
             || normalized.contains("0x0102")
     }
@@ -388,9 +392,8 @@ enum RemoteControlSecurityAdmissionPolicy {
     ) -> Bool {
         guard !isApproved else { return true }
         switch type {
-        case .streamConfiguration, .screenData, .damageReport, .cursorUpdate, .overlayUpdate:
-            return true
-        case .mouseEvent, .keyboardEvent, .clipboard:
+        case .streamConfiguration, .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
+             .mouseEvent, .keyboardEvent, .clipboard:
             return false
         }
     }
@@ -401,9 +404,8 @@ enum RemoteControlSecurityAdmissionPolicy {
     ) -> Bool {
         guard !isApproved else { return true }
         switch type {
-        case .streamConfiguration, .streamConfigurationAck, .screenData, .damageReport, .cursorUpdate, .overlayUpdate:
-            return true
-        case .mouseEvent, .keyboardEvent, .clipboard:
+        case .streamConfiguration, .streamConfigurationAck, .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
+             .mouseEvent, .keyboardEvent, .clipboard:
             return false
         }
     }

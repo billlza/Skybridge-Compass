@@ -78,6 +78,10 @@ The Rust workspace under `rust/` is the new headless surface:
 
 The CLI must not read GUI view models or UI-only state.
 
+SkyBridge CLI is the product display name. The installed command and binary name
+remain `skybridge` so existing automation, release artifacts, Homebrew formulas,
+and npm wrappers do not break during the branding cleanup.
+
 ## Authority Boundaries
 
 GUI-affecting commands:

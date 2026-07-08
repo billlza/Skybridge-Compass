@@ -17,6 +17,7 @@ skybridge_smoke_redact_stream() {
   local root_dir="${ROOT_DIR:-$(pwd)}"
   python3 - "${device_label}" "${root_dir}" "$@" 3<&0 <<'PY'
 import os
+import json
 import re
 import sys
 
@@ -154,49 +155,121 @@ text = sys.stdin.read()
 
 sensitive_key_values = {
     "accesstoken",
+    "accountdisplayname",
+    "address",
     "arguments",
     "apikey",
     "argv",
+    "authsession",
+    "authorization",
+    "bearertoken",
+    "bonjourservicename",
     "bundlepath",
+    "candidate",
     "clientsecret",
     "clouddeviceid",
     "code",
+    "connectioncode",
+    "controlendpoint",
     "deviceidentifier",
     "deviceid",
     "devicename",
+    "displayname",
     "ecid",
+    "endpoint",
+    "endpointhost",
     "environment",
     "environmentvariables",
     "executablepath",
     "fingerprint",
+    "host",
     "identifier",
     "identitykey",
+    "ice",
+    "icecandidate",
+    "icepwd",
+    "iceufrag",
+    "ip",
+    "localdescription",
     "localdeviceid",
+    "localendpoint",
     "localhostnames",
+    "mlkempublickey",
     "name",
+    "nebulaid",
     "path",
     "p2pdeviceid",
     "potentialhostnames",
     "privatekey",
     "publickeybase64",
     "pubkeyfp",
+    "relay",
     "refreshtoken",
+    "remotedescription",
     "remotedeviceid",
+    "remoteendpoint",
+    "reason",
+    "routeidentifier",
     "serialnumber",
+    "selectedcandidate",
+    "selectedcandidatepair",
+    "session",
+    "sessionid",
+    "sdp",
     "stablepeerid",
+    "sub",
     "targetdeviceid",
+    "tenantid",
+    "token",
+    "trackid",
     "udid",
+    "url",
+    "userid",
+    "useridentifier",
+    "xwingpublickey",
 }
 
+def normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
 def redact_text(value: str) -> str:
+    value = re.sub(r"(?m)^v=0\r?$", "<redacted-sdp>", value)
+    value = re.sub(r"(?m)^a=ice-pwd:[^\r\n]+", "a=ice-pwd:<redacted>", value)
+    value = re.sub(r"(?m)^a=ice-ufrag:[^\r\n]+", "a=ice-ufrag:<redacted>", value)
+    value = re.sub(r"(?m)^a=candidate:[^\r\n]+", "a=candidate:<redacted>", value)
+    value = re.sub(r"\bAuthorization:\s*Bearer\s+\S+", "Authorization: Bearer <redacted>", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bconnect\s+[A-Za-z0-9._:-]{4,}\b", "connect <redacted-sas-code>", value, flags=re.IGNORECASE)
     value = re.sub(r"\bfingerprint=[0-9A-Fa-f]{16,}\b", "fingerprint=<redacted-fingerprint>", value)
     value = re.sub(r"\bcode=[0-9]{6}\b", "code=<redacted-sas-code>", value)
+    value = re.sub(r"\bcode\s+[0-9]{6}\b", "code <redacted-sas-code>", value, flags=re.IGNORECASE)
     value = re.sub(
-        r"\b(identityKey|targetDeviceId|localDeviceId|peerId|remoteDeviceId|stablePeerId|deviceId|p2pDeviceId|cloudDeviceId|pubKeyFP)=\S+",
+        r"\b(ice[_-]?candidate|ice[_-]?pwd|ice[_-]?ufrag|local[_-]?description|remote[_-]?description|sdp)="
+        r"(?!<redacted\b|<redacted>)[^\s&]+",
+        r"\1=<redacted-secret>",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(identity[_-]?key|target[_-]?device[_-]?id|local[_-]?device[_-]?id|peer[_-]?id|remote[_-]?device[_-]?id|stable[_-]?peer[_-]?id|device[_-]?id|p2p[_-]?device[_-]?id|cloud[_-]?device[_-]?id|pub[_-]?key[_-]?fp|session|session[_-]?id|track[_-]?id)=\S+",
         r"\1=<redacted-identity>",
         value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(tenant[_-]?id|user[_-]?identifier|user[_-]?id|sub|nebula[_-]?id|display[_-]?name|account[_-]?display[_-]?name|route[_-]?identifier|bonjour[_-]?service[_-]?name|endpoint[_-]?host|control[_-]?endpoint|relay|endpoint|host|ip|address|reason|local[_-]?endpoint|remote[_-]?endpoint|selected[_-]?candidate|selected[_-]?candidate[_-]?pair|xwing[_-]?public[_-]?key|mlkem[_-]?public[_-]?key)=\S+",
+        r"\1=<redacted-public-artifact-value>",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(access[_-]?token|api[_-]?key|authorization|bearer[_-]?token|client[_-]?secret|private[_-]?key|public[_-]?key[_-]?base64|refresh[_-]?token|token)="
+        r"(?!<redacted\b|<redacted>)[^\s&]+",
+        r"\1=<redacted-secret>",
+        value,
+        flags=re.IGNORECASE,
     )
     value = re.sub(r"skybridge://[^ \n\r\t\"'\'']+", "<redacted-connect-link>", value)
+    value = re.sub(r"https?://[^ \n\r\t\"'\'']+", "<redacted-url>", value)
     value = re.sub(r"/Users/[^ \n\r\t\"'\'']+", "<home>", value)
     value = re.sub(r"/Applications/[^ \n\r\t\"'\'']+", "<applications>", value)
     value = re.sub(r"/Volumes/[^ \n\r\t\"'\'']+", "<volumes>", value)
@@ -212,7 +285,7 @@ def redact_text(value: str) -> str:
     return value
 
 def redact_json(value, key: str = ""):
-    normalized_key = key.lower()
+    normalized_key = normalize_key(key)
     if normalized_key in sensitive_key_values:
         if normalized_key == "fingerprint":
             return "<redacted-fingerprint>"
@@ -224,12 +297,59 @@ def redact_json(value, key: str = ""):
             "p2pdeviceid",
             "pubkeyfp",
             "remotedeviceid",
+            "session",
+            "sessionid",
             "stablepeerid",
             "targetdeviceid",
+            "trackid",
         }:
             return "<redacted-identity>"
-        if normalized_key in {"accesstoken", "apikey", "clientsecret", "privatekey", "publickeybase64", "refreshtoken"}:
+        if normalized_key in {
+            "accesstoken",
+            "apikey",
+            "authorization",
+            "bearertoken",
+            "clientsecret",
+            "connectioncode",
+            "icecandidate",
+            "icepwd",
+            "iceufrag",
+            "localdescription",
+            "mlkempublickey",
+            "privatekey",
+            "publickeybase64",
+            "refreshtoken",
+            "remotedescription",
+            "sdp",
+            "token",
+            "xwingpublickey",
+        }:
             return "<redacted-secret>"
+        if normalized_key in {
+            "accountdisplayname",
+            "address",
+            "bonjourservicename",
+            "controlendpoint",
+            "displayname",
+            "endpoint",
+            "endpointhost",
+            "host",
+            "ip",
+            "localendpoint",
+            "nebulaid",
+            "reason",
+            "relay",
+            "remoteendpoint",
+            "routeidentifier",
+            "selectedcandidate",
+            "selectedcandidatepair",
+            "sub",
+            "tenantid",
+            "url",
+            "userid",
+            "useridentifier",
+        }:
+            return "<redacted-public-artifact-value>"
         if normalized_key == "code":
             return "<redacted-sas-code>"
         if normalized_key in {"arguments", "argv", "environment", "environmentvariables"}:
@@ -280,16 +400,45 @@ skybridge_smoke_materialize_public_artifacts() {
     return 2
   fi
 
-  rm -rf "${public_dir}"
-  mkdir -p "${public_dir}"
+  local artifact_abs
+  local public_parent
+  local public_abs
+  artifact_abs="$(cd "${artifact_dir}" && pwd -P)"
+  public_parent="$(dirname "${public_dir}")"
+  mkdir -p "${public_parent}"
+  public_abs="$(cd "${public_parent}" && pwd -P)/$(basename "${public_dir}")"
+
+  if [[ "${public_abs}" == "/" || "${public_abs}" == "${artifact_abs}" || "${public_abs}" == "${artifact_abs}/"* ]]; then
+    echo "refusing unsafe public artifact directory: ${public_dir}" >&2
+    return 2
+  fi
+
+  rm -rf "${public_abs}"
+  mkdir -p "${public_abs}"
 
   local source_path
   local name
+  local rel_path
+  local dest_path
   while IFS= read -r -d "" source_path; do
     name="$(basename "${source_path}")"
-    skybridge_smoke_public_artifact_file_name "${name}" || continue
-    skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${public_dir}/${name}"
-  done < <(find "${artifact_dir}" -maxdepth 1 -type f -print0)
+    rel_path="${source_path#${artifact_abs}/}"
+    if ! skybridge_smoke_public_artifact_file_name "${name}"; then
+      echo "unsupported smoke artifact file extension in public materializer input: ${rel_path}" >&2
+      return 2
+    fi
+    if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
+      echo "refusing unsafe smoke artifact path: ${source_path}" >&2
+      return 2
+    fi
+    dest_path="${public_abs}/${rel_path}"
+    mkdir -p "$(dirname "${dest_path}")"
+    skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+  done < <(
+    find "${artifact_abs}" \
+      \( -path "${public_abs}" -o -name .build -o -name .git -o -name DerivedData-ios -o -name DerivedData-mac-online \) -prune \
+      -o -type f -print0
+  )
 }
 
 skybridge_smoke_check_public_artifacts() {
@@ -330,6 +479,77 @@ for token in path_tokens:
         tokens.append(token)
 
 extensions = (".log", ".json", ".jsonl", ".txt", ".csv")
+sensitive_key_values = {
+    "accesstoken",
+    "accountdisplayname",
+    "address",
+    "apikey",
+    "authsession",
+    "authorization",
+    "bearertoken",
+    "bonjourservicename",
+    "bundlepath",
+    "candidate",
+    "clientsecret",
+    "clouddeviceid",
+    "code",
+    "connectioncode",
+    "controlendpoint",
+    "deviceidentifier",
+    "deviceid",
+    "devicename",
+    "displayname",
+    "ecid",
+    "endpoint",
+    "endpointhost",
+    "executablepath",
+    "fingerprint",
+    "host",
+    "identifier",
+    "identitykey",
+    "ice",
+    "icecandidate",
+    "icepwd",
+    "iceufrag",
+    "ip",
+    "localdescription",
+    "localdeviceid",
+    "localendpoint",
+    "localhostnames",
+    "mlkempublickey",
+    "name",
+    "nebulaid",
+    "path",
+    "p2pdeviceid",
+    "potentialhostnames",
+    "privatekey",
+    "publickeybase64",
+    "pubkeyfp",
+    "relay",
+    "refreshtoken",
+    "remotedescription",
+    "remotedeviceid",
+    "remoteendpoint",
+    "reason",
+    "routeidentifier",
+    "serialnumber",
+    "selectedcandidate",
+    "selectedcandidatepair",
+    "session",
+    "sessionid",
+    "sdp",
+    "stablepeerid",
+    "sub",
+    "targetdeviceid",
+    "tenantid",
+    "token",
+    "trackid",
+    "udid",
+    "url",
+    "userid",
+    "useridentifier",
+    "xwingpublickey",
+}
 patterns = [
     ("raw connect link", re.compile(r"skybridge://")),
     (
@@ -346,7 +566,7 @@ patterns = [
     (
         "raw secret JSON field",
         re.compile(
-            r'"(?:accessToken|refreshToken|apiKey|clientSecret|privateKey|publicKeyBase64)"\s*:\s*'
+            r'"(?:accessToken|refreshToken|apiKey|authorization|bearerToken|clientSecret|iceCandidate|icePwd|iceUfrag|localDescription|mlkemPublicKey|privateKey|publicKeyBase64|remoteDescription|sdp|token|xwingPublicKey)"\s*:\s*'
             r'"(?!<redacted)[^"]+"',
             re.IGNORECASE,
         ),
@@ -354,33 +574,99 @@ patterns = [
     (
         "raw Apple device identifier field",
         re.compile(
-            r'"(?:identifier|udid|serialNumber|deviceIdentifier|ecid|deviceId|p2pDeviceId|cloudDeviceId|pubKeyFP)"\s*:\s*'
+            r'"(?:identifier|udid|serialNumber|deviceIdentifier|ecid|deviceId|p2pDeviceId|cloudDeviceId|pubKeyFP|session|sessionId|trackId)"\s*:\s*'
             r'"(?!<redacted)[^"]+"',
             re.IGNORECASE,
         ),
     ),
+    (
+        "raw public identity or route field",
+        re.compile(
+            r'"(?:accountDisplayName|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|ip|nebulaId|reason|relay|routeIdentifier|sub|tenantId|url|userId|userIdentifier)"\s*:\s*'
+            r'"(?!<redacted)[^"]+"',
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "raw public identity or route assignment",
+        re.compile(
+            r"\b(?:accountDisplayName|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|ip|nebulaId|reason|relay|routeIdentifier|sub|tenantId|userId|userIdentifier|xwingPublicKey|mlkemPublicKey)="
+            r"(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE,
+        ),
+    ),
+    ("raw bearer authorization", re.compile(r"\bAuthorization:\s*Bearer\s+(?!<redacted\b|<redacted>)[^\s]+", re.IGNORECASE)),
+    ("raw SDP", re.compile(r"(^|\n)v=0(\r?\n|$)")),
+    ("raw ICE password", re.compile(r"(^|\n)a=ice-pwd:(?!<redacted\b|<redacted>)[^\s]+", re.IGNORECASE)),
+    ("raw ICE ufrag", re.compile(r"(^|\n)a=ice-ufrag:(?!<redacted\b|<redacted>)[^\s]+", re.IGNORECASE)),
+    ("raw ICE candidate", re.compile(r"(^|\n)a=candidate:(?!<redacted\b|<redacted>)[^\r\n]+", re.IGNORECASE)),
+    ("raw SDP assignment", re.compile(r"\b(?:iceCandidate|icePwd|iceUfrag|localDescription|remoteDescription|sdp)=(?!<redacted\b|<redacted>)[^\s&]+", re.IGNORECASE)),
+    ("raw session or track assignment", re.compile(r"\b(?:session|sessionId|trackId)=(?!<redacted\b|<redacted>)[^\s]+", re.IGNORECASE)),
+    ("raw connect code", re.compile(r"\bconnect\s+(?!<redacted\b|<redacted>)[A-Za-z0-9._:-]{4,}\b", re.IGNORECASE)),
+    ("raw plain SAS code", re.compile(r"\bcode\s+(?!<redacted\b|<redacted>)[0-9]{6}\b", re.IGNORECASE)),
     ("raw local path", re.compile(r"(^|[\s\"=])/(Users|Applications|Volumes|private/var/folders|var/folders|tmp)/[^\s\"']+")),
+    ("raw URL", re.compile(r"https?://[^\s\"']+", re.IGNORECASE)),
     ("raw fingerprint", re.compile(r'\bfingerprint[=:]\s*(?!<redacted)[0-9A-Fa-f]{16,}\b', re.IGNORECASE)),
     ("raw SAS code", re.compile(r"\bcode=[0-9]{6}\b")),
     ("raw long base64", re.compile(r"\b[A-Za-z0-9+/_-]{80,}={0,2}\b")),
 ]
+
+def normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+def contains_unredacted_sensitive_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        return bool(stripped) and "<redacted" not in stripped.lower()
+    if isinstance(value, list):
+        return any(contains_unredacted_sensitive_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(contains_unredacted_sensitive_value(item) for item in value.values())
+    return True
+
+def inspect_json_fields(value, rel_path: str, findings):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if normalize_key(str(key)) in sensitive_key_values and contains_unredacted_sensitive_value(item):
+                findings.append((rel_path, f"raw sensitive JSON field {key}"))
+            inspect_json_fields(item, rel_path, findings)
+    elif isinstance(value, list):
+        for item in value:
+            inspect_json_fields(item, rel_path, findings)
+
+def inspect_structured_json(text: str, rel_path: str, findings):
+    candidates = []
+    if rel_path.endswith(".jsonl"):
+        candidates = [line for line in text.splitlines() if line.strip()]
+    elif rel_path.endswith(".json"):
+        candidates = [text]
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        inspect_json_fields(payload, rel_path, findings)
 
 findings = []
 scanned_count = 0
 for current_root, dirs, files in os.walk(public_dir):
     dirs[:] = [name for name in dirs if name not in {".build", "DerivedData-ios", "DerivedData-mac-online"}]
     for name in files:
-        if not name.endswith(extensions):
-            continue
-        scanned_count += 1
         path = os.path.join(current_root, name)
         rel_path = os.path.relpath(path, public_dir)
+        if not name.endswith(extensions):
+            findings.append((rel_path, "unsupported public artifact file extension"))
+            continue
+        scanned_count += 1
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
         except OSError as exc:
             findings.append((rel_path, f"unreadable public artifact: {exc}"))
             continue
+        inspect_structured_json(text, rel_path, findings)
         for token in sorted(set(tokens), key=lambda value: (-len(value), value)):
             if token and token in text:
                 findings.append((rel_path, "raw configured token"))

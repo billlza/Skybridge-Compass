@@ -9,6 +9,20 @@ import Foundation
 
 // MARK: - Offline Message
 
+public enum OfflineMessageQueueError: Error, LocalizedError, Sendable {
+    case capacityExceeded(maxMessages: Int)
+    case persistenceFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .capacityExceeded(let maxMessages):
+            return "Offline message queue exceeds \(maxMessages) messages"
+        case .persistenceFailed:
+            return "Offline message queue persistence failed"
+        }
+    }
+}
+
 /// 离线消息
 public struct OfflineMessage: Codable, Identifiable, Sendable {
     public let id: String
@@ -97,6 +111,7 @@ public class OfflineMessageQueue: ObservableObject {
             legacyUserDefaultsKey: "offline_message_queue"
         )
     )
+    private static let maxQueuedMessages = 500
     private let maxRetryCount = 3
     private let retryInterval: TimeInterval = 60 // 60秒后重试
     private var retryTimer: Timer?
@@ -111,12 +126,16 @@ public class OfflineMessageQueue: ObservableObject {
     // MARK: - Public Methods
     
     /// 添加消息到队列
-    public func enqueue(_ message: OfflineMessage) {
+    public func enqueue(_ message: OfflineMessage) throws {
         var newMessage = message
         newMessage.status = .pending
-        pendingMessages.append(newMessage)
-        updateTotalCount()
-        saveToStorage()
+        var nextPending = pendingMessages
+        nextPending.append(newMessage)
+        try commit(
+            pending: nextPending,
+            failed: failedMessages,
+            persistenceFailureLog: "Offline message queue enqueue persistence failed"
+        )
         
         SkyBridgeLogger.shared.info("📬 消息已加入离线队列: \(message.id)")
     }
@@ -127,14 +146,14 @@ public class OfflineMessageQueue: ObservableObject {
         messageType: OfflineMessageType,
         payload: Data,
         expiresIn: TimeInterval? = nil
-    ) {
+    ) throws {
         let message = OfflineMessage(
             targetDeviceId: targetDeviceId,
             messageType: messageType,
             payload: payload,
             expiresAt: expiresIn.map { Date().addingTimeInterval($0) }
         )
-        enqueue(message)
+        try enqueue(message)
     }
     
     /// 获取指定设备的待发送消息
@@ -143,85 +162,104 @@ public class OfflineMessageQueue: ObservableObject {
     }
     
     /// 标记消息为已发送
-    public func markAsSent(_ messageId: String) {
+    public func markAsSent(_ messageId: String) throws {
         if let index = pendingMessages.firstIndex(where: { $0.id == messageId }) {
-            pendingMessages.remove(at: index)
-            updateTotalCount()
-            saveToStorage()
+            var nextPending = pendingMessages
+            nextPending.remove(at: index)
+            try commit(
+                pending: nextPending,
+                failed: failedMessages,
+                persistenceFailureLog: "Offline message queue sent-state persistence failed"
+            )
             
             SkyBridgeLogger.shared.info("✅ 离线消息已发送: \(messageId)")
         }
     }
     
     /// 标记消息发送失败
-    public func markAsFailed(_ messageId: String) {
+    public func markAsFailed(_ messageId: String) throws {
         if let index = pendingMessages.firstIndex(where: { $0.id == messageId }) {
+            var nextPending = pendingMessages
+            var nextFailed = failedMessages
             var message = pendingMessages[index]
             message.retryCount += 1
             message.lastRetryAt = Date()
             
             if message.retryCount >= maxRetryCount {
                 message.status = .failed
-                pendingMessages.remove(at: index)
-                failedMessages.append(message)
+                nextPending.remove(at: index)
+                nextFailed.append(message)
                 
                 SkyBridgeLogger.shared.warning("⚠️ 离线消息发送失败（重试次数已达上限）: \(messageId)")
             } else {
                 message.status = .pending
-                pendingMessages[index] = message
+                nextPending[index] = message
                 
                 SkyBridgeLogger.shared.info("🔄 离线消息将稍后重试: \(messageId)")
             }
             
-            updateTotalCount()
-            saveToStorage()
+            try commit(
+                pending: nextPending,
+                failed: nextFailed,
+                persistenceFailureLog: "Offline message queue failed-state persistence failed"
+            )
         }
     }
     
     /// 重试失败的消息
-    public func retryFailedMessages() {
+    public func retryFailedMessages() throws {
+        var nextPending = pendingMessages
         for message in failedMessages {
             var retryMessage = message
             retryMessage.retryCount = 0
             retryMessage.status = .pending
-            pendingMessages.append(retryMessage)
+            nextPending.append(retryMessage)
         }
-        failedMessages.removeAll()
-        updateTotalCount()
-        saveToStorage()
+        try commit(
+            pending: nextPending,
+            failed: [],
+            persistenceFailureLog: "Offline message queue retry-state persistence failed"
+        )
     }
     
     /// 删除消息
-    public func remove(_ messageId: String) {
-        pendingMessages.removeAll { $0.id == messageId }
-        failedMessages.removeAll { $0.id == messageId }
-        updateTotalCount()
-        saveToStorage()
+    public func remove(_ messageId: String) throws {
+        let nextPending = pendingMessages.filter { $0.id != messageId }
+        let nextFailed = failedMessages.filter { $0.id != messageId }
+        try commit(
+            pending: nextPending,
+            failed: nextFailed,
+            persistenceFailureLog: "Offline message queue removal persistence failed"
+        )
     }
     
     /// 清空队列
-    public func clear() {
-        pendingMessages.removeAll()
-        failedMessages.removeAll()
-        updateTotalCount()
-        saveToStorage()
+    public func clear() throws {
+        try commit(
+            pending: [],
+            failed: [],
+            persistenceFailureLog: "Offline message queue clear persistence failed"
+        )
     }
     
     /// 清理过期消息
-    public func cleanupExpiredMessages() {
+    public func cleanupExpiredMessages() throws {
         let expiredPendingIds = pendingMessages.filter { $0.isExpired }.map { $0.id }
         let expiredFailedIds = failedMessages.filter { $0.isExpired }.map { $0.id }
 
-        pendingMessages.removeAll { $0.isExpired }
-        failedMessages.removeAll { $0.isExpired }
+        let nextPending = pendingMessages.filter { !$0.isExpired }
+        let nextFailed = failedMessages.filter { !$0.isExpired }
 
         for id in expiredPendingIds + expiredFailedIds {
             SkyBridgeLogger.shared.info("🗑️ 离线消息已过期并删除: \(id)")
         }
 
         guard !expiredPendingIds.isEmpty || !expiredFailedIds.isEmpty else { return }
-        updateTotalCount()
-        saveToStorage()
+        try commit(
+            pending: nextPending,
+            failed: nextFailed,
+            persistenceFailureLog: "Offline message queue expiry cleanup persistence failed"
+        )
     }
     
     /// 处理设备上线
@@ -239,9 +277,21 @@ public class OfflineMessageQueue: ObservableObject {
                 let success = await sendHandler(message)
                 
                 if success {
-                    markAsSent(message.id)
+                    do {
+                        try markAsSent(message.id)
+                    } catch {
+                        SkyBridgeLogger.shared.error(
+                            "Offline message sent-state update failed: \(Self.logSafeErrorSummary(error))"
+                        )
+                    }
                 } else {
-                    markAsFailed(message.id)
+                    do {
+                        try markAsFailed(message.id)
+                    } catch {
+                        SkyBridgeLogger.shared.error(
+                            "Offline message failed-state update failed: \(Self.logSafeErrorSummary(error))"
+                        )
+                    }
                 }
             }
         }
@@ -256,7 +306,13 @@ public class OfflineMessageQueue: ObservableObject {
     private func startRetryTimer() {
         retryTimer = Timer.scheduledTimer(withTimeInterval: retryInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.cleanupExpiredMessages()
+                do {
+                    try self?.cleanupExpiredMessages()
+                } catch {
+                    SkyBridgeLogger.shared.error(
+                        "Offline message cleanup failed: \(Self.logSafeErrorSummary(error))"
+                    )
+                }
             }
         }
     }
@@ -267,10 +323,55 @@ public class OfflineMessageQueue: ObservableObject {
     }
     
     // MARK: - Persistence
+
+    private static func logSafeErrorSummary(_ error: Error) -> String {
+        guard let error = error as? OfflineMessageQueueError else {
+            return String(describing: type(of: error))
+        }
+        switch error {
+        case .capacityExceeded:
+            return "capacity_exceeded"
+        case .persistenceFailed:
+            return "persistence_failed"
+        }
+    }
+
+    private func commit(
+        pending nextPending: [OfflineMessage],
+        failed nextFailed: [OfflineMessage],
+        persistenceFailureLog: String
+    ) throws {
+        let nextCount = nextPending.count + nextFailed.count
+        guard nextCount <= Self.maxQueuedMessages else {
+            throw OfflineMessageQueueError.capacityExceeded(maxMessages: Self.maxQueuedMessages)
+        }
+
+        let previousPending = pendingMessages
+        let previousFailed = failedMessages
+        let previousTotalCount = totalCount
+
+        pendingMessages = nextPending
+        failedMessages = nextFailed
+        updateTotalCount()
+
+        do {
+            try saveToStorage()
+        } catch {
+            pendingMessages = previousPending
+            failedMessages = previousFailed
+            totalCount = previousTotalCount
+            SkyBridgeLogger.shared.error(persistenceFailureLog)
+            throw error
+        }
+    }
     
-    private func saveToStorage() {
+    private func saveToStorage() throws {
         let data = StoredMessages(pending: pendingMessages, failed: failedMessages)
-        try? Self.storage.save(data)
+        do {
+            try Self.storage.save(data)
+        } catch {
+            throw OfflineMessageQueueError.persistenceFailed
+        }
     }
     
     private func loadFromStorage() {
@@ -283,7 +384,13 @@ public class OfflineMessageQueue: ObservableObject {
         updateTotalCount()
         
         // 清理过期消息
-        cleanupExpiredMessages()
+        do {
+            try cleanupExpiredMessages()
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "Offline message load cleanup failed: \(Self.logSafeErrorSummary(error))"
+            )
+        }
     }
     
     private struct StoredMessages: Codable {

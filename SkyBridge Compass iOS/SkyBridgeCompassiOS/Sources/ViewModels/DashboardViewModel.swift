@@ -86,6 +86,7 @@ public class DashboardViewModel: ObservableObject {
     
     private init() {
         setupBindings()
+        DeviceMessagingService.shared.start()
         startNetworkMonitoring()
     }
 

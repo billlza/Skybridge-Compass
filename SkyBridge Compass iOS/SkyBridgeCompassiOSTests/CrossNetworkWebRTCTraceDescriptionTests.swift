@@ -42,7 +42,7 @@ final class CrossNetworkWebRTCTraceDescriptionTests: XCTestCase {
         )
     }
 
-    func testDescribeEnvelopeSummarizesPayloadWithoutLeakingAuthToken() {
+    func testDescribeEnvelopeSummarizesPayloadWithoutLeakingSensitiveIdentifiersOrAuthToken() {
         let sdp = """
         v=0
         m=video 9 UDP/TLS/RTP/SAVPF 96
@@ -66,13 +66,83 @@ final class CrossNetworkWebRTCTraceDescriptionTests: XCTestCase {
         )
 
         let offerSummary = CrossNetworkWebRTCTraceDescription.describeEnvelope(offer)
-        XCTAssertTrue(offerSummary.contains("session=session-1 type=offer from=ios to=mac auth=1"))
+        XCTAssertTrue(offerSummary.contains("session_ref=ref:"))
+        XCTAssertTrue(offerSummary.contains("type=offer"))
+        XCTAssertTrue(offerSummary.contains("from_ref=ref:"))
+        XCTAssertTrue(offerSummary.contains("to_ref=ref:"))
+        XCTAssertTrue(offerSummary.contains("auth=1"))
         XCTAssertTrue(offerSummary.contains("media=1 hasVideo=true videoDir=sendonly candidates total=1"))
+        XCTAssertFalse(offerSummary.contains("session-1"))
+        XCTAssertFalse(offerSummary.contains("from=ios"))
+        XCTAssertFalse(offerSummary.contains("to=mac"))
         XCTAssertFalse(offerSummary.contains("secret-token"))
 
         let iceSummary = CrossNetworkWebRTCTraceDescription.describeEnvelope(ice)
-        XCTAssertTrue(iceSummary.contains("session=session-1 type=iceCandidate from=mac to=- auth=1 kind=relay"))
+        XCTAssertTrue(iceSummary.contains("session_ref=ref:"))
+        XCTAssertTrue(iceSummary.contains("type=iceCandidate"))
+        XCTAssertTrue(iceSummary.contains("from_ref=ref:"))
+        XCTAssertTrue(iceSummary.contains("to_ref=-"))
+        XCTAssertTrue(iceSummary.contains("auth=1 kind=relay"))
+        XCTAssertFalse(iceSummary.contains("session-1"))
+        XCTAssertFalse(iceSummary.contains("from=mac"))
         XCTAssertFalse(iceSummary.contains("secret-token"))
+    }
+
+    func testTraceRedactionSanitizesKnownAssignments() {
+        let raw = "local-offer session=session-secret from=ios-device to=mac-device peer=peer-device token=secret-token relay=10.0.0.5:3478 untouched=value"
+
+        let redacted = SkyBridgeTraceRedaction.redactKnownAssignments(in: raw)
+
+        XCTAssertTrue(redacted.contains("session_ref=ref:"))
+        XCTAssertTrue(redacted.contains("from_ref=ref:"))
+        XCTAssertTrue(redacted.contains("to_ref=ref:"))
+        XCTAssertTrue(redacted.contains("peer_ref=ref:"))
+        XCTAssertTrue(redacted.contains("token_ref=ref:"))
+        XCTAssertTrue(redacted.contains("relay_ref=ref:"))
+        XCTAssertTrue(redacted.contains("untouched=value"))
+        XCTAssertFalse(redacted.contains("session-secret"))
+        XCTAssertFalse(redacted.contains("ios-device"))
+        XCTAssertFalse(redacted.contains("mac-device"))
+        XCTAssertFalse(redacted.contains("peer-device"))
+        XCTAssertFalse(redacted.contains("secret-token"))
+        XCTAssertFalse(redacted.contains("10.0.0.5:3478"))
+    }
+
+    func testMediaDiagnosticSanitizesSensitiveFieldsAndUnsupportedValues() {
+        let payload = SkyBridgeTraceRedaction.sanitizedMediaDiagnosticFields(
+            [
+                "kind": "visibleNativeRenderFPS",
+                "session": "session-secret",
+                "session_id": "session-secret",
+                "relay": "10.0.0.5:3478",
+                "trackId": "track-secret",
+                "viewerDisplayFPS": 60.0,
+                "relayTokenPresent": true,
+                "rawPath": "/Users/bill/private/status.log",
+                "nested": ["token": "secret"]
+            ],
+            timestamp: "2026-07-07T00:00:00.000Z"
+        )
+
+        XCTAssertEqual(payload["schema_version"] as? Int, 1)
+        XCTAssertEqual(payload["timestamp"] as? String, "2026-07-07T00:00:00.000Z")
+        XCTAssertEqual(payload["kind"] as? String, "visibleNativeRenderFPS")
+        XCTAssertEqual(payload["viewerDisplayFPS"] as? Double, 60.0)
+        XCTAssertEqual(payload["relayTokenPresent"] as? Bool, true)
+        XCTAssertTrue((payload["session_ref"] as? String)?.hasPrefix("ref:") == true)
+        XCTAssertTrue((payload["relay_ref"] as? String)?.hasPrefix("ref:") == true)
+        XCTAssertTrue((payload["track_ref"] as? String)?.hasPrefix("ref:") == true)
+        XCTAssertTrue((payload["rawPath_ref"] as? String)?.hasPrefix("ref:") == true)
+        XCTAssertEqual(payload["nested_redacted"] as? String, "unsupported_non_scalar")
+        XCTAssertNil(payload["session"])
+        XCTAssertNil(payload["session_id"])
+        XCTAssertNil(payload["relay"])
+        XCTAssertNil(payload["trackId"])
+        XCTAssertNil(payload["rawPath"])
+        XCTAssertFalse(String(describing: payload).contains("session-secret"))
+        XCTAssertFalse(String(describing: payload).contains("10.0.0.5:3478"))
+        XCTAssertFalse(String(describing: payload).contains("/Users/bill/private/status.log"))
+        XCTAssertFalse(String(describing: payload).contains("secret"))
     }
 
     func testSmokeTraceTokenRemovesWhitespaceAndLimitsLength() {

@@ -374,6 +374,8 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "schema_version": OPERATOR_CAPABILITY_SCHEMA_VERSION,
+                "product_name": "SkyBridge CLI",
+                "binary_name": "skybridge",
                 "ios_runtime_control_supported": false,
                 "mac_gui_control_protocol": "crossnet-control/1",
                 "mac_gui_control_release_gate": "signed_mac_app_socket_smoke_required",
@@ -384,7 +386,7 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
     }
 
     println!(
-        "Operator Capability Contract v{}",
+        "SkyBridge CLI Operator Capability Contract v{}",
         OPERATOR_CAPABILITY_SCHEMA_VERSION
     );
     println!("iOS runtime control supported: false");

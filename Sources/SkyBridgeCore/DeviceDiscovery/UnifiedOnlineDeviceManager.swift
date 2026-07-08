@@ -3774,11 +3774,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private func normalizeFingerprint(_ raw: String?) -> String? {
-        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
-            return nil
-        }
-        guard raw.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else { return nil }
-        return raw
+        BonjourInteropContract.normalizedPubKeyFingerprint(raw)
     }
 
     private func preferredIdentifier(current: String, incoming: String) -> String {

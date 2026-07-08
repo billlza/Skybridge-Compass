@@ -2803,6 +2803,49 @@ public class FileTransferManager: BaseManager {
         updateTransferringStatus()
     }
 
+    @available(macOS 14.0, iOS 17.0, *)
+    func approveInboundWebRTCFileTransfer(
+        _ request: WebRTCInboundFileTransferApprovalRequest
+    ) async -> WebRTCInboundFileTransferApprovalDecision {
+        #if os(macOS)
+        let senderDeviceId = request.senderDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !senderDeviceId.isEmpty else {
+            return .rejected(reason: "inbound_file_transfer_missing_sender_identity")
+        }
+
+        let approvalRequest = InboundFileTransferApprovalService.Request(
+            transferId: request.transferId,
+            fileName: request.fileName,
+            fileSize: request.fileSize,
+            chunkSize: request.chunkSize,
+            totalChunks: request.totalChunks,
+            senderDeviceId: senderDeviceId,
+            senderDeviceName: request.senderDeviceName,
+            endpointDescription: request.endpointDescription,
+            destinationDirectoryPath: request.destinationDirectoryPath,
+            proposedSavePath: request.proposedSavePath
+        )
+        let decision = await InboundFileTransferApprovalService.shared.decide(for: approvalRequest)
+        return Self.webRTCInboundFileTransferApprovalDecision(from: decision)
+        #else
+        return .rejected(reason: WebRTCInboundFileTransferSupport.explicitApprovalRequiredMessage)
+        #endif
+    }
+
+    #if os(macOS)
+    @available(macOS 14.0, *)
+    static func webRTCInboundFileTransferApprovalDecision(
+        from decision: InboundFileTransferApprovalService.Decision
+    ) -> WebRTCInboundFileTransferApprovalDecision {
+        switch decision {
+        case .allowOnce:
+            return .approved
+        case .reject:
+            return .rejected(reason: "operator_rejected_inbound_file_transfer")
+        }
+    }
+    #endif
+
     /// WebRTC 出站：创建一个“外部传输”的发送记录（用于 UI 展示与统计）。
     public func beginExternalOutboundTransfer(
         transferId: String,

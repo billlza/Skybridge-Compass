@@ -243,12 +243,10 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             throw FileTransferNetworkError.invalidPort
         }
 
- // 创建TXT记录
-        let txtRecord: [String: Data] = [
-            "version": "1.0".data(using: .utf8) ?? Data(),
-            "device": (Host.current().localizedName ?? "Unknown").data(using: .utf8) ?? Data(),
-            "capabilities": "file-transfer".data(using: .utf8) ?? Data()
-        ]
+        let txtRecord = Self.makeBonjourTXTRecord(
+            deviceName: Host.current().localizedName ?? "Unknown",
+            port: port
+        )
 
         let txtData = NetService.data(fromTXTRecord: txtRecord)
 
@@ -259,6 +257,17 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         netService?.publish()
 
         logger.info("📡 Bonjour服务已注册: \(self.serviceType) 端口: \(port)")
+    }
+
+    nonisolated static func makeBonjourTXTRecord(deviceName: String, port: UInt16) -> [String: Data] {
+        var record: [String: Data] = [
+            "version": Data("1.0".utf8),
+            "device": Data(deviceName.utf8),
+            "name": Data(deviceName.utf8),
+            "platform": Data("macos".utf8)
+        ]
+        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &record, port: port)
+        return record
     }
 
  /// 处理新连接

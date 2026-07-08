@@ -4,6 +4,30 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../../../../../Scripts/check_macos_release_readiness.sh"),
     ),
     (
+        "Scripts/generate_macos_update_manifest.swift",
+        include_str!("../../../../../../Scripts/generate_macos_update_manifest.swift"),
+    ),
+    (
+        "Scripts/publish_macos_update_release.sh",
+        include_str!("../../../../../../Scripts/publish_macos_update_release.sh"),
+    ),
+    (
+        "Scripts/validate_macos_update_manifest.sh",
+        include_str!("../../../../../../Scripts/validate_macos_update_manifest.sh"),
+    ),
+    (
+        "Scripts/validate_macos_release_artifact_run.sh",
+        include_str!("../../../../../../Scripts/validate_macos_release_artifact_run.sh"),
+    ),
+    (
+        "Scripts/validate_macos_release_public_artifacts.sh",
+        include_str!("../../../../../../Scripts/validate_macos_release_public_artifacts.sh"),
+    ),
+    (
+        ".github/workflows/macos-release-readiness.yml",
+        include_str!("../../../../../../.github/workflows/macos-release-readiness.yml"),
+    ),
+    (
         "Scripts/verify_xcode_toolchain.sh",
         include_str!("../../../../../../Scripts/verify_xcode_toolchain.sh"),
     ),

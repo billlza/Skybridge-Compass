@@ -22,9 +22,11 @@ Supported install surfaces for v1:
 The npm wrapper is a thin downloader / launcher only.
 It must not become the only delivery path for the protocol core.
 
-## Current Rust Workspace
+## Current SkyBridge CLI Workspace
 
-The headless workspace lives under `rust/`.
+The SkyBridge CLI headless Rust workspace lives under `rust/`. The product
+display name is SkyBridge CLI; the installed command and binary name remain
+`skybridge`.
 
 Local build and test:
 

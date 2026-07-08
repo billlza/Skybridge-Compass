@@ -580,6 +580,31 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)"))
     }
 
+    func testMacWebRTCQueuesPreSessionOfferAnswerAndIceOnly() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+
+        XCTAssertTrue(source.contains("private static let maxPendingPreSessionSignalingEnvelopes = 32"))
+        XCTAssertTrue(source.contains("private static let maxTotalPendingPreSessionSignalingEnvelopes = 128"))
+        XCTAssertTrue(source.contains("private static let maxPendingPreSessionSignalingEnvelopeBytes = 768 * 1024"))
+        XCTAssertTrue(source.contains("private static let maxTotalPendingPreSessionSignalingEnvelopeBytes = 4 * 1024 * 1024"))
+        XCTAssertTrue(source.contains("private static func preSessionSignalingEnvelopeByteCount(_ env: WebRTCSignalingEnvelope) -> Int?"))
+        XCTAssertTrue(source.contains("private func pendingPreSessionSignalingQueueMetrics() -> (count: Int, bytes: Int)?"))
+        XCTAssertTrue(source.contains("pre_session_signaling_global_queue_overflow"))
+        XCTAssertTrue(source.contains("pre_session_signaling_envelope_too_large"))
+        XCTAssertTrue(source.contains("private func enqueuePreSessionSignalingEnvelope(_ env: WebRTCSignalingEnvelope)"))
+        XCTAssertTrue(source.contains("pre-session signaling queue overflow"))
+        XCTAssertTrue(source.contains("cleanupReason: \"pre_session_signaling_queue_overflow\""))
+        XCTAssertTrue(source.contains("case .offer, .answer, .iceCandidate:"))
+        XCTAssertTrue(source.contains("case .join, .leave:"))
+        XCTAssertTrue(source.contains("await drainPendingPreSessionSignalingEnvelopes(sessionID: sessionID)"))
+        XCTAssertTrue(source.contains("pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionID)"))
+        XCTAssertFalse(
+            source.contains("drop signaling envelope without local session: type=\\(env.type.rawValue, privacy: .public) session=\\(env.sessionId, privacy: .public)\"") &&
+            !source.contains("enqueuePreSessionSignalingEnvelope(env)"),
+            "Offer/answer/ICE arriving before session start must be queued with a bounded fail-closed queue, not silently dropped."
+        )
+    }
+
     func testQRCodeBootstrapUsesLongerStartupWindowsThanRuntimeHeartbeat() {
         XCTAssertGreaterThanOrEqual(
             CrossNetworkConnectionManager.qrCodeGenerationWatchdogTimeoutSeconds,
@@ -1303,6 +1328,43 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             .dropUntilPQCRekey,
             "Business payloads must not start the media/control path before PQC rekey."
         )
+        XCTAssertEqual(
+            WebRTCBootstrapAppMessagePolicy.admission(for: .authenticatedRouteBinding(routeBindingPayload())),
+            .dropUntilPQCRekey,
+            "Route binding is product-control authorization material and must not run before PQC rekey."
+        )
+    }
+
+    func testAuthenticatedRouteBindingAppMessageRoundTripsAsExternallyTaggedControlPayload() throws {
+        let payload = routeBindingPayload()
+        let encoded = try JSONEncoder().encode(AppMessage.authenticatedRouteBinding(payload))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let routeBinding = try XCTUnwrap(object["authenticatedRouteBinding"] as? [String: Any])
+
+        XCTAssertEqual(routeBinding["version"] as? Int, 1)
+        XCTAssertEqual(routeBinding["kind"] as? String, "fileTransfer")
+        XCTAssertEqual(routeBinding["serviceType"] as? String, "_skybridge-transfer._tcp")
+        XCTAssertEqual(routeBinding["endpointProvenance"] as? String, "resolved-dns-sd-endpoint")
+        XCTAssertEqual(routeBinding["routeAuthorityProtocolPublicKeyFingerprint"] as? String, String(repeating: "a", count: 64))
+        XCTAssertEqual(routeBinding["sessionHashHex"] as? String, "0123456789abcdef")
+        XCTAssertEqual(routeBinding["transcriptPrefixHex"] as? String, "fedcba9876543210")
+
+        let decoded = try JSONDecoder().decode(AppMessage.self, from: encoded)
+        XCTAssertEqual(decoded, .authenticatedRouteBinding(payload))
+        XCTAssertEqual(WebRTCControlChannelCodec.bootstrapAppMessageKind(decoded), "authenticatedRouteBinding")
+    }
+
+    func testWebRTCSendsAuthenticatedRouteBindingAfterEstablishedBusinessSession() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        XCTAssertTrue(source.contains("func sendLocalAuthenticatedRouteBindings("))
+        XCTAssertTrue(source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionID]"))
+        XCTAssertTrue(source.contains("ServiceEndpointRegistry.shared.snapshot()"))
+        XCTAssertTrue(source.contains("WebRTCControlChannelCodec.sessionBindingDescriptor(for: keys)"))
+        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: keys, stage: \"initial-handshake\")"))
+        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: rekeyed, stage: \"outbound-rekey\")"))
+        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: keys, stage: \"inbound-rekey\")"))
+        XCTAssertTrue(source.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)"))
+        XCTAssertTrue(source.contains("webrtcRekeyInProgressSessionIds.contains(sessionID)"))
     }
 
     func testActiveWebRTCRekeyFramesBypassBusinessDecryptAndRouteToDriver() throws {
@@ -1885,6 +1947,26 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(loopBody.contains("driverState=\\(lastHandshakeDriverState"))
         XCTAssertTrue(loopBody.contains("lastEvent=\\(lastControlLoopEvent"))
         XCTAssertTrue(loopBody.contains("lastRekey=\\(self.lastRekeyEvent ?? \"-\""))
+    }
+
+    private func routeBindingPayload() -> AppMessage.AuthenticatedRouteBindingPayload {
+        AppMessage.AuthenticatedRouteBindingPayload(
+            kind: "fileTransfer",
+            serviceType: "_skybridge-transfer._tcp",
+            instanceName: "Desk Mac._skybridge-transfer._tcp.local",
+            hostName: "desk-mac.local",
+            port: 9443,
+            endpointProvenance: "resolved-dns-sd-endpoint",
+            localDeviceId: "mac-device",
+            remoteDeviceId: "android-device",
+            routeAuthorityProtocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            remoteProtocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            sessionHashHex: "0123456789abcdef",
+            transcriptPrefixHex: "fedcba9876543210",
+            sentAt: Date(timeIntervalSinceReferenceDate: 42),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 72),
+            nonce: Data(1...16)
+        )
     }
 
     private func readSource(_ relativePath: String) throws -> String {
