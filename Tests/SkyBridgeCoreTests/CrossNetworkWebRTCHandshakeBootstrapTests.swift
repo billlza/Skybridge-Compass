@@ -1646,6 +1646,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         let brandIconSource = try readSource("Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift")
         let menuBarControllerSource = try readSource("Sources/SkyBridgeUI/MenuBar/MenuBarController.swift")
         let menuBarIconGeneratorSource = try readSource("Sources/SkyBridgeUI/MenuBar/MenuBarIconGenerator.swift")
+        let crossNetworkConnectionViewSource = try readSource("Sources/SkyBridgeCompassApp/Views/CrossNetworkConnectionView.swift")
         let dashboardStoredProperties = try sourceSlice(
             from: "final class DashboardViewModel: ObservableObject",
             to: "// MARK: - 初始化",
@@ -1675,6 +1676,21 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             from: "private struct RootAppServicesContainer: View",
             to: "private struct PreferencesSceneContent: View",
             in: appSource
+        )
+        let rootContainerViewSource = try sourceSlice(
+            from: "private struct RootContainerView: View",
+            to: "private struct SupabasePasswordResetSheet: View",
+            in: appSource
+        )
+        let rootAuthenticationTask = try sourceSlice(
+            from: ".task(id: authModel.currentSession)",
+            to: ".animation(",
+            in: rootContainerViewSource
+        )
+        let dashboardAuthenticationUpdate = try sourceSlice(
+            from: "func updateAuthentication(session: AuthSession?) async",
+            to: "/// 根据当前认证状态启动各项后台服务。",
+            in: dashboardSource
         )
 
         XCTAssertFalse(
@@ -1720,6 +1736,41 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             rootServiceSettledGate.lowerBound,
             rootServiceBindings.lowerBound,
             "Root service bootstrapping must wait for the startup progress stable period before subscribing to device managers."
+        )
+        XCTAssertTrue(
+            rootAuthenticationTask.contains("await dashboardModel.updateAuthentication(session: authModel.currentSession)")
+        )
+        XCTAssertFalse(
+            rootAuthenticationTask.contains("CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded"),
+            "Login-to-dashboard auth state changes must not synchronously wait for current-path activation before the dashboard can become interactive."
+        )
+        XCTAssertTrue(
+            dashboardAuthenticationUpdate.contains("session.isAuthenticatedForProtectedServices"),
+            "Dashboard protected service startup must reject guest, pending-verification, and empty-token sessions."
+        )
+        XCTAssertTrue(
+            dashboardAuthenticationUpdate.contains("scheduleAuthenticatedStartup(for: session)"),
+            "Authenticated dashboard service startup must be scheduled after the auth binding path returns."
+        )
+        XCTAssertFalse(
+            dashboardAuthenticationUpdate.contains("await start()"),
+            "Auth binding must not synchronously await the full DashboardViewModel.start() service graph."
+        )
+        XCTAssertTrue(
+            dashboardSource.contains("authenticatedStartupTask?.cancel()"),
+            "Post-login startup must be cancellable so logout or rapid account switches cannot keep old service work alive."
+        )
+        XCTAssertTrue(
+            dashboardSource.contains("CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(session: session)"),
+            "Current-path activation should remain part of authenticated startup, but off the root auth task's hot path."
+        )
+        XCTAssertTrue(
+            appSource.contains("AuthenticationService.shared.hasAuthenticatedSessionForProtectedServices()"),
+            "App active discovery recovery must not start protected device discovery for guest or pending-verification sessions."
+        )
+        XCTAssertTrue(
+            crossNetworkConnectionViewSource.contains("guard AuthenticationService.shared.hasAuthenticatedSessionForProtectedServices() else"),
+            "CrossNetworkConnectionView must not start protected discovery from an unauthenticated standalone window task."
         )
         XCTAssertTrue(
             startupCoordinatorSource.contains("prepareDeferredServiceLaunch()"),

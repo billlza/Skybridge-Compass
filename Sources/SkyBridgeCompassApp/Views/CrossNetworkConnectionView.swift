@@ -51,6 +51,9 @@ struct CrossNetworkConnectionView: View {
         .frame(minWidth: 700, minHeight: 600)
         .navigationTitle(LocalizationManager.shared.localizedString("connection.crossNetwork.title"))
         .task {
+            guard AuthenticationService.shared.hasAuthenticatedSessionForProtectedServices() else {
+                return
+            }
  // 自动发现 iCloud 设备
             unifiedDeviceManager.startDiscovery()
             try? await connectionManager.discoverCloudDevices()

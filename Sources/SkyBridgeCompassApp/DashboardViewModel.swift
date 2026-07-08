@@ -96,11 +96,10 @@ final class DashboardViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var presentationCancellables = Set<AnyCancellable>()
+    private var authenticatedStartupTask: Task<Void, Never>?
+    private var authenticatedStartupSessionKey: String?
     private var hasStartedServices = false
     private var isStartingServices = false
-    private var isAuthenticated: Bool {
-        tenantController.accessToken != nil
-    }
 
  /// 设备扫描状态
     var isScanning: Bool {
@@ -134,12 +133,57 @@ final class DashboardViewModel: ObservableObject {
  /// 由根视图调用以更新认证状态。
     func updateAuthentication(session: AuthSession?) async {
         if let session {
+            guard session.isAuthenticatedForProtectedServices else {
+                await tenantController.clearAuthentication()
+                stop()
+                return
+            }
             await tenantController.bindAuthentication(session: session)
-            await start()
+            scheduleAuthenticatedStartup(for: session)
         } else {
             await tenantController.clearAuthentication()
             stop()
         }
+    }
+
+    private func scheduleAuthenticatedStartup(for session: AuthSession) {
+        let sessionKey = Self.startupKey(for: session)
+        if authenticatedStartupSessionKey == sessionKey,
+           (hasStartedServices || isStartingServices) {
+            return
+        }
+
+        authenticatedStartupSessionKey = sessionKey
+        authenticatedStartupTask?.cancel()
+        authenticatedStartupTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  !Task.isCancelled,
+                  self.isCurrentAuthenticatedSession(session) else {
+                return
+            }
+
+            await self.start()
+
+            guard !Task.isCancelled,
+                  self.isCurrentAuthenticatedSession(session) else {
+                return
+            }
+            await CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(session: session)
+        }
+    }
+
+    private func isCurrentAuthenticatedSession(_ session: AuthSession) -> Bool {
+        session.isAuthenticatedForProtectedServices
+            && tenantController.accessToken == session.accessToken
+    }
+
+    private static func startupKey(for session: AuthSession) -> String {
+        [
+            session.userIdentifier,
+            String(session.issuedAt.timeIntervalSince1970),
+            session.nebulaId ?? ""
+        ].joined(separator: "|")
     }
 
  /// 根据当前认证状态启动各项后台服务。
@@ -600,12 +644,26 @@ final class DashboardViewModel: ObservableObject {
 
     /// 停止所有订阅并释放资源，通常在界面离开或退出登录时调用。
     func stop() {
+        authenticatedStartupTask?.cancel()
+        authenticatedStartupTask = nil
+        authenticatedStartupSessionKey = nil
+
+        let shouldStopStartedServices = hasStartedServices || isStartingServices
         hasStartedServices = false
         isStartingServices = false
         presentationCancellables.removeAll()
         cancellables.removeAll()
+        guard shouldStopStartedServices else {
+            systemMetricsService.stopMonitoring()
+            performanceCoordinator?.stopPerformanceCoordination()
+            performanceCoordinator = nil
+            return
+        }
+
         discoveryService.stop()
         p2pDiscoveryService.stopDiscovery()
+        PresenceService.shared.stop()
+        TrustedAutoConnectManager.shared.stop()
         sessionService.shutdown()
  // FileTransferManager 不需要stop方法
         systemMetricsService.stopMonitoring()

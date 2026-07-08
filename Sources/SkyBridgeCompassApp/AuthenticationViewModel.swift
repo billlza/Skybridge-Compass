@@ -477,7 +477,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             currentSession = updatedSession
         } catch {
             SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 注册后持久化会话失败: \(error.localizedDescription, privacy: .private)")
-            currentSession = updatedSession
+            errorMessage = error.localizedDescription
+            return
         }
 
         await loadUserAvatarAfterLogin(session: updatedSession)

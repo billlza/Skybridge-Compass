@@ -37,10 +37,7 @@ public final class SystemMetricsService: ObservableObject {
  /// 开始监控系统指标
     public func startMonitoring() {
         guard monitoringTimer == nil else { return }
-        
- // 立即获取一次指标
-        updateMetrics()
-        
+
  // 每5秒更新一次指标
         monitoringTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in

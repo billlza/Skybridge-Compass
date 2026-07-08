@@ -469,6 +469,7 @@ struct SkyBridgeCompassApp: App {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 let shouldAutoScan = await MainActor.run {
                     SettingsManager.shared.autoScanOnStartup
+                        && AuthenticationService.shared.hasAuthenticatedSessionForProtectedServices()
                 }
                 if shouldAutoScan {
                     await UnifiedOnlineDeviceManager.shared.startDiscoveryAsync()
@@ -948,7 +949,6 @@ private struct RootContainerView: View {
             } else {
                 await dashboardModel.updateAuthentication(session: authModel.currentSession)
             }
-            await CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(session: authModel.currentSession)
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
         .overlay(alignment: .topTrailing) {

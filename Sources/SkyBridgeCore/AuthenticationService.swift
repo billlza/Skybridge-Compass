@@ -77,6 +77,10 @@ import Combine
         sessionSubject.value?.accessToken
     }
 
+    public func hasAuthenticatedSessionForProtectedServices() -> Bool {
+        sessionSubject.value?.isAuthenticatedForProtectedServices == true
+    }
+
     public func validAccessToken(forceRefresh: Bool = false) async throws -> String? {
         guard let currentSession = sessionSubject.value else {
             return nil

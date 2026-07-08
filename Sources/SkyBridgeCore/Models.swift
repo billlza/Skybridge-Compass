@@ -35,6 +35,13 @@ public struct AuthSession: Codable, Hashable, Sendable {
         self.avatarURL = avatarURL
         self.issuedAt = issuedAt
     }
+
+    public var isAuthenticatedForProtectedServices: Bool {
+        let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !token.isEmpty
+            && token != "guest_token"
+            && token != "pending_verification"
+    }
 }
 
 /// 概括远程桌面会话的状态与性能指标。
