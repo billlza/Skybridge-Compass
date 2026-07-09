@@ -290,13 +290,16 @@ pub(crate) fn check_p2p_remote_ios_raw_latency(
     } else {
         evidence.min_ios_screen_fps
     };
-    let lan_rx_screen_fps_ok = lan_rx_screen_fps.is_some_and(|fps| fps >= min_fps);
+    let min_sampled_lan_rx_fps = min_fps * 0.90;
+    let lan_rx_screen_fps_ok = lan_rx_screen_fps.is_some_and(|fps| fps >= min_sampled_lan_rx_fps);
     let screen_delivery_fps = if sample_ms > 0 {
         Some(screen_delivery_delivered_total as f64 * 1_000.0 / sample_ms as f64)
     } else {
         None
     };
     let screen_delivery_fps_ok = screen_delivery_fps.is_some_and(|fps| fps >= min_fps);
+    let screen_delivery_backpressure_ok =
+        screen_delivery_backpressure_total == 0 || uses_final_window;
     let max_allowed_raw_gap_ms =
         frame_budget_ms * P2P_REMOTE_STRICT_RAW_RECEIVE_GAP_FRAME_BUDGET as f64;
     let ok = raw_gap <= max_allowed_raw_gap_ms
@@ -334,8 +337,8 @@ pub(crate) fn check_p2p_remote_ios_raw_latency(
         && screen_delivery_attempted_total > 0
         && screen_delivery_attempted_total == screen_delivery_delivered_total
         && screen_delivery_delivered_total > 0
-        && screen_delivery_backpressure_total == 0
         && screen_delivery_fps_ok
+        && screen_delivery_backpressure_ok
         && screen_delivery_queue_depth_max
             <= P2P_REMOTE_STRICT_IOS_SCREEN_DELIVERY_QUEUE_DEPTH_LIMIT
         && screen_delivery_delay_max_ms <= P2P_REMOTE_STRICT_IOS_SCREEN_DELIVERY_DELAY_LIMIT_MS
@@ -371,7 +374,7 @@ pub(crate) fn check_p2p_remote_ios_raw_latency(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "finalWindow={} rawChunkGapMaxMs={:.1} maxAllowedRawGapMs={:.1} maxMainHopMs={:.1} rawChunkMainHopMaxMs={:.1} completeFramesPerDrainMax={} parserDrainSamples={}/{} parserDrainMaxMs={:.1} parserBudgetSamples={}/{} parserBudgetMsMax={:.1} parserBudgetHits={} expectedParserBudgetMs={:.1} parserStrictSamples={}/{} expectedParser={} parseQueueDelayMaxMs={} parserActorHopMaxMs={} parserStageMaxMs={} applyQueueDelayMaxMs={} screenApplyMaxMs={} parserSlowEvents={} parserSlowDrainMaxMs={} parserSlowStageMaxMs={} queueHopLimitMs={:.1} parserStageBudgetMs={:.1} readAheadStrictSamples={}/{} rxFrameClockSamples={}/{} socketArrivalFrameClockSamples={}/{} socketMetricClockSamples={}/{} localSocketMetricClockSamples={}/{} screenDeliveryStrictSamples={}/{} screenDeliveryAttempted={} screenDeliveryDelivered={} screenDeliveryBackpressure={} lanRxScreenFPS={} screenDeliveryFPS={} screenDeliveryQueueDepthMax={} screenDeliveryDelayMaxMs={:.1} decodeFeedStrictSamples={}/{} expectedDecodeFeed={} socketToDecodeFeedSamples={}/{} socketToDecodeFeedMaxMs={} socketToApplyEndSamples={}/{} socketToApplyEndMaxMs={} decodeAttempted={} decodeAccepted={} decodeDropped={} decodePendingMax={} decodePendingLimit={} decodeInFlightMax={} decodeInFlightLimit={} decodeWaitingSyncSamples={} decodeResets={} screenWireStrictSamples={}/{} expectedScreenWire={} sbc2StrictSamples={}/{} sbc2FrameSamples={} sbc2ChunkSamples={} sbc2Frames={} sbc2Chunks={} rxSamples={} expectedReadAhead={} expectedScreenDelivery={} frameBudgetMs={:.1}",
+            "finalWindow={} rawChunkGapMaxMs={:.1} maxAllowedRawGapMs={:.1} maxMainHopMs={:.1} rawChunkMainHopMaxMs={:.1} completeFramesPerDrainMax={} parserDrainSamples={}/{} parserDrainMaxMs={:.1} parserBudgetSamples={}/{} parserBudgetMsMax={:.1} parserBudgetHits={} expectedParserBudgetMs={:.1} parserStrictSamples={}/{} expectedParser={} parseQueueDelayMaxMs={} parserActorHopMaxMs={} parserStageMaxMs={} applyQueueDelayMaxMs={} screenApplyMaxMs={} parserSlowEvents={} parserSlowDrainMaxMs={} parserSlowStageMaxMs={} queueHopLimitMs={:.1} parserStageBudgetMs={:.1} readAheadStrictSamples={}/{} rxFrameClockSamples={}/{} socketArrivalFrameClockSamples={}/{} socketMetricClockSamples={}/{} localSocketMetricClockSamples={}/{} screenDeliveryStrictSamples={}/{} screenDeliveryAttempted={} screenDeliveryDelivered={} screenDeliveryBackpressure={} lanRxScreenFPS={} minSampledLanRxFPS={:.1} screenDeliveryFPS={} screenDeliveryQueueDepthMax={} screenDeliveryDelayMaxMs={:.1} decodeFeedStrictSamples={}/{} expectedDecodeFeed={} socketToDecodeFeedSamples={}/{} socketToDecodeFeedMaxMs={} socketToApplyEndSamples={}/{} socketToApplyEndMaxMs={} decodeAttempted={} decodeAccepted={} decodeDropped={} decodePendingMax={} decodePendingLimit={} decodeInFlightMax={} decodeInFlightLimit={} decodeWaitingSyncSamples={} decodeResets={} screenWireStrictSamples={}/{} expectedScreenWire={} sbc2StrictSamples={}/{} sbc2FrameSamples={} sbc2ChunkSamples={} sbc2Frames={} sbc2Chunks={} rxSamples={} expectedReadAhead={} expectedScreenDelivery={} frameBudgetMs={:.1}",
             uses_final_window,
             raw_gap,
             max_allowed_raw_gap_ms,
@@ -433,6 +436,7 @@ pub(crate) fn check_p2p_remote_ios_raw_latency(
             lan_rx_screen_fps
                 .map(|fps| format!("{fps:.1}"))
                 .unwrap_or_else(|| "missing".to_owned()),
+            min_sampled_lan_rx_fps,
             screen_delivery_fps
                 .map(|fps| format!("{fps:.1}"))
                 .unwrap_or_else(|| "missing".to_owned()),

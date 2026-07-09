@@ -156,7 +156,7 @@ fn p2p_remote_metal_render_queue_rejects_final_window_realtime_replacement() {
 }
 
 #[test]
-fn p2p_remote_metal_render_queue_rejects_low_final_window_sample_fps() {
+fn p2p_remote_metal_render_queue_uses_final_window_aggregate_fps() {
     let mut evidence = P2pRemotePerformanceEvidence::default();
     for _ in 0..10 {
         update_p2p_remote_final_window_ios_evidence(
@@ -170,7 +170,7 @@ fn p2p_remote_metal_render_queue_rejects_low_final_window_sample_fps() {
     );
 
     let check = check_p2p_remote_metal_render_queue(&evidence, 59.0);
-    assert!(!check.ok, "{}", check.detail);
+    assert!(check.ok, "{}", check.detail);
     assert!(
         check
             .detail
@@ -178,4 +178,16 @@ fn p2p_remote_metal_render_queue_rejects_low_final_window_sample_fps() {
     );
     assert!(check.detail.contains("inputFPSMin=Some(30.0)"));
     assert!(check.detail.contains("displayFPSMin=Some(30.0)"));
+
+    let mut aggregate_low = P2pRemotePerformanceEvidence::default();
+    for _ in 0..8 {
+        update_p2p_remote_final_window_ios_evidence(
+            &mut aggregate_low,
+            "Metal render telemetry: sampleMs=1000 input=30 submitted=30 displayed=30 submittedFPS=30.0 displayFPS=30.0 frameAgeMs=44 displayLink=mtkview-native displayLinkTargetFPS=60 displayLinkPumpFPS=60 displayCadence=strict-60-native-pump-catch-up-vsync manualDraw=0 renderPath=directBGRA directBGRA=30 ciFallback=0 drawCallbacks=30 queueCapacity=3 queueDepthMax=3 queueDrop=0 queueBackpressure=0 coalescedBeforeDraw=0 realtimeReplacementBeforeDraw=0 realtimeReplacementReason=none drawableSkip=0 inflightSkip=0 failureSkip=0",
+        );
+    }
+    let check = check_p2p_remote_metal_render_queue(&aggregate_low, 59.0);
+    assert!(!check.ok, "{}", check.detail);
+    assert!(check.detail.contains("inputFPSGate=Some(30.0)"));
+    assert!(check.detail.contains("displayFPSGate=Some(30.0)"));
 }

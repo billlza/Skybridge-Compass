@@ -134,7 +134,7 @@ fn evidence_values_match<'a>(values: impl IntoIterator<Item = Option<&'a String>
 
 pub(super) fn protocol_identity_binding_matches_skr(evidence: &SignedKEMRefreshEvidence) -> bool {
     let binding = &evidence.protocol_identity_binding;
-    evidence_values_match([
+    let identity_values = [
         binding.request_peer.as_ref(),
         binding.served_target.as_ref(),
         binding.verified_peer.as_ref(),
@@ -142,12 +142,38 @@ pub(super) fn protocol_identity_binding_matches_skr(evidence: &SignedKEMRefreshE
         evidence.request_peer.as_ref(),
         evidence.served_target.as_ref(),
         evidence.verified_peer.as_ref(),
-    ]) && evidence_values_match([
+    ];
+    let identity_values_match = evidence_values_match(identity_values);
+    let identity_redaction_seen = identity_values
+        .into_iter()
+        .flatten()
+        .any(|value| value.contains("redacted"));
+    let binding_identity_complete = binding.request_peer.is_some()
+        && binding.served_target.is_some()
+        && binding.verified_peer.is_some()
+        && binding.pinned_peer.is_some();
+    let binding_fingerprints_match = evidence_values_match([
         binding.served_fingerprint.as_ref(),
         binding.verified_fingerprint.as_ref(),
         binding.pinned_fingerprint.as_ref(),
-        evidence.protocol_identity_fingerprint.as_ref(),
-    ])
+    ]);
+    let skr_fingerprint_is_bound = evidence.protocol_identity_fingerprint.as_ref().map_or_else(
+        || evidence.pinned_identity_seen && binding_fingerprints_match,
+        |fingerprint| {
+            evidence_values_match([
+                binding.served_fingerprint.as_ref(),
+                binding.verified_fingerprint.as_ref(),
+                binding.pinned_fingerprint.as_ref(),
+                Some(fingerprint),
+            ])
+        },
+    );
+    let identity_is_bound = identity_values_match
+        || (identity_redaction_seen
+            && evidence.pinned_identity_seen
+            && binding_identity_complete
+            && binding_fingerprints_match);
+    identity_is_bound && skr_fingerprint_is_bound
 }
 
 fn protocol_identity_binding_lifecycle_order_ok(evidence: &SignedKEMRefreshEvidence) -> bool {

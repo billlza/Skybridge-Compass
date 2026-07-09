@@ -7,6 +7,7 @@ struct SmokeStatusReporter {
     func reset() {
         guard let statusURL else { return }
         try? writeProtectedData(Data(), to: statusURL)
+        SkyBridgeSmokeTraceWriter.resetListenerStatusIfConfigured()
     }
 
     func append(_ line: String) {

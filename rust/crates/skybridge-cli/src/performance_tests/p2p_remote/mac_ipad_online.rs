@@ -307,7 +307,7 @@ fn mac_ipad_online_connect_button_rejects_duplicate_presentation_rows_without_de
 }
 
 #[test]
-fn mac_ipad_online_connect_button_rejects_same_identity_rendered_multiple_times() {
+fn mac_ipad_online_connect_button_accepts_same_identity_status_refreshes() {
     let mut evidence = P2pRemotePerformanceEvidence::default();
     add_dashboard_boot(&mut evidence);
     update_p2p_remote_evidence(
@@ -328,6 +328,12 @@ fn mac_ipad_online_connect_button_rejects_same_identity_rendered_multiple_times(
     }
     update_p2p_remote_evidence(
         &mut evidence,
+        "ipad-control-port reachable=1 host=192.0.2.10 port=9527 identityKey=ipad-stable-1 targetDeviceId=ipad-stable-1 source=pre-mac-online-probe probe=tcp-only listenerReady=1",
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
         &with_real_bonjour_route(
             "mac-online-connect action=button targetFamily=ipad source=OnlineDeviceCard clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=id:ipad-stable-1",
         ),
@@ -352,17 +358,79 @@ fn mac_ipad_online_connect_button_rejects_same_identity_rendered_multiple_times(
     );
 
     let check = check_p2p_remote_mac_ipad_online_connect_button(&evidence);
-    assert!(!check.ok, "{}", check.detail);
+    assert!(check.ok, "{}", check.detail);
     assert!(check.detail.contains("macOnlineRows=3"));
-    assert!(
-        check
-            .detail
-            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=1")
-    );
+    assert!(check.detail.contains("duplicatePhysicalRows=0"));
 }
 
 #[test]
-fn mac_ipad_online_connect_button_rejects_mixed_trusted_cloud_and_online_rows_for_same_ipad() {
+fn mac_ipad_online_connect_button_accepts_stale_unroutable_identity_before_connectable_row() {
+    let mut evidence = P2pRemotePerformanceEvidence::default();
+    add_dashboard_boot(&mut evidence);
+    update_p2p_remote_evidence(
+        &mut evidence,
+        "[DEBUG] [General] iCloud KVS 在线心跳已发布: Ziang的iPad",
+        false,
+        true,
+    );
+    for status in ["offline", "online"] {
+        update_p2p_remote_evidence(
+            &mut evidence,
+            &format!(
+                "mac-online-device-ui targetFamily=ipad visible=1 source=OnlineDeviceCard evidenceSource=app-smoke status={status} buttonEnabled=0 disabledReason=no_resolved_control_route matchStrength=stable-id resolvedSource=skybridgeBonjour controlEndpoint=0 candidateCount=0 dedupeKey=ziangdeipad-ipad device=ZiangdeIPad model=iPad identityKey=id:old-bonjour-runtime-id"
+            ),
+            true,
+            false,
+        );
+    }
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-device-ui targetFamily=ipad visible=1 source=OnlineDeviceCard evidenceSource=app-smoke status=online buttonEnabled=1 matchStrength=stable-id resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 dedupeKey=ziangdeipad-ipad device=ZiangdeIPad model=iPad identityKey=id:stable-p2p-identity",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        "ipad-control-port reachable=1 host=192.0.2.10 port=9527 identityKey=stable-p2p-identity targetDeviceId=stable-p2p-identity source=pre-mac-online-probe probe=tcp-only listenerReady=1",
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-connect action=button targetFamily=ipad source=OnlineDeviceCard clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 dedupeKey=ziangdeipad-ipad identityKey=id:stable-p2p-identity",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-connect-start targetFamily=ipad source=OnlineDeviceCard evidenceSource=external-ax clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 dedupeKey=ziangdeipad-ipad identityKey=id:stable-p2p-identity",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-connect-result action=button targetFamily=ipad result=success source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility targetRowBound=1 status=connected resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 dedupeKey=ziangdeipad-ipad identityKey=stable-p2p-identity",
+        ),
+        true,
+        false,
+    );
+
+    let check = check_p2p_remote_mac_ipad_online_connect_button(&evidence);
+    assert!(check.ok, "{}", check.detail);
+    assert!(check.detail.contains("macOnlineRows=3"));
+    assert!(check.detail.contains("orderedIdentity=bound"));
+    assert!(check.detail.contains("duplicatePhysicalRows=0"));
+}
+
+#[test]
+fn mac_ipad_online_connect_button_accepts_mixed_rows_when_identity_is_unified() {
     let mut evidence = P2pRemotePerformanceEvidence::default();
     add_dashboard_boot(&mut evidence);
     update_p2p_remote_evidence(
@@ -380,6 +448,12 @@ fn mac_ipad_online_connect_button_rejects_mixed_trusted_cloud_and_online_rows_fo
     }
     update_p2p_remote_evidence(
         &mut evidence,
+        "ipad-control-port reachable=1 host=192.0.2.10 port=9527 identityKey=ipad-stable-1 targetDeviceId=ipad-stable-1 source=pre-mac-online-probe probe=tcp-only listenerReady=1",
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
         &with_real_bonjour_route(
             "mac-online-connect action=button targetFamily=ipad source=OnlineDeviceCard clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=id:ipad-stable-1",
         ),
@@ -404,13 +478,9 @@ fn mac_ipad_online_connect_button_rejects_mixed_trusted_cloud_and_online_rows_fo
     );
 
     let check = check_p2p_remote_mac_ipad_online_connect_button(&evidence);
-    assert!(!check.ok, "{}", check.detail);
+    assert!(check.ok, "{}", check.detail);
     assert!(check.detail.contains("macOnlineRows=3"));
-    assert!(
-        check
-            .detail
-            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=1")
-    );
+    assert!(check.detail.contains("duplicatePhysicalRows=0"));
 }
 
 #[test]
@@ -1117,6 +1187,60 @@ fn mac_ipad_online_connect_button_rejects_script_only_launch_marker_as_dashboard
     assert!(!check.ok, "{}", check.detail);
     assert!(check.detail.contains("dashboardRoleBoot=0"));
     assert!(check.detail.contains("connectSuccess=1"));
+    assert!(check.detail.contains("orderedIdentity=bound"));
+}
+
+#[test]
+fn mac_ipad_online_connect_button_accepts_app_status_success_after_ax_click() {
+    let mut evidence = P2pRemotePerformanceEvidence::default();
+    add_dashboard_boot(&mut evidence);
+    update_p2p_remote_evidence(
+        &mut evidence,
+        "[DEBUG] [General] iCloud KVS 在线心跳已发布: iPad",
+        false,
+        true,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-device-ui targetFamily=ipad visible=1 source=OnlineDeviceCard evidenceSource=app-smoke status=online buttonEnabled=1 matchStrength=stable-id resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        "ipad-control-port reachable=1 host=192.0.2.10 port=9527 identityKey=ipad-stable-1 targetDeviceId=ipad-stable-1 source=pre-mac-online-probe probe=tcp-only listenerReady=1",
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-connect action=button targetFamily=ipad source=OnlineDeviceCard clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        &with_real_bonjour_route(
+            "mac-online-connect-start action=button targetFamily=ipad source=OnlineDeviceCard evidenceSource=external-ax clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut evidence,
+        "mac-online-connect-result action=button targetFamily=ipad result=success source=OnlineDeviceCard evidenceSource=app-smoke observer=app-status-after-ax-click targetRowBound=1 status=connected identityKey=ipad-stable-1 pubKeyFP=abc123",
+        true,
+        false,
+    );
+
+    let check = check_p2p_remote_mac_ipad_online_connect_button(&evidence);
+    assert!(check.ok, "{}", check.detail);
+    assert!(check.detail.contains("connectSuccess=1"));
+    assert!(check.detail.contains("connectFailure=0"));
     assert!(check.detail.contains("orderedIdentity=bound"));
 }
 

@@ -3054,6 +3054,8 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(source.contains("private var remoteDesktopRenderFallbackForbidden"))
     XCTAssertTrue(source.contains("private func failFastRemoteDesktopRenderMainPath("))
+    XCTAssertTrue(source.contains("private func recoverLANMetalFeedBackpressureSaturation("))
+    XCTAssertTrue(source.contains("reason=metal-feed-backpressure-saturated classification=renderer-queue-backpressure"))
     XCTAssertTrue(source.contains("render-main-path-failed"))
     let renderFailFastBody = try sourceSlice(
       from: "private func failFastRemoteDesktopRenderMainPath(",
@@ -3066,6 +3068,8 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     XCTAssertTrue(cgImageFallbackBody.contains("cgimage-fallback-forbidden"))
+    XCTAssertTrue(metalFeedRejectionBody.contains("if deliveryResult.hasQueueBackpressureRejection"))
+    XCTAssertTrue(metalFeedRejectionBody.contains("recoverLANMetalFeedBackpressureSaturation(reason: reason"))
     XCTAssertTrue(cgImageFallbackBody.contains("failFastRemoteDesktopRenderMainPath("))
     XCTAssertFalse(cgImageFallbackBody.contains("updateRenderPipeline(.sampleBufferDisplayLayer)"))
     XCTAssertTrue(decodedOutputBody.contains("static-image-fallback-forbidden"))

@@ -5039,6 +5039,10 @@ public class RemoteDesktopManager: ObservableObject {
                 return true
             }
             let reason = "metal-feed-renderer-rejected consumers=\(deliveryResult.consumerCount) active=\(deliveryResult.activeConsumerCount) stale=\(deliveryResult.staleConsumerCount) accepted=\(deliveryResult.acceptedConsumerCount) rejected=\(deliveryResult.rejectedConsumerCount) rendererReason=\(deliveryResult.rejectionSummary) version=\(deliveryResult.frameVersion) mode=direct"
+            if deliveryResult.hasQueueBackpressureRejection {
+                await recoverLANMetalFeedBackpressureSaturation(reason: reason, at: Date())
+                return false
+            }
             SkyBridgeLogger.shared.error("⛔️ LAN 远控 Metal feed 被 renderer 拒收，fail-fast 保留传输并请求同步帧: \(reason)")
             SkyBridgeSmokeTraceWriter.appendStatus(
                 "failed stage=remote-desktop phase=metal_feed_not_accepted detail=\"\(reason)\" transportAction=preserve audioAction=preserve"
@@ -5085,6 +5089,24 @@ public class RemoteDesktopManager: ObservableObject {
             }
         }
         return result
+    }
+
+    private func recoverLANMetalFeedBackpressureSaturation(reason: String, at now: Date) async {
+        lastContinuityRecoveryAt = now
+        let message =
+            "render-continuity-deferred session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") " +
+            "reason=metal-feed-backpressure-saturated classification=renderer-queue-backpressure " +
+            "detail=\"\(reason)\" attemptedFallback=none fallbackResult=not-attempted action=request-sync"
+        if crossNetwork.activeRemoteDesktopSessionId == nil {
+            SkyBridgeLogger.shared.info("ℹ️ \(message)")
+        } else {
+            SkyBridgeLogger.shared.warning("⚠️ \(message)")
+        }
+        SkyBridgeSmokeTraceWriter.appendStatus(message)
+        await requestStreamRefreshIfNeeded(
+            reason: "metal-feed-backpressure-saturated",
+            minimumInterval: 0.25
+        )
     }
 
     private func recoverLANMetalFeedDeliveryDelay(reason: String, at now: Date) async {

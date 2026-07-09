@@ -147,6 +147,7 @@ cat >"$RAW_ARTIFACT_DIR/device-info.json" <<EOF
 {"identifier":"$DEVICE_ID","deviceName":"Bill's iPad","deviceId":"raw-device-id","p2pDeviceId":"raw-p2p-id","pubKeyFP":"raw-pubkey-fp","fingerprint":"8A6E7D5C4B3A29108A6E7D5C4B3A2910","accessToken":"public-artifact-access-token","access_token":"public-artifact-snake-access-token","apiKey":"public-artifact-api-key","publicKeyBase64":"$LONG_BASE64URL","sdp":"v=0\na=ice-pwd:raw-json-ice-pwd\na=ice-ufrag:raw-json-ice-ufrag","icePwd":"raw-json-ice-pwd","ice_pwd":"raw-json-snake-ice-pwd","iceUfrag":"raw-json-ice-ufrag","iceCandidate":"candidate:1 1 UDP 2122252543 10.20.30.43 54322 typ host","local_endpoint":"10.20.30.45:7000","SelectedCandidatePair":"10.20.30.45:7000 -> 10.20.30.46:7001"}
 EOF
 printf 'raw binary should not be copied %s\n' "$DEVICE_ID" >"$RAW_ARTIFACT_DIR/frame.png"
+printf 'unsupported artifact should fail %s\n' "$DEVICE_ID" >"$RAW_ARTIFACT_DIR/unsupported.blob"
 
 mkdir -p "$SDP_ONLY_PUBLIC_DIR"
 cat >"$SDP_ONLY_PUBLIC_DIR/webrtc-public.log" <<'EOF'
@@ -181,7 +182,7 @@ if skybridge_smoke_materialize_public_artifacts "$DEVICE_LABEL" "$RAW_ARTIFACT_D
   echo "Expected public artifact materializer to fail on unsupported file extensions" >&2
   exit 1
 fi
-rm -f "$RAW_ARTIFACT_DIR/frame.png"
+rm -f "$RAW_ARTIFACT_DIR/unsupported.blob"
 
 skybridge_smoke_materialize_public_artifacts "$DEVICE_LABEL" "$RAW_ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"

@@ -130,10 +130,32 @@ grep -q 'phase=app-local-network-privacy reason=local-network-permission-denied'
   || fail "Mac online iPad smoke must fail fast when the packaged app is denied Local Network privacy"
 grep -q 'bootstrap-control-waiting .*reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must consume app-side Local Network denial evidence instead of waiting for connected-row timeout"
+grep -q 'mac-online-connect-result .*targetFamily=ipad .*result=success' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must verify that the synchronized artifact contains connected-row success before the CLI gate"
+grep -q 'failed stage=mac-online-ipad phase=status-sync reason=status-sync-missing-success' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must fail closed when runtime success evidence was not synchronized to the artifact"
+grep -q 'source_render_gap_budget_exceeded = int' "$SMOKE_SCRIPT" \
+  || fail "Remote desktop performance gate must expose Mac source render-gap budget diagnostics"
+grep -q 'macSourceRenderGapBudgetExceeded=' "$SMOKE_SCRIPT" \
+  || fail "Remote desktop performance summary must retain Mac source render-gap budget diagnostics"
+grep -q 'sck_source_frame_age_budget_exceeded = int' "$SMOKE_SCRIPT" \
+  || fail "Remote desktop performance gate must expose SCK source-frame-age budget diagnostics"
+grep -q 'macSourceFrameAgeBudgetExceeded=' "$SMOKE_SCRIPT" \
+  || fail "Remote desktop performance summary must retain SCK source-frame-age budget diagnostics"
+! grep -q 'Mac smoke source render gap exceeded live-source budget' "$SMOKE_SCRIPT" \
+  || fail "Remote desktop performance gate must not hard-fail on smoke-source heartbeat jitter after end-to-end cadence passes"
 grep -q 'ios_listener_ready_for_control_port' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad TCP probe must bind positive evidence to iOS listener-ready status"
-grep -q 'copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status-listener"' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad listener readiness must read the app-authored iOS cache status"
+grep -q 'IOS_LISTENER_STATUS_NAME=' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must use a per-run iOS listener status sidecar"
+grep -q 'SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME="$IOS_LISTENER_STATUS_NAME"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must pass the sidecar basename to the iOS app"
+grep -q '"SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME"' "$SMOKE_SCRIPT" \
+  || fail "iOS launch environment must preserve the listener sidecar basename"
+grep -q 'copy_ios_app_cache_file "$IOS_LISTENER_STATUS_NAME" "$IOS_LISTENER_STATUS_LOCAL" "listener-status"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must read the app-authored listener sidecar"
+! grep -q 'copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status-listener"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must not copy the high-volume iOS status log"
 grep -q 'lifecycle_pattern = re.compile' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad listener readiness must parse the latest structured listener lifecycle status"
 grep -Fq 'p2p-listener\s+ready' "$SMOKE_SCRIPT" \
@@ -189,6 +211,10 @@ grep -q 'skybridge_assert_no_nested_framework_versions_payload "$webrtc_framewor
   || fail "Mac online iPad app verification must reject nested versioned framework payloads"
 grep -q -- '-perm -111' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad Debug app must sign executable files inside embedded frameworks"
+contains_literal "$mac_online_build_body" "MAC_ONLINE_APP_BUNDLE=\"\$MAC_ONLINE_PACKAGED_APP_BUNDLE\"" \
+  || fail "Mac online iPad packaged app must launch from the stable signed app bundle for TCC-stable Local Network proof"
+! contains_literal "$mac_online_build_body" "ditto \"\$MAC_ONLINE_PACKAGED_APP_BUNDLE\" \"\$MAC_ONLINE_RUNTIME_APP_BUNDLE\"" \
+  || fail "Mac online iPad packaged app must not be copied to a fresh temporary bundle before Local Network proof"
 contains_literal "$mac_online_build_body" "ditto \"\$debug_app_bundle\" \"\$MAC_ONLINE_RUNTIME_APP_BUNDLE\"" \
   || fail "Mac online iPad Debug app must launch from a TCC-safe runtime app copy"
 contains_literal "$mac_online_build_body" "sign_macos_online_ipad_debug_app" \
@@ -201,6 +227,12 @@ grep -q 'mac-online-app source=%s %s bundle=%s executable=%s' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad app verification must emit source plus trust status evidence"
 grep -q 'stapler=valid spctl=accepted' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad packaged app status must include notarization and Gatekeeper proof"
+grep -q 'mac_online_app_reports_connected_after_ax_click' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad connected proof must accept app-authored connected status only after AX click evidence"
+grep -q 'mac-online-connect-app action=button .*targetFamily=ipad .*result=success' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad connected proof must require app-authored button success"
+grep -q 'observer=app-status-after-ax-click' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad connected proof must label app-status success after AX click without pretending it is AX text"
 contains_literal "$mac_online_build_body" "xattr -dr com.apple.quarantine \"\$MAC_ONLINE_APP_BUNDLE\"" \
   || fail "Mac online iPad Debug app quarantine attributes must be cleared before LaunchServices open"
 [[ "$mac_online_build_body" == *'ENABLE_DEBUG_DYLIB=NO'* ]] \

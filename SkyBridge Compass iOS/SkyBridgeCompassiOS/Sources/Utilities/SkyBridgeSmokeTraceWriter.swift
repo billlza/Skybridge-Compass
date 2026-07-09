@@ -271,6 +271,13 @@ enum SkyBridgeSmokeTraceWriter {
             cachedHandles[key] = handle
             return handle
         }
+
+        func resetHandle(for url: URL) throws {
+            let key = url.path
+            if let handle = cachedHandles.removeValue(forKey: key) {
+                try handle.close()
+            }
+        }
     }
 
     private static let writerQueue = DispatchQueue(
@@ -287,14 +294,47 @@ enum SkyBridgeSmokeTraceWriter {
         }
         return Destination(baseCaches: baseCaches, fileName: fileName)
     }()
+    private static let listenerStatusURL: URL? = {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return nil }
+        guard let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !fileName.isEmpty,
+              !fileName.contains("/"),
+              !fileName.contains("\\"),
+              let baseCaches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return baseCaches.appendingPathComponent(fileName)
+    }()
     private static let writerState = WriterState()
 
     static func appendStatus(_ line: String) {
-        enqueueLine(line, suffix: "")
+        enqueueStatusLine(line)
     }
 
     static func append(_ line: String) {
         enqueueLine(SkyBridgeTraceRedaction.redactKnownAssignments(in: line), suffix: ".trace.log")
+    }
+
+    static func resetListenerStatusIfConfigured() {
+        guard let listenerStatusURL else { return }
+        writerQueue.async {
+            resetFile(at: listenerStatusURL)
+        }
+    }
+
+    private static func enqueueStatusLine(_ line: String) {
+        guard let destination else { return }
+        let statusURL = destination.url(suffix: "")
+        let mirrorURL = isListenerLifecycleStatusLine(line) ? listenerStatusURL : nil
+        writerQueue.async {
+            let formatted = "[\(writerState.timestamp())] \(line)\n"
+            guard let data = formatted.data(using: .utf8) else { return }
+            write(data, to: statusURL)
+            if let mirrorURL {
+                write(data, to: mirrorURL)
+            }
+        }
     }
 
     private static func enqueueLine(_ line: String, suffix: String) {
@@ -326,6 +366,17 @@ enum SkyBridgeSmokeTraceWriter {
         }
     }
 
+    private static func isListenerLifecycleStatusLine(_ line: String) -> Bool {
+        let lifecyclePrefixes = [
+            "p2p-listener ready",
+            "p2p-listener stopped",
+            "p2p-listener failed",
+            "p2p-listener cancelled",
+            "p2p-listener unhealthy"
+        ]
+        return lifecyclePrefixes.contains { line.hasPrefix($0) }
+    }
+
     private static func write(_ data: Data, to url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: url.path),
@@ -341,6 +392,27 @@ enum SkyBridgeSmokeTraceWriter {
                 try? handle.write(contentsOf: data)
             }
         }
+    }
+
+    private static func resetFile(at url: URL) {
+        do {
+            try writerState.resetHandle(for: url)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: url, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            appendListenerStatusResetFailure(error)
+        }
+    }
+
+    private static func appendListenerStatusResetFailure(_ error: Error) {
+        guard let destination else { return }
+        let line = "[\(writerState.timestamp())] p2p-listener failed stage=listener-status-sidecar-reset reason=write-failed error=\(String(describing: error))\n"
+        guard let data = line.data(using: .utf8) else { return }
+        write(data, to: destination.url(suffix: ""))
     }
 
     private static func cachedHandle(for url: URL) -> FileHandle? {

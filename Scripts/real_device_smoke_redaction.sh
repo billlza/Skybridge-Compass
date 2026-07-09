@@ -385,6 +385,14 @@ skybridge_smoke_public_artifact_file_name() {
   esac
 }
 
+skybridge_smoke_private_capture_artifact_file_name() {
+  local name="${1:?missing artifact file name}"
+  case "${name}" in
+    *.[pP][nN][gG]|*.[jJ][pP][gG]|*.[jJ][pP][eE][gG]|*.[hH][eE][iI][cC]|*.[hH][eE][iI][fF]|*.[mM][oO][vV]|*.[mM][pP]4|*.[mM]4[vV]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 skybridge_smoke_materialize_public_artifacts() {
   local device_label="${1:?missing device label}"
   local artifact_dir="${2:?missing artifact dir}"
@@ -423,12 +431,15 @@ skybridge_smoke_materialize_public_artifacts() {
   while IFS= read -r -d "" source_path; do
     name="$(basename "${source_path}")"
     rel_path="${source_path#${artifact_abs}/}"
-    if ! skybridge_smoke_public_artifact_file_name "${name}"; then
-      echo "unsupported smoke artifact file extension in public materializer input: ${rel_path}" >&2
-      return 2
-    fi
     if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
       echo "refusing unsafe smoke artifact path: ${source_path}" >&2
+      return 2
+    fi
+    if ! skybridge_smoke_public_artifact_file_name "${name}"; then
+      if skybridge_smoke_private_capture_artifact_file_name "${name}"; then
+        continue
+      fi
+      echo "unsupported smoke artifact file extension in public materializer input: ${rel_path}" >&2
       return 2
     fi
     dest_path="${public_abs}/${rel_path}"

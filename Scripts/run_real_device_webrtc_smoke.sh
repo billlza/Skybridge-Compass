@@ -7,7 +7,7 @@ ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_we
 if [[ "$ARTIFACT_DIR" != /* ]]; then
   ARTIFACT_DIR="$PWD/$ARTIFACT_DIR"
 fi
-PUBLIC_ARTIFACT_DIR="$ARTIFACT_DIR/public-redacted"
+PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
 
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"

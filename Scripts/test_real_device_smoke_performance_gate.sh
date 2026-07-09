@@ -26,6 +26,9 @@ require_literal() {
 
 require_literal 'source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"' "$P2P_SCRIPT"
 require_literal 'source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"' "$FILE_SCRIPT"
+require_literal 'PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"' "$P2P_SCRIPT"
+require_literal 'PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"' "$FILE_SCRIPT"
+require_literal 'PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"' "$WEBRTC_SCRIPT"
 require_literal 'skybridge_smoke_check_performance_gate "$ROOT_DIR" p2p-remote "$ARTIFACT_DIR"' "$P2P_SCRIPT"
 require_literal 'skybridge_smoke_check_performance_gate "$ROOT_DIR" file-transfer "$ARTIFACT_DIR"' "$FILE_SCRIPT"
 require_literal 'skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"' "$P2P_SCRIPT"

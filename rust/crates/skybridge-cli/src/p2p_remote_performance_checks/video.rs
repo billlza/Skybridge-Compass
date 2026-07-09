@@ -36,6 +36,12 @@ pub(crate) fn check_p2p_remote_hevc_main_path(
         evidence.sck_meaningful_fps_min
     };
     let min_source_fps = P2P_REMOTE_STRICT_TARGET_FPS as f64 - 1.0;
+    let source_capture_fps_ok =
+        final_sck_window || source_capture_fps_min.is_some_and(|fps| fps >= min_source_fps);
+    let source_meaningful_fps_ok =
+        final_sck_window || source_meaningful_fps_min.is_some_and(|fps| fps >= min_source_fps);
+    let source_frame_age_budget_exceeded = source_frame_age_max_ms
+        .is_some_and(|age| age > P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_AGE_LIMIT_MS);
     let waiting_sync_cleared = !evidence.waiting_sync
         || (evidence.first_frame_sync && evidence.final_ios_remote_desktop_pass);
     let ok = evidence.hevc_configured
@@ -59,10 +65,8 @@ pub(crate) fn check_p2p_remote_hevc_main_path(
         })
         && evidence.sck_captured_frames_total > 0
         && evidence.sck_meaningful_frames_total > 0
-        && source_capture_fps_min.is_some_and(|fps| fps >= min_source_fps)
-        && source_meaningful_fps_min.is_some_and(|fps| fps >= min_source_fps)
-        && source_frame_age_max_ms
-            .is_some_and(|age| age <= P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_AGE_LIMIT_MS)
+        && source_capture_fps_ok
+        && source_meaningful_fps_ok
         && source_frame_repeat_max
             .is_some_and(|repeat| repeat <= P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_REPEAT_LIMIT)
         && evidence.sck_encode_failures_total == 0
@@ -87,7 +91,7 @@ pub(crate) fn check_p2p_remote_hevc_main_path(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "hevcConfigured={} failFast={} firstFrameSync={} h264Video={} waitingSync={} waitingSyncCleared={} finalSCKWindow={} sckCadenceCatchUpLimit={:?} sckCadenceCatchUpSamples={} sckMaxFrameDelayCount={:?} sckMaxFrameDelaySamples={} sckMaximumRealTimeFrameRate={:?} sckLowLatencyRateControl={}/{} sckCadenceTimerFires={} sckCadenceSubmitted={} sckCadenceCatchUpFrames={} sckCadenceBatchMax={:?} sckCapturedFrames={} sckMeaningfulFrames={} sckCaptureFpsMin={:?} sckMeaningfulFpsMin={:?} minRequiredSourceFps={:.1} globalSCKCaptureFpsMin={:?} globalSCKMeaningfulFpsMin={:?} sckSourceFrameAgeMaxMs={:?} sckSourceFrameRepeatMax={:?} globalSCKSourceFrameAgeMaxMs={:?} globalSCKSourceFrameRepeatMax={:?} sckEncodeFailures={} sckEncodeFailureLines={} sckEncodeFailureStatus={:?} sckSingleChunkBudgetBytes={:?} sckEncodedFrameBytesMax={:?} sckEncodedSyncFrameBytesMax={:?} sckOversizedEncodedFrames={} sckOversizedSyncFrames={} sckDataRateLimitBytesPerSecond={:?} sckExpectedBurstLimitBytes={:?} sckBurstLimitBytes={:?} sckBurstWindowMs={:?} sckBurstSamples={} dataRateLimitsStatus={:?} dataRateLimitsReadbackStatus={:?} dataRateLimitsAppliedSamples={} sckReadbackBurstLimitBytes={:?} sckReadbackBurstWindowMs={:?}",
+            "hevcConfigured={} failFast={} firstFrameSync={} h264Video={} waitingSync={} waitingSyncCleared={} finalSCKWindow={} sckCadenceCatchUpLimit={:?} sckCadenceCatchUpSamples={} sckMaxFrameDelayCount={:?} sckMaxFrameDelaySamples={} sckMaximumRealTimeFrameRate={:?} sckLowLatencyRateControl={}/{} sckCadenceTimerFires={} sckCadenceSubmitted={} sckCadenceCatchUpFrames={} sckCadenceBatchMax={:?} sckCapturedFrames={} sckMeaningfulFrames={} sckCaptureFpsMin={:?} sckMeaningfulFpsMin={:?} minRequiredSourceFps={:.1} globalSCKCaptureFpsMin={:?} globalSCKMeaningfulFpsMin={:?} sckSourceFrameAgeMaxMs={:?} sckSourceFrameAgeBudgetExceeded={} sckSourceFrameRepeatMax={:?} globalSCKSourceFrameAgeMaxMs={:?} globalSCKSourceFrameRepeatMax={:?} sckEncodeFailures={} sckEncodeFailureLines={} sckEncodeFailureStatus={:?} sckSingleChunkBudgetBytes={:?} sckEncodedFrameBytesMax={:?} sckEncodedSyncFrameBytesMax={:?} sckOversizedEncodedFrames={} sckOversizedSyncFrames={} sckDataRateLimitBytesPerSecond={:?} sckExpectedBurstLimitBytes={:?} sckBurstLimitBytes={:?} sckBurstWindowMs={:?} sckBurstSamples={} dataRateLimitsStatus={:?} dataRateLimitsReadbackStatus={:?} dataRateLimitsAppliedSamples={} sckReadbackBurstLimitBytes={:?} sckReadbackBurstWindowMs={:?}",
             evidence.hevc_configured,
             evidence.fail_fast_configured,
             evidence.first_frame_sync,
@@ -114,6 +118,7 @@ pub(crate) fn check_p2p_remote_hevc_main_path(
             evidence.sck_capture_fps_min,
             evidence.sck_meaningful_fps_min,
             source_frame_age_max_ms,
+            source_frame_age_budget_exceeded,
             source_frame_repeat_max,
             evidence.sck_source_frame_age_max_ms,
             evidence.sck_source_frame_repeat_max,

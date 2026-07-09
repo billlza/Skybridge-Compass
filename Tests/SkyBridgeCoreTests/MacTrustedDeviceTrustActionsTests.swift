@@ -38,6 +38,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let releaseReadinessScript = try repositorySource("Scripts/check_macos_release_readiness.sh")
         let frameworkHelpers = try repositorySource("Scripts/framework_artifact_helpers.sh")
         let iosP2PSmokeHarnessSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift")
+        let iosSmokeTraceWriterSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/SkyBridgeSmokeTraceWriter.swift")
         let rustMacIpadGateSource = try repositorySource("rust/crates/skybridge-cli/src/p2p_remote_performance_evidence/mac_ipad_online.rs")
         let rustMacIpadTestsSource = try repositorySource("rust/crates/skybridge-cli/src/performance_tests/p2p_remote/mac_ipad_online.rs")
         let xcodeProjectSource = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
@@ -237,6 +238,20 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Real-device smoke must copy the iOS PQC report from the app container with bounded devicectl diagnostics instead of silently treating a missing file as proof."
         )
         XCTAssertTrue(
+            remoteSmokeScript.contains("IOS_LISTENER_STATUS_NAME=\"${IOS_STATUS_NAME%.status.log}.listener.status.log\"") &&
+            remoteSmokeScript.contains("SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME=\"$IOS_LISTENER_STATUS_NAME\"") &&
+            remoteSmokeScript.contains("copy_ios_app_cache_file \"$IOS_LISTENER_STATUS_NAME\" \"$IOS_LISTENER_STATUS_LOCAL\" \"listener-status\""),
+            "Mac online iPad smoke must prove iOS listener readiness through a small app-authored listener sidecar instead of the high-volume status log."
+        )
+        XCTAssertTrue(
+            iosSmokeTraceWriterSource.contains("SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME") &&
+            iosSmokeTraceWriterSource.contains("resetListenerStatusIfConfigured") &&
+            iosSmokeTraceWriterSource.contains("isListenerLifecycleStatusLine") &&
+            iosSmokeTraceWriterSource.contains("\"p2p-listener ready\"") &&
+            !iosSmokeTraceWriterSource.contains("\"p2p-listener inbound-ready\""),
+            "The iOS smoke trace writer must mirror only listener lifecycle evidence into the sidecar."
+        )
+        XCTAssertTrue(
             remoteSmokeScript.contains("materialize_ios_pqc_report_from_app_authored_status") &&
             remoteSmokeScript.contains("reportJSONBase64") &&
             remoteSmokeScript.contains("base64.b64decode(match.group(1), validate=True)") &&
@@ -260,6 +275,10 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("SKYBRIDGE_PQC_PEER_DEVICE_ID") &&
             remoteSmokeScript.contains("press_mac_online_ipad_connect_button") &&
             remoteSmokeScript.contains("observe_mac_online_ipad_connected_row") &&
+            remoteSmokeScript.contains("mac_online_app_reports_connected_after_ax_click") &&
+            remoteSmokeScript.contains("append_mac_online_app_connected_result") &&
+            remoteSmokeScript.contains("mac-online-connect-app action=button .*targetFamily=ipad .*result=success") &&
+            remoteSmokeScript.contains("observer=app-status-after-ax-click") &&
             remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
             remoteSmokeScript.contains("subprocess.Popen(command, stdin=subprocess.PIPE)") &&
             remoteSmokeScript.contains("kAXIdentifierAttribute") &&
@@ -275,7 +294,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("MAC_ONLINE_STATUS_ARTIFACT=\"$ARTIFACT_DIR/mac-online-ipad.status.log\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_STATUS=\"$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.status.log\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_RUNTIME_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_DIR/SkyBridge Compass Pro.app\"") &&
-            remoteSmokeScript.contains("ditto \"$MAC_ONLINE_PACKAGED_APP_BUNDLE\" \"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
+            remoteSmokeScript.contains("MAC_ONLINE_APP_BUNDLE=\"$MAC_ONLINE_PACKAGED_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("ditto \"$debug_app_bundle\" \"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY") &&

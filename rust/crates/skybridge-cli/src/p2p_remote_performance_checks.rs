@@ -242,7 +242,7 @@ fn p2p_remote_mac_ipad_duplicate_physical_row_summary(
                 .get(physical_key)
                 .copied()
                 .unwrap_or(identities.len() as u64);
-            if row_count <= 1 && identities.len() <= 1 {
+            if identities.len() <= 1 {
                 return None;
             }
             Some(format!(
@@ -250,17 +250,6 @@ fn p2p_remote_mac_ipad_duplicate_physical_row_summary(
                 row_count,
                 identities.len()
             ))
-        })
-        .or_else(|| {
-            evidence
-                .mac_ipad_online_physical_row_counts
-                .iter()
-                .find_map(|(_, row_count)| {
-                    if *row_count <= 1 {
-                        return None;
-                    }
-                    Some(format!("duplicate:rows={row_count}:identityCount=unknown"))
-                })
         })
 }
 

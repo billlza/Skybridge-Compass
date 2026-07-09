@@ -195,13 +195,25 @@ fn p2p_remote_audio_rejects_mac_shared_audio_tx_failures() {
     seed_successful_audio_rx(&mut submit_after_close);
     update_p2p_remote_evidence(
         &mut submit_after_close,
-        "audioTxSubmitDropped session=s1 reason=closed started=1 closed=1 capturedTotal=20 encodedTotal=20 sentTotal=20 droppedTotal=0 endpoint=127.0.0.1:4444 mode=highFidelity",
+        "audioTxSubmitDropped session=s1 reason=overflow started=1 closed=0 capturedTotal=20 encodedTotal=20 sentTotal=0 droppedTotal=1 endpoint=127.0.0.1:4444 mode=highFidelity",
         true,
         false,
     );
     let check = check_p2p_remote_audio(&submit_after_close);
     assert!(!check.ok, "{}", check.detail);
     assert!(check.detail.contains("txSubmitDropped=1"));
+
+    let mut terminal_submit_after_close = P2pRemotePerformanceEvidence::default();
+    seed_successful_audio_rx(&mut terminal_submit_after_close);
+    update_p2p_remote_evidence(
+        &mut terminal_submit_after_close,
+        "audioTxSubmitDropped session=s1 reason=closed started=1 closed=1 capturedTotal=20 encodedTotal=20 sentTotal=20 droppedTotal=0 endpoint=127.0.0.1:4444 mode=highFidelity",
+        true,
+        false,
+    );
+    let check = check_p2p_remote_audio(&terminal_submit_after_close);
+    assert!(check.ok, "{}", check.detail);
+    assert!(check.detail.contains("txSubmitDropped=0"));
 
     let mut lan_no_traffic_recovered = P2pRemotePerformanceEvidence::default();
     seed_successful_audio_rx(&mut lan_no_traffic_recovered);

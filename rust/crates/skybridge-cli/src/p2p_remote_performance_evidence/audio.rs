@@ -12,11 +12,16 @@ pub(super) fn update_p2p_remote_audio_evidence(
         line.contains("audioTxSenderClose") || line.contains("audioTxSenderClosed");
     if is_mac && is_audio_tx_sender_close {
         evidence.audio_tx_sender_close_samples += 1;
-        if !is_expected_terminal_audio_tx_sender_close(evidence) {
+        if !is_expected_terminal_audio_tx_sender_close(evidence)
+            && !is_expected_terminal_audio_tx_sender_close_line(line)
+        {
             evidence.audio_tx_sender_unexpected_close_samples += 1;
         }
     }
-    if is_mac && line.contains("audioTxSubmitDropped") {
+    if is_mac
+        && line.contains("audioTxSubmitDropped")
+        && !is_expected_terminal_audio_tx_submit_drop(line)
+    {
         evidence.audio_tx_submit_dropped_samples += 1;
     }
     if is_mac && line.contains("mac-remote-audio-tx") {
@@ -113,4 +118,18 @@ fn is_expected_terminal_audio_tx_sender_close(evidence: &P2pRemotePerformanceEvi
     evidence.smoke_final_success
         && evidence.smoke_final_validated
         && evidence.smoke_capture_source_verified
+}
+
+fn is_expected_terminal_audio_tx_sender_close_line(line: &str) -> bool {
+    extract_text_value(line, "reason").as_deref() == Some("peer-connection-closed")
+        && extract_text_u64(line, "sendFail").unwrap_or(0) == 0
+        && extract_text_u64(line, "droppedTotal").unwrap_or(0) == 0
+        && extract_text_u64(line, "sentTotal").unwrap_or(0) > 0
+}
+
+fn is_expected_terminal_audio_tx_submit_drop(line: &str) -> bool {
+    extract_text_value(line, "reason").as_deref() == Some("closed")
+        && extract_text_u64(line, "closed").unwrap_or(0) == 1
+        && extract_text_u64(line, "droppedTotal").unwrap_or(0) == 0
+        && extract_text_u64(line, "sentTotal").unwrap_or(0) > 0
 }

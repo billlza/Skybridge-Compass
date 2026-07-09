@@ -293,13 +293,25 @@ fn p2p_remote_raw_latency_rejects_batched_receive_drains() {
     update_p2p_remote_evidence(
         &mut delivery_backpressure,
         &format!(
-            "ios-lan-remote-rx sampleMs=1000 rawChunkGapMaxMs=18.0 rawChunkMainHopMaxMs=1.0 maxMainHopMs=1.0 completeFramesPerDrainMax=1 parser=secure-off-main-actor parserDrainMaxMs=1.0 parserBudgetMs=6.0 parserBudgetHits=0 parseQueueDelayMaxMs=1.0 parserActorHopMaxMs=1.0 parserStageMaxMs=1.0 applyQueueDelayMaxMs=1.0 screenApplyMaxMs=1.0 screenDelivery=immediate-decode-metal-feed-direct screenDeliveryAttempted=60 screenDeliveryDelivered=60 screenDeliveryBackpressure=1 screenDeliveryQueueDepthMax=1 screenDeliveryDelayMaxMs=16.0 decodeFeed=ordered-vt-decode-metal-direct socketMetricClock=local-socket-arrival socketToDecodeFeedSamples=60 socketToDecodeFeedMaxMs=2.0 socketToApplyEndSamples=60 socketToApplyEndMaxMs=3.0 decodeAttempted=60 decodeAccepted=60 decodeDropped=0 decodePendingMax=1 decodeInFlightMax=1 decodeWaitingSyncSamples=0 decodeResets=0 readAhead=stream-parser-low-latency-256k-4frame-6ms-drain-budget{STRICT_IOS_RX_SBC2_TAIL} rxFrameClock=socket-arrival"
+            "ios-lan-remote-rx sampleMs=1000 screenFrames=60 screenFPS=60.0 rawChunkGapMaxMs=18.0 rawChunkMainHopMaxMs=1.0 maxMainHopMs=1.0 completeFramesPerDrainMax=1 parser=secure-off-main-actor parserDrainMaxMs=1.0 parserBudgetMs=6.0 parserBudgetHits=0 parseQueueDelayMaxMs=1.0 parserActorHopMaxMs=1.0 parserStageMaxMs=1.0 applyQueueDelayMaxMs=1.0 screenApplyMaxMs=1.0 screenDelivery=immediate-decode-metal-feed-direct screenDeliveryAttempted=60 screenDeliveryDelivered=60 screenDeliveryBackpressure=1 screenDeliveryQueueDepthMax=1 screenDeliveryDelayMaxMs=16.0 decodeFeed=ordered-vt-decode-metal-direct socketMetricClock=local-socket-arrival socketToDecodeFeedSamples=60 socketToDecodeFeedMaxMs=2.0 socketToApplyEndSamples=60 socketToApplyEndMaxMs=3.0 decodeAttempted=60 decodeAccepted=60 decodeDropped=0 decodePendingMax=1 decodeInFlightMax=1 decodeWaitingSyncSamples=0 decodeResets=0 readAhead=stream-parser-low-latency-256k-4frame-6ms-drain-budget{STRICT_IOS_RX_SBC2_TAIL} rxFrameClock=socket-arrival"
         ),
         false,
         true,
     );
     let check = check_p2p_remote_ios_raw_latency(&delivery_backpressure, 59.0);
     assert!(!check.ok, "{}", check.detail);
+    assert!(check.detail.contains("screenDeliveryBackpressure=1"));
+
+    let mut final_delivery_backpressure = P2pRemotePerformanceEvidence::default();
+    update_p2p_remote_final_window_ios_evidence(
+        &mut final_delivery_backpressure,
+        &format!(
+            "ios-lan-remote-rx sampleMs=1000 screenFrames=60 screenFPS=60.0 rawChunkGapMaxMs=18.0 rawChunkMainHopMaxMs=1.0 maxMainHopMs=1.0 completeFramesPerDrainMax=1 parser=secure-off-main-actor parserDrainMaxMs=1.0 parserBudgetMs=6.0 parserBudgetHits=0 parseQueueDelayMaxMs=1.0 parserActorHopMaxMs=1.0 parserStageMaxMs=1.0 applyQueueDelayMaxMs=1.0 screenApplyMaxMs=1.0 screenDelivery=immediate-decode-metal-feed-direct screenDeliveryAttempted=60 screenDeliveryDelivered=60 screenDeliveryBackpressure=1 screenDeliveryQueueDepthMax=1 screenDeliveryDelayMaxMs=16.0 decodeFeed=ordered-vt-decode-metal-direct socketMetricClock=local-socket-arrival socketToDecodeFeedSamples=60 socketToDecodeFeedMaxMs=2.0 socketToApplyEndSamples=60 socketToApplyEndMaxMs=3.0 decodeAttempted=60 decodeAccepted=60 decodeDropped=0 decodePendingMax=1 decodeInFlightMax=1 decodeWaitingSyncSamples=0 decodeResets=0 readAhead=stream-parser-low-latency-256k-4frame-6ms-drain-budget{STRICT_IOS_RX_SBC2_TAIL} rxFrameClock=socket-arrival"
+        ),
+    );
+    let check = check_p2p_remote_ios_raw_latency(&final_delivery_backpressure, 59.0);
+    assert!(check.ok, "{}", check.detail);
+    assert!(check.detail.contains("finalWindow=true"));
     assert!(check.detail.contains("screenDeliveryBackpressure=1"));
 
     let mut missing_screen_wire = P2pRemotePerformanceEvidence::default();

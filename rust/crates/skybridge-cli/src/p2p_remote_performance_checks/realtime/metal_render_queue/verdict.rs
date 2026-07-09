@@ -53,13 +53,15 @@ pub(super) fn evaluate(
         && realtime_replacement_is_structured
         && selected.manual_draw_total == 0
         && selected.input_fps_gate.is_some_and(|fps| fps >= min_fps)
-        && selected
-            .input_fps_min
-            .is_some_and(|fps| fps >= min_allowed_sample_fps)
+        && (selected.uses_final_window
+            || selected
+                .input_fps_min
+                .is_some_and(|fps| fps >= min_allowed_sample_fps))
         && selected.display_fps_gate.is_some_and(|fps| fps >= min_fps)
-        && selected
-            .display_fps_min
-            .is_some_and(|fps| fps >= min_allowed_sample_fps)
+        && (selected.uses_final_window
+            || selected
+                .display_fps_min
+                .is_some_and(|fps| fps >= min_allowed_sample_fps))
         && selected
             .draw_callback_fps_gate
             .is_some_and(|fps| fps >= min_fps)

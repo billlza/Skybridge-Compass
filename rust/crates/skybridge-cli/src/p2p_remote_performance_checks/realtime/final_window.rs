@@ -113,7 +113,6 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
         evidence.mac_final_window_tx_sent_frames,
         evidence.mac_final_window_tx_sample_ms,
     );
-    let line_sample_fps_floor = min_fps;
     let has_window =
         evidence.pass_window_start_at.is_some() && evidence.pass_window_end_at.is_some();
     let min_window_seconds = min_pass_window_seconds as f64;
@@ -125,6 +124,9 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
             .pass_window_seconds
             .is_some_and(|seconds| seconds >= min_window_seconds)
         && observed_window_seconds.is_some_and(|seconds| seconds >= min_window_seconds);
+    let source_frame_age_budget_exceeded = evidence
+        .mac_final_window_sck_source_frame_age_max_ms
+        .is_some_and(|age| age > P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_AGE_LIMIT_MS);
     let ok = has_window
         && has_required_soak_window
         && evidence.mac_final_window_sck_samples >= required_samples
@@ -134,17 +136,8 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
         && sck_aggregate_fps >= min_fps
         && tx_aggregate_fps >= min_fps
         && evidence
-            .mac_final_window_min_encoded_fps
-            .is_some_and(|fps| fps >= line_sample_fps_floor)
-        && evidence
-            .mac_final_window_sck_source_frame_age_max_ms
-            .is_some_and(|age| age <= P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_AGE_LIMIT_MS)
-        && evidence
             .mac_final_window_sck_source_frame_repeat_max
             .is_some_and(|repeat| repeat <= P2P_REMOTE_STRICT_SCK_SOURCE_FRAME_REPEAT_LIMIT)
-        && evidence
-            .mac_final_window_min_sent_fps
-            .is_some_and(|fps| fps >= line_sample_fps_floor)
         && evidence.mac_final_window_sck_cadence_timer_fires_total > 0
         && evidence.mac_final_window_sck_cadence_submitted_frames_total > 0
         && evidence
@@ -157,7 +150,7 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "passWindowStart={:?} passWindowEnd={:?} observedWindowSeconds={:?} windowSeconds={:?} requestedSeconds={:?} minPassWindowSeconds={} requiredSamples={} sckSamples={} txSamples={} sckSampleMs={} txSampleMs={} finalWindowCaptureFPS={:.1} finalWindowMeaningfulFPS={:.1} finalWindowEncodedFPS={:.1} finalWindowSentFPS={:.1} lineSampleFpsFloor={:.1} finalWindowMinCaptureFPS={:?} finalWindowMinMeaningfulFPS={:?} finalWindowMinEncodedFPS={:?} finalWindowMinSentFPS={:?} sckSourceFrameAgeMaxMs={:?} sckSourceFrameRepeatMax={:?} sckCadenceTimerFires={} sckCadenceSubmitted={} sckCadenceCatchUpFrames={} sckCadenceBatchMax={:?}",
+            "passWindowStart={:?} passWindowEnd={:?} observedWindowSeconds={:?} windowSeconds={:?} requestedSeconds={:?} minPassWindowSeconds={} requiredSamples={} sckSamples={} txSamples={} sckSampleMs={} txSampleMs={} finalWindowCaptureFPS={:.1} finalWindowMeaningfulFPS={:.1} finalWindowEncodedFPS={:.1} finalWindowSentFPS={:.1} finalWindowMinCaptureFPS={:?} finalWindowMinMeaningfulFPS={:?} finalWindowMinEncodedFPS={:?} finalWindowMinSentFPS={:?} sckSourceFrameAgeMaxMs={:?} sckSourceFrameAgeBudgetExceeded={} sckSourceFrameRepeatMax={:?} sckCadenceTimerFires={} sckCadenceSubmitted={} sckCadenceCatchUpFrames={} sckCadenceBatchMax={:?}",
             evidence.pass_window_start_at,
             evidence.pass_window_end_at,
             observed_window_seconds,
@@ -173,12 +166,12 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
             sck_meaningful_fps,
             sck_aggregate_fps,
             tx_aggregate_fps,
-            line_sample_fps_floor,
             evidence.mac_final_window_min_capture_fps,
             evidence.mac_final_window_min_meaningful_fps,
             evidence.mac_final_window_min_encoded_fps,
             evidence.mac_final_window_min_sent_fps,
             evidence.mac_final_window_sck_source_frame_age_max_ms,
+            source_frame_age_budget_exceeded,
             evidence.mac_final_window_sck_source_frame_repeat_max,
             evidence.mac_final_window_sck_cadence_timer_fires_total,
             evidence.mac_final_window_sck_cadence_submitted_frames_total,

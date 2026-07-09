@@ -42,11 +42,13 @@ pub(super) fn update_p2p_remote_mac_ipad_online_evidence(
 
     if is_mac_ipad_visible_row(line, lower) {
         evidence.mac_ipad_online_ui_rows += 1;
-        remember_physical_identity_row(
-            &mut evidence.mac_ipad_online_physical_identity_rows,
-            &mut evidence.mac_ipad_online_physical_row_counts,
-            line,
-        );
+        if physical_row_can_influence_connection(line, lower) {
+            remember_physical_identity_row(
+                &mut evidence.mac_ipad_online_physical_identity_rows,
+                &mut evidence.mac_ipad_online_physical_row_counts,
+                line,
+            );
+        }
     }
 
     if is_mac_ipad_online_row(line, lower) {
@@ -115,7 +117,8 @@ pub(super) fn update_p2p_remote_mac_ipad_online_evidence(
     if is_mac_ipad_connect_result(line, lower) {
         if text_value_equals(line, "result", "success")
             && (has_real_connect_endpoint(line, lower)
-                || is_external_ax_connected_result(line, lower))
+                || is_external_ax_connected_result(line, lower)
+                || is_app_status_after_ax_connected_result(line, lower))
         {
             evidence.mac_ipad_connect_success_samples += 1;
             remember_identity_sequence(
@@ -188,6 +191,12 @@ fn is_mac_ipad_visible_row(line: &str, lower: &str) -> bool {
         && (boolean_text_value(line, "visible") || lower.contains("visible=true"))
 }
 
+fn physical_row_can_influence_connection(line: &str, lower: &str) -> bool {
+    has_real_connect_endpoint(line, lower)
+        || (text_value_equals(line, "status", "connected")
+            && !is_explicit_non_connectable_row(line, lower))
+}
+
 fn is_mac_ipad_connect_click(line: &str, lower: &str) -> bool {
     if lower.contains("mac-online-connect-start")
         || lower.contains("mac-ipad-connect-start")
@@ -253,6 +262,14 @@ fn is_external_ax_connected_result(line: &str, lower: &str) -> bool {
         && (text_value_equals(line, "evidenceSource", "external-ax")
             || text_value_equals(line, "observer", "accessibility")
             || text_value_equals(line, "clickSource", "accessibility"))
+        && (text_value_equals(line, "status", "connected") || lower.contains("status=connected"))
+}
+
+fn is_app_status_after_ax_connected_result(line: &str, lower: &str) -> bool {
+    text_value_equals(line, "source", "OnlineDeviceCard")
+        && text_value_equals(line, "evidenceSource", "app-smoke")
+        && text_value_equals(line, "observer", "app-status-after-ax-click")
+        && boolean_text_value(line, "targetRowBound")
         && (text_value_equals(line, "status", "connected") || lower.contains("status=connected"))
 }
 
@@ -455,7 +472,17 @@ fn source_key(line: &str) -> Option<String> {
 }
 
 fn normalized_identity_value(line: &str, key: &str) -> Option<String> {
-    normalized_identity_payload(line, key).map(|value| format!("{key}:{value}"))
+    normalized_identity_payload(line, key).map(|value| {
+        let normalized = if matches!(
+            key,
+            "identityKey" | "targetDeviceId" | "p2pDeviceId" | "cloudDeviceId" | "deviceId"
+        ) {
+            value.strip_prefix("id:").unwrap_or(&value).to_owned()
+        } else {
+            value
+        };
+        format!("{key}:{normalized}")
+    })
 }
 
 fn normalized_identity_payload(line: &str, key: &str) -> Option<String> {
