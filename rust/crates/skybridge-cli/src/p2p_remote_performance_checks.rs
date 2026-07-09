@@ -156,13 +156,12 @@ pub(crate) fn check_p2p_remote_signed_kem_refresh(
 pub(crate) fn check_p2p_remote_protocol_identity_binding(
     evidence: &P2pRemotePerformanceEvidence,
 ) -> DoctorCheck {
-    let binding = &evidence.signed_kem_refresh.protocol_identity_binding;
     let ok = protocol_identity_binding_required_ok(&evidence.signed_kem_refresh);
     simple_doctor_check(
         "p2p_remote_protocol_identity_binding",
         ok,
         if ok { "info" } else { "error" },
-        protocol_identity_binding_check_detail(binding),
+        protocol_identity_binding_check_detail(&evidence.signed_kem_refresh),
     )
 }
 

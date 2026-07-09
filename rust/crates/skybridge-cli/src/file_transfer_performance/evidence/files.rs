@@ -96,11 +96,53 @@ pub(super) fn read_file_transfer_logs(files: &[PathBuf]) -> Result<FileTransferL
 }
 
 fn sort_file_transfer_log_entries_chronologically(entries: &mut [FileTransferLogEntry]) {
-    entries.sort_by(|left, right| match (left.observed_at, right.observed_at) {
-        (Some(left_at), Some(right_at)) if left_at != right_at => left_at.cmp(&right_at),
-        _ => left
-            .file_id
-            .cmp(&right.file_id)
-            .then_with(|| left.line_index.cmp(&right.line_index)),
+    entries.sort_by_key(|entry| {
+        (
+            entry.observed_at.is_none(),
+            entry.observed_at,
+            entry.file_id,
+            entry.line_index,
+        )
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(
+        file_id: usize,
+        line_index: usize,
+        observed_at: Option<OffsetDateTime>,
+    ) -> FileTransferLogEntry {
+        FileTransferLogEntry {
+            is_mac: file_id == 0,
+            is_ios: file_id != 0,
+            file_id,
+            line_index,
+            observed_at,
+            line: format!("entry-{file_id}-{line_index}"),
+        }
+    }
+
+    #[test]
+    fn file_transfer_log_sort_uses_total_order_for_mixed_timestamps() {
+        let early = OffsetDateTime::from_unix_timestamp(10).unwrap();
+        let late = OffsetDateTime::from_unix_timestamp(20).unwrap();
+        let mut entries = vec![
+            entry(0, 0, Some(late)),
+            entry(1, 0, None),
+            entry(2, 0, Some(early)),
+        ];
+
+        sort_file_transfer_log_entries_chronologically(&mut entries);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.observed_at, entry.file_id, entry.line_index))
+                .collect::<Vec<_>>(),
+            vec![(Some(early), 2, 0), (Some(late), 0, 0), (None, 1, 0)]
+        );
+    }
 }

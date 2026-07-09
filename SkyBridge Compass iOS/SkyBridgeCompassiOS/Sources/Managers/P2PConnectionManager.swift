@@ -955,16 +955,17 @@ public class P2PConnectionManager: ObservableObject {
         guard !routeCandidates.isEmpty else {
             throw signedLANRefreshFailure("no LAN endpoint candidates")
         }
-        let directHostCandidate = routeCandidates.contains {
+        let directEndpoints = routeCandidates.filter {
             Self.signedLANRefreshEndpointClass($0) == "direct-host"
         }
+        let directHostCandidate = !directEndpoints.isEmpty
         guard directHostCandidate else {
             throw signedLANRefreshFailure("missing direct LAN endpoint candidate")
         }
-        let endpoints = routeCandidates.filter { endpoint in
-            let endpointClass = Self.signedLANRefreshEndpointClass(endpoint)
-            return endpointClass == "direct-host" || endpointClass == "bonjour-service"
+        let serviceFallbackEndpoints = routeCandidates.filter {
+            Self.signedLANRefreshEndpointClass($0) == "bonjour-service"
         }
+        let endpoints = directEndpoints + serviceFallbackEndpoints
         guard !endpoints.isEmpty else {
             throw signedLANRefreshFailure("no signed LAN refresh bootstrap endpoint candidates")
         }
@@ -988,9 +989,7 @@ public class P2PConnectionManager: ObservableObject {
         )
 
         let refreshStartedAt = Date()
-        let serviceFallbackCandidateCount = endpoints.filter {
-            Self.signedLANRefreshEndpointClass($0) == "bonjour-service"
-        }.count
+        let serviceFallbackCandidateCount = serviceFallbackEndpoints.count
         let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(Self.protocolIdentityLogRedaction) endpointCount=\(endpoints.count) serviceFallbackCandidates=\(serviceFallbackCandidateCount) classicFallbackSuppressed=1 pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
         SkyBridgeLogger.shared.info(connectStartLine)
         SignedKEMRefreshSmokeStatusWriter.append(connectStartLine)

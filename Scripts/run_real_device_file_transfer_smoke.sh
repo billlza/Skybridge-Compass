@@ -542,6 +542,7 @@ print_pib1_operator_code() {
 wait_for_optional_protocol_identity_binding() {
   local timeout_seconds="$1"
   local started_at
+  local ios_skr_pinned_protocol_identity_pattern='SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound|verified and imported: .*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound)'
   started_at="$(date +%s)"
   while true; do
     copy_ios_status
@@ -570,10 +571,10 @@ wait_for_optional_protocol_identity_binding() {
       print_pib1_operator_code
       wait_for_file_pattern "$HOST_STATUS" 'PIB-1 requester protocol identity pinned: .*lifecycle=identity-oob>requester-pinned' "$timeout_seconds" "macOS PIB-1 requester pinned"
       wait_for_file_pattern "$HOST_STATUS" 'PIB-1 protocol identity binding served: .*lifecycle=identity-oob>served' "$timeout_seconds" "macOS PIB-1 served"
-      wait_for_ios_status_pattern 'PIB-1 protocol identity binding signature verified: .*lifecycle=identity-oob>verified' "$timeout_seconds" "iOS PIB-1 signature verified"
+      wait_for_ios_status_pattern "(PIB-1 protocol identity binding signature verified: .*lifecycle=identity-oob>verified|${ios_skr_pinned_protocol_identity_pattern})" "$timeout_seconds" "iOS PIB-1 signature verified or SKR-1 pinned identity proof"
       copy_ios_status
       print_pib1_operator_code
-      wait_for_ios_status_pattern 'PIB-1 protocol identity binding (pinned|operator approved): .*lifecycle=identity-oob>pinned' "$timeout_seconds" "iOS PIB-1 pinned"
+      wait_for_ios_status_pattern "(PIB-1 protocol identity binding (pinned|operator approved): .*lifecycle=identity-oob>pinned|${ios_skr_pinned_protocol_identity_pattern})" "$timeout_seconds" "iOS PIB-1 pinned or SKR-1 pinned identity proof"
       return 0
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] \

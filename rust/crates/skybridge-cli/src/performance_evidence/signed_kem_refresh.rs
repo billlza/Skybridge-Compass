@@ -125,7 +125,7 @@ pub(crate) fn signed_kem_refresh_check_detail(evidence: &SignedKEMRefreshEvidenc
         evidence.success_rate_pct_min,
         evidence.application_loss_pct_max,
         evidence.retry_count_max,
-        protocol_identity_binding_check_detail(&evidence.protocol_identity_binding),
+        protocol_identity_binding_check_detail(evidence),
         SIGNED_KEM_REFRESH_MAX_LATENCY_MS,
         SIGNED_KEM_REFRESH_MAX_JITTER_MS,
         SIGNED_KEM_REFRESH_MIN_SUCCESS_RATE_PCT,
@@ -182,7 +182,7 @@ fn signed_kem_refresh_lifecycle_order_ok(evidence: &SignedKEMRefreshEvidence) ->
             request < verified
                 && verified < xwing
                 && signed_kem_refresh_served_before_verified_or_ambiguous(
-                    evidence, served, verified,
+                    evidence, served, verified, xwing,
                 )
         }
         _ => false,
@@ -193,6 +193,7 @@ fn signed_kem_refresh_served_before_verified_or_ambiguous(
     evidence: &SignedKEMRefreshEvidence,
     served_sequence: u64,
     verified_sequence: u64,
+    strict_xwing_sequence: u64,
 ) -> bool {
     if served_sequence < verified_sequence {
         return true;
@@ -215,5 +216,10 @@ fn signed_kem_refresh_served_before_verified_or_ambiguous(
 
     let cross_source_precision_is_ambiguous = !evidence.served_timestamp_has_fractional_seconds
         || !evidence.verified_imported_timestamp_has_fractional_seconds;
-    cross_source_precision_is_ambiguous && (0..=999).contains(&skew_ms)
+    if cross_source_precision_is_ambiguous && (0..=999).contains(&skew_ms) {
+        return true;
+    }
+
+    !evidence.verified_imported_timestamp_has_fractional_seconds
+        && served_sequence < strict_xwing_sequence
 }

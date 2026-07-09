@@ -126,7 +126,14 @@ pub(crate) fn update_signed_kem_refresh_evidence(
         );
         remember_evidence_token(
             &mut evidence.protocol_identity_fingerprint,
-            extract_text_value_any(line, &["protocolIdentityFingerprint", "fingerprint"]),
+            extract_text_value_any(
+                line,
+                &[
+                    "protocolIdentityFingerprint",
+                    "fingerprint",
+                    "signingFingerprint",
+                ],
+            ),
         );
     }
     evidence.request_seen = evidence.ios_request_seen;

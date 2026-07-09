@@ -5,6 +5,7 @@ use super::{SignedKEMRefreshEvidence, remember_evidence_token};
 #[derive(Debug, Default)]
 pub(crate) struct ProtocolIdentityBindingEvidence {
     pub(crate) required_seen: bool,
+    pub(crate) requester_pinned_seen: bool,
     pub(crate) request_seen: bool,
     pub(crate) served_seen: bool,
     pub(crate) verified_seen: bool,
@@ -12,14 +13,17 @@ pub(crate) struct ProtocolIdentityBindingEvidence {
     pub(crate) fingerprint_seen: bool,
     pub(crate) failure_seen: bool,
     pub(crate) lifecycle_samples: u64,
+    pub(crate) requester_pinned_sequence: Option<u64>,
     pub(crate) request_sequence: Option<u64>,
     pub(crate) served_sequence: Option<u64>,
     pub(crate) verified_sequence: Option<u64>,
     pub(crate) pinned_sequence: Option<u64>,
+    pub(crate) requester_pinned_requester: Option<String>,
     pub(crate) request_peer: Option<String>,
     pub(crate) served_target: Option<String>,
     pub(crate) verified_peer: Option<String>,
     pub(crate) pinned_peer: Option<String>,
+    pub(crate) requester_pinned_fingerprint: Option<String>,
     pub(crate) served_fingerprint: Option<String>,
     pub(crate) verified_fingerprint: Option<String>,
     pub(crate) pinned_fingerprint: Option<String>,
@@ -45,6 +49,8 @@ pub(in crate::performance_evidence::signed_kem_refresh) fn update_protocol_ident
     let request_event = lower.contains("protocol identity binding request:")
         || lower.contains("protocol identity binding request ")
         || lower.contains("lifecycle=identity-oob>request");
+    let requester_pinned_event = lower.contains("requester protocol identity pinned")
+        || lower.contains("lifecycle=identity-oob>requester-pinned");
     let served_event = lower.contains("protocol identity binding served:")
         || lower.contains("protocol identity binding served ")
         || lower.contains("lifecycle=identity-oob>served");
@@ -63,6 +69,7 @@ pub(in crate::performance_evidence::signed_kem_refresh) fn update_protocol_ident
         || lower.contains("lifecycle=identity-oob>timeout");
 
     evidence.request_seen |= request_event && is_ios && !is_mac;
+    evidence.requester_pinned_seen |= requester_pinned_event && is_mac && !is_ios;
     evidence.served_seen |= served_event && is_mac && !is_ios;
     evidence.verified_seen |= verified_event && is_ios && !is_mac;
     evidence.pinned_seen |= pinned_event && is_ios && !is_mac;
@@ -78,6 +85,19 @@ pub(in crate::performance_evidence::signed_kem_refresh) fn update_protocol_ident
     }
     if request_event && is_ios && !is_mac {
         remember_evidence_token(&mut evidence.request_peer, extract_text_value(line, "peer"));
+    }
+    if requester_pinned_event && is_mac && !is_ios && evidence.requester_pinned_sequence.is_none() {
+        evidence.requester_pinned_sequence = Some(sequence);
+    }
+    if requester_pinned_event && is_mac && !is_ios {
+        remember_evidence_token(
+            &mut evidence.requester_pinned_requester,
+            extract_text_value(line, "requester"),
+        );
+        remember_evidence_token(
+            &mut evidence.requester_pinned_fingerprint,
+            extract_text_value_any(line, &["fingerprint", "protocolIdentityFingerprint"]),
+        );
     }
     if served_event && is_mac && !is_ios && evidence.served_sequence.is_none() {
         evidence.served_sequence = Some(sequence);
@@ -115,21 +135,34 @@ pub(in crate::performance_evidence::signed_kem_refresh) fn update_protocol_ident
             extract_text_value_any(line, &["fingerprint", "protocolIdentityFingerprint"]),
         );
     }
-    if request_event || served_event || verified_event || pinned_event || failure_event {
+    if request_event
+        || requester_pinned_event
+        || served_event
+        || verified_event
+        || pinned_event
+        || failure_event
+    {
         evidence.lifecycle_samples += 1;
     }
 }
 
-fn evidence_values_match<'a>(values: impl IntoIterator<Item = Option<&'a String>>) -> bool {
+fn evidence_values_match_or_redacted<'a>(
+    values: impl IntoIterator<Item = Option<&'a String>>,
+) -> bool {
     let mut expected: Option<&str> = None;
+    let mut saw_value = false;
     for value in values.into_iter().flatten() {
+        saw_value = true;
+        if value.contains("redacted") {
+            continue;
+        }
         match expected {
             Some(current) if current != value.as_str() => return false,
             Some(_) => {}
             None => expected = Some(value.as_str()),
         }
     }
-    true
+    saw_value
 }
 
 pub(super) fn protocol_identity_binding_matches_skr(evidence: &SignedKEMRefreshEvidence) -> bool {
@@ -143,37 +176,28 @@ pub(super) fn protocol_identity_binding_matches_skr(evidence: &SignedKEMRefreshE
         evidence.served_target.as_ref(),
         evidence.verified_peer.as_ref(),
     ];
-    let identity_values_match = evidence_values_match(identity_values);
-    let identity_redaction_seen = identity_values
-        .into_iter()
-        .flatten()
-        .any(|value| value.contains("redacted"));
     let binding_identity_complete = binding.request_peer.is_some()
         && binding.served_target.is_some()
         && binding.verified_peer.is_some()
         && binding.pinned_peer.is_some();
-    let binding_fingerprints_match = evidence_values_match([
+    let skr_identity_complete = binding.served_target.is_some()
+        && evidence.request_peer.is_some()
+        && evidence.served_target.is_some()
+        && evidence.verified_peer.is_some();
+    let identity_values_match = evidence_values_match_or_redacted(identity_values);
+    let fingerprint_values = [
         binding.served_fingerprint.as_ref(),
         binding.verified_fingerprint.as_ref(),
         binding.pinned_fingerprint.as_ref(),
-    ]);
-    let skr_fingerprint_is_bound = evidence.protocol_identity_fingerprint.as_ref().map_or_else(
-        || evidence.pinned_identity_seen && binding_fingerprints_match,
-        |fingerprint| {
-            evidence_values_match([
-                binding.served_fingerprint.as_ref(),
-                binding.verified_fingerprint.as_ref(),
-                binding.pinned_fingerprint.as_ref(),
-                Some(fingerprint),
-            ])
-        },
-    );
-    let identity_is_bound = identity_values_match
-        || (identity_redaction_seen
-            && evidence.pinned_identity_seen
-            && binding_identity_complete
-            && binding_fingerprints_match);
-    identity_is_bound && skr_fingerprint_is_bound
+        evidence.protocol_identity_fingerprint.as_ref(),
+    ];
+    let fingerprint_sources_seen = fingerprint_values.iter().any(|value| value.is_some());
+    let fingerprints_match = evidence_values_match_or_redacted(fingerprint_values);
+    (binding_identity_complete || skr_identity_complete)
+        && identity_values_match
+        && evidence.pinned_identity_seen
+        && fingerprint_sources_seen
+        && fingerprints_match
 }
 
 fn protocol_identity_binding_lifecycle_order_ok(evidence: &SignedKEMRefreshEvidence) -> bool {
@@ -198,7 +222,25 @@ fn protocol_identity_binding_lifecycle_order_ok(evidence: &SignedKEMRefreshEvide
     }
 }
 
-pub(crate) fn protocol_identity_binding_required_ok(evidence: &SignedKEMRefreshEvidence) -> bool {
+fn protocol_identity_binding_skr_lifecycle_order_ok(evidence: &SignedKEMRefreshEvidence) -> bool {
+    let binding = &evidence.protocol_identity_binding;
+    let skr_request_sequence = evidence
+        .latest_request_sequence
+        .or(evidence.request_sequence);
+    match (
+        binding.requester_pinned_sequence,
+        binding.served_sequence,
+        skr_request_sequence,
+        evidence.verified_imported_sequence,
+    ) {
+        (Some(requester_pinned), Some(served), Some(skr_request), Some(skr_verified)) => {
+            requester_pinned < served && skr_request < skr_verified
+        }
+        _ => false,
+    }
+}
+
+fn protocol_identity_binding_complete_oob_ok(evidence: &SignedKEMRefreshEvidence) -> bool {
     let binding = &evidence.protocol_identity_binding;
     binding.request_seen
         && binding.served_seen
@@ -211,12 +253,36 @@ pub(crate) fn protocol_identity_binding_required_ok(evidence: &SignedKEMRefreshE
         && protocol_identity_binding_lifecycle_order_ok(evidence)
 }
 
+fn protocol_identity_binding_satisfied_by_skr(evidence: &SignedKEMRefreshEvidence) -> bool {
+    let binding = &evidence.protocol_identity_binding;
+    binding.requester_pinned_seen
+        && binding.served_seen
+        && binding.fingerprint_seen
+        && !binding.failure_seen
+        && binding.lifecycle_samples >= 2
+        && evidence.request_seen
+        && evidence.served_seen
+        && evidence.verified_imported_seen
+        && evidence.pinned_identity_seen
+        && evidence.signature_verified_seen
+        && evidence.request_hash_bound_seen
+        && protocol_identity_binding_matches_skr(evidence)
+        && protocol_identity_binding_skr_lifecycle_order_ok(evidence)
+}
+
+pub(crate) fn protocol_identity_binding_required_ok(evidence: &SignedKEMRefreshEvidence) -> bool {
+    protocol_identity_binding_complete_oob_ok(evidence)
+        || protocol_identity_binding_satisfied_by_skr(evidence)
+}
+
 pub(crate) fn protocol_identity_binding_check_detail(
-    binding: &ProtocolIdentityBindingEvidence,
+    evidence: &SignedKEMRefreshEvidence,
 ) -> String {
+    let binding = &evidence.protocol_identity_binding;
     format!(
-        "pibRequired={} pibRequestSeen={} pibServedSeen={} pibVerifiedSeen={} pibPinnedSeen={} pibFingerprintSeen={} pibFailureSeen={} pibLifecycleSamples={} pibRequestSeq={:?} pibServedSeq={:?} pibVerifiedSeq={:?} pibPinnedSeq={:?} pibRequestPeerSeen={} pibServedTargetSeen={} pibVerifiedPeerSeen={} pibPinnedPeerSeen={} pibServedFingerprintSeen={} pibVerifiedFingerprintSeen={} pibPinnedFingerprintSeen={} pibFirstFailure={}",
+        "pibRequired={} pibRequesterPinnedSeen={} pibRequestSeen={} pibServedSeen={} pibVerifiedSeen={} pibPinnedSeen={} pibFingerprintSeen={} pibFailureSeen={} pibLifecycleSamples={} pibRequesterPinnedSeq={:?} pibRequestSeq={:?} pibServedSeq={:?} pibVerifiedSeq={:?} pibPinnedSeq={:?} pibRequesterPinnedRequesterSeen={} pibRequestPeerSeen={} pibServedTargetSeen={} pibVerifiedPeerSeen={} pibPinnedPeerSeen={} pibRequesterPinnedFingerprintSeen={} pibServedFingerprintSeen={} pibVerifiedFingerprintSeen={} pibPinnedFingerprintSeen={} pibMatchesSKR={} pibSatisfiedBySKR={} pibFirstFailure={}",
         binding.required_seen,
+        binding.requester_pinned_seen,
         binding.request_seen,
         binding.served_seen,
         binding.verified_seen,
@@ -224,17 +290,22 @@ pub(crate) fn protocol_identity_binding_check_detail(
         binding.fingerprint_seen,
         binding.failure_seen,
         binding.lifecycle_samples,
+        binding.requester_pinned_sequence,
         binding.request_sequence,
         binding.served_sequence,
         binding.verified_sequence,
         binding.pinned_sequence,
+        binding.requester_pinned_requester.is_some(),
         binding.request_peer.is_some(),
         binding.served_target.is_some(),
         binding.verified_peer.is_some(),
         binding.pinned_peer.is_some(),
+        binding.requester_pinned_fingerprint.is_some(),
         binding.served_fingerprint.is_some(),
         binding.verified_fingerprint.is_some(),
         binding.pinned_fingerprint.is_some(),
+        protocol_identity_binding_matches_skr(evidence),
+        protocol_identity_binding_satisfied_by_skr(evidence),
         binding.first_failure.as_deref().unwrap_or("-")
     )
 }

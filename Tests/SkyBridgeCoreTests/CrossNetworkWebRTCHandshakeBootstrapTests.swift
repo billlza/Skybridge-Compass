@@ -692,6 +692,15 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             scriptSource.contains("requester protocol identity pinned"),
             "The real-device smoke script must wait for Mac-side requester pinning before SKR-1."
         )
+        XCTAssertTrue(
+            scriptSource.contains("ios_skr_pinned_protocol_identity_pattern"),
+            "File-transfer smoke must accept SKR-1 pinnedProtocolIdentity=1 evidence as the iOS-side completion proof for PIB-1-bound trust refresh."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("iOS PIB-1 signature verified or SKR-1 pinned identity proof")
+                && scriptSource.contains("iOS PIB-1 pinned or SKR-1 pinned identity proof"),
+            "The iOS wait loop must not fail after a completed signed KEM refresh proves the pinned protocol identity."
+        )
 
         let p2pSource = try [
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
