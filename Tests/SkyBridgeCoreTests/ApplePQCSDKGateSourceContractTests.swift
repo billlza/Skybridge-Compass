@@ -1434,6 +1434,13 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         )
         XCTAssertTrue(packageApp.contains("skybridge_stamp_apple_pqc_sdk_packaging_metadata"))
         XCTAssertTrue(buildDMG.contains("skybridge_assert_bundle_has_apple_pqc_compile_marker"))
+        XCTAssertTrue(
+            buildDMG.contains("SwiftPM 主构建模式：Xcode app target 仅提供 Widget/资源，中间 app runtime marker 校验推迟到 package_app.sh 产物")
+        )
+        XCTAssertTrue(
+            buildDMG.contains("verify_app_runtime_layout \"$APP_BUNDLE\""),
+            "Release DMG must still validate the final packaged app bundle after package_app.sh copies the SwiftPM release executable."
+        )
         XCTAssertTrue(buildDMG.contains("skybridge_assert_release_app_stable_platform_metadata"))
         XCTAssertTrue(releaseReadiness.contains("skybridge_assert_bundle_has_apple_pqc_compile_marker"))
         XCTAssertTrue(releaseReadiness.contains("skybridge_assert_release_app_stable_platform_metadata"))

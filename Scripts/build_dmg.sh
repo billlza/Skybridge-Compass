@@ -910,8 +910,10 @@ if [[ "$SKIP_BUILD" == false ]]; then
         ONLY_ACTIVE_ARCH=YES \
         build
 
-    if [[ -x "$XCODE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp" ]]; then
+    if [[ "$MAIN_BUILD_SYSTEM" == "xcode" && -x "$XCODE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp" ]]; then
         verify_app_runtime_layout "$XCODE_APP_BUNDLE"
+    elif [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" ]]; then
+        log_info "SwiftPM 主构建模式：Xcode app target 仅提供 Widget/资源，中间 app runtime marker 校验推迟到 package_app.sh 产物"
     fi
 
     log_success "Release 构建完成"
