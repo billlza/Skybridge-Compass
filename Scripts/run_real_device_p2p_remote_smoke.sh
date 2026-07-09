@@ -335,7 +335,6 @@ MAC_ONLINE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-mac-online"
 MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
 MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
 MAC_ONLINE_SIGN_IDENTITY="${SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY:-}"
-MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS:-60}"
 MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS:-120}"
 MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS:-3}"
 MAC_APP_BUNDLE="$ARTIFACT_DIR/LocalLanInteropHost.app"
@@ -1176,7 +1175,7 @@ wait_for_mac_online_pattern() {
 }
 
 press_mac_online_ipad_connect_button() {
-  run_stdin_command_with_hard_timeout "$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS" swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -1757,7 +1756,7 @@ SWIFT
 }
 
 observe_mac_online_ipad_connected_row() {
-  run_stdin_command_with_hard_timeout "$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS" swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -2056,6 +2055,148 @@ wait_for_mac_online_connected_row() {
   done
 }
 
+latest_mac_online_ipad_control_endpoint() {
+  python3 - "$MAC_ONLINE_STATUS" "$IOS_PQC_DEVICE_ID" <<'PY'
+import re
+import sys
+
+status_path, target_identity = sys.argv[1], sys.argv[2]
+
+def field(line, key):
+    match = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", line)
+    return match.group(1) if match else None
+
+def variants(value):
+    if not value:
+        return set()
+    raw = value.strip()
+    if not raw:
+        return set()
+    lowered = raw.lower()
+    result = {raw, lowered}
+    if lowered.startswith("id:"):
+        payload = raw[3:].strip().lower()
+        if payload:
+            result.add(payload)
+            result.add(f"id:{payload}")
+    elif re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw):
+        result.add(f"id:{lowered}")
+    return result
+
+target_variants = variants(target_identity)
+try:
+    with open(status_path, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except OSError:
+    raise SystemExit(1)
+
+for line in reversed(lines):
+    if "mac-online-device-ui" not in line:
+        continue
+    if "targetFamily=ipad" not in line or "source=OnlineDeviceCard" not in line:
+        continue
+    if "status=online" not in line or "buttonEnabled=1" not in line:
+        continue
+    if target_variants:
+        row_variants = set()
+        for key in ("identityKey", "targetDeviceId", "p2pDeviceId"):
+            row_variants.update(variants(field(line, key)))
+        if row_variants.isdisjoint(target_variants):
+            continue
+    host = field(line, "endpointHost")
+    port = field(line, "endpointPort")
+    if not host or host == "-" or not port or not port.isdigit() or int(port) <= 0:
+        continue
+    print(host, port)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+ios_listener_ready_for_control_port() {
+  local port="$1"
+  copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status-listener" >/dev/null 2>&1 || true
+  python3 - "$port" "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_LOCAL" <<'PY'
+import os
+import re
+import sys
+
+port = sys.argv[1]
+latest = None
+lifecycle_pattern = re.compile(r"\bp2p-listener\s+(ready|stopped|failed|cancelled|unhealthy)\b")
+for path in sys.argv[2:]:
+    if not path or not os.path.exists(path):
+        continue
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if lifecycle_pattern.search(line):
+                    latest = line.strip()
+    except OSError:
+        continue
+
+if latest is None:
+    raise SystemExit(1)
+
+if (
+    re.search(r"\bp2p-listener\s+ready\b", latest)
+    and re.search(rf"\bactualPort={re.escape(port)}(?:\s|$)", latest)
+    and re.search(r"\bhandlerInstalled=1(?:\s|$)", latest)
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+verify_ipad_control_port_reachable_from_mac() {
+  local started_at
+  local endpoint
+  local host
+  local port
+  local probe_error="$ARTIFACT_DIR/ipad-control-port-probe.stderr.log"
+  local detail
+  local listener_ready
+  local tcp_reachable_without_listener=0
+  started_at="$(date +%s)"
+
+  while true; do
+    endpoint="$(latest_mac_online_ipad_control_endpoint 2>/dev/null || true)"
+    if [[ -n "$endpoint" ]]; then
+      read -r host port <<<"$endpoint"
+      if ios_listener_ready_for_control_port "$port"; then
+        listener_ready=1
+      else
+        listener_ready=0
+      fi
+      if tcp_port_reachable "$host" "$port" "$probe_error"; then
+        if [[ "$listener_ready" == "1" ]]; then
+          printf '%s ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+          return 0
+        fi
+        tcp_reachable_without_listener=1
+        detail="listener-not-ready"
+        printf '%s ipad-control-port reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=0 reason=listener-not-ready\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+      fi
+      if [[ "$tcp_reachable_without_listener" != "1" || "$detail" != "listener-not-ready" ]]; then
+        detail="$(redacted_last_log_line "$probe_error")"
+        printf '%s ipad-control-port reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=%s detail=%s\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" "${detail:-unknown}" >>"$MAC_ONLINE_STATUS"
+      fi
+    fi
+
+    if (( "$(date +%s)" - started_at >= 20 )); then
+      if [[ "$tcp_reachable_without_listener" == "1" ]]; then
+        printf '%s failed stage=mac-online-ipad phase=ipad-control-port-probe reason=listener-not-ready targetDeviceId=%s port=%s detail=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" "${port:-unknown}" "${detail:-listener-not-ready}" >>"$MAC_ONLINE_STATUS"
+      else
+        printf '%s failed stage=mac-online-ipad phase=ipad-control-port-probe reason=tcp-unreachable targetDeviceId=%s port=%s detail=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" "${port:-unknown}" "${detail:-no_endpoint_or_timeout}" >>"$MAC_ONLINE_STATUS"
+      fi
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 run_mac_online_ipad_button_smoke() {
   mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
   : >"$MAC_ONLINE_STATUS"
@@ -2068,6 +2209,7 @@ run_mac_online_ipad_button_smoke() {
   start_macos_online_ipad_client
   wait_for_mac_online_pattern 'boot .*role=mac-online-ipad-client .*source=app' 20 "macOS online iPad app smoke role boot"
   wait_for_mac_online_pattern 'mac-online-device-ui .*targetFamily=ipad .*source=OnlineDeviceCard .*status=online .*buttonEnabled=1' "$MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS" "macOS online iPad visible connectable row"
+  verify_ipad_control_port_reachable_from_mac
 
   echo "==> Pressing macOS online iPad Connect button"
   local click_started_at
@@ -4351,13 +4493,13 @@ wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*handshak
 wait_for_ios_status_pattern "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}" "$SMOKE_TIMEOUT_SECONDS" "P2P remote desktop pass window"
 copy_ios_status
 validate_remote_desktop_route_evidence
+validate_remote_desktop_performance_window
 if [[ "$RUN_MAC_ONLINE_IPAD_SMOKE" == "1" ]]; then
   run_mac_online_ipad_button_smoke
 else
   append_host_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
   append_ios_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
 fi
-validate_remote_desktop_performance_window
 wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"

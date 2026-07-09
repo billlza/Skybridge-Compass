@@ -559,6 +559,60 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveDiscoveredAppleMobileCandidateWithoutPortBlocksStalePresentationHost() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stableDeviceId = "9DDF920E-D7C4-51F2-9C94-67FF629BDF04"
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: "192.168.0.107",
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: stableDeviceId,
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        let connectable = manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1)
+
+        XCTAssertTrue(manager.hasUnresolvedLiveSkyBridgeControlRoute(for: resolved))
+        XCTAssertEqual(connectable.count, 0)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
     func testLiveDiscoveredAppleMobileCandidateWithoutControlPortDoesNotEnableStalePresentation() throws {
         let manager = UnifiedOnlineDeviceManager.shared
         let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."

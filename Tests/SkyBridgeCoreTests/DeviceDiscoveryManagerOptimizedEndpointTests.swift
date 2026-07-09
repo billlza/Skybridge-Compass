@@ -138,6 +138,42 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
         )
     }
 
+    func testPortMapMergePreservesResolvedControlPortWhenRefreshCarriesZero() {
+        let merged = DeviceDiscoveryManagerOptimized.mergedPortMapPreservingResolvedPorts(
+            incoming: [
+                "_skybridge._tcp": 0,
+                "_skybridge-transfer._tcp": 8080,
+                "_skybridge-remote._tcp": 0
+            ],
+            existing: [
+                "_skybridge._tcp": 9527,
+                "_skybridge-remote._tcp": 5901
+            ]
+        )
+
+        XCTAssertEqual(merged["_skybridge._tcp"], 9527)
+        XCTAssertEqual(merged["_skybridge-transfer._tcp"], 8080)
+        XCTAssertEqual(merged["_skybridge-remote._tcp"], 5901)
+    }
+
+    func testPortMapMergeAllowsFreshResolvedPortToReplaceStalePort() {
+        let merged = DeviceDiscoveryManagerOptimized.mergedPortMapPreservingResolvedPorts(
+            incoming: ["_skybridge._tcp": 51752],
+            existing: ["_skybridge._tcp": 9527]
+        )
+
+        XCTAssertEqual(merged["_skybridge._tcp"], 51752)
+    }
+
+    func testPortMapMergeKeepsUnresolvedServiceWhenNoResolvedPortExists() {
+        let merged = DeviceDiscoveryManagerOptimized.mergedPortMapPreservingResolvedPorts(
+            incoming: ["_skybridge._tcp": 0],
+            existing: [:]
+        )
+
+        XCTAssertEqual(merged["_skybridge._tcp"], 0)
+    }
+
     func testCompleteProtocolIdentityUpgradesRouteOnlyBonjourDevice() {
         let route = "bonjour:iPad_Pro_11-inch__M4_@local."
         let identityFingerprint = String(repeating: "b", count: 64)
@@ -242,6 +278,11 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
         XCTAssertTrue(source.contains("portMap: [controlType: controlPort]"))
         XCTAssertTrue(source.contains("deviceId: identity.deviceId"))
         XCTAssertTrue(source.contains("pubKeyFP: identity.pubKeyFP"))
+        XCTAssertTrue(source.contains("mergedPortMapPreservingResolvedPorts("))
+        XCTAssertFalse(
+            source.contains("portMap.merging"),
+            "Bonjour merge paths must not let a fresh zero port overwrite an already resolved control port."
+        )
     }
 
     func testWeakNameMergeDoesNotCoalesceStableProtocolIdentities() throws {

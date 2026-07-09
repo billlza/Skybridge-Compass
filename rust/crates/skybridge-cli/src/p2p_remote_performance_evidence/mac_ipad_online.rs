@@ -22,6 +22,24 @@ pub(super) fn update_p2p_remote_mac_ipad_online_evidence(
         evidence.mac_ipad_dashboard_role_boot_samples += 1;
     }
 
+    if is_ipad_control_port_probe(line, lower) {
+        if text_value_equals(line, "reachable", "1")
+            && text_value_equals(line, "source", "pre-mac-online-probe")
+            && text_value_equals(line, "listenerReady", "1")
+            && extract_text_u64(line, "port").is_some_and(|port| port > 0)
+            && identity_key(line).is_some()
+        {
+            evidence.mac_ipad_control_port_reachable_samples += 1;
+            remember_identity_sequence(
+                &mut evidence.mac_ipad_control_port_reachable_identity_sequences,
+                line,
+                line_sequence,
+            );
+        } else {
+            evidence.mac_ipad_control_port_unreachable_samples += 1;
+        }
+    }
+
     if is_mac_ipad_visible_row(line, lower) {
         evidence.mac_ipad_online_ui_rows += 1;
         remember_physical_identity_row(
@@ -130,6 +148,11 @@ fn is_ipad_presence_heartbeat(line: &str, lower: &str) -> bool {
         || (lower.contains("ios-icloud-presence")
             && lower.contains("heartbeat")
             && target_family_is_ipad(line, lower))
+}
+
+fn is_ipad_control_port_probe(line: &str, lower: &str) -> bool {
+    lower.contains("ipad-control-port")
+        && (text_value_equals(line, "probe", "tcp-only") || lower.contains("probe=tcp-only"))
 }
 
 fn is_real_online_row_source(line: &str) -> bool {

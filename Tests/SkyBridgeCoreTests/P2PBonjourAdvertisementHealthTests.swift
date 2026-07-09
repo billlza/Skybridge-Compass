@@ -722,9 +722,39 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             p2pSource.contains("resolveNetServiceEndpoint(") &&
             p2pSource.contains("Self.resolveNetServiceEndpointOnMain(") &&
             p2pSource.contains("timeoutSeconds: 3.0") &&
-            p2pSource.contains("return (service + directRoutable + directAny).filter"),
-            "Automatic LAN connects and strict-PQC bootstrap must prefer live Bonjour service/current NetService endpoints before stale host:port fallback endpoints."
+            p2pSource.contains("return (directRoutable + directAny + service).filter"),
+            "Automatic LAN connects should still prefer live Bonjour/current NetService endpoints, while strict-PQC bootstrap should try already-resolved direct LAN endpoints before Bonjour service fallback."
         )
+    }
+
+    func testMacStrictPQCBootstrapUsesEndpointScopedPeerToPeerPolicy() throws {
+        let p2pSource = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let makeConnectionBody = try sourceSlice(
+            from: "private func makeConnection(",
+            to: "private func applyInterfacePreference",
+            in: p2pSource
+        )
+        let endpointPolicyBody = try sourceSlice(
+            from: "private static func shouldIncludePeerToPeer(for endpoint: NWEndpoint)",
+            to: "private func applyInterfacePreference",
+            in: p2pSource
+        )
+        let bootstrapExchangeBody = try sourceSlice(
+            from: "private func exchangeBootstrapControlMessage(",
+            to: "private func waitForBootstrapControlConnection",
+            in: p2pSource
+        )
+
+        XCTAssertTrue(makeConnectionBody.contains("params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)"))
+        XCTAssertFalse(makeConnectionBody.contains("params.includePeerToPeer = true"))
+        XCTAssertTrue(endpointPolicyBody.contains("guard case .hostPort(let host, _) = endpoint else { return true }"))
+        XCTAssertTrue(endpointPolicyBody.contains("if IPv4Address(value) != nil {\n            return value.hasPrefix(\"169.254.\")\n        }"))
+        XCTAssertTrue(endpointPolicyBody.contains("if IPv6Address(value) != nil {\n            return value.hasPrefix(\"fe80:\")\n        }"))
+        XCTAssertTrue(
+            endpointPolicyBody.contains("return false"),
+            "Direct hostPort endpoints should only opt into peer-to-peer for validated link-local addresses; Bonjour/service endpoints keep peer-to-peer through the non-hostPort branch."
+        )
+        XCTAssertTrue(bootstrapExchangeBody.contains("peerToPeer=\\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0)"))
     }
 
     func testRemoteControlRoutePreflightDoesNotEnterSessionLifecycle() throws {

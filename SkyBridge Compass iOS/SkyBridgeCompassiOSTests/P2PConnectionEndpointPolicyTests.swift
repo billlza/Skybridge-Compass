@@ -133,6 +133,11 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
                 for: .hostPort(host: NWEndpoint.Host("192.168.1.20"), port: 9527)
             )
         )
+        XCTAssertFalse(
+            P2PConnectionEndpointPolicy.shouldIncludePeerToPeer(
+                for: .hostPort(host: NWEndpoint.Host("ipad-pro.local"), port: 9527)
+            )
+        )
         XCTAssertTrue(
             P2PConnectionEndpointPolicy.shouldIncludePeerToPeer(
                 for: .hostPort(host: NWEndpoint.Host("fe80::1%en0"), port: 9527)

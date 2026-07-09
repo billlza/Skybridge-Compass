@@ -814,6 +814,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         return parsedIPAddress(raw)
     }
 
+    nonisolated static func mergedPortMapPreservingResolvedPorts(
+        incoming: [String: Int],
+        existing: [String: Int]
+    ) -> [String: Int] {
+        var merged = existing
+        for (serviceType, incomingPort) in incoming {
+            let existingPort = merged[serviceType] ?? 0
+            if incomingPort > 0 || existingPort <= 0 {
+                merged[serviceType] = incomingPort
+            }
+        }
+        return merged
+    }
+
     nonisolated private static func parsedIPAddress(_ raw: String) -> String? {
         var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.hasPrefix("[") && token.hasSuffix("]") {
@@ -1031,7 +1045,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             : Array(Set(sanitized.services + existingDevice.services)),
                         portMap: preserveExistingNetworkIdentity
                             ? existingDevice.portMap
-                            : sanitized.portMap.merging(existingDevice.portMap) { new, _ in new },
+                            : Self.mergedPortMapPreservingResolvedPorts(
+                                incoming: sanitized.portMap,
+                                existing: existingDevice.portMap
+                            ),
                         remoteVideoFormats: sanitized.remoteVideoFormats.union(existingDevice.remoteVideoFormats),
                         connectionTypes: mergedConnectionTypes,
                         uniqueIdentifier: preserveExistingNetworkIdentity
@@ -1175,7 +1192,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     )
                     merged._updateDisplayNameIfAllowed(betterName)
                     merged.services = Array(Set(device.services + merged.services))
-                    merged.portMap = device.portMap.merging(merged.portMap) { new, _ in new }
+                    merged.portMap = Self.mergedPortMapPreservingResolvedPorts(
+                        incoming: device.portMap,
+                        existing: merged.portMap
+                    )
                     merged.mergeRouteIdentifiers(device.routeIdentifiers)
                     if device.source != .unknown {
                         merged.source = device.source

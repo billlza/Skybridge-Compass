@@ -959,7 +959,7 @@ public class P2PDiscoveryService: BaseManager {
         if securityPlan == .encryptedTLS, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
-            params.includePeerToPeer = true
+            params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)
             params.allowLocalEndpointReuse = true
             applyInterfacePreference(interfacePreference, to: params)
             if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -977,7 +977,7 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         let params = NWParameters.tcp
-        params.includePeerToPeer = true
+        params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)
         params.allowLocalEndpointReuse = true
         applyInterfacePreference(interfacePreference, to: params)
         if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -988,6 +988,26 @@ public class P2PDiscoveryService: BaseManager {
             tcpOptions.noDelay = true
         }
         return NWConnection(to: endpoint, using: params)
+    }
+
+    private static func shouldIncludePeerToPeer(for endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return true }
+        var value = String(describing: host)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            value = String(value.dropFirst().dropLast())
+        }
+        if let scope = value.firstIndex(of: "%") {
+            value = String(value[..<scope])
+        }
+        if IPv4Address(value) != nil {
+            return value.hasPrefix("169.254.")
+        }
+        if IPv6Address(value) != nil {
+            return value.hasPrefix("fe80:")
+        }
+        return false
     }
 
     private func applyInterfacePreference(_ preference: InterfacePreference, to params: NWParameters) {
@@ -1466,7 +1486,7 @@ public class P2PDiscoveryService: BaseManager {
             let connection = makeConnection(to: endpoint, securityPlan: .plainTCP, interfacePreference: .automatic)
             let connectStartedAt = Date()
             RemoteControlSmokeStatusWriter.append(
-                "bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) endpoint=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
+                "bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) peerToPeer=\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0) endpoint=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
             )
             do {
                 try await waitForBootstrapControlConnection(connection, timeoutSeconds: min(10, max(3, timeoutSeconds)))
@@ -1747,7 +1767,7 @@ public class P2PDiscoveryService: BaseManager {
             return false
         }
         var seen = Set<String>()
-        return (service + directRoutable + directAny).filter { endpoint in
+        return (directRoutable + directAny + service).filter { endpoint in
             let key = endpoint.debugDescription
             return seen.insert(key).inserted
         }

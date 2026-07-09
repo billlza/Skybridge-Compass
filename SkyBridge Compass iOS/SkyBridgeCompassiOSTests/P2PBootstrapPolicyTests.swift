@@ -1536,6 +1536,72 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(stateDiagnostics.contains("runtimePeerId)) state="))
     }
 
+    func testInboundConnectionRemainsProvisionalUntilFirstProtocolFrame() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        func slice(from start: String, to end: String) throws -> String {
+            let startRange = try XCTUnwrap(source.range(of: start))
+            let endRange = try XCTUnwrap(source.range(of: end, range: startRange.upperBound..<source.endIndex))
+            return String(source[startRange.lowerBound..<endRange.lowerBound])
+        }
+
+        let handleIncoming = try slice(
+            from: "private func handleIncomingConnection",
+            to: "/// 开始从连接接收消息"
+        )
+        let receiveBody = try slice(
+            from: "private func startReceiving(",
+            to: "private func promoteInboundConnectionForFirstFrame"
+        )
+        let promoteBody = try slice(
+            from: "private func promoteInboundConnectionForFirstFrame",
+            to: "private func handleInboundReceiveFailure"
+        )
+        let receiveFailureBody = try slice(
+            from: "private func handleInboundReceiveFailure",
+            to: "private func looksLikeTLSRecordHeader"
+        )
+        let bootstrapControlBody = try slice(
+            from: "private func handlePreHandshakeBootstrapControlMessage(",
+            to: "private func makeInboundBootstrapControlResponse"
+        )
+
+        XCTAssertTrue(handleIncoming.contains("startReceiving(from: connection, peerId: canonicalPeerId, promoteInboundDevice: canonicalDevice)"))
+        XCTAssertFalse(handleIncoming.contains("connections[canonicalPeerId] = connection"))
+        XCTAssertFalse(handleIncoming.contains("lastKnownDevices[canonicalPeerId] = canonicalDevice"))
+        XCTAssertFalse(handleIncoming.contains("connectionStatusByDeviceId[canonicalPeerId] = .connecting"))
+        XCTAssertFalse(handleIncoming.contains("await transport?.setConnection(connection, for: canonicalPeerId)"))
+        XCTAssertTrue(receiveBody.contains("handlePreHandshakeBootstrapControlMessage("))
+        XCTAssertTrue(receiveBody.contains("over: connection"))
+        XCTAssertTrue(receiveBody.contains("p2p-inbound provisional-bootstrap-control-consumed"))
+        XCTAssertTrue(receiveBody.contains("connection.cancel()"))
+        XCTAssertTrue(receiveBody.contains("prepareProvisionalInboundHandshakeDriver("))
+        XCTAssertTrue(receiveBody.contains("reason: \"入站连接首帧不是有效握手协议帧\""))
+        XCTAssertTrue(receiveBody.contains("bodyLen > 0"))
+        XCTAssertTrue(receiveBody.contains("handleInboundReceiveFailure("))
+        XCTAssertTrue(promoteBody.contains("lastKnownDevices[canonicalPeerId] = canonicalDevice"))
+        XCTAssertTrue(promoteBody.contains("connectionStatusByDeviceId[canonicalPeerId] = .connecting"))
+        XCTAssertTrue(promoteBody.contains("connections[canonicalPeerId] = connection"))
+        XCTAssertTrue(promoteBody.contains("await transport.setConnection(connection, for: canonicalPeerId)"))
+        XCTAssertTrue(promoteBody.contains("p2p-inbound promoted-active"))
+        XCTAssertTrue(receiveFailureBody.contains("promoteInboundDevice != nil, !isTrackedConnection(connection)"))
+        XCTAssertTrue(receiveFailureBody.contains("p2p-inbound provisional-closed"))
+        XCTAssertTrue(bootstrapControlBody.contains("over provisionalConnection: NWConnection? = nil"))
+        XCTAssertTrue(bootstrapControlBody.contains("if provisionalConnection == nil, sessionKeys[peerId] != nil { return false }"))
+        XCTAssertTrue(bootstrapControlBody.contains("provisionalConnection ?? connections[peerId]"))
+
+        let provisionalGuardBody = try slice(
+            from: "private func prepareProvisionalInboundHandshakeDriver",
+            to: "private func looksLikeTLSRecordHeader"
+        )
+        XCTAssertTrue(provisionalGuardBody.contains("HandshakeMessageA.decode"))
+        XCTAssertTrue(provisionalGuardBody.contains("!messageA.supportedSuites.isEmpty"))
+        XCTAssertTrue(provisionalGuardBody.contains("ensureInboundRekeyDriverIfNeeded"))
+        XCTAssertTrue(provisionalGuardBody.contains("ensureInboundHandshakeDriverIfNeeded"))
+        XCTAssertTrue(provisionalGuardBody.contains("reason=invalid-first-frame"))
+    }
+
     func testStrictPQCFailureStatusLinesRedactPeerIdentitySecrets() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"

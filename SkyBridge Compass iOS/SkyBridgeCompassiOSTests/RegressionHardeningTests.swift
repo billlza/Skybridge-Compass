@@ -3632,6 +3632,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(ConnectableAddressCanonicalizer.isLinkLocal("169.254.10.20"))
     XCTAssertTrue(ConnectableAddressCanonicalizer.isRoutableLANAddress("192.168.31.20"))
     XCTAssertFalse(ConnectableAddressCanonicalizer.prefersPeerToPeer(for: "192.168.31.20"))
+    XCTAssertFalse(ConnectableAddressCanonicalizer.prefersPeerToPeer(for: "ipad-pro.local"))
     XCTAssertTrue(
       ConnectableAddressCanonicalizer.prefersPeerToPeer(for: "fe80::468:f5a1:462b:29d3%bridge100"))
     XCTAssertEqual(
@@ -3831,10 +3832,16 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(discoverySource.contains("advertisingStartupContinuation"))
+    XCTAssertTrue(discoverySource.contains("public struct AdvertisingReadinessSnapshot"))
+    XCTAssertTrue(discoverySource.contains("public var advertisingReadinessSnapshot"))
+    XCTAssertTrue(discoverySource.contains("handlerInstalled"))
+    XCTAssertTrue(discoverySource.contains("actualPort"))
     XCTAssertTrue(discoverySource.contains("withTaskCancellationHandler"))
     XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.failure(CancellationError()))"))
     XCTAssertTrue(discoverySource.contains("activeListener.start(queue: queue)"))
     XCTAssertTrue(discoverySource.contains("case .ready:"))
+    XCTAssertTrue(discoverySource.contains("advertisingActualPort = activeListener.port?.rawValue"))
+    XCTAssertTrue(discoverySource.contains("appendListenerStatus(\n                \"ready service="))
     XCTAssertTrue(discoverySource.contains("isAdvertising = true"))
     XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.success(()))"))
     XCTAssertTrue(discoverySource.contains("AdvertisingStartupError.timedOut"))
@@ -3856,7 +3863,11 @@ final class RegressionHardeningTests: XCTestCase {
       p2pManagerSource.contains("if discoveryManager.isAdvertising {\n            isListening = true\n            return"),
       "P2PConnectionManager must not treat a discovery flag alone as full listener readiness."
     )
-    XCTAssertTrue(p2pManagerSource.contains("try await discoveryManager.startAdvertising(port: 9527)"))
+    XCTAssertTrue(p2pManagerSource.contains("let beforeStart = discoveryManager.advertisingReadinessSnapshot"))
+    XCTAssertTrue(p2pManagerSource.contains("beforeStart.isReady(for: controlPort)"))
+    XCTAssertTrue(p2pManagerSource.contains("let readiness = discoveryManager.advertisingReadinessSnapshot"))
+    XCTAssertTrue(p2pManagerSource.contains("readiness.isReady(for: controlPort)"))
+    XCTAssertTrue(p2pManagerSource.contains("try await discoveryManager.startAdvertising(port: controlPort)"))
     XCTAssertTrue(p2pManagerSource.contains("P2P 监听状态与 Bonjour 广播状态不一致"))
     XCTAssertTrue(appSource.contains("try await connectionManager.startListening()"))
     XCTAssertTrue(appSource.contains("前台恢复 P2P 监听器失败"))

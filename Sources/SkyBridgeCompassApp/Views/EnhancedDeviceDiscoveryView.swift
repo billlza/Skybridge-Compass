@@ -2747,15 +2747,17 @@ public struct EnhancedDeviceDiscoveryView: View {
         let preferredCandidate = connectableCandidates.first
         let bonjourServiceName = preferredCandidate
             .flatMap(smokeBonjourServiceName)
-            ?? smokeBonjourServiceName(from: device)
             ?? "-"
-        let endpointHost = preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? device.ipv4 ?? device.ipv6 ?? "-"
+        let endpointHost = preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? "-"
         let endpointPort = preferredCandidate?.portMap["_skybridge._tcp"]
-            ?? device.portMap["_skybridge._tcp"]
+            ?? preferredCandidate?.portMap["_skybridge._udp"]
             ?? 0
-        let service = (preferredCandidate?.services ?? device.services).contains("_skybridge._tcp")
-            ? "_skybridge._tcp"
-            : "-"
+        let service: String = {
+            guard let preferredCandidate else { return "-" }
+            if preferredCandidate.services.contains("_skybridge._tcp") { return "_skybridge._tcp" }
+            if preferredCandidate.services.contains("_skybridge._udp") { return "_skybridge._udp" }
+            return "-"
+        }()
         let effectiveStatus = effectiveConnectionStatus(for: device)
         let status = effectiveStatus == .connected
             ? "connected"

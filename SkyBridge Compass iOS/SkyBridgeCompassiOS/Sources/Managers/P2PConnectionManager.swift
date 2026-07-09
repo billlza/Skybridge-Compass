@@ -1780,21 +1780,30 @@ public class P2PConnectionManager: ObservableObject {
             transport = NWConnectionTransport()
         }
         
-        // 使用 DeviceDiscoveryManager 的广播功能
-        if discoveryManager.isAdvertising {
+        // 使用 DeviceDiscoveryManager 的广播功能；必须看到真实 ready listener 证明，
+        // 不能只信 isAdvertising 布尔值，否则 Bonjour 缓存可能被误认为 TCP 控制端口可达。
+        let controlPort: UInt16 = 9527
+        let beforeStart = discoveryManager.advertisingReadinessSnapshot
+        if beforeStart.isReady(for: controlPort) {
             SkyBridgeLogger.shared.debug("📡 P2P Bonjour 广播已就绪，继续确认传输层")
         } else {
-            try await discoveryManager.startAdvertising(port: 9527)
+            try await discoveryManager.startAdvertising(port: controlPort)
         }
-        guard discoveryManager.isAdvertising else {
+        let readiness = discoveryManager.advertisingReadinessSnapshot
+        guard readiness.isReady(for: controlPort) else {
             isListening = false
-            lastError = "P2P 广播监听未进入可用状态"
-            throw P2PError.connectionFailed
+            let message = "P2P 广播监听未进入可用状态: requestedPort=\(controlPort) actualPort=\(readiness.actualPort.map(String.init) ?? "-") handlerInstalled=\(readiness.handlerInstalled ? 1 : 0) generation=\(readiness.readyGeneration)"
+            lastError = message
+            throw NSError(
+                domain: "P2PConnectionManager",
+                code: -2201,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
         }
         isListening = true
         lastError = nil
         
-        SkyBridgeLogger.shared.info("🎧 P2P 监听器已启动（通过 Bonjour 广播）")
+        SkyBridgeLogger.shared.info("🎧 P2P 监听器已启动（通过 Bonjour 广播，端口 \(readiness.actualPort ?? controlPort)）")
     }
     
     /// 停止监听
@@ -2171,41 +2180,16 @@ public class P2PConnectionManager: ObservableObject {
             "p2p-inbound canonical peer=\(Self.protocolIdentityLogRedaction) canonical=\(Self.protocolIdentityLogRedaction)"
         )
         let canonicalDevice = canonicalizedDevice(inboundDevice, canonicalPeerId: canonicalPeerId)
-        lastKnownDevices[canonicalPeerId] = canonicalDevice
-        connectionStatusByDeviceId[canonicalPeerId] = .connecting
-        connectionErrorByDeviceId.removeValue(forKey: canonicalPeerId)
-
-        // 保存连接
-        connections[canonicalPeerId] = connection
-
-        // Inbound connections must enter the same lifecycle funnel as outbound ones,
-        // otherwise ready/failed/cancelled transitions never reach UI and cleanup.
-        installConnectionObservers(connection, for: canonicalDevice)
-        await handleConnectionStateChange(.ready, for: canonicalDevice)
-
-        // 设置传输层
-        await transport?.setConnection(connection, for: canonicalPeerId)
-
-        guard transport != nil else {
-            let message = "入站连接缺少握手传输层"
-            SkyBridgeLogger.shared.error("❌ \(message)")
-            smokeInboundTrace(
-                "p2p-inbound transport-missing peer=\(Self.protocolIdentityLogRedaction)"
-            )
-            lastError = message
-            connectionStatusByDeviceId[canonicalPeerId] = .failed
-            connectionErrorByDeviceId[canonicalPeerId] = message
-            return
-        }
 
         // Delay responder driver creation until the first MessageA arrives.
         // The offered suites in MessageA decide whether the inbound path must
         // initialize as Classic, ML-KEM, or X-Wing. Creating a driver here would
         // freeze whatever policy was left from a previous connection and can
         // reject a valid PQC MessageA with suiteNegotiationFailed.
-        startReceiving(from: connection, peerId: canonicalPeerId)
-
-        currentHandshakeState = "等待握手消息..."
+        // The first frame also decides whether this is an ephemeral bootstrap
+        // control channel. TCP-only reachability probes and bootstrap-control
+        // exchanges must not replace the active P2P session for the same peer.
+        startReceiving(from: connection, peerId: canonicalPeerId, promoteInboundDevice: canonicalDevice)
         SkyBridgeLogger.shared.info("🔐 等待来自 \(Self.protocolIdentityLogRedaction) 的握手消息")
         smokeInboundTrace(
             "p2p-inbound awaiting-message peer=\(Self.protocolIdentityLogRedaction)"
@@ -2213,7 +2197,11 @@ public class P2PConnectionManager: ObservableObject {
     }
     
     /// 开始从连接接收消息
-    private func startReceiving(from connection: NWConnection, peerId: String) {
+    private func startReceiving(
+        from connection: NWConnection,
+        peerId: String,
+        promoteInboundDevice: DiscoveredDevice? = nil
+    ) {
         // 与 macOS 端一致：4-byte big-endian length framing
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] lengthData, _, isComplete, error in
             Task { @MainActor in
@@ -2222,6 +2210,12 @@ public class P2PConnectionManager: ObservableObject {
                     self?.smokeInboundTrace(
                         "p2p-inbound rx-header-error peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                     )
+                    self?.handleInboundReceiveFailure(
+                        connection,
+                        peerId: peerId,
+                        reason: "接收长度头错误: \(Self.diagnosticErrorSummary(error))",
+                        promoteInboundDevice: promoteInboundDevice
+                    )
                     return
                 }
                 guard let lengthData, lengthData.count == 4 else {
@@ -2229,19 +2223,26 @@ public class P2PConnectionManager: ObservableObject {
                         "p2p-inbound rx-header-short peer=\(Self.protocolIdentityLogRedaction) bytes=\(lengthData?.count ?? 0) complete=\(isComplete ? 1 : 0)"
                     )
                     if !isComplete {
-                        self?.startReceiving(from: connection, peerId: peerId)
+                        self?.startReceiving(from: connection, peerId: peerId, promoteInboundDevice: promoteInboundDevice)
+                    } else {
+                        self?.handleInboundReceiveFailure(
+                            connection,
+                            peerId: peerId,
+                            reason: "连接在首帧长度头前关闭",
+                            promoteInboundDevice: promoteInboundDevice
+                        )
                     }
                     return
                 }
                 
-		                let length = lengthData.withUnsafeBytes { raw -> UInt32 in
-		                    raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
-		                }
-	                let bodyLen = Int(length)
-                    self?.smokeInboundTrace(
-                        "p2p-inbound rx-header peer=\(Self.protocolIdentityLogRedaction) bodyBytes=\(bodyLen)"
-                    )
-	                guard bodyLen <= 2_000_000 else {
+                let length = lengthData.withUnsafeBytes { raw -> UInt32 in
+                    raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
+                }
+                let bodyLen = Int(length)
+                self?.smokeInboundTrace(
+                    "p2p-inbound rx-header peer=\(Self.protocolIdentityLogRedaction) bodyBytes=\(bodyLen)"
+                )
+                guard bodyLen > 0, bodyLen <= 2_000_000 else {
                     if self?.looksLikeTLSRecordHeader(lengthData) == true {
                         SkyBridgeLogger.shared.warning("⚠️ 检测到 TLS 记录头，但当前通道期望 length-framed 明文握手，已关闭该入站连接")
                         self?.smokeInboundTrace(
@@ -2260,32 +2261,181 @@ public class P2PConnectionManager: ObservableObject {
 
                 connection.receive(minimumIncompleteLength: bodyLen, maximumLength: bodyLen) { [weak self] payload, _, isComplete2, error2 in
                     Task { @MainActor in
+                        guard let self else { return }
                         if let error2 = error2 {
                             SkyBridgeLogger.shared.error("❌ 接收消息体错误: \(Self.diagnosticErrorSummary(error2))")
-                            self?.smokeInboundTrace(
+                            self.smokeInboundTrace(
                                 "p2p-inbound rx-body-error peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error2))"
+                            )
+                            self.handleInboundReceiveFailure(
+                                connection,
+                                peerId: peerId,
+                                reason: "接收消息体错误: \(Self.diagnosticErrorSummary(error2))",
+                                promoteInboundDevice: promoteInboundDevice
                             )
                             return
                         }
                         if let payload, !payload.isEmpty {
-                            self?.smokeInboundTrace(
+                            self.smokeInboundTrace(
                                 "p2p-inbound rx-body peer=\(Self.protocolIdentityLogRedaction) bytes=\(payload.count)"
                             )
-                            await self?.handleReceivedMessage(payload, from: peerId)
+                            if let promoteInboundDevice {
+                                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+                                if await self.handlePreHandshakeBootstrapControlMessage(
+                                    unwrapped,
+                                    from: peerId,
+                                    over: connection
+                                ) {
+                                    self.smokeInboundTrace(
+                                        "p2p-inbound provisional-bootstrap-control-consumed peer=\(Self.protocolIdentityLogRedaction)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+
+                                guard await self.prepareProvisionalInboundHandshakeDriver(
+                                    for: peerId,
+                                    firstFrame: unwrapped
+                                ) else {
+                                    self.handleInboundReceiveFailure(
+                                        connection,
+                                        peerId: peerId,
+                                        reason: "入站连接首帧不是有效握手协议帧",
+                                        promoteInboundDevice: promoteInboundDevice
+                                    )
+                                    return
+                                }
+
+                                do {
+                                    try await self.promoteInboundConnectionForFirstFrame(
+                                        connection,
+                                        peerId: peerId,
+                                        device: promoteInboundDevice
+                                    )
+                                } catch {
+                                    let message = "入站连接首帧推广失败: \(Self.diagnosticErrorSummary(error))"
+                                    SkyBridgeLogger.shared.error("❌ \(message)")
+                                    self.smokeInboundTrace(
+                                        "p2p-inbound promote-failed peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
+                                    )
+                                    self.handleInboundReceiveFailure(
+                                        connection,
+                                        peerId: peerId,
+                                        reason: message,
+                                        promoteInboundDevice: promoteInboundDevice
+                                    )
+                                    return
+                                }
+                            }
+
+                            await self.handleReceivedMessage(payload, from: peerId)
                         } else {
-                            self?.smokeInboundTrace(
+                            self.smokeInboundTrace(
                                 "p2p-inbound rx-body-empty peer=\(Self.protocolIdentityLogRedaction) complete=\(isComplete2 ? 1 : 0)"
                             )
-                }
-                
+                            self.handleInboundReceiveFailure(
+                                connection,
+                                peerId: peerId,
+                                reason: "连接在消息体前关闭",
+                                promoteInboundDevice: promoteInboundDevice
+                            )
+                            return
+                        }
+
                         // 继续接收（只要连接未 complete）
                         if !(isComplete || isComplete2) {
-                    self?.startReceiving(from: connection, peerId: peerId)
+                            self.startReceiving(from: connection, peerId: peerId)
                         }
                     }
                 }
             }
         }
+    }
+
+    private func promoteInboundConnectionForFirstFrame(
+        _ connection: NWConnection,
+        peerId: String,
+        device: DiscoveredDevice
+    ) async throws {
+        let canonicalPeerId = canonicalPeerLookupKey(peerId)
+        let canonicalDevice = canonicalizedDevice(device, canonicalPeerId: canonicalPeerId)
+        if let tracked = connections[canonicalPeerId], tracked === connection {
+            return
+        }
+        guard let transport else {
+            let message = "入站连接缺少握手传输层"
+            lastError = message
+            throw NSError(
+                domain: "P2PConnectionManager",
+                code: -2301,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        }
+        if let existing = connections[canonicalPeerId], existing !== connection {
+            smokeInboundTrace(
+                "p2p-inbound replacing-active-connection peer=\(Self.protocolIdentityLogRedaction)"
+            )
+            existing.cancel()
+        }
+
+        lastKnownDevices[canonicalPeerId] = canonicalDevice
+        connectionStatusByDeviceId[canonicalPeerId] = .connecting
+        connectionErrorByDeviceId.removeValue(forKey: canonicalPeerId)
+        connections[canonicalPeerId] = connection
+        installConnectionObservers(connection, for: canonicalDevice)
+        await handleConnectionStateChange(.ready, for: canonicalDevice, connection: connection)
+
+        await transport.setConnection(connection, for: canonicalPeerId)
+        smokeInboundTrace(
+            "p2p-inbound promoted-active peer=\(Self.protocolIdentityLogRedaction)"
+        )
+    }
+
+    private func handleInboundReceiveFailure(
+        _ connection: NWConnection,
+        peerId: String,
+        reason: String,
+        promoteInboundDevice: DiscoveredDevice?
+    ) {
+        if promoteInboundDevice != nil, !isTrackedConnection(connection) {
+            smokeInboundTrace(
+                "p2p-inbound provisional-closed peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.smokeSanitize(reason))"
+            )
+            connection.cancel()
+            return
+        }
+
+        cleanupBrokenInboundConnection(connection, peerId: peerId, reason: reason)
+    }
+
+    private func prepareProvisionalInboundHandshakeDriver(
+        for peerId: String,
+        firstFrame: Data
+    ) async -> Bool {
+        let handshakeFrame = HandshakePadding.unwrapIfNeeded(firstFrame, label: "rx")
+        guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame),
+              !messageA.supportedSuites.isEmpty else {
+            smokeInboundTrace(
+                "p2p-inbound provisional-rejected peer=\(Self.protocolIdentityLogRedaction) reason=invalid-first-frame bytes=\(handshakeFrame.count)"
+            )
+            return false
+        }
+
+        let canonicalPeerId = canonicalPeerLookupKey(peerId)
+        let driver: HandshakeDriver?
+        if hasStoredSessionMaterial(for: canonicalPeerId),
+           hasActiveAuthenticatedSession(for: canonicalPeerId) {
+            driver = await ensureInboundRekeyDriverIfNeeded(for: canonicalPeerId, frame: handshakeFrame)
+        } else {
+            driver = await ensureInboundHandshakeDriverIfNeeded(for: canonicalPeerId, frame: handshakeFrame)
+        }
+
+        if driver == nil {
+            smokeInboundTrace(
+                "p2p-inbound provisional-rejected peer=\(Self.protocolIdentityLogRedaction) reason=driver-unavailable"
+            )
+        }
+        return driver != nil
     }
 
     private func looksLikeTLSRecordHeader(_ header: Data) -> Bool {
@@ -2301,6 +2451,9 @@ public class P2PConnectionManager: ObservableObject {
 
     private func cleanupBrokenInboundConnection(_ connection: NWConnection, peerId: String, reason: String) {
         let peerId = canonicalPeerLookupKey(peerId)
+        smokeInboundTrace(
+            "p2p-inbound cleanup-broken peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.smokeSanitize(reason))"
+        )
         connection.cancel()
 
         let isTrackedConnection = connections[peerId].map { $0 === connection } ?? false
@@ -2408,8 +2561,13 @@ public class P2PConnectionManager: ObservableObject {
         let isFailure: Bool
     }
 
-    private func handlePreHandshakeBootstrapControlMessage(_ data: Data, from peerId: String) async -> Bool {
-        guard handshakeDrivers[peerId] == nil, sessionKeys[peerId] == nil else { return false }
+    private func handlePreHandshakeBootstrapControlMessage(
+        _ data: Data,
+        from peerId: String,
+        over provisionalConnection: NWConnection? = nil
+    ) async -> Bool {
+        guard handshakeDrivers[peerId] == nil else { return false }
+        if provisionalConnection == nil, sessionKeys[peerId] != nil { return false }
         let frame = HandshakePadding.unwrapIfNeeded(data, label: "rx")
         guard let message = try? JSONDecoder().decode(AppMessage.self, from: frame) else {
             return false
@@ -2421,7 +2579,7 @@ public class P2PConnectionManager: ObservableObject {
             return false
         }
 
-        guard let connection = connections[peerId] else {
+        guard let connection = provisionalConnection ?? connections[peerId] else {
             let line = "⛔️ inbound bootstrap control rejected: peer=\(Self.protocolIdentityLogRedaction) reason=missing_connection"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)

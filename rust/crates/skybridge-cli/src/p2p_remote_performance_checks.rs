@@ -178,6 +178,8 @@ pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
         && evidence.mac_ipad_online_button_enabled_rows > 0
         && evidence.mac_ipad_online_connectable_enabled_rows > 0
         && evidence.mac_ipad_online_strong_match_rows > 0
+        && evidence.mac_ipad_control_port_reachable_samples > 0
+        && evidence.mac_ipad_control_port_unreachable_samples == 0
         && evidence.mac_ipad_connect_click_samples > 0
         && evidence.mac_ipad_real_button_source_click_samples > 0
         && evidence.mac_ipad_connect_no_endpoint_failures == 0
@@ -191,7 +193,7 @@ pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "iosIpadHeartbeat={} dashboardRoleBoot={} macOnlineRows={} realRowSourceRows={} buttonEnabledRows={} connectableEnabledRows={} strongMatchRows={} weakMatchRows={} connectClicks={} buttonSourceClicks={} realEndpointSamples={} noEndpointFailures={} connectStarts={} connectSuccess={} connectFailure={} orderedIdentity={} rowIdentities={} clickIdentities={} startIdentities={} successIdentities={} duplicatePhysicalRows={}",
+            "iosIpadHeartbeat={} dashboardRoleBoot={} macOnlineRows={} realRowSourceRows={} buttonEnabledRows={} connectableEnabledRows={} strongMatchRows={} weakMatchRows={} ipadControlReachable={} ipadControlUnreachable={} connectClicks={} buttonSourceClicks={} realEndpointSamples={} noEndpointFailures={} connectStarts={} connectSuccess={} connectFailure={} orderedIdentity={} rowIdentities={} controlIdentities={} clickIdentities={} startIdentities={} successIdentities={} duplicatePhysicalRows={}",
             evidence.ios_ipad_presence_heartbeat_samples,
             evidence.mac_ipad_dashboard_role_boot_samples,
             evidence.mac_ipad_online_ui_rows,
@@ -200,6 +202,8 @@ pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
             evidence.mac_ipad_online_connectable_enabled_rows,
             evidence.mac_ipad_online_strong_match_rows,
             evidence.mac_ipad_online_weak_match_rows,
+            evidence.mac_ipad_control_port_reachable_samples,
+            evidence.mac_ipad_control_port_unreachable_samples,
             evidence.mac_ipad_connect_click_samples,
             evidence.mac_ipad_real_button_source_click_samples,
             evidence.mac_ipad_connect_real_endpoint_samples,
@@ -214,6 +218,9 @@ pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
             },
             evidence
                 .mac_ipad_online_connectable_identity_sequences
+                .len(),
+            evidence
+                .mac_ipad_control_port_reachable_identity_sequences
                 .len(),
             evidence.mac_ipad_connect_click_identity_sequences.len(),
             evidence.mac_ipad_connect_start_identity_sequences.len(),
@@ -271,6 +278,9 @@ fn p2p_remote_mac_ipad_ordered_connect_success_identity(
                 .split_once('\u{1f}')
                 .map(|(identity, _)| identity)
                 .unwrap_or(identity_source.as_str());
+            let control_probe_sequence = evidence
+                .mac_ipad_control_port_reachable_identity_sequences
+                .get(identity)?;
             let start_sequence = evidence
                 .mac_ipad_connect_start_identity_sequences
                 .get(identity)?;
@@ -278,6 +288,8 @@ fn p2p_remote_mac_ipad_ordered_connect_success_identity(
                 .mac_ipad_connect_success_identity_sequences
                 .get(identity)?;
             (*row_sequence <= *click_sequence
+                && *row_sequence <= *control_probe_sequence
+                && *control_probe_sequence <= *click_sequence
                 && *click_sequence <= *start_sequence
                 && *start_sequence <= *success_sequence)
                 .then(|| identity.to_owned())

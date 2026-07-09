@@ -50,12 +50,14 @@ enum OnlineDeviceConnectionCoordinator {
         unifiedDeviceManager: UnifiedOnlineDeviceManager
     ) throws -> ConnectionPlan {
         let liveDiscoveredCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)
+        let hasUnresolvedLiveControlRoute = unifiedDeviceManager.hasUnresolvedLiveSkyBridgeControlRoute(for: device)
         let protocolFingerprint = preferredLiveProtocolFingerprint(from: liveDiscoveredCandidates)
             ?? authoritativeProtocolFingerprint(
                 for: device,
                 unifiedDeviceManager: unifiedDeviceManager
             )
-        let directDeviceRouteAllowed = UnifiedOnlineDeviceManager.hasDirectSkyBridgeControlRoute(device)
+        let directDeviceRouteAllowed = !hasUnresolvedLiveControlRoute
+            && UnifiedOnlineDeviceManager.hasDirectSkyBridgeControlRoute(device)
             && hasRequiredProtocolIdentityForCachedAppleMobileRoute(
                 device,
                 protocolFingerprint: protocolFingerprint
@@ -84,9 +86,11 @@ enum OnlineDeviceConnectionCoordinator {
                 from: device
             )
         }
-        if let fallback = fallbackDiscoveredDevice(for: device, unifiedDeviceManager: unifiedDeviceManager),
-           !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
-            discoveredCandidates.append(fallback)
+        if liveDiscoveredCandidates.isEmpty, directDeviceRouteAllowed {
+            if let fallback = fallbackDiscoveredDevice(for: device, unifiedDeviceManager: unifiedDeviceManager),
+               !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
+                discoveredCandidates.append(fallback)
+            }
         }
 
         guard !discoveredCandidates.isEmpty else {

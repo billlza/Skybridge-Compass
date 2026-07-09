@@ -399,6 +399,25 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 是否正在广播
     @Published public private(set) var isAdvertising: Bool = false
+
+    public struct AdvertisingReadinessSnapshot: Equatable, Sendable {
+        public let isAdvertising: Bool
+        public let listenerPresent: Bool
+        public let handlerInstalled: Bool
+        public let requestedPort: UInt16?
+        public let actualPort: UInt16?
+        public let serviceType: String
+        public let readyGeneration: UInt64
+
+        public var isReady: Bool {
+            isAdvertising && listenerPresent && handlerInstalled && actualPort.map { $0 > 0 } == true
+        }
+
+        public func isReady(for requestedPort: UInt16) -> Bool {
+            guard isReady, let actualPort else { return false }
+            return requestedPort == 0 || actualPort == requestedPort
+        }
+    }
     
     /// 最后一次错误
     @Published public private(set) var error: Error?
@@ -417,6 +436,11 @@ public class DeviceDiscoveryManager: ObservableObject {
     private static let advertisingStartupTimeoutSeconds: TimeInterval = 8
     private var advertisingStartupContinuation: CheckedContinuation<Void, Error>?
     private var advertisingStartupTimeoutTask: Task<Void, Never>?
+    private var advertisingRequestedPort: UInt16?
+    private var advertisingActualPort: UInt16?
+    private var advertisingServiceType: String = DiscoveryServiceType.skybridge.rawValue
+    private var advertisingHandlerInstalled: Bool = false
+    private var advertisingReadyGeneration: UInt64 = 0
     
     /// 设备缓存
     private var deviceCache: [String: DiscoveredDevice] = [:]
@@ -460,6 +484,18 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 新连接回调
     public var onNewConnection: ((NWConnection, String) -> Void)?
 
+    public var advertisingReadinessSnapshot: AdvertisingReadinessSnapshot {
+        AdvertisingReadinessSnapshot(
+            isAdvertising: isAdvertising,
+            listenerPresent: listener != nil,
+            handlerInstalled: advertisingHandlerInstalled,
+            requestedPort: advertisingRequestedPort,
+            actualPort: advertisingActualPort,
+            serviceType: advertisingServiceType,
+            readyGeneration: advertisingReadyGeneration
+        )
+    }
+
     private enum AdvertisingStartupError: LocalizedError, Sendable {
         case timedOut(seconds: TimeInterval)
         case cancelledBeforeReady
@@ -475,6 +511,17 @@ public class DeviceDiscoveryManager: ObservableObject {
                 return "P2P Bonjour 广播监听器启动被新的启动请求替换"
             }
         }
+    }
+
+    private func resetAdvertisingReadiness(requestedPort: UInt16? = nil) {
+        advertisingRequestedPort = requestedPort
+        advertisingActualPort = nil
+        advertisingServiceType = DiscoveryServiceType.skybridge.rawValue
+        advertisingHandlerInstalled = false
+    }
+
+    private func appendListenerStatus(_ body: String) {
+        SkyBridgeSmokeTraceWriter.appendStatus("p2p-listener \(body)")
     }
     
     /// 本机设备名称
@@ -705,8 +752,19 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// - Parameter port: 监听端口
     public func startAdvertising(port: UInt16 = 9527) async throws {
         if isAdvertising, listener != nil {
-            SkyBridgeLogger.shared.debug("📡 广播已在运行")
-            return
+            let snapshot = advertisingReadinessSnapshot
+            if snapshot.isReady(for: port) {
+                SkyBridgeLogger.shared.debug("📡 广播已在运行且监听器已就绪")
+                return
+            }
+
+            SkyBridgeLogger.shared.warning(
+                "⚠️ P2P Bonjour 广播状态缺少 ready 证明，正在重建监听器: requestedPort=\(port) actualPort=\(snapshot.actualPort.map(String.init) ?? "-") handlerInstalled=\(snapshot.handlerInstalled ? 1 : 0)"
+            )
+            appendListenerStatus(
+                "unhealthy action=rebuild requestedPort=\(port) actualPort=\(snapshot.actualPort.map(String.init) ?? "-") handlerInstalled=\(snapshot.handlerInstalled ? 1 : 0)"
+            )
+            isAdvertising = false
         }
 
         if isAdvertising {
@@ -718,6 +776,8 @@ public class DeviceDiscoveryManager: ObservableObject {
             listener = nil
             staleListener.cancel()
         }
+
+        resetAdvertisingReadiness(requestedPort: port)
         
         // 创建 TXT 记录。Bonjour `deviceId` must be the same protocol authority
         // identity used by MessageA/PIB; Apple mobile/vendor IDs are aliases only.
@@ -750,6 +810,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             }
         } catch {
             SkyBridgeLogger.shared.error("❌ 创建监听器失败: \(error.localizedDescription)")
+            resetAdvertisingReadiness(requestedPort: port)
             self.error = error
             throw error
         }
@@ -779,6 +840,7 @@ public class DeviceDiscoveryManager: ObservableObject {
                 await self?.handleNewIncomingConnection(connection)
             }
         }
+        advertisingHandlerInstalled = true
         
         do {
             try await waitForAdvertisingReady(activeListener)
@@ -787,6 +849,7 @@ public class DeviceDiscoveryManager: ObservableObject {
                 listener = nil
             }
             isAdvertising = false
+            resetAdvertisingReadiness(requestedPort: port)
             self.error = error
             throw error
         }
@@ -803,8 +866,10 @@ public class DeviceDiscoveryManager: ObservableObject {
         finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
         activeListener?.cancel()
         isAdvertising = false
+        resetAdvertisingReadiness()
         
         SkyBridgeLogger.shared.info("📡 停止广播服务")
+        appendListenerStatus("stopped")
     }
     
     // MARK: - Private Methods - Browser
@@ -1816,6 +1881,9 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         switch state {
         case .ready:
+            advertisingActualPort = activeListener.port?.rawValue
+            advertisingServiceType = DiscoveryServiceType.skybridge.rawValue
+            advertisingReadyGeneration += 1
             isAdvertising = true
             error = nil
             finishAdvertisingStartup(.success(()))
@@ -1824,18 +1892,25 @@ public class DeviceDiscoveryManager: ObservableObject {
             } else {
                 SkyBridgeLogger.shared.info("✅ 监听器就绪")
             }
+            appendListenerStatus(
+                "ready service=\(DiscoveryServiceType.skybridge.rawValue) requestedPort=\(advertisingRequestedPort.map(String.init) ?? "-") actualPort=\(advertisingActualPort.map(String.init) ?? "-") handlerInstalled=\(advertisingHandlerInstalled ? 1 : 0) generation=\(advertisingReadyGeneration)"
+            )
 
         case .failed(let error):
             SkyBridgeLogger.shared.error("❌ 监听器失败: \(error.localizedDescription)")
             self.error = error
             isAdvertising = false
             listener = nil
+            resetAdvertisingReadiness()
+            appendListenerStatus("failed error=\(Self.smokeSanitize(error.localizedDescription))")
             finishAdvertisingStartup(.failure(error))
 
         case .cancelled:
             SkyBridgeLogger.shared.info("⏹️ 监听器已取消")
             isAdvertising = false
             listener = nil
+            resetAdvertisingReadiness()
+            appendListenerStatus("cancelled")
             finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
             
         default:

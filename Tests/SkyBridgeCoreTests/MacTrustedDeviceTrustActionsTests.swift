@@ -77,6 +77,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(
             coordinatorSource.contains("resolvedConnectableDiscoveredCandidates(for: device, limit: 6)") &&
+            coordinatorSource.contains("hasUnresolvedLiveSkyBridgeControlRoute(for: device)") &&
             coordinatorSource.contains("!liveDiscoveredCandidates.isEmpty") &&
             coordinatorSource.contains("UnifiedOnlineDeviceManager.hasDirectSkyBridgeControlRoute(device)") &&
             coordinatorSource.contains("缺少新鲜可拨 SkyBridge 控制路由") &&
@@ -259,7 +260,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("SKYBRIDGE_PQC_PEER_DEVICE_ID") &&
             remoteSmokeScript.contains("press_mac_online_ipad_connect_button") &&
             remoteSmokeScript.contains("observe_mac_online_ipad_connected_row") &&
-            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout \"$MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS\" swift -") &&
+            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
             remoteSmokeScript.contains("subprocess.Popen(command, stdin=subprocess.PIPE)") &&
             remoteSmokeScript.contains("kAXIdentifierAttribute") &&
             remoteSmokeScript.contains("appendButtonClickEvidence") &&
@@ -387,7 +388,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("subtreeContainsTargetDevice(child) && subtreeContainsConnectButton(child)") &&
             remoteSmokeScript.contains("AXUIElementSetMessagingTimeout(root, 0.25)") &&
             remoteSmokeScript.contains("let maxAXTraversalNodes = 5000") &&
-            remoteSmokeScript.contains("MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS=\"${SKYBRIDGE_SMOKE_MAC_ONLINE_AX_HELPER_TIMEOUT_SECONDS:-60}\"") &&
+            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
             remoteSmokeScript.contains("SKYBRIDGE_MAC_ONLINE_APP_PID=\"$MAC_ONLINE_PID\"") &&
             remoteSmokeScript.contains("let targetProcessIdentifier = ProcessInfo.processInfo.environment[\"SKYBRIDGE_MAC_ONLINE_APP_PID\"]") &&
             remoteSmokeScript.contains("app = candidates.first { $0.processIdentifier == targetProcessIdentifier }") &&
@@ -470,6 +471,18 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             unifiedSource.contains("device.pubKeyFP ?? \"\"") &&
             unifiedSource.contains("public func smokeDiscoveryDiagnostics(limit: Int = 16)"),
             "Discovery fingerprint changes must drive presentation refreshes, and the Mac online smoke path must expose raw discovery evidence when no connectable row appears."
+        )
+        XCTAssertTrue(
+            unifiedSource.contains("public func hasUnresolvedLiveSkyBridgeControlRoute(for onlineDevice: OnlineDevice) -> Bool") &&
+            discoverySource.contains("let endpointHost = preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? \"-\"") &&
+            discoverySource.contains("let endpointPort = preferredCandidate?.portMap[\"_skybridge._tcp\"]") &&
+            discoverySource.contains("guard let preferredCandidate else { return \"-\" }"),
+            "Mac online smoke evidence must fail closed when live discovery has not resolved a dialable control endpoint."
+        )
+        XCTAssertFalse(
+            discoverySource.contains("preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? device.ipv4") ||
+            discoverySource.contains("?? device.portMap[\"_skybridge._tcp\"]"),
+            "Mac online smoke must not report stale OnlineDevice presentation host/port as the endpoint selected for a real click."
         )
         XCTAssertTrue(
             coordinatorSource.contains("let liveDiscoveredCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)") &&
@@ -782,7 +795,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertTrue(
             discoverySource.contains("cachedPresentationIdentityKey(for: device)") &&
             discoverySource.contains("accessibilityIdentityByDeviceId") &&
-            discoverySource.contains("fingerprintSmokeIdentity(candidate.pubKeyFP) != nil"),
+            discoverySource.contains("fingerprintSmokeIdentity(from: candidate.pubKeyFP) != nil"),
             "Online row accessibility identities should use the presentation snapshot unless live Bonjour identity evidence is fresher than the cached row identity."
         )
     }

@@ -416,9 +416,37 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             .map { $0 }
     }
 
+    public func hasUnresolvedLiveSkyBridgeControlRoute(for onlineDevice: OnlineDevice) -> Bool {
+        resolvedDiscoveredCandidates(for: onlineDevice, limit: 6)
+            .contains { candidate in
+                Self.isUnresolvedLiveSkyBridgeControlRoute(candidate, for: onlineDevice)
+            }
+    }
+
+    private nonisolated static func isUnresolvedLiveSkyBridgeControlRoute(
+        _ candidate: DiscoveredDevice,
+        for onlineDevice: OnlineDevice
+    ) -> Bool {
+        guard hasSkyBridgeControlHint(services: candidate.services, portMap: candidate.portMap),
+              !hasResolvedSkyBridgeControlRoute(candidate) else {
+            return false
+        }
+        if isAppleMobilePresentation(candidate),
+           BonjourInteropContract.normalizedPubKeyFingerprint(candidate.pubKeyFP) == nil {
+            return false
+        }
+
+        let onlineAliases = normalizedPeerAliases(for: onlineDevice)
+        let candidateAliases = normalizedPeerAliases(for: candidate)
+        return !onlineAliases.isEmpty && !candidateAliases.isEmpty && !onlineAliases.isDisjoint(with: candidateAliases)
+    }
+
     public func hasResolvedConnectableControlRoute(for onlineDevice: OnlineDevice) -> Bool {
         if !resolvedConnectableDiscoveredCandidates(for: onlineDevice, limit: 1).isEmpty {
             return true
+        }
+        if hasUnresolvedLiveSkyBridgeControlRoute(for: onlineDevice) {
+            return false
         }
         guard onlineDevice.isConnectable || onlineDevice.connectionStatus == .connected else {
             return false

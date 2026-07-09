@@ -499,7 +499,7 @@ public enum ConnectableAddressCanonicalizer {
     }
 
     public static func prefersPeerToPeer(for raw: String?) -> Bool {
-        guard lookupKey(raw) != nil else { return true }
+        guard lookupKey(raw) != nil else { return false }
         return isLinkLocal(raw)
     }
 

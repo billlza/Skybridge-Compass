@@ -122,6 +122,23 @@ grep -q 'subprocess.Popen(command, stdin=subprocess.PIPE)' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad Swift Accessibility probes must be supervised without shell job-termination noise"
 grep -q 'start_macos_online_ipad_client' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must wait for the real SkyBridge app process before clicking"
+grep -q 'ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad TCP probe must only emit positive evidence when iOS listener readiness is proven"
+grep -q 'reason=listener-not-ready' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad TCP probe must fail closed when TCP is reachable but iOS listener readiness is missing"
+grep -q 'ios_listener_ready_for_control_port' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad TCP probe must bind positive evidence to iOS listener-ready status"
+grep -q 'copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status-listener"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must read the app-authored iOS cache status"
+grep -q 'lifecycle_pattern = re.compile' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must parse the latest structured listener lifecycle status"
+grep -Fq 'p2p-listener\s+ready' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must require the latest structured ready state"
+! grep -q 'grep -Fq "监听器就绪，端口: ${port}" "$IOS_STATUS_LOCAL"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad listener readiness must not accept stale legacy console ready lines"
+if perl -0ne 'exit(/reason=listener-not-ready.*?\n\s*sleep 1\n\s*continue/s ? 0 : 1)' "$SMOKE_SCRIPT"; then
+  fail "Mac online iPad listener-not-ready branch must still reach the timeout failure check"
+fi
 script_has_literal "RUN_MAC_ONLINE_IPAD_SMOKE=\"\${SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD:-1}\"" \
   || fail "Mac online iPad smoke must be explicitly skippable for security-notice profiles"
 grep -q 'profile-separated-from-active-remote-control-session' "$SMOKE_SCRIPT" \
@@ -248,6 +265,16 @@ script_has_literal "mac-control-port reachable=1 host=\$host port=\$port source=
   || fail "macOS control port probe should emit positive TCP reachability evidence"
 grep -q 'failed stage=mac-host phase=control-port-probe reason=tcp-unreachable' "$SMOKE_SCRIPT" \
   || fail "macOS control port probe should fail fast with a structured startup failure"
+grep -q 'verify_ipad_control_port_reachable_from_mac' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must actively probe the iPad control TCP port before clicking Connect"
+grep -q 'ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad control-port probe should emit positive TCP-only reachability evidence only after listener readiness"
+grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=tcp-unreachable' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad control-port probe should fail fast before UI click"
+grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=listener-not-ready' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad control-port probe should fail fast when listener readiness is missing"
+grep -q 'latest_mac_online_ipad_control_endpoint' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad probe must derive host/port from the app-authored OnlineDeviceCard row"
 grep -q 'minimum_source_samples' "$SMOKE_SCRIPT" \
   || fail "remote performance validation should require source helper heartbeats inside the final window"
 ! grep -q 'Mac smoke source aggregate renderFPS below live-source budget' "$SMOKE_SCRIPT" \
