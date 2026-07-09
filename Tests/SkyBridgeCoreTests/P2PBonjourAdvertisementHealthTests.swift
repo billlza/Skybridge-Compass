@@ -744,6 +744,11 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             to: "private func waitForBootstrapControlConnection",
             in: p2pSource
         )
+        let bootstrapWaitBody = try sourceSlice(
+            from: "private func waitForBootstrapControlConnection(",
+            to: "private func sendBootstrapFrame",
+            in: p2pSource
+        )
 
         XCTAssertTrue(makeConnectionBody.contains("params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)"))
         XCTAssertFalse(makeConnectionBody.contains("params.includePeerToPeer = true"))
@@ -755,6 +760,13 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             "Direct hostPort endpoints should only opt into peer-to-peer for validated link-local addresses; Bonjour/service endpoints keep peer-to-peer through the non-hostPort branch."
         )
         XCTAssertTrue(bootstrapExchangeBody.contains("peerToPeer=\\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0)"))
+        XCTAssertTrue(
+            bootstrapWaitBody.contains("case .waiting(let error):") &&
+            bootstrapWaitBody.contains("connection.currentPath") &&
+            p2pSource.contains("reason=local-network-permission-denied") &&
+            bootstrapWaitBody.contains("P2PDiscoveryError.localNetworkPermissionDenied"),
+            "Strict-PQC bootstrap must fail fast when Network.framework reports Local Network privacy denial, instead of collapsing the app-side authorization failure into a generic timeout."
+        )
     }
 
     func testRemoteControlRoutePreflightDoesNotEnterSessionLifecycle() throws {

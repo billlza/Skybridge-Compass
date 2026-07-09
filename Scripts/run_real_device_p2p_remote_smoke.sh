@@ -2022,6 +2022,17 @@ wait_for_mac_online_connected_row() {
   local started_at
   started_at="$(date +%s)"
   while true; do
+    if [[ -f "$MAC_ONLINE_STATUS" ]] \
+      && grep -qE 'bootstrap-control-waiting .*reason=local-network-permission-denied|bootstrap-control-failed .*reason=local-network-permission-denied' "$MAC_ONLINE_STATUS"; then
+      printf '%s failed stage=mac-online-ipad phase=app-local-network-privacy reason=local-network-permission-denied identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+      sync_mac_online_launch_stdio
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
+      return 1
+    fi
     if SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_ONLINE_STATUS" \
       SKYBRIDGE_MAC_ONLINE_APP_PID="$MAC_ONLINE_PID" \
       SKYBRIDGE_TARGET_IPAD_IDENTITY="$IOS_PQC_DEVICE_ID" \

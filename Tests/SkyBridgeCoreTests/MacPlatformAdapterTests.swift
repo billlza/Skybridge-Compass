@@ -245,13 +245,13 @@ struct CoordinateConversionIntegrationTests {
 @Suite("Permission Status Tests")
 struct PermissionStatusTests {
     
-    @Test("本地网络权限应始终返回已授权")
+    @Test("本地网络权限不应被静态假定为已授权")
     @MainActor
-    func testLocalNetworkPermissionAlwaysAuthorized() async {
+    func testLocalNetworkPermissionIsNotAssumedAuthorized() async {
         if #available(macOS 14.0, *) {
             let adapter = MacPlatformAdapter()
             let status = await adapter.checkPermission(.localNetwork)
-            #expect(status == .authorized)
+            #expect(status == .notDetermined)
         }
     }
 }

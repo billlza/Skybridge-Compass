@@ -40,6 +40,7 @@ public enum P2PDiscoveryError: Error, LocalizedError {
     case timeout
     case scanningFailed
     case noConnectableEndpoint
+    case localNetworkPermissionDenied
     case strictPQCTrustPreflightFailed(String)
 
     public var errorDescription: String? {
@@ -54,6 +55,8 @@ public enum P2PDiscoveryError: Error, LocalizedError {
             return "扫描失败"
         case .noConnectableEndpoint:
             return "设备未暴露可连接的 SkyBridge 控制端点"
+        case .localNetworkPermissionDenied:
+            return "本地网络权限被系统拒绝，请在 macOS 系统设置的本地网络权限中允许 SkyBridge Compass Pro 后重试"
         case .strictPQCTrustPreflightFailed(let reason):
             return "strict PQC 信任预检失败：\(reason)"
         }

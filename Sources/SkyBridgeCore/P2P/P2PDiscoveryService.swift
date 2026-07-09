@@ -295,6 +295,7 @@ public class P2PDiscoveryService: BaseManager {
 
     private final class WaitForConnectionContext: @unchecked Sendable {
         private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let waitingReported = OSAllocatedUnfairLock(initialState: false)
         private let continuation: CheckedContinuation<Void, Error>
         var timeoutTask: Task<Void, Never>?
 
@@ -315,6 +316,14 @@ public class P2PDiscoveryService: BaseManager {
                 continuation.resume()
             case .failure(let error):
                 continuation.resume(throwing: error)
+            }
+        }
+
+        func shouldReportWaiting() -> Bool {
+            waitingReported.withLock { didReport -> Bool in
+                guard !didReport else { return false }
+                didReport = true
+                return true
             }
         }
     }
@@ -1127,13 +1136,13 @@ public class P2PDiscoveryService: BaseManager {
         return endpoints
     }
 
-    private static func smokeEndpointPlanSummary(_ endpoints: [NWEndpoint]) -> String {
+    private nonisolated static func smokeEndpointPlanSummary(_ endpoints: [NWEndpoint]) -> String {
         endpoints.enumerated().map { index, endpoint in
             "\(index):\(smokeEndpointClass(endpoint)):\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
         }.joined(separator: ",")
     }
 
-    private static func smokeEndpointClass(_ endpoint: NWEndpoint) -> String {
+    private nonisolated static func smokeEndpointClass(_ endpoint: NWEndpoint) -> String {
         switch endpoint {
         case .service:
             return "service"
@@ -1141,6 +1150,56 @@ public class P2PDiscoveryService: BaseManager {
             return "direct-host"
         default:
             return "other"
+        }
+    }
+
+    private nonisolated static func isLocalNetworkPermissionDenied(_ error: NWError, path: NWPath?) -> Bool {
+        if #available(macOS 11.0, iOS 14.0, *),
+           path?.unsatisfiedReason == .localNetworkDenied {
+            return true
+        }
+        let details = [
+            String(describing: error),
+            (error as NSError).localizedDescription
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return details.contains("local network prohibited")
+            || details.contains("local network denied")
+            || details.contains("localnetworkdenied")
+    }
+
+    private nonisolated static func bootstrapConnectionWaitingSummary(_ error: NWError, path: NWPath?) -> String {
+        let nsError = error as NSError
+        var fields = [
+            "error_domain=\(nsError.domain)",
+            "code=\(nsError.code)"
+        ]
+        if Self.isLocalNetworkPermissionDenied(error, path: path) {
+            fields.append("reason=local-network-permission-denied")
+        }
+        if #available(macOS 11.0, iOS 14.0, *),
+           let unsatisfiedReason = path?.unsatisfiedReason {
+            fields.append("unsatisfiedReason=\(Self.unsatisfiedReasonDiagnosticCode(unsatisfiedReason))")
+        }
+        return fields.joined(separator: " ")
+    }
+
+    @available(macOS 11.0, iOS 14.0, *)
+    private nonisolated static func unsatisfiedReasonDiagnosticCode(_ reason: NWPath.UnsatisfiedReason) -> String {
+        switch reason {
+        case .notAvailable:
+            return "notAvailable"
+        case .cellularDenied:
+            return "cellularDenied"
+        case .wifiDenied:
+            return "wifiDenied"
+        case .localNetworkDenied:
+            return "localNetworkDenied"
+        case .vpnInactive:
+            return "vpnInactive"
+        @unknown default:
+            return "unknown"
         }
     }
 
@@ -1489,7 +1548,12 @@ public class P2PDiscoveryService: BaseManager {
                 "bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) peerToPeer=\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0) endpoint=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
             )
             do {
-                try await waitForBootstrapControlConnection(connection, timeoutSeconds: min(10, max(3, timeoutSeconds)))
+                try await waitForBootstrapControlConnection(
+                    connection,
+                    endpoint: endpoint,
+                    attemptIndex: index,
+                    timeoutSeconds: min(10, max(3, timeoutSeconds))
+                )
                 let connectLatencyMs = Date().timeIntervalSince(connectStartedAt) * 1_000.0
                 RemoteControlSmokeStatusWriter.append(
                     String(
@@ -1533,6 +1597,8 @@ public class P2PDiscoveryService: BaseManager {
 
     private func waitForBootstrapControlConnection(
         _ connection: NWConnection,
+        endpoint: NWEndpoint,
+        attemptIndex: Int,
         timeoutSeconds: TimeInterval
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -1541,6 +1607,16 @@ public class P2PDiscoveryService: BaseManager {
                 switch state {
                 case .ready:
                     context.complete(.success(()))
+                case .waiting(let error):
+                    let path = connection.currentPath
+                    if context.shouldReportWaiting() {
+                        RemoteControlSmokeStatusWriter.append(
+                            "bootstrap-control-waiting index=\(attemptIndex) endpointClass=\(Self.smokeEndpointClass(endpoint)) \(Self.bootstrapConnectionWaitingSummary(error, path: path))"
+                        )
+                    }
+                    if Self.isLocalNetworkPermissionDenied(error, path: path) {
+                        context.complete(.failure(P2PDiscoveryError.localNetworkPermissionDenied))
+                    }
                 case .failed(let error):
                     context.complete(.failure(error))
                 case .cancelled:

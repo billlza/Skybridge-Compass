@@ -81,8 +81,9 @@ extension DevicePermissionManager {
  // 检查辅助功能权限
         results[.accessibility] = checkAccessibilityPermission()
         
- // 本地网络权限在 macOS 上始终授权
-        results[.localNetwork] = .authorized
+        // macOS Local Network privacy has no reliable static query API.
+        // Route attempts surface denial through Network.framework.
+        results[.localNetwork] = .notDetermined
         
         return results
     }

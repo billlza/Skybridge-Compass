@@ -381,6 +381,8 @@ private final class LocalLanInteropHostCoordinator {
                 return "mac_smoke_reconnect_control_timeout"
             case .scanningFailed:
                 return "mac_smoke_reconnect_scanning_failed"
+            case .localNetworkPermissionDenied:
+                return "mac_smoke_reconnect_local_network_permission_denied"
             case .strictPQCTrustPreflightFailed:
                 return "mac_smoke_reconnect_strict_pqc_trust_preflight_failed"
             }

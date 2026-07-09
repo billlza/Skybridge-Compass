@@ -216,7 +216,7 @@ extension MacPlatformAdapter: PlatformAdapter {
         case .accessibility:
             return checkAccessibilityPermission()
         case .localNetwork:
-            return .authorized  // macOS 不需要显式授权本地网络
+            return .notDetermined
         case .camera, .microphone:
             return .notDetermined  // 暂不实现
         }

@@ -126,6 +126,10 @@ grep -q 'ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDevi
   || fail "Mac online iPad TCP probe must only emit positive evidence when iOS listener readiness is proven"
 grep -q 'reason=listener-not-ready' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad TCP probe must fail closed when TCP is reachable but iOS listener readiness is missing"
+grep -q 'phase=app-local-network-privacy reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must fail fast when the packaged app is denied Local Network privacy"
+grep -q 'bootstrap-control-waiting .*reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must consume app-side Local Network denial evidence instead of waiting for connected-row timeout"
 grep -q 'ios_listener_ready_for_control_port' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad TCP probe must bind positive evidence to iOS listener-ready status"
 grep -q 'copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status-listener"' "$SMOKE_SCRIPT" \
@@ -273,6 +277,8 @@ grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=tcp-u
   || fail "Mac online iPad control-port probe should fail fast before UI click"
 grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=listener-not-ready' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad control-port probe should fail fast when listener readiness is missing"
+grep -q 'failed stage=mac-online-ipad phase=app-local-network-privacy reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad control flow should distinguish packaged-app Local Network denial from connected-row timeout"
 grep -q 'latest_mac_online_ipad_control_endpoint' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad probe must derive host/port from the app-authored OnlineDeviceCard row"
 grep -q 'minimum_source_samples' "$SMOKE_SCRIPT" \

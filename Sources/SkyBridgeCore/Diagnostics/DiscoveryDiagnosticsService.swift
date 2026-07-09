@@ -252,12 +252,7 @@ public final class DiscoveryDiagnosticsService: ObservableObject {
         // iOS 的“本地网络权限”没有可靠的静态查询 API：
         // 只有在发起 Bonjour 浏览/监听时系统才会弹窗或返回失败。
         // 因此这里不做“猜测”，避免把“有网”误判为“已授权”。
-#if os(macOS)
-        // macOS 没有 iOS 那套 Local Network 权限弹窗机制（以 sandbox/防火墙为主）。
-        return .granted
-#else
         return .unknown
-#endif
     }
     
     /// 检查 Bonjour 白名单配置
