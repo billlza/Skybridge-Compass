@@ -85,12 +85,11 @@ struct KeychainManagerSupabaseConfigTests {
     }
 
     @Test("Auth session storage uses the same backend for store load and delete")
-    func testAuthSessionStorageUsesConsistentBackend() throws {
+    func testAuthSessionStorageUsesConsistentBackend() async throws {
         guard #available(macOS 14.0, *) else { return }
 
         let keychain = KeychainManager.shared
-        try? keychain.deleteAuthSession()
-        defer { try? keychain.deleteAuthSession() }
+        try? await keychain.deleteAuthSession()
 
         let session = AuthSession(
             accessToken: "access-token",
@@ -102,9 +101,9 @@ struct KeychainManagerSupabaseConfigTests {
             issuedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        try keychain.storeAuthSession(session)
+        try await keychain.storeAuthSession(session)
 
-        let loadedSession = try keychain.loadAuthSessionStrict()
+        let loadedSession = try await keychain.loadAuthSessionStrict()
         #expect(loadedSession?.accessToken == session.accessToken)
         #expect(loadedSession?.refreshToken == session.refreshToken)
         #expect(loadedSession?.userIdentifier == session.userIdentifier)
@@ -113,8 +112,27 @@ struct KeychainManagerSupabaseConfigTests {
         #expect(loadedSession?.avatarURL == session.avatarURL)
         #expect(loadedSession?.issuedAt == session.issuedAt)
 
-        try keychain.deleteAuthSession()
-        #expect(try keychain.loadAuthSessionStrict() == nil)
+        try await keychain.deleteAuthSession()
+        #expect(try await keychain.loadAuthSessionStrict() == nil)
+    }
+
+    @Test("Auth session writes and deletes remain ordered on one actor")
+    func testAuthSessionWriteDeleteOrdering() async throws {
+        guard #available(macOS 14.0, *) else { return }
+
+        let keychain = KeychainManager.shared
+        let session = AuthSession(
+            accessToken: "ordered-access-token",
+            refreshToken: nil,
+            userIdentifier: "ordered-user",
+            displayName: "Ordered User",
+            issuedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+
+        try await keychain.storeAuthSession(session)
+        try await keychain.deleteAuthSession()
+
+        #expect(try await keychain.loadAuthSessionStrict() == nil)
     }
 
     private func clearSupabaseEntries(using keychain: KeychainManager) throws {

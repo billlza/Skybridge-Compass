@@ -263,9 +263,7 @@ struct LocalWebRTCSmokeHost {
             reporter.append("auth-supabase-skip-smoke")
         }
         reporter.append("auth-update-session-start")
-        try await MainActor.run {
-            try AuthenticationService.shared.updateSession(session)
-        }
+        try await AuthenticationService.shared.updateSession(session)
         reporter.append("auth-update-session-done")
         reporter.append("auth-bind-tenant-start")
         await TenantAccessController.shared.bindAuthentication(session: session)

@@ -73,19 +73,17 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
             SupabaseService.shared.updateConfiguration(.init(url: baseURL, anonKey: "anon-key"))
         }
         _ = await AuthenticationService.shared.signOutAndWait()
-        try await MainActor.run {
-            try AuthenticationService.shared.updateSession(
-                AuthSession(
-                    accessToken: Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: -3600),
-                    refreshToken: "refresh-token",
-                    userIdentifier: "user-1",
-                    nebulaId: "NEBULA-1",
-                    displayName: "UITest User",
-                    avatarURL: nil,
-                    issuedAt: .distantPast
-                )
+        try await AuthenticationService.shared.updateSession(
+            AuthSession(
+                accessToken: Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: -3600),
+                refreshToken: "refresh-token",
+                userIdentifier: "user-1",
+                nebulaId: "NEBULA-1",
+                displayName: "UITest User",
+                avatarURL: nil,
+                issuedAt: .distantPast
             )
-        }
+        )
         defer {
             Task { @MainActor in
                 _ = await AuthenticationService.shared.signOutAndWait()
@@ -99,6 +97,28 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
 
         XCTAssertEqual(server.requestCount, 1)
         XCTAssertEqual(Set(tokens.compactMap { $0 }).count, 1)
+    }
+
+    func testGuestSessionDeletionCannotDeleteFollowingAuthenticatedSession() async throws {
+        let service = AuthenticationService.shared
+        _ = await service.signOutAndWait()
+        service.activateGuestSession()
+
+        let authenticatedSession = AuthSession(
+            accessToken: "authenticated-access-token",
+            refreshToken: "authenticated-refresh-token",
+            userIdentifier: "authenticated-user",
+            displayName: "Authenticated User",
+            issuedAt: Date(timeIntervalSince1970: 1_700_000_002)
+        )
+        try await service.updateSession(authenticatedSession)
+
+        let persistedSession = try await KeychainManager.shared.loadAuthSessionStrict()
+        XCTAssertEqual(persistedSession, authenticatedSession)
+
+        _ = await service.signOutAndWait()
+        let sessionAfterSignOut = try await KeychainManager.shared.loadAuthSessionStrict()
+        XCTAssertNil(sessionAfterSignOut)
     }
 
     private nonisolated static func makeSupabaseAccessToken(baseURL: URL, expirationOffset: TimeInterval) -> String {

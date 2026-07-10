@@ -9,9 +9,7 @@ import OSLog
 /// - 协议解析/落盘逻辑复用现有 `FileTransferManager.receiveFile(from:deviceId:deviceName:)`
 @MainActor
 public final class FileTransferListenerService: ObservableObject {
-    private final class StartState: @unchecked Sendable {
-        var finished = false
-    }
+    private static let listenerStartTimeout: Duration = .seconds(5)
 
     private enum ListenerHealthState {
         case stopped
@@ -129,17 +127,18 @@ public final class FileTransferListenerService: ObservableObject {
             return false
         }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let state = StartState()
+            let startupGate = NetworkListenerStartupGate()
             probe.stateUpdateHandler = { update in
                 switch update {
                 case .ready:
-                    guard !state.finished else { return }
-                    state.finished = true
+                    guard startupGate.observe(.ready) == .completesStartup else { return }
                     probe.cancel()
                     continuation.resume(returning: true)
-                case .failed, .cancelled:
-                    guard !state.finished else { return }
-                    state.finished = true
+                case .failed:
+                    guard startupGate.observe(.failed) == .completesStartup else { return }
+                    continuation.resume(returning: false)
+                case .cancelled:
+                    guard startupGate.observe(.cancelled) == .completesStartup else { return }
                     continuation.resume(returning: false)
                 default:
                     break
@@ -147,10 +146,8 @@ public final class FileTransferListenerService: ObservableObject {
             }
             probe.start(queue: queue)
  // 兜底超时：若探测器卡在 .setup/.waiting 永不就绪，强制以“不可绑定”收尾，避免 continuation 永不 resume。
- // 与 stateUpdateHandler 同在 `queue` 上串行执行，故对 state.finished 的访问无数据竞争。
             queue.asyncAfter(deadline: .now() + 2.0) {
-                guard !state.finished else { return }
-                state.finished = true
+                guard startupGate.claimTimeout() else { return }
                 probe.cancel()
                 continuation.resume(returning: false)
             }
@@ -268,40 +265,54 @@ public final class FileTransferListenerService: ObservableObject {
 
     private func start(listener: NWListener) async throws -> UInt16 {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
-            let startState = StartState()
+            let startupGate = NetworkListenerStartupGate()
 
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 Task { @MainActor in
                     switch state {
                     case .ready:
-                        self.listenerHealthState = .ready
                         let boundPort = listener.port?.rawValue ?? 0
+                        guard boundPort > 0 else {
+                            guard startupGate.observe(.failed) == .completesStartup else { return }
+                            listener.cancel()
+                            self.listenerHealthState = .failed
+                            self.activePort = nil
+                            self.bonjourPublished = false
+                            ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+                            self.log.error("FileTransfer listener became ready without a bound port")
+                            continuation.resume(throwing: POSIXError(.EADDRNOTAVAIL))
+                            return
+                        }
+                        let observation = startupGate.observe(.ready)
+                        guard observation != .ignored else { return }
+                        self.listenerHealthState = .ready
                         self.activePort = boundPort
                         ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
                         self.log.info("✅ FileTransfer listener ready on \(boundPort)")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(returning: boundPort)
                         }
                     case .failed(let error):
+                        let observation = startupGate.observe(.failed)
+                        guard observation != .ignored else { return }
                         self.listenerHealthState = .failed
                         self.activePort = nil
                         self.bonjourPublished = false
                         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.error("❌ FileTransfer listener failed: \(String(describing: error))")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
+                        let observation = startupGate.observe(.cancelled)
+                        guard observation != .ignored else { return }
                         self.listenerHealthState = .cancelled
                         self.activePort = nil
                         self.bonjourPublished = false
                         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.info("⏹️ FileTransfer listener cancelled")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(throwing: POSIXError(.ECANCELED))
                         }
                     default:
@@ -317,6 +328,31 @@ public final class FileTransferListenerService: ObservableObject {
             }
 
             listener.start(queue: queue)
+            Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: Self.listenerStartTimeout)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard startupGate.observe(.failed) == .completesStartup else { return }
+                    listener.cancel()
+                    self?.listenerHealthState = .failed
+                    self?.activePort = nil
+                    self?.bonjourPublished = false
+                    ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+                    self?.log.error("FileTransfer listener timeout task failed: \(String(describing: error))")
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard startupGate.claimTimeout() else { return }
+                listener.cancel()
+                self?.listenerHealthState = .failed
+                self?.activePort = nil
+                self?.bonjourPublished = false
+                ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+                self?.log.error("FileTransfer listener start timed out")
+                continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+            }
         }
     }
 

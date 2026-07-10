@@ -19,6 +19,11 @@
 #include <stdlib.h>
 
 /**
+ * C ABI version for this header/library contract.
+ */
+#define Q_PERIAPT_ABI_VERSION 1
+
+/**
  * Success.
  */
 #define Q_PERIAPT_OK 0
@@ -78,6 +83,11 @@
 #define Q_PERIAPT_MLKEM768_SK_LEN 2400
 
 /**
+ * ML-KEM-768 X-Wing seed secret length, bytes.
+ */
+#define Q_PERIAPT_MLKEM768_XWING_SEED_LEN 32
+
+/**
  * ML-KEM-768 public-key length, bytes.
  */
 #define Q_PERIAPT_MLKEM768_PK_LEN 1184
@@ -96,6 +106,32 @@
  * Combined shared-secret length, bytes.
  */
 #define Q_PERIAPT_SECRET_LEN 32
+
+/**
+ * Return the C ABI version implemented by this library. Consumers should compare this against
+ * [`Q_PERIAPT_ABI_VERSION`] at startup before trusting any length constants or entry points.
+ */
+uint32_t q_periapt_abi_version(void);
+
+/**
+ * Return the crate version string for the linked native library.
+ */
+const char *q_periapt_version(void);
+
+/**
+ * Return the fixed suite id implemented by this C ABI as a NUL-terminated ASCII string.
+ */
+const char *q_periapt_fixed_suite_id(void);
+
+/**
+ * Return the fixed suite id length, excluding the terminating NUL.
+ */
+uintptr_t q_periapt_fixed_suite_id_len(void);
+
+/**
+ * Return a stable ASCII name for a status code. Unknown status codes return `UNKNOWN_STATUS`.
+ */
+const char *q_periapt_status_name(int32_t code);
 
 /**
  * Verify a detached-signed agility policy (`toml` + `signature`) under `vk` with the suite's
@@ -138,6 +174,26 @@ int32_t q_periapt_mlkem768_keypair(const uint8_t *seed,
                                    uintptr_t out_pk_len);
 
 /**
+ * Deterministically derive an X-Wing-compatible ML-KEM-768 key pair from a 32-byte seed.
+ *
+ * The returned secret key is the 32-byte seed accepted by
+ * [`Q_PERIAPT_PROFILE_COMPAT_XWING`] decapsulation. The expanded 2400-byte secret key
+ * produced by [`q_periapt_mlkem768_keypair`] is intentionally **not** admitted to
+ * `CompatXWing`; use it with [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`].
+ *
+ * # Safety
+ * `seed`/`out_sk_seed`/`out_pk` must point to readable/writable regions of the given
+ * lengths (`32` / [`Q_PERIAPT_MLKEM768_XWING_SEED_LEN`] /
+ * [`Q_PERIAPT_MLKEM768_PK_LEN`]).
+ */
+int32_t q_periapt_mlkem768_xwing_keypair(const uint8_t *seed,
+                                         uintptr_t seed_len,
+                                         uint8_t *out_sk_seed,
+                                         uintptr_t out_sk_seed_len,
+                                         uint8_t *out_pk,
+                                         uintptr_t out_pk_len);
+
+/**
  * Deterministically derive an X25519 key pair from a 32-byte scalar.
  *
  * # Safety
@@ -155,7 +211,9 @@ int32_t q_periapt_x25519_keypair(const uint8_t *secret,
  *
  * Writes `out_ct_pq` ([`Q_PERIAPT_MLKEM768_CT_LEN`]), `out_ct_trad` ([`Q_PERIAPT_X25519_LEN`])
  * and `out_secret` ([`Q_PERIAPT_SECRET_LEN`]). `context` is bound only under
- * [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`] and must then be non-empty.
+ * [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`] and must then be non-empty. `CompatXWing`
+ * uses the X-Wing-safe ML-KEM seed backend internally; `ContextBound` uses the
+ * expanded ML-KEM backend.
  *
  * # Safety
  * Every `(ptr, len)` pair must describe a valid region; output buffers must be
@@ -186,6 +244,11 @@ int32_t q_periapt_hybrid_encapsulate(uint8_t profile,
  * Hybrid decapsulation. Returns [`Q_PERIAPT_OK`] and writes `out_secret`
  * ([`Q_PERIAPT_SECRET_LEN`]) for any correctly-sized ciphertext; an invalid ciphertext
  * yields a pseudorandom secret (implicit rejection — no oracle).
+ *
+ * `sk_pq` is profile-specific: [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`] expects the
+ * 2400-byte expanded key from [`q_periapt_mlkem768_keypair`], while
+ * [`Q_PERIAPT_PROFILE_COMPAT_XWING`] expects the 32-byte seed from
+ * [`q_periapt_mlkem768_xwing_keypair`].
  *
  * # Safety
  * Every `(ptr, len)` pair must describe a valid region; `out_secret` must be

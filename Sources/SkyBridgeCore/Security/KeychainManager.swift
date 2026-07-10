@@ -618,7 +618,12 @@ extension KeychainManager {
     private nonisolated static let authSessionService = "com.skybridge.compass.authsession"
     private nonisolated static let authSessionAccount = "primary"
 
-    public nonisolated func storeAuthSession(_ session: AuthSession) throws {
+    /// Persist an authentication session on the KeychainManager actor.
+    ///
+    /// Security.framework calls are synchronous. Keeping this method actor-isolated
+    /// preserves write ordering while allowing MainActor callers to suspend instead
+    /// of blocking the UI during `SecItemUpdate`.
+    public func storeAuthSession(_ session: AuthSession) throws {
         let data = try JSONEncoder().encode(session)
         if Self.useInMemoryKeychain {
             let key = Self.authSessionService + "|" + Self.authSessionAccount
@@ -639,11 +644,11 @@ extension KeychainManager {
         }
     }
 
-    public nonisolated func loadAuthSession() -> AuthSession? {
+    public func loadAuthSession() -> AuthSession? {
         try? loadAuthSessionStrict()
     }
 
-    public nonisolated func loadAuthSessionStrict() throws -> AuthSession? {
+    public func loadAuthSessionStrict() throws -> AuthSession? {
         guard let data = try loadKeyDataStrict(
             service: Self.authSessionService,
             account: Self.authSessionAccount
@@ -661,7 +666,7 @@ extension KeychainManager {
         }
     }
 
-    public nonisolated func deleteAuthSession() throws {
+    public func deleteAuthSession() throws {
         try deleteAPIKey(service: Self.authSessionService, account: Self.authSessionAccount)
     }
 }

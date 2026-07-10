@@ -6,10 +6,7 @@ import os.lock
 
 final class LocalFileTransferHTTPServer: @unchecked Sendable {
     typealias TestingStartHook = @Sendable () async -> Void
-
-    private final class StartState: @unchecked Sendable {
-        var finished = false
-    }
+    private static let listenerStartTimeout: Duration = .seconds(5)
 
     struct AccessGrant: Sendable {
         let token: String
@@ -147,21 +144,41 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let startState = StartState()
+            let startupGate = NetworkListenerStartupGate()
             listener.stateUpdateHandler = { state in
-                guard !startState.finished else { return }
                 switch state {
                 case .ready:
-                    startState.finished = true
-                    continuation.resume()
+                    if startupGate.observe(.ready) == .completesStartup {
+                        continuation.resume()
+                    }
                 case .failed(let error):
-                    startState.finished = true
-                    continuation.resume(throwing: error)
+                    if startupGate.observe(.failed) == .completesStartup {
+                        continuation.resume(throwing: error)
+                    }
+                case .cancelled:
+                    if startupGate.observe(.cancelled) == .completesStartup {
+                        continuation.resume(throwing: POSIXError(.ECANCELED))
+                    }
                 default:
                     break
                 }
             }
             listener.start(queue: self.queue)
+            Task {
+                do {
+                    try await Task.sleep(for: Self.listenerStartTimeout)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard startupGate.observe(.failed) == .completesStartup else { return }
+                    listener.cancel()
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard startupGate.claimTimeout() else { return }
+                listener.cancel()
+                continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+            }
         }
 
         self.listener = listener

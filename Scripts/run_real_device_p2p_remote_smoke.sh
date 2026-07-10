@@ -3852,6 +3852,11 @@ tx_sent_fps = tx_sent_frames * 1000.0 / tx_sample_ms
 if min_capture_fps is None or min_meaningful_fps is None:
     fail("Mac HEVC SCK telemetry did not expose captureFPS/meaningfulFPS inside final pass window")
 sck_source_frame_age_budget_exceeded = int(sck_source_frame_age_max_ms > max_sck_source_frame_age_ms)
+if sck_source_frame_age_budget_exceeded:
+    fail(
+        "Mac HEVC SCK source frame age exceeded live-source budget inside final pass window: "
+        f"sourceFrameAgeMaxMs={sck_source_frame_age_max_ms:.1f} limit={max_sck_source_frame_age_ms:.1f}"
+    )
 if sck_source_frame_repeat_max > max_sck_source_frame_repeat:
     fail(f"Mac HEVC SCK repeated stale source frames inside final pass window: sourceFrameRepeatMax={sck_source_frame_repeat_max} limit={max_sck_source_frame_repeat}")
 if sck_encoded_fps < min_fps:

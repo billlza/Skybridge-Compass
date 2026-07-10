@@ -128,7 +128,7 @@ import Combine
                 issuedAt: refreshedSession.issuedAt
             )
 
-            try store(session: mergedSession)
+            try await store(session: mergedSession)
             sessionSubject.send(mergedSession)
             await TenantAccessController.shared.bindAuthentication(session: mergedSession)
             return mergedSession
@@ -211,7 +211,7 @@ import Combine
                     SupabaseService.userMessage(for: error) ?? error.localizedDescription
                 )
             }
-            try store(session: session)
+            try await store(session: session)
             sessionSubject.send(session)
             return session
         }
@@ -244,7 +244,7 @@ import Combine
         }
 
         let session = try session(fromNebulaResult: result)
-        try store(session: session)
+        try await store(session: session)
         sessionSubject.send(session)
         return session
     }
@@ -257,7 +257,7 @@ import Combine
     public func verifyNebulaMFA(mfaToken: String, code: String) async throws -> AuthSession {
         let result = try await NebulaService.shared.verifyMFA(mfaToken: mfaToken, code: code)
         let session = try session(fromNebulaResult: result)
-        try store(session: session)
+        try await store(session: session)
         sessionSubject.send(session)
         return session
     }
@@ -318,7 +318,7 @@ import Combine
                     SupabaseService.userMessage(for: error) ?? error.localizedDescription
                 )
             }
-            try store(session: session)
+            try await store(session: session)
             sessionSubject.send(session)
             return session
         }
@@ -348,7 +348,7 @@ import Combine
                 )
             }
  // 确保会话被正确存储和发布
-            try store(session: session)
+            try await store(session: session)
             sessionSubject.send(session)
             return session
         }
@@ -401,8 +401,8 @@ import Combine
     }
 
     /// 持久化并广播新的会话（例如刷新访问令牌后）。
-    public func updateSession(_ session: AuthSession) throws {
-        try store(session: session)
+    public func updateSession(_ session: AuthSession) async throws {
+        try await store(session: session)
         sessionSubject.send(session)
     }
 
@@ -429,9 +429,12 @@ import Combine
         guard persistedSessionLoadTask == nil else { return }
 
         persistedSessionLoadTask = Task(priority: .utility) { [weak self] in
-            let loadResult = await Task.detached(priority: .utility) {
-                Result { try KeychainManager.shared.loadAuthSessionStrict() }
-            }.value
+            let loadResult: Result<AuthSession?, Error>
+            do {
+                loadResult = .success(try await KeychainManager.shared.loadAuthSessionStrict())
+            } catch {
+                loadResult = .failure(error)
+            }
 
             guard let self else { return }
             defer { self.persistedSessionLoadTask = nil }
@@ -499,21 +502,20 @@ import Combine
         decoder.dateDecodingStrategy = .iso8601
         let authResponse = try decoder.decode(AuthResponse.self, from: data)
         let session = authResponse.session
-        try store(session: session)
+        try await store(session: session)
         sessionSubject.send(session)
         return session
     }
 
-    private func store(session: AuthSession) throws {
+    private func store(session: AuthSession) async throws {
+        persistedSessionLoadTask?.cancel()
+        persistedSessionLoadTask = nil
+        await cancelAndAwaitPendingSessionDeletion()
         do {
-            try KeychainManager.shared.storeAuthSession(session)
+            try await KeychainManager.shared.storeAuthSession(session)
         } catch let error as NSError {
             throw AuthenticationError.storage(OSStatus(error.code))
         }
-    }
-
-    private func loadSessionFromKeychain() throws -> AuthSession? {
-        try KeychainManager.shared.loadAuthSessionStrict()
     }
 
     nonisolated static func mergedRefreshToken(_ candidate: String?, fallback: String?) -> String? {
@@ -671,21 +673,37 @@ import Combine
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
         sessionSubject.send(nil)
-        schedulePersistedSessionDeletion(reason: "clearLocalSessionState")
+        await cancelAndAwaitPendingSessionDeletion()
+        do {
+            try await KeychainManager.shared.deleteAuthSession()
+        } catch {
+            logger.error("AuthenticationService Keychain 会话清理失败 [clearLocalSessionState]: \(error.localizedDescription, privacy: .private)")
+        }
         await TenantAccessController.shared.clearAuthentication()
     }
 
     private func schedulePersistedSessionDeletion(reason: String) {
-        authSessionDeletionTask?.cancel()
-        authSessionDeletionTask = Task.detached(priority: .utility) {
+        let previousTask = authSessionDeletionTask
+        previousTask?.cancel()
+        authSessionDeletionTask = Task(priority: .utility) {
+            if let previousTask {
+                await previousTask.value
+            }
             guard !Task.isCancelled else { return }
             do {
-                try KeychainManager.shared.deleteAuthSession()
+                try await KeychainManager.shared.deleteAuthSession()
             } catch {
-                await MainActor.run {
-                    self.logger.error("AuthenticationService Keychain 会话清理失败 [\(reason, privacy: .public)]: \(error.localizedDescription, privacy: .private)")
-                }
+                self.logger.error("AuthenticationService Keychain 会话清理失败 [\(reason, privacy: .public)]: \(error.localizedDescription, privacy: .private)")
             }
+        }
+    }
+
+    private func cancelAndAwaitPendingSessionDeletion() async {
+        guard let deletionTask = authSessionDeletionTask else { return }
+        deletionTask.cancel()
+        await deletionTask.value
+        if authSessionDeletionTask == deletionTask {
+            authSessionDeletionTask = nil
         }
     }
 }

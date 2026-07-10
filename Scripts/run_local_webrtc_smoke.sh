@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/ios_simulator_helpers.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/local_webrtc_smoke_$(date +%Y%m%d_%H%M%S)}"
 if [[ "$ARTIFACT_DIR" != /* ]]; then
   ARTIFACT_DIR="$PWD/$ARTIFACT_DIR"
@@ -43,35 +44,11 @@ IOS_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-smoke-ios-device-0001}"
 
 mkdir -p "$ARTIFACT_DIR"
 
-pick_simulator_id() {
-  local payload
-  payload="$(xcrun simctl list devices available -j)"
-  python3 -c '
-import json, sys
-payload = json.loads(sys.argv[1])
-preferred = ["iPhone 16e", "iPhone 16", "iPhone 15", "iPhone 14"]
-devices = []
-for runtime_devices in payload.get("devices", {}).values():
-    for device in runtime_devices:
-        if device.get("isAvailable"):
-            devices.append(device)
-
-for name in preferred:
-    for device in devices:
-        if device.get("name") == name:
-            print(device["udid"])
-            raise SystemExit(0)
-
-for device in devices:
-    if "iPhone" in device.get("name", ""):
-        print(device["udid"])
-        raise SystemExit(0)
-
-raise SystemExit("No available iPhone simulator found.")
-' "$payload"
-}
-
-SIM_ID="${SKYBRIDGE_SMOKE_SIMULATOR_ID:-$(pick_simulator_id)}"
+SIM_ID="$(
+  skybridge_pick_bootable_ios_simulator_id \
+    "${SKYBRIDGE_SMOKE_SIMULATOR_ID:-}" \
+    "[local WebRTC smoke]"
+)"
 
 SIGNALING_SERVER_URL="http://127.0.0.1:${SIGNALING_PORT}"
 SIGNALING_WS_URL="ws://127.0.0.1:${SIGNALING_PORT}/ws"

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${ROOT_DIR}/Scripts/ios_simulator_helpers.sh"
 IOS_PROJECT="${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompassiOSTests"
 IOS_TEST_TARGET="SkyBridgeCompassiOSTests"
@@ -16,60 +17,11 @@ fi
 
 bash "${ROOT_DIR}/Scripts/check_ios_test_configuration.sh"
 
-pick_simulator_id() {
-  local payload_file
-  local error_file
-  payload_file="$(mktemp)"
-  error_file="$(mktemp)"
-
-  local attempt
-  for attempt in 1 2; do
-    if xcrun simctl list devices available -j >"${payload_file}" 2>"${error_file}" && [[ -s "${payload_file}" ]]; then
-      if python3 - "${payload_file}" <<'PY'
-import json
-import re
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    payload = json.load(handle)
-best = None
-for runtime, devices in payload.get("devices", {}).items():
-    if "iOS" not in runtime:
-        continue
-    m = re.search(r"iOS[- ](\d+)[.-](\d+)", runtime)
-    if not m:
-        continue
-    major = int(m.group(1))
-    minor = int(m.group(2))
-    for device in devices:
-        if not device.get("isAvailable"):
-            continue
-        if device.get("name", "").startswith("iPhone"):
-            rank = (major, minor)
-            if best is None or rank > best[0]:
-                best = (rank, device["udid"])
-if best is None:
-    raise SystemExit("No available iOS simulator device found.")
-print(best[1])
-PY
-      then
-        rm -f "${payload_file}" "${error_file}"
-        return
-      fi
-    fi
-
-    sleep 2
-  done
-
-  echo "[iOS test lane] simctl did not return a non-empty simulator device list." >&2
-  if [[ -s "${error_file}" ]]; then
-    cat "${error_file}" >&2
-  fi
-  rm -f "${payload_file}" "${error_file}"
-  return 1
-}
-
-SIM_ID="$(pick_simulator_id)"
+SIM_ID="$(
+  skybridge_pick_bootable_ios_simulator_id \
+    "${SKYBRIDGE_IOS_SIMULATOR_ID:-}" \
+    "[iOS test lane]"
+)"
 SIM_ARCH="${SIM_ARCH:-$(uname -m)}"
 DERIVED_DATA_PATH="$(mktemp -d)"
 trap 'rm -rf "${DERIVED_DATA_PATH}"' EXIT
@@ -113,10 +65,6 @@ run_xcodebuild_with_retry() {
   rm -f "${log_file}"
   return 1
 }
-
-# Ensure simulator is ready before invoking xcodebuild.
-xcrun simctl boot "${SIM_ID}" >/dev/null 2>&1 || true
-xcrun simctl bootstatus "${SIM_ID}" -b >/dev/null 2>&1 || true
 
 echo "[iOS test lane] running full ${IOS_TEST_TARGET} suite"
 

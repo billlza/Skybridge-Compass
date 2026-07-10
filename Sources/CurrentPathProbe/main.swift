@@ -412,9 +412,7 @@ struct CurrentPathProbe {
                 )
             }
         }
-        try await MainActor.run {
-            try AuthenticationService.shared.updateSession(session)
-        }
+        try await AuthenticationService.shared.updateSession(session)
         await TenantAccessController.shared.bindAuthentication(session: session)
     }
 

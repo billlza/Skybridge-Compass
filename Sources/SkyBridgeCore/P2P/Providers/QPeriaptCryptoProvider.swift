@@ -77,14 +77,14 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
  // MARK: - Q-Periapt KEM Constants (mirror q_periapt.h / QPeriaptKEMProvider)
 
     /// `profile = 2`: context-bound combiner (Q_PERIAPT_PROFILE_CONTEXT_BOUND).
-    private static let qpProfileContextBound: UInt8 = 2
-    private static let qpMlkem768SKLen = 2400 // Q_PERIAPT_MLKEM768_SK_LEN
-    private static let qpMlkem768PKLen = 1184 // Q_PERIAPT_MLKEM768_PK_LEN
-    private static let qpMlkem768CTLen = 1088 // Q_PERIAPT_MLKEM768_CT_LEN
-    private static let qpX25519Len = 32       // Q_PERIAPT_X25519_LEN
-    private static let qpSecretLen = 32       // Q_PERIAPT_SECRET_LEN
+    private static let qpProfileContextBound = UInt8(Q_PERIAPT_PROFILE_CONTEXT_BOUND)
+    private static let qpMlkem768SKLen = Int(Q_PERIAPT_MLKEM768_SK_LEN)
+    private static let qpMlkem768PKLen = Int(Q_PERIAPT_MLKEM768_PK_LEN)
+    private static let qpMlkem768CTLen = Int(Q_PERIAPT_MLKEM768_CT_LEN)
+    private static let qpX25519Len = Int(Q_PERIAPT_X25519_LEN)
+    private static let qpSecretLen = Int(Q_PERIAPT_SECRET_LEN)
     private static let qpMlkemSeedLen = 64    // q_periapt_mlkem768_keypair seed length
-    private static let qpOkStatus: Int32 = 0  // Q_PERIAPT_OK
+    private static let qpOkStatus = Int32(Q_PERIAPT_OK)
     private static let qpPolicyVersion: UInt32 = 1
 
     /// `recipientPublicKey` on the wire: pk_pq ‖ pk_trad.
@@ -95,7 +95,7 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
     private static let qpPrivateKeyLen = qpMlkem768SKLen + qpX25519Len + qpMlkem768PKLen + qpX25519Len // 3648
 
     /// suite_id 字节串（ASCII）。
-    private static let qpSuiteID: [UInt8] = Array("ML-KEM-768+X25519".utf8)
+    private static let qpSuiteID = QPeriaptRuntimeContract.expectedSuiteID
     /// context 字节串（ASCII），ContextBound profile 下绑定。
     private static let qpContext: [UInt8] = Array("skybridge-qperiapt/v1".utf8)
 
@@ -106,6 +106,7 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
     public static func quickRuntimeProbe() -> Bool {
         #if canImport(CQPeriapt)
         do {
+            try QPeriaptRuntimeContract.requireCompatible()
             let provider = QPeriaptCryptoProvider()
             let keyPair = try provider.generateQPeriaptKEMKeyPair()
             guard keyPair.publicKey.bytes.count == qpPublicKeyLen,
@@ -139,6 +140,8 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
     private func qpEncapsulate(
         recipientPublicKey: Data
     ) throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes) {
+        try QPeriaptRuntimeContract.requireCompatible()
+
         guard recipientPublicKey.count == Self.qpPublicKeyLen else {
             throw CryptoProviderError.invalidKeyLength(
                 expected: Self.qpPublicKeyLen,
@@ -161,6 +164,7 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         var ctPQ = [UInt8](repeating: 0, count: Self.qpMlkem768CTLen)
         var ctTrad = [UInt8](repeating: 0, count: Self.qpX25519Len)
         var secret = [UInt8](repeating: 0, count: Self.qpSecretLen)
+        defer { Self.wipe(&secret) }
 
         let status = Self.qpSuiteID.withUnsafeBufferPointer { suitePtr in
             Self.qpContext.withUnsafeBufferPointer { ctxPtr in
@@ -194,8 +198,9 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
             }
         }
         guard status == Self.qpOkStatus else {
-            Self.wipe(&secret)
-            throw CryptoProviderError.encapsulationFailed
+            throw CryptoProviderError.encapsulationFailed(
+                "q_periapt_hybrid_encapsulate failed: \(QPeriaptRuntimeContract.statusDescription(status))"
+            )
         }
 
         // encapsulatedKey = ct_pq ‖ ct_trad
@@ -204,7 +209,6 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         encapsulated.append(contentsOf: ctTrad)
 
         let sharedSecretSecure = SecureBytes(data: Data(secret))
-        Self.wipe(&secret)
         return (encapsulatedKey: encapsulated, sharedSecret: sharedSecretSecure)
     }
 
@@ -214,6 +218,8 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         encapsulatedKey: Data,
         privateKey: SecureBytes
     ) throws -> SecureBytes {
+        try QPeriaptRuntimeContract.requireCompatible()
+
         guard privateKey.byteCount == Self.qpPrivateKeyLen else {
             throw CryptoProviderError.invalidKeyLength(
                 expected: Self.qpPrivateKeyLen,
@@ -229,48 +235,40 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
             )
         }
 
-        // Split privateKey = sk_pq ‖ sk_trad ‖ pk_pq ‖ pk_trad (out of SecureBytes, into the FFI call).
-        let blob = privateKey.data
-        var offset = blob.startIndex
-        let skPQ = [UInt8](blob[offset ..< blob.index(offset, offsetBy: Self.qpMlkem768SKLen)])
-        offset = blob.index(offset, offsetBy: Self.qpMlkem768SKLen)
-        let skTrad = [UInt8](blob[offset ..< blob.index(offset, offsetBy: Self.qpX25519Len)])
-        offset = blob.index(offset, offsetBy: Self.qpX25519Len)
-        let pkPQ = [UInt8](blob[offset ..< blob.index(offset, offsetBy: Self.qpMlkem768PKLen)])
-        offset = blob.index(offset, offsetBy: Self.qpMlkem768PKLen)
-        let pkTrad = [UInt8](blob[offset ..< blob.index(offset, offsetBy: Self.qpX25519Len)])
-
         // Split encapsulated = ct_pq ‖ ct_trad
         let ctPQ = [UInt8](encapsulatedKey.prefix(Self.qpMlkem768CTLen))
         let ctTrad = [UInt8](encapsulatedKey.suffix(Self.qpX25519Len))
 
         var secret = [UInt8](repeating: 0, count: Self.qpSecretLen)
+        defer { Self.wipe(&secret) }
 
-        let status = Self.qpSuiteID.withUnsafeBufferPointer { suitePtr in
-            Self.qpContext.withUnsafeBufferPointer { ctxPtr in
-                skPQ.withUnsafeBufferPointer { skPQPtr in
+        let status: Int32 = privateKey.withUnsafeBytes { privateKeyRaw in
+            guard let privateKeyBase = privateKeyRaw.bindMemory(to: UInt8.self).baseAddress else {
+                return Int32(Q_PERIAPT_ERR_NULL)
+            }
+            let skPQ = privateKeyBase
+            let skTrad = privateKeyBase.advanced(by: Self.qpMlkem768SKLen)
+            let pkPQ = skTrad.advanced(by: Self.qpX25519Len)
+            let pkTrad = pkPQ.advanced(by: Self.qpMlkem768PKLen)
+
+            return Self.qpSuiteID.withUnsafeBufferPointer { suitePtr in
+                Self.qpContext.withUnsafeBufferPointer { ctxPtr in
                     ctPQ.withUnsafeBufferPointer { ctPQPtr in
-                        pkPQ.withUnsafeBufferPointer { pkPQPtr in
-                            skTrad.withUnsafeBufferPointer { skTradPtr in
-                                ctTrad.withUnsafeBufferPointer { ctTradPtr in
-                                    pkTrad.withUnsafeBufferPointer { pkTradPtr in
-                                        secret.withUnsafeMutableBufferPointer { secretPtr in
-                                            q_periapt_hybrid_decapsulate(
-                                                Self.qpProfileContextBound,
-                                                suitePtr.baseAddress, UInt(suitePtr.count),
-                                                Self.qpPolicyVersion,
-                                                skPQPtr.baseAddress, UInt(skPQPtr.count),
-                                                ctPQPtr.baseAddress, UInt(ctPQPtr.count),
-                                                pkPQPtr.baseAddress, UInt(pkPQPtr.count),
-                                                skTradPtr.baseAddress, UInt(skTradPtr.count),
-                                                ctTradPtr.baseAddress, UInt(ctTradPtr.count),
-                                                pkTradPtr.baseAddress, UInt(pkTradPtr.count),
-                                                ctxPtr.baseAddress, UInt(ctxPtr.count),
-                                                secretPtr.baseAddress, UInt(secretPtr.count)
-                                            )
-                                        }
-                                    }
-                                }
+                        ctTrad.withUnsafeBufferPointer { ctTradPtr in
+                            secret.withUnsafeMutableBufferPointer { secretPtr in
+                                q_periapt_hybrid_decapsulate(
+                                    Self.qpProfileContextBound,
+                                    suitePtr.baseAddress, UInt(suitePtr.count),
+                                    Self.qpPolicyVersion,
+                                    skPQ, UInt(Self.qpMlkem768SKLen),
+                                    ctPQPtr.baseAddress, UInt(ctPQPtr.count),
+                                    pkPQ, UInt(Self.qpMlkem768PKLen),
+                                    skTrad, UInt(Self.qpX25519Len),
+                                    ctTradPtr.baseAddress, UInt(ctTradPtr.count),
+                                    pkTrad, UInt(Self.qpX25519Len),
+                                    ctxPtr.baseAddress, UInt(ctxPtr.count),
+                                    secretPtr.baseAddress, UInt(secretPtr.count)
+                                )
                             }
                         }
                     }
@@ -278,12 +276,12 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
             }
         }
         guard status == Self.qpOkStatus else {
-            Self.wipe(&secret)
-            throw CryptoProviderError.decapsulationFailed
+            throw CryptoProviderError.decapsulationFailed(
+                "q_periapt_hybrid_decapsulate failed: \(QPeriaptRuntimeContract.statusDescription(status))"
+            )
         }
 
         let sharedSecretSecure = SecureBytes(data: Data(secret))
-        Self.wipe(&secret)
         return sharedSecretSecure
     }
     #endif
@@ -619,11 +617,14 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
  ///   publicKey  = pk_pq ‖ pk_trad
  ///   privateKey = sk_pq ‖ sk_trad ‖ pk_pq ‖ pk_trad
     private func generateQPeriaptKEMKeyPair() throws -> KeyPair {
+        try QPeriaptRuntimeContract.requireCompatible()
+
         // ML-KEM-768 keypair (deterministic from a 64-byte seed).
         var mlkemSeed = try Self.randomBytes(count: Self.qpMlkemSeedLen)
         defer { Self.wipe(&mlkemSeed) }
 
         var skPQ = [UInt8](repeating: 0, count: Self.qpMlkem768SKLen)
+        defer { Self.wipe(&skPQ) }
         var pkPQ = [UInt8](repeating: 0, count: Self.qpMlkem768PKLen)
 
         let pqStatus = mlkemSeed.withUnsafeBufferPointer { seedPtr in
@@ -638,8 +639,9 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
             }
         }
         guard pqStatus == Self.qpOkStatus else {
-            Self.wipe(&skPQ)
-            throw CryptoProviderError.keyGenerationFailed("q_periapt_mlkem768_keypair failed (\(pqStatus))")
+            throw CryptoProviderError.keyGenerationFailed(
+                "q_periapt_mlkem768_keypair failed: \(QPeriaptRuntimeContract.statusDescription(pqStatus))"
+            )
         }
 
         // X25519 keypair (deterministic from a 32-byte scalar).
@@ -647,6 +649,7 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         defer { Self.wipe(&x25519Secret) }
 
         var skTrad = [UInt8](repeating: 0, count: Self.qpX25519Len)
+        defer { Self.wipe(&skTrad) }
         var pkTrad = [UInt8](repeating: 0, count: Self.qpX25519Len)
 
         let tradStatus = x25519Secret.withUnsafeBufferPointer { secretPtr in
@@ -661,9 +664,9 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
             }
         }
         guard tradStatus == Self.qpOkStatus else {
-            Self.wipe(&skPQ)
-            Self.wipe(&skTrad)
-            throw CryptoProviderError.keyGenerationFailed("q_periapt_x25519_keypair failed (\(tradStatus))")
+            throw CryptoProviderError.keyGenerationFailed(
+                "q_periapt_x25519_keypair failed: \(QPeriaptRuntimeContract.statusDescription(tradStatus))"
+            )
         }
 
         // publicKey = pk_pq ‖ pk_trad
@@ -677,9 +680,6 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         privateKey.append(contentsOf: skTrad)
         privateKey.append(contentsOf: pkPQ)
         privateKey.append(contentsOf: pkTrad)
-
-        Self.wipe(&skPQ)
-        Self.wipe(&skTrad)
 
         return KeyPair(
             publicKey: KeyMaterial(
@@ -766,10 +766,11 @@ public struct QPeriaptCryptoProvider: CryptoProvider, Sendable {
         return bytes
     }
 
-    /// 最佳努力擦除敏感缓冲区。
+    /// 擦除敏感缓冲区，使用与 `SecureBytes` 相同的不可优化实现。
     private static func wipe(_ buffer: inout [UInt8]) {
-        for index in buffer.indices {
-            buffer[index] = 0
+        buffer.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress, !bytes.isEmpty else { return }
+            SecureBytes.wipingFunction(baseAddress, bytes.count)
         }
     }
 }

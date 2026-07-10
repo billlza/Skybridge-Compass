@@ -708,18 +708,18 @@ struct UserProfileOverlay: View {
                         accessToken: currentSession.accessToken
                     )
 
+                    let updatedSession = AuthSession(
+                        accessToken: currentSession.accessToken,
+                        refreshToken: currentSession.refreshToken,
+                        userIdentifier: currentSession.userIdentifier,
+                        nebulaId: currentSession.nebulaId,
+                        displayName: updatedUserInfo.displayName,
+                        avatarURL: updatedUserInfo.avatar ?? currentSession.avatarURL,
+                        issuedAt: currentSession.issuedAt
+                    )
+                    try await AuthenticationService.shared.updateSession(updatedSession)
                     await MainActor.run {
  // 更新本地会话信息
-                        let updatedSession = AuthSession(
-                            accessToken: currentSession.accessToken,
-                            refreshToken: currentSession.refreshToken,
-                            userIdentifier: currentSession.userIdentifier,
-                            nebulaId: currentSession.nebulaId,
-                            displayName: updatedUserInfo.displayName,
-                            avatarURL: updatedUserInfo.avatar ?? currentSession.avatarURL,
-                            issuedAt: currentSession.issuedAt
-                        )
-
                         SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 准备更新用户会话信息")
                         SkyBridgeLogger.ui.debugOnly("   原昵称: \(currentSession.displayName)")
                         SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedUserInfo.displayName)")
@@ -730,13 +730,8 @@ struct UserProfileOverlay: View {
                             SkyBridgeLogger.ui.debugOnly("   头像已缓存: \(updatedUserInfo.avatar ?? "无")")
                         }
 
- // 通过AuthenticationViewModel更新会话，确保UI状态同步
+ // Keychain 持久化成功后再更新界面状态。
                         authModel.currentSession = updatedSession
-                        do {
-                            try AuthenticationService.shared.updateSession(updatedSession)
-                        } catch {
-                            SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-                        }
 
  // 如果有邮箱更改，更新本地邮箱信息
                         if hasEmailChange {
@@ -872,14 +867,8 @@ struct UserProfileOverlay: View {
                 } catch {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
                 }
-                await MainActor.run {
-                    authModel.currentSession = newSession
-                    do {
-                        try AuthenticationService.shared.updateSession(newSession)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
-                }
+                try await AuthenticationService.shared.updateSession(newSession)
+                await MainActor.run { authModel.currentSession = newSession }
                 SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 访问令牌刷新成功")
             } catch {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileOverlay] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
@@ -943,14 +932,8 @@ struct UserProfileOverlay: View {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] auth API 失败，尝试刷新令牌并重试")
                 let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
                 session = newSession
-                await MainActor.run {
-                    authModel.currentSession = newSession
-                    do {
-                        try AuthenticationService.shared.updateSession(newSession)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
-                }
+                try await AuthenticationService.shared.updateSession(newSession)
+                await MainActor.run { authModel.currentSession = newSession }
                 do {
                     success = try await SupabaseService.shared.updateUserProfile(
                         displayName: displayName,
@@ -997,24 +980,19 @@ struct UserProfileOverlay: View {
             if imageData != nil, resolvedAvatarURL == nil {
                 throw NSError(domain: "AuthError", code: -2, userInfo: [NSLocalizedDescriptionKey: "头像上传后未能从云端资料回读 avatar_url"])
             }
+            let updatedSession = AuthSession(
+                accessToken: session.accessToken,
+                refreshToken: session.refreshToken,
+                userIdentifier: session.userIdentifier,
+                nebulaId: session.nebulaId,
+                displayName: displayName ?? session.displayName,
+                avatarURL: resolvedAvatarURL ?? session.avatarURL,
+                issuedAt: session.issuedAt
+            )
+            try await AuthenticationService.shared.updateSession(updatedSession)
             await MainActor.run {
  // 更新本地会话信息
-                let updatedSession = AuthSession(
-                    accessToken: session.accessToken,
-                    refreshToken: session.refreshToken,
-                    userIdentifier: session.userIdentifier,
-                    nebulaId: session.nebulaId,
-                    displayName: displayName ?? session.displayName,
-                    avatarURL: resolvedAvatarURL ?? session.avatarURL,
-                    issuedAt: session.issuedAt
-                )
-
                 authModel.currentSession = updatedSession
-                do {
-                    try AuthenticationService.shared.updateSession(updatedSession)
-                } catch {
-                    SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-                }
 
  // 如果有手机号更新，保存到AuthenticationViewModel
                 if let phoneNumber = phoneNumber {

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CQPeriapt)
+import CQPeriapt
+#endif
 
 /// Runtime admission policy for the experimental Q-Periapt suite.
 ///
@@ -8,8 +11,16 @@ import Foundation
 @available(macOS 14.0, iOS 17.0, *)
 public enum QPeriaptPlatformPolicy {
     public static let authProfile = "q-periapt-beta"
+    #if canImport(CQPeriapt)
+    public static let publicKeyLength = Int(Q_PERIAPT_MLKEM768_PK_LEN) + Int(Q_PERIAPT_X25519_LEN)
+    public static let privateKeyLength = Int(Q_PERIAPT_MLKEM768_SK_LEN)
+        + Int(Q_PERIAPT_X25519_LEN)
+        + Int(Q_PERIAPT_MLKEM768_PK_LEN)
+        + Int(Q_PERIAPT_X25519_LEN)
+    #else
     public static let publicKeyLength = 1_216
     public static let privateKeyLength = 3_648
+    #endif
 
     private static let minimumAppleMajorVersion = 26
 

@@ -9,6 +9,12 @@ fail() {
   exit 1
 }
 
+command -v rustc >/dev/null 2>&1 || fail "rustc is required to inspect vendored Rust symbols"
+RUST_HOST="$(rustc -vV | awk '/^host:/ { print $2 }')"
+RUST_SYSROOT="$(rustc --print sysroot)"
+LLVM_NM="$RUST_SYSROOT/lib/rustlib/$RUST_HOST/bin/llvm-nm"
+[[ -x "$LLVM_NM" ]] || fail "Rust llvm-nm not found: $LLVM_NM"
+
 require_file_not_ignored() {
   local path="$1"
   [[ -f "${ROOT_DIR}/${path}" ]] || fail "missing required vendor artifact: ${path}"
@@ -53,13 +59,42 @@ assert_no_user_home_paths_in_static_library() {
     || fail "${path} leaks a non-toolchain local user path into the vendored binary: ${first_match}"
 }
 
+assert_qperiapt_symbols() {
+  local path="$1"
+  local symbols
+  if ! symbols="$($LLVM_NM --defined-only "${ROOT_DIR}/${path}" 2>/dev/null)"; then
+    fail "failed to inspect Q-Periapt symbols in ${path}"
+  fi
+  local symbol
+  for symbol in \
+    q_periapt_abi_version \
+    q_periapt_version \
+    q_periapt_fixed_suite_id \
+    q_periapt_fixed_suite_id_len \
+    q_periapt_status_name \
+    q_periapt_hybrid_encapsulate \
+    q_periapt_hybrid_decapsulate
+  do
+    grep -Eq "[[:space:]]_?${symbol}$" <<<"${symbols}" \
+      || fail "${path} is missing required Q-Periapt ABI symbol: ${symbol}"
+  done
+}
+
+assert_qperiapt_header_matches() {
+  local path="$1"
+  local canonical="${ROOT_DIR}/Sources/CQPeriapt/include/q_periapt.h"
+  [[ -f "${ROOT_DIR}/${path}" ]] || fail "missing Q-Periapt header: ${path}"
+  cmp -s "$canonical" "${ROOT_DIR}/${path}" \
+    || fail "${path} differs from the CQPeriapt compile-time header"
+}
+
 if grep -Fq "/Users/" "${ROOT_DIR}/Scripts/build_qperiapt_xcframework.sh"; then
   fail "build_qperiapt_xcframework.sh must not hard-code a local user path; use QPERIAPT_REPO or External/pqt_hybrid_suite"
 fi
 
 grep -Fq "repository: billlza/q-periapt" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness must checkout q-periapt explicitly for clean CI source contracts"
-grep -Fq "ref: d0475a94276bc5ff65deb1c5367d1f56ca436f5b" "${RELEASE_READINESS_WORKFLOW}" \
+grep -Fq "ref: cb4ab8ed2be768c8313b5a7a84fc432fd752dc90" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must be pinned to a full commit SHA"
 grep -Fq "path: External/pqt_hybrid_suite" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must land in External/pqt_hybrid_suite"
@@ -86,6 +121,10 @@ for slice in macos-arm64 ios-arm64 ios-arm64-simulator; do
   require_file_not_ignored "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
   assert_no_user_home_paths_in_static_library "Sources/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
   assert_no_user_home_paths_in_static_library "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
+  assert_qperiapt_symbols "Sources/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
+  assert_qperiapt_symbols "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/libq_periapt_ffi.a"
+  assert_qperiapt_header_matches "Sources/Vendor/qperiapt.xcframework/${slice}/Headers/q_periapt.h"
+  assert_qperiapt_header_matches "SkyBridge Compass iOS/Vendor/qperiapt.xcframework/${slice}/Headers/q_periapt.h"
 done
 
 assert_no_large_vendor_files

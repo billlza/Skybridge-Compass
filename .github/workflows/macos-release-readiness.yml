@@ -133,7 +133,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: billlza/q-periapt
-          ref: d0475a94276bc5ff65deb1c5367d1f56ca436f5b
+          ref: cb4ab8ed2be768c8313b5a7a84fc432fd752dc90
           path: External/pqt_hybrid_suite
           persist-credentials: false
 

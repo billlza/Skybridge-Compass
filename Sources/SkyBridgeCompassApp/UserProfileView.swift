@@ -457,6 +457,7 @@ struct UserProfileView: View {
                     )
                 }
 
+                try await AuthenticationService.shared.updateSession(updatedSession)
                 await MainActor.run {
                     SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileView] 准备更新用户会话信息")
                     SkyBridgeLogger.ui.debugOnly("   原昵称: \(currentSession.displayName)")
@@ -468,13 +469,8 @@ struct UserProfileView: View {
                         SkyBridgeLogger.ui.debugOnly("   头像已缓存")
                     }
 
- // 通过AuthenticationService更新会话 - 只设置一次
+ // Keychain 持久化成功后再更新界面状态。
                     authModel.currentSession = updatedSession
-                    do {
-                        try AuthenticationService.shared.updateSession(updatedSession)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileView] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
                     SkyBridgeLogger.ui.debugOnly("✅ [UserProfileView] 用户会话已更新")
 
  // 重置编辑状态
@@ -540,14 +536,8 @@ struct UserProfileView: View {
                 } catch {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileView] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
                 }
-                await MainActor.run {
-                    authModel.currentSession = refreshed
-                    do {
-                        try AuthenticationService.shared.updateSession(refreshed)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileView] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
-                }
+                try await AuthenticationService.shared.updateSession(refreshed)
+                await MainActor.run { authModel.currentSession = refreshed }
             } catch {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileView] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
             }

@@ -144,6 +144,36 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(crossNetwork.contains("osVersion: QPeriaptPlatformPolicy.localOSVersionString()"))
     }
 
+    func testQPeriaptAppleBindingFailsClosedOnABIAndSuiteDrift() throws {
+        let contract = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptRuntimeContract.swift")
+        XCTAssertTrue(contract.contains("q_periapt_abi_version()"))
+        XCTAssertTrue(contract.contains("q_periapt_fixed_suite_id_len()"))
+        XCTAssertTrue(contract.contains("q_periapt_fixed_suite_id()"))
+        XCTAssertTrue(contract.contains("Q-Periapt C ABI mismatch"))
+        XCTAssertTrue(contract.contains("Q-Periapt header changed the SkyBridge ContextBound wire contract"))
+
+        let provider = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptCryptoProvider.swift")
+        XCTAssertTrue(provider.contains("try QPeriaptRuntimeContract.requireCompatible()"))
+        XCTAssertTrue(provider.contains("privateKey.withUnsafeBytes"))
+        XCTAssertFalse(
+            provider.contains("let blob = privateKey.data"),
+            "Q-Periapt decapsulation must not duplicate the complete private-key blob into ordinary Data."
+        )
+        XCTAssertTrue(provider.contains("SecureBytes.wipingFunction(baseAddress, bytes.count)"))
+
+        let kemProvider = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptKEMProvider.swift")
+        XCTAssertTrue(kemProvider.contains("try QPeriaptRuntimeContract.requireCompatible()"))
+        XCTAssertTrue(kemProvider.contains("privateKey.withUnsafeBytes"))
+        XCTAssertTrue(kemProvider.contains("SecureBytes.wipingFunction(baseAddress, bytes.count)"))
+
+        let buildScript = try readSource("Scripts/build_qperiapt_xcframework.sh")
+        XCTAssertTrue(buildScript.contains("assert_header_contract"))
+        XCTAssertTrue(buildScript.contains("assert_required_symbols"))
+        XCTAssertTrue(buildScript.contains("assert_xcframework_contract"))
+        XCTAssertTrue(buildScript.contains("q_periapt_abi_version"))
+        XCTAssertTrue(buildScript.contains("q_periapt_fixed_suite_id"))
+    }
+
     func testOSVersionOrHardwareChecksDoNotAdvertisePQCWithoutCryptoEvidence() throws {
         let forbiddenClaims = [
             "启用后量子加密",

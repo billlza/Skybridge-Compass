@@ -19,9 +19,17 @@ import XCTest
 @testable import SkyBridgeCore
 
 #if canImport(CQPeriapt)
+import CQPeriapt
 
 @available(macOS 14.0, iOS 17.0, *)
 final class QPeriaptRoundTripTests: XCTestCase {
+    func testQPeriaptRuntimeMetadataMatchesCompileTimeContract() throws {
+        XCTAssertEqual(q_periapt_abi_version(), QPeriaptRuntimeContract.expectedABIVersion)
+        XCTAssertEqual(Int(q_periapt_fixed_suite_id_len()), QPeriaptRuntimeContract.expectedSuiteID.count)
+        XCTAssertTrue(QPeriaptRuntimeContract.isCompatible)
+        XCTAssertNoThrow(try QPeriaptRuntimeContract.requireCompatible())
+    }
+
     func testQPeriaptRuntimeProbePassesOnSupportedAppleRuntime() throws {
         guard QPeriaptPlatformPolicy.isSupportedAppleOSVersion(ProcessInfo.processInfo.operatingSystemVersion) else {
             throw XCTSkip("Q-Periapt runtime admission requires macOS/iOS 26+.")

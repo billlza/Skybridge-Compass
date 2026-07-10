@@ -9,9 +9,7 @@ import OSLog
 /// - 协议：复用 `RemoteControlManager` 的长度前缀帧封装与 ScreenData/RemoteMouseEvent/RemoteKeyboardEvent
 @MainActor
 public final class RemoteControlServer: ObservableObject {
-    private final class StartState: @unchecked Sendable {
-        var finished = false
-    }
+    private static let listenerStartTimeout: Duration = .seconds(5)
 
     private final class IncomingConnectionLifecycle: @unchecked Sendable {
         private let lock = NSLock()
@@ -268,47 +266,60 @@ public final class RemoteControlServer: ObservableObject {
 
     private func start(listener: NWListener, generation: UInt64) async throws -> UInt16 {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
-            let startState = StartState()
+            let startupGate = NetworkListenerStartupGate()
 
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else {
-                        if !startState.finished {
-                            startState.finished = true
+                        if startupGate.observe(.cancelled) == .completesStartup {
                             continuation.resume(throwing: POSIXError(.ECANCELED))
                         }
                         return
                     }
                     switch state {
                     case .ready:
-                        self.listenerHealthState = .ready
                         let boundPort = listener.port?.rawValue ?? 0
+                        guard boundPort > 0 else {
+                            guard startupGate.observe(.failed) == .completesStartup else { return }
+                            listener.cancel()
+                            self.listenerHealthState = .failed
+                            self.activePort = nil
+                            self.isBonjourPublished = false
+                            ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
+                            self.log.error("RemoteControlServer became ready without a bound port")
+                            continuation.resume(throwing: POSIXError(.EADDRNOTAVAIL))
+                            return
+                        }
+                        let observation = startupGate.observe(.ready)
+                        guard observation != .ignored else { return }
+                        self.listenerHealthState = .ready
                         self.activePort = boundPort
                         ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
                         self.log.info("✅ RemoteControlServer ready on \(boundPort)")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(returning: boundPort)
                         }
                     case .failed(let error):
+                        let observation = startupGate.observe(.failed)
+                        guard observation != .ignored else { return }
                         self.listenerHealthState = .failed
                         self.activePort = nil
                         self.isBonjourPublished = false
                         ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
                         self.log.error("❌ RemoteControlServer failed: \(String(describing: error))")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
+                        let observation = startupGate.observe(.cancelled)
+                        guard observation != .ignored else { return }
                         self.listenerHealthState = .cancelled
                         self.activePort = nil
                         self.isBonjourPublished = false
                         ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
                         self.log.info("⏹️ RemoteControlServer cancelled")
-                        if !startState.finished {
-                            startState.finished = true
+                        if observation == .completesStartup {
                             continuation.resume(throwing: POSIXError(.ECANCELED))
                         }
                     default:
@@ -323,6 +334,40 @@ public final class RemoteControlServer: ObservableObject {
             }
 
             listener.start(queue: queue)
+            Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: Self.listenerStartTimeout)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard startupGate.observe(.failed) == .completesStartup else { return }
+                    listener.cancel()
+                    self?.listenerHealthState = .failed
+                    self?.activePort = nil
+                    self?.isBonjourPublished = false
+                    ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
+                    self?.log.error("RemoteControlServer timeout task failed: \(String(describing: error))")
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard startupGate.claimTimeout() else { return }
+                listener.cancel()
+
+                guard let self else {
+                    continuation.resume(throwing: POSIXError(.ECANCELED))
+                    return
+                }
+                guard self.listenerGeneration == generation else {
+                    continuation.resume(throwing: POSIXError(.ECANCELED))
+                    return
+                }
+                self.listenerHealthState = .failed
+                self.activePort = nil
+                self.isBonjourPublished = false
+                ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
+                self.log.error("RemoteControlServer listener start timed out")
+                continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+            }
         }
     }
 

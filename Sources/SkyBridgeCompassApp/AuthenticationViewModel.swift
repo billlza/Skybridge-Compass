@@ -427,14 +427,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                     userId: session.userIdentifier,
                     accessToken: session.accessToken
                 )
-                await MainActor.run {
-                    self.finishNebulaIdentityLookup(
-                        nebulaId: nebulaId,
-                        expectedGeneration: expectedGeneration,
-                        expectedSessionKey: expectedSessionKey,
-                        reason: reason
-                    )
-                }
+                await self.finishNebulaIdentityLookup(
+                    nebulaId: nebulaId,
+                    expectedGeneration: expectedGeneration,
+                    expectedSessionKey: expectedSessionKey,
+                    reason: reason
+                )
             } catch is CancellationError {
                 await MainActor.run {
                     if NebulaIdentityContract.shouldApplyAsyncResult(
@@ -473,7 +471,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         )
 
         do {
-            try authService.updateSession(updatedSession)
+            try await authService.updateSession(updatedSession)
             currentSession = updatedSession
         } catch {
             SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 注册后持久化会话失败: \(error.localizedDescription, privacy: .private)")
@@ -538,7 +536,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         expectedGeneration: Int,
         expectedSessionKey: String,
         reason: String
-    ) {
+    ) async {
         guard NebulaIdentityContract.shouldApplyAsyncResult(
             expectedGeneration: expectedGeneration,
             currentGeneration: sessionGeneration,
@@ -552,7 +550,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         if let normalizedNebulaId {
             supabaseNebulaId = normalizedNebulaId
             nebulaIdentitySyncPhase = .hydrated
-            persistNebulaIdentityIfNeeded(normalizedNebulaId, reason: reason)
+            await persistNebulaIdentityIfNeeded(normalizedNebulaId, reason: reason)
         } else {
             refreshNebulaIdentitySyncPhase()
         }
@@ -583,7 +581,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] NebulaID 加载失败（忽略）: \(error.localizedDescription)")
     }
 
-    private func persistNebulaIdentityIfNeeded(_ nebulaId: String, reason: String) {
+    private func persistNebulaIdentityIfNeeded(_ nebulaId: String, reason: String) async {
         guard let session = currentSession else { return }
         guard NebulaIdentityContract.normalizedNebulaId(session.nebulaId) != nebulaId else { return }
 
@@ -598,7 +596,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         )
 
         do {
-            try authService.updateSession(updatedSession)
+            try await authService.updateSession(updatedSession)
             SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] NebulaID 已回写持久化会话: \(reason)")
         } catch {
             SkyBridgeLogger.ui.error("⚠️ [AuthenticationViewModel] NebulaID 会话回写失败: \(error.localizedDescription, privacy: .private)")
@@ -1059,7 +1057,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             issuedAt: session.issuedAt
         )
 
-        try authService.updateSession(resolvedSession)
+        try await authService.updateSession(resolvedSession)
         return resolvedSession
     }
 
@@ -1126,7 +1124,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             avatarURL: userInfo.picture,
             issuedAt: Date()
         )
-        try authService.updateSession(session)
+        try await authService.updateSession(session)
         return session
     }
 
@@ -2650,8 +2648,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 // Best-effort refresh for 403/expired tokens
                 if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
                     activeSession = refreshed
+                    try await AuthenticationService.shared.updateSession(refreshed)
                     currentSession = refreshed
-                    try? AuthenticationService.shared.updateSession(refreshed)
                 }
             }
 
@@ -2671,12 +2669,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 avatarURL: activeSession.avatarURL,
                 issuedAt: activeSession.issuedAt
             )
+            try await AuthenticationService.shared.updateSession(updatedSession)
             currentSession = updatedSession
-            do {
-                try AuthenticationService.shared.updateSession(updatedSession)
-            } catch {
-                SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-            }
             SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 显示名称更新成功(Supabase): \(displayName)")
             return
         }
@@ -2698,12 +2692,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             issuedAt: session.issuedAt
         )
 
+        try await AuthenticationService.shared.updateSession(updatedSession)
         currentSession = updatedSession
-        do {
-            try AuthenticationService.shared.updateSession(updatedSession)
-        } catch {
-            SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-        }
         SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 显示名称更新成功: \(updatedUserInfo.displayName)")
     }
 
@@ -2731,8 +2721,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             if let refreshToken = session.refreshToken {
                 if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
                     activeSession = refreshed
+                    try await AuthenticationService.shared.updateSession(refreshed)
                     currentSession = refreshed
-                    try? AuthenticationService.shared.updateSession(refreshed)
                 }
             }
 
@@ -2755,8 +2745,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 avatarURL: avatarUrl,
                 issuedAt: activeSession.issuedAt
             )
+            try await AuthenticationService.shared.updateSession(updatedSession)
             currentSession = updatedSession
-            try? AuthenticationService.shared.updateSession(updatedSession)
 
             SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 头像上传成功(Supabase): \(avatarUrl)")
             return
@@ -2783,8 +2773,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             avatarURL: avatarUrl,
             issuedAt: session.issuedAt
         )
+        try await AuthenticationService.shared.updateSession(updatedSession)
         currentSession = updatedSession
-        try? AuthenticationService.shared.updateSession(updatedSession)
 
         SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 头像上传成功: \(avatarUrl)")
     }

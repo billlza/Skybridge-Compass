@@ -23,6 +23,12 @@ run_check_strict_no_warnings \
   env SRCROOT="${ROOT_DIR}" zsh "${ROOT_DIR}/Scripts/release_no_print_guard.zsh"
 
 run_check_strict_no_warnings \
+  "ios-simulator-selection" \
+  "code" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_ios_simulator_helpers.sh"
+
+run_check_strict_no_warnings \
   "swift-build" \
   "code" \
   "source-quality" \
