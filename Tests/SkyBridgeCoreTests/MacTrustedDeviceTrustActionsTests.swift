@@ -1,4 +1,5 @@
 import XCTest
+@testable import SkyBridgeCore
 
 final class MacTrustedDeviceTrustActionsTests: XCTestCase {
     func testMacTrustedDeviceDetailSplitsRepairAndFullForgetSemantics() throws {
@@ -756,11 +757,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertTrue(signingHelperSource.contains("\"com.apple.application-identifier\""))
 
         XCTAssertTrue(iosAppSource.contains("ICloudDevicePresenceService.shared.start()"))
-        XCTAssertTrue(iosAppSource.contains("ICloudDevicePresenceService.shared.refreshNow()"))
-        XCTAssertTrue(iosAppSource.contains("if !shouldSkipInteractiveStartup {\n                ICloudDevicePresenceService.shared.refreshNow()\n            }"))
+        XCTAssertTrue(iosAppSource.contains("configureICloudPresenceReadiness()"))
+        XCTAssertTrue(iosAppSource.contains("snapshot.isReady(for: 9527)"))
+        XCTAssertTrue(iosAppSource.contains("ICloudDevicePresenceService.shared.stop()"))
         XCTAssertTrue(iosPresenceSource.contains("private let deviceKeyPrefix = \"skybridge.device.\""))
         XCTAssertTrue(iosPresenceSource.contains("NSUbiquitousKeyValueStore.default"))
         XCTAssertTrue(iosPresenceSource.contains("\"remote_desktop\", \"file_transfer\", \"clipboard\""))
+        XCTAssertTrue(iosPresenceSource.contains("isOnline: readiness.isReady"))
+        XCTAssertTrue(iosPresenceSource.contains("listenerReady: readiness.isReady"))
+        XCTAssertTrue(iosPresenceSource.contains("controlPort: readiness.controlPort"))
+        XCTAssertTrue(macICloudSource.contains("public var listenerReady: Bool?"))
+        XCTAssertTrue(macICloudSource.contains("public var controlPort: UInt16?"))
         XCTAssertTrue(macICloudSource.contains("继续使用 iCloud KV Store 做设备在线心跳"))
         XCTAssertTrue(
             iosPresenceSource.contains("isAdvertisableRoutableIPv4") &&
@@ -773,6 +780,28 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             macICloudSource.contains("iCloud 容器不可用：请检查 iCloud Drive"),
             "iCloud KVS device presence must not be blocked by the optional iCloud Documents container."
         )
+
+        let legacyRecord = iCloudDevice(
+            id: "legacy-ipad",
+            name: "Legacy iPad",
+            model: "iPad",
+            osVersion: "iOS 18",
+            appVersion: "1.0",
+            lastSeen: Date(timeIntervalSince1970: 1_700_000_000),
+            capabilities: [.remoteDesktop],
+            isOnline: true,
+            networkType: .wifi,
+            ipAddress: "192.0.2.10"
+        )
+        let legacyData = try JSONEncoder().encode(legacyRecord)
+        let legacyJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyData) as? [String: Any]
+        )
+        XCTAssertNil(legacyJSON["listenerReady"])
+        XCTAssertNil(legacyJSON["controlPort"])
+        let decodedLegacy = try JSONDecoder().decode(iCloudDevice.self, from: legacyData)
+        XCTAssertNil(decodedLegacy.listenerReady)
+        XCTAssertNil(decodedLegacy.controlPort)
     }
 
     func testDeviceDiscoveryViewCachesPresentationDerivedStateOffBody() throws {

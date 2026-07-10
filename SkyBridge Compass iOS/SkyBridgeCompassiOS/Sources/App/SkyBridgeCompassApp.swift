@@ -288,22 +288,10 @@ struct SkyBridgeCompassApp: App {
         let discoveryElapsedMs = Int(Date().timeIntervalSince(discoveryStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ Discovery 配置完成 (\(discoveryElapsedMs)ms)")
 
-        // 3. 启动 iCloud KVS 在线心跳。它不是 CloudKit 数据同步，必须默认开启，
-        // 否则 Mac 端只能看到过期云设备记录，iPad 前台也会显示离线。
-        ICloudDevicePresenceService.shared.start()
+        // 3. KVS 在线态必须来自真实可拨号的控制监听器，而不是 App 进程存活状态。
+        configureICloudPresenceReadiness()
 
-        // 4. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
-        if SettingsManager.instance.enableCloudKitSync {
-            SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：CloudKit 初始化")
-            let cloudKitStartedAt = Date()
-            await CloudKitSyncManager.instance.initialize()
-            let cloudKitElapsedMs = Int(Date().timeIntervalSince(cloudKitStartedAt) * 1000)
-            SkyBridgeLogger.shared.info("✅ CloudKit 同步已初始化 (\(cloudKitElapsedMs)ms)")
-        } else {
-            SkyBridgeLogger.shared.info("ℹ️ CloudKit 同步未开启（SettingsManager.enableCloudKitSync = false）")
-        }
-
-        // 5. 启动 P2P 监听器（按后台策略）
+        // 4. 启动 P2P 监听器（按后台策略）
         if SettingsManager.instance.allowBackgroundConnection || scenePhase == .active {
             do {
                 SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：P2P 监听器")
@@ -318,24 +306,39 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.shared.info("ℹ️ 后台连接未开启：P2P 监听器延迟到前台启动")
         }
 
-        // 6. Clipboard Sync wiring（最小闭环）：本地剪贴板变化 -> 广播给已握手连接
+        // 5. 监听器启动完成后再发布 KVS presence。启动失败时会显式发布离线，
+        // 避免 Mac 将心跳存活误判为 P2P 控制端口可达。
+        ICloudDevicePresenceService.shared.start()
+
+        // 6. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
+        if SettingsManager.instance.enableCloudKitSync {
+            SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：CloudKit 初始化")
+            let cloudKitStartedAt = Date()
+            await CloudKitSyncManager.instance.initialize()
+            let cloudKitElapsedMs = Int(Date().timeIntervalSince(cloudKitStartedAt) * 1000)
+            SkyBridgeLogger.shared.info("✅ CloudKit 同步已初始化 (\(cloudKitElapsedMs)ms)")
+        } else {
+            SkyBridgeLogger.shared.info("ℹ️ CloudKit 同步未开启（SettingsManager.enableCloudKitSync = false）")
+        }
+
+        // 7. Clipboard Sync wiring（最小闭环）：本地剪贴板变化 -> 广播给已握手连接
         ClipboardManager.shared.onLocalClipboardChanged = { data, mimeType in
             Task { @MainActor in
                 await P2PConnectionManager.instance.broadcastClipboard(data: data, mimeType: mimeType)
             }
         }
 
-        // 7. 应用剪贴板设置（启用/图片/URL/大小/历史/轮询/限速）
+        // 8. 应用剪贴板设置（启用/图片/URL/大小/历史/轮询/限速）
         applyClipboardSettings()
 
-        // 8. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
+        // 9. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：文件传输监听")
         let fileTransferStartedAt = Date()
         await FileTransferRuntime.shared.startIfNeeded()
         let fileTransferElapsedMs = Int(Date().timeIntervalSince(fileTransferStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ 文件传输监听步骤完成 (\(fileTransferElapsedMs)ms)")
 
-        // 9. 启动灵动岛 Live Activity（显示天气或连接状态）
+        // 10. 启动灵动岛 Live Activity（显示天气或连接状态）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：Live Activity")
         let liveActivityStartedAt = Date()
         await initializeLiveActivity()
@@ -442,11 +445,8 @@ struct SkyBridgeCompassApp: App {
             } catch {
                 SkyBridgeLogger.shared.error("❌ 前台恢复 P2P 监听器失败: \(error.localizedDescription)")
             }
-            // 回到前台：重启在线心跳定时器（后台空闲时会被停掉以省电）。start() 幂等。
+            // 回到前台：在监听器启动结果确定后重启 presence。start() 会立即发布一次。
             ICloudDevicePresenceService.shared.start()
-            if !shouldSkipInteractiveStartup {
-                ICloudDevicePresenceService.shared.refreshNow()
-            }
             applyClipboardSettings()
 
         case .background:
@@ -482,6 +482,16 @@ struct SkyBridgeCompassApp: App {
 
         default:
             break
+        }
+    }
+
+    private func configureICloudPresenceReadiness() {
+        ICloudDevicePresenceService.shared.configureControlListenerReadinessProvider {
+            let snapshot = DeviceDiscoveryManager.instance.advertisingReadinessSnapshot
+            return ICloudDevicePresenceService.ControlListenerReadiness(
+                isReady: snapshot.isReady(for: 9527),
+                controlPort: snapshot.actualPort
+            )
         }
     }
     

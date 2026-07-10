@@ -2748,6 +2748,9 @@ public struct EnhancedDeviceDiscoveryView: View {
         let bonjourServiceName = preferredCandidate
             .flatMap(smokeBonjourServiceName)
             ?? "-"
+        let bonjourServiceNameBase64 = bonjourServiceName == "-"
+            ? "-"
+            : Data(bonjourServiceName.utf8).base64EncodedString()
         let endpointHost = preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? "-"
         let endpointPort = preferredCandidate?.portMap["_skybridge._tcp"]
             ?? preferredCandidate?.portMap["_skybridge._udp"]
@@ -2798,6 +2801,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             "model=\(smokeFieldValue(device.modelName ?? "-"))",
             "service=\(service)",
             "bonjourServiceName=\(smokeFieldValue(bonjourServiceName))",
+            "bonjourServiceNameBase64=\(bonjourServiceNameBase64)",
             "endpointHost=\(smokeFieldValue(endpointHost))",
             "endpointPort=\(endpointPort)"
         ]

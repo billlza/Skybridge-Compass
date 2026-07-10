@@ -2102,7 +2102,7 @@ append_mac_online_app_connected_result() {
     >>"$MAC_ONLINE_STATUS"
 }
 
-latest_mac_online_ipad_control_endpoint() {
+latest_mac_online_ipad_control_route() {
   python3 - "$MAC_ONLINE_STATUS" "$IOS_PQC_DEVICE_ID" <<'PY'
 import re
 import sys
@@ -2152,12 +2152,102 @@ for line in reversed(lines):
             continue
     host = field(line, "endpointHost")
     port = field(line, "endpointPort")
-    if not host or host == "-" or not port or not port.isdigit() or int(port) <= 0:
+    if not port or not port.isdigit() or int(port) <= 0:
         continue
-    print(host, port)
-    raise SystemExit(0)
+    if host and host != "-":
+        print("host", host, port)
+        raise SystemExit(0)
+    service_name_base64 = field(line, "bonjourServiceNameBase64")
+    if service_name_base64 and service_name_base64 != "-":
+        print("bonjour", service_name_base64, port)
+        raise SystemExit(0)
 raise SystemExit(1)
 PY
+}
+
+bonjour_control_route_reachable() {
+  local service_name_base64="$1"
+  local probe_error="$2"
+  local service_name
+  service_name="$(python3 - "$service_name_base64" <<'PY'
+import base64
+import sys
+
+try:
+    decoded = base64.b64decode(sys.argv[1], validate=True).decode("utf-8")
+except (ValueError, UnicodeDecodeError):
+    raise SystemExit(1)
+if not decoded or "\x00" in decoded:
+    raise SystemExit(1)
+print(decoded)
+PY
+)" || return 1
+
+  run_stdin_command_with_hard_timeout 8 swift - "$service_name" > /dev/null 2>"$probe_error" <<'SWIFT'
+import Darwin
+import Foundation
+import Network
+
+guard CommandLine.arguments.count == 2 else {
+    fputs("invalid service-name arguments\n", stderr)
+    exit(2)
+}
+
+let serviceName = CommandLine.arguments[1]
+let parameters = NWParameters.tcp
+parameters.includePeerToPeer = true
+let endpoint = NWEndpoint.service(
+    name: serviceName,
+    type: "_skybridge._tcp",
+    domain: "local.",
+    interface: nil
+)
+let connection = NWConnection(to: endpoint, using: parameters)
+let completion = DispatchSemaphore(value: 0)
+final class BonjourControlProbeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private var succeeded = false
+
+    func finish(_ result: Bool, detail: String? = nil) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed else { return false }
+        completed = true
+        succeeded = result
+        if let detail {
+            fputs("\(detail)\n", stderr)
+        }
+        return true
+    }
+
+    func result() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return succeeded
+    }
+}
+let probeState = BonjourControlProbeState()
+
+connection.stateUpdateHandler = { state in
+    switch state {
+    case .ready:
+        if probeState.finish(true) { completion.signal() }
+    case .failed(let error):
+        if probeState.finish(false, detail: "NWConnection failed: \(error)") { completion.signal() }
+    case .cancelled:
+        if probeState.finish(false, detail: "NWConnection cancelled before ready") { completion.signal() }
+    default:
+        break
+    }
+}
+connection.start(queue: DispatchQueue(label: "com.skybridge.smoke.bonjour-control-probe"))
+if completion.wait(timeout: .now() + 5) == .timedOut {
+    _ = probeState.finish(false, detail: "NWConnection timed out resolving Bonjour control route")
+}
+connection.cancel()
+exit(probeState.result() ? 0 : 1)
+SWIFT
 }
 
 ios_listener_ready_for_control_port() {
@@ -2198,6 +2288,8 @@ PY
 verify_ipad_control_port_reachable_from_mac() {
   local started_at
   local endpoint
+  local route_kind
+  local route_value
   local host
   local port
   local probe_error="$ARTIFACT_DIR/ipad-control-port-probe.stderr.log"
@@ -2207,17 +2299,23 @@ verify_ipad_control_port_reachable_from_mac() {
   started_at="$(date +%s)"
 
   while true; do
-    endpoint="$(latest_mac_online_ipad_control_endpoint 2>/dev/null || true)"
+    endpoint="$(latest_mac_online_ipad_control_route 2>/dev/null || true)"
     if [[ -n "$endpoint" ]]; then
-      read -r host port <<<"$endpoint"
+      read -r route_kind route_value port <<<"$endpoint"
+      if [[ "$route_kind" == "host" ]]; then
+        host="$route_value"
+      else
+        host="bonjour-service"
+      fi
       if ios_listener_ready_for_control_port "$port"; then
         listener_ready=1
       else
         listener_ready=0
       fi
-      if tcp_port_reachable "$host" "$port" "$probe_error"; then
+      if { [[ "$route_kind" == "host" ]] && tcp_port_reachable "$route_value" "$port" "$probe_error"; } \
+        || { [[ "$route_kind" == "bonjour" ]] && bonjour_control_route_reachable "$route_value" "$probe_error"; }; then
         if [[ "$listener_ready" == "1" ]]; then
-          printf '%s ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+          printf '%s ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1 routeKind=%s\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$route_kind" >>"$MAC_ONLINE_STATUS"
           return 0
         fi
         tcp_reachable_without_listener=1

@@ -3881,6 +3881,54 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testICloudPresenceControlListenerReadinessFailsClosed() {
+    let missingPort = ICloudDevicePresenceService.ControlListenerReadiness(
+      isReady: true,
+      controlPort: nil
+    )
+    let zeroPort = ICloudDevicePresenceService.ControlListenerReadiness(
+      isReady: true,
+      controlPort: 0
+    )
+    let listenerNotReady = ICloudDevicePresenceService.ControlListenerReadiness(
+      isReady: false,
+      controlPort: 9527
+    )
+    let ready = ICloudDevicePresenceService.ControlListenerReadiness(
+      isReady: true,
+      controlPort: 9527
+    )
+
+    XCTAssertEqual(missingPort, .unavailable)
+    XCTAssertEqual(zeroPort, .unavailable)
+    XCTAssertEqual(listenerNotReady, .unavailable)
+    XCTAssertTrue(ready.isReady)
+    XCTAssertEqual(ready.controlPort, 9527)
+  }
+
+  func testICloudPresencePublishesAfterListenerStartupAndStopsFailClosed() throws {
+    let appSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift"
+    )
+    let presenceSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CloudKitSyncManager.swift"
+    )
+
+    let listenerStart = try XCTUnwrap(appSource.range(of: "try await connectionManager.startListening()"))
+    let presenceStart = try XCTUnwrap(
+      appSource.range(of: "ICloudDevicePresenceService.shared.start()", range: listenerStart.upperBound..<appSource.endIndex)
+    )
+    XCTAssertLessThan(listenerStart.lowerBound, presenceStart.lowerBound)
+    XCTAssertTrue(appSource.contains("snapshot.isReady(for: 9527)"))
+    XCTAssertTrue(appSource.contains("connectionManager.stopListening()"))
+    XCTAssertTrue(appSource.contains("ICloudDevicePresenceService.shared.stop()"))
+    XCTAssertTrue(presenceSource.contains("publishPresence(readiness: .unavailable, reason: \"listener-stopped\")"))
+    XCTAssertTrue(presenceSource.contains("isOnline: readiness.isReady"))
+    XCTAssertTrue(presenceSource.contains("listenerReady: readiness.isReady"))
+    XCTAssertTrue(presenceSource.contains("controlPort: readiness.controlPort"))
+  }
+
   func testIOSPrimaryBonjourTXTAdvertisesAllControlPortAliases() throws {
     let discoverySource = try repositoryScriptSource(
       "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"

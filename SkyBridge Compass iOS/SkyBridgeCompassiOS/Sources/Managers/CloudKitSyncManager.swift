@@ -220,13 +220,39 @@ public class CloudKitSyncManager: ObservableObject {
 public final class ICloudDevicePresenceService: ObservableObject {
     public static let shared = ICloudDevicePresenceService()
 
+    public struct ControlListenerReadiness: Equatable, Sendable {
+        public let isReady: Bool
+        public let controlPort: UInt16?
+
+        public init(isReady: Bool, controlPort: UInt16?) {
+            let hasValidPort = controlPort.map { $0 > 0 } == true
+            self.isReady = isReady && hasValidPort
+            self.controlPort = self.isReady ? controlPort : nil
+        }
+
+        public static let unavailable = ControlListenerReadiness(
+            isReady: false,
+            controlPort: nil
+        )
+    }
+
     private let kvStore = NSUbiquitousKeyValueStore.default
     private let deviceKeyPrefix = "skybridge.device."
     private let refreshInterval: TimeInterval = 30
     private var heartbeatTimer: Timer?
     private var didLogUnavailable = false
+    private var didLogMissingReadinessProvider = false
+    private var lastPublishedReadiness: ControlListenerReadiness?
+    private var controlListenerReadinessProvider: (@MainActor () -> ControlListenerReadiness)?
 
     private init() {}
+
+    public func configureControlListenerReadinessProvider(
+        _ provider: @escaping @MainActor () -> ControlListenerReadiness
+    ) {
+        controlListenerReadinessProvider = provider
+        didLogMissingReadinessProvider = false
+    }
 
     public func start() {
         guard heartbeatTimer == nil else {
@@ -249,9 +275,29 @@ public final class ICloudDevicePresenceService: ObservableObject {
     public func stop() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
+        publishPresence(readiness: .unavailable, reason: "listener-stopped")
     }
 
     public func refreshNow() {
+        let readiness: ControlListenerReadiness
+        if let controlListenerReadinessProvider {
+            readiness = controlListenerReadinessProvider()
+        } else {
+            readiness = .unavailable
+            if !didLogMissingReadinessProvider {
+                didLogMissingReadinessProvider = true
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ iCloud KVS 在线心跳按离线发布：未配置 P2P 控制监听器 readiness provider"
+                )
+            }
+        }
+        publishPresence(readiness: readiness, reason: "heartbeat")
+    }
+
+    private func publishPresence(
+        readiness: ControlListenerReadiness,
+        reason: String
+    ) {
         guard FileManager.default.ubiquityIdentityToken != nil else {
             if !didLogUnavailable {
                 didLogUnavailable = true
@@ -269,12 +315,16 @@ public final class ICloudDevicePresenceService: ObservableObject {
             osVersion: identity.osVersion,
             appVersion: Self.appVersion(),
             lastSeen: Date(),
-            capabilities: ["remote_desktop", "file_transfer", "clipboard"],
-            isOnline: true,
+            capabilities: readiness.isReady
+                ? ["remote_desktop", "file_transfer", "clipboard"]
+                : [],
+            isOnline: readiness.isReady,
             networkType: endpoint.networkType,
             ipAddress: endpoint.ipAddress,
             stableIdentityDeviceId: identity.stableDeviceId,
-            vendorDeviceId: identity.vendorDeviceId
+            vendorDeviceId: identity.vendorDeviceId,
+            listenerReady: readiness.isReady,
+            controlPort: readiness.controlPort
         )
 
         let encoder = JSONEncoder()
@@ -285,7 +335,16 @@ public final class ICloudDevicePresenceService: ObservableObject {
             kvStore.set(data, forKey: deviceKeyPrefix + device.id)
             kvStore.synchronize()
             didLogUnavailable = false
-            SkyBridgeLogger.shared.debug("💓 iCloud KVS 在线心跳已发布: \(device.name)")
+            if readiness.isReady {
+                SkyBridgeLogger.shared.debug(
+                    "💓 iCloud KVS 在线心跳已发布: \(device.name) controlPort=\(readiness.controlPort.map(String.init) ?? "-") listenerReady=1"
+                )
+            } else if lastPublishedReadiness != readiness {
+                SkyBridgeLogger.shared.info(
+                    "💤 iCloud KVS 离线状态已发布: \(device.name) reason=\(reason) listenerReady=0"
+                )
+            }
+            lastPublishedReadiness = readiness
         } catch {
             SkyBridgeLogger.shared.warning("⚠️ iCloud KVS 在线心跳编码失败: \(error.localizedDescription)")
         }
@@ -304,6 +363,8 @@ public final class ICloudDevicePresenceService: ObservableObject {
         let ipAddress: String?
         let stableIdentityDeviceId: String
         let vendorDeviceId: String?
+        let listenerReady: Bool
+        let controlPort: UInt16?
     }
 
     private static func appVersion() -> String {

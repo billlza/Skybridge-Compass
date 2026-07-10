@@ -865,7 +865,17 @@ struct PerformanceSettingsView: View {
                 Toggle("允许后台连接（耗电更高）", isOn: $settings.allowBackgroundConnection)
                     .onChange(of: settings.allowBackgroundConnection) { _, enabled in
                         if enabled {
-                            Task { try? await connectionManager.startListening() }
+                            Task {
+                                do {
+                                    try await connectionManager.startListening()
+                                    ICloudDevicePresenceService.shared.refreshNow()
+                                } catch {
+                                    ICloudDevicePresenceService.shared.refreshNow()
+                                    SkyBridgeLogger.shared.error(
+                                        "❌ 启用后台连接时 P2P 监听器启动失败: \(error.localizedDescription)"
+                                    )
+                                }
+                            }
                         }
                     }
                 Toggle("自动重连", isOn: $settings.autoReconnect)

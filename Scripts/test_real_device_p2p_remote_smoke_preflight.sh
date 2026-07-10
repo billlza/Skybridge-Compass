@@ -124,6 +124,12 @@ grep -q 'start_macos_online_ipad_client' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must wait for the real SkyBridge app process before clicking"
 grep -q 'ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad TCP probe must only emit positive evidence when iOS listener readiness is proven"
+grep -q 'bonjour_control_route_reachable' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad TCP probe must resolve the app-authored Bonjour service when its host IP is not populated yet"
+grep -q 'bonjourServiceNameBase64' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad TCP probe must consume a lossless Bonjour service name instead of a whitespace-sanitized display value"
+grep -q 'NWEndpoint.service' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad Bonjour pre-probe must exercise Network.framework service endpoint resolution"
 grep -q 'reason=listener-not-ready' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad TCP probe must fail closed when TCP is reachable but iOS listener readiness is missing"
 grep -q 'phase=app-local-network-privacy reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
@@ -311,8 +317,8 @@ grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=liste
   || fail "Mac online iPad control-port probe should fail fast when listener readiness is missing"
 grep -q 'failed stage=mac-online-ipad phase=app-local-network-privacy reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad control flow should distinguish packaged-app Local Network denial from connected-row timeout"
-grep -q 'latest_mac_online_ipad_control_endpoint' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad probe must derive host/port from the app-authored OnlineDeviceCard row"
+grep -q 'latest_mac_online_ipad_control_route' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad probe must derive host-or-Bonjour route evidence from the app-authored OnlineDeviceCard row"
 grep -q 'minimum_source_samples' "$SMOKE_SCRIPT" \
   || fail "remote performance validation should require source helper heartbeats inside the final window"
 ! grep -q 'Mac smoke source aggregate renderFPS below live-source budget' "$SMOKE_SCRIPT" \

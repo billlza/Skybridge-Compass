@@ -520,6 +520,8 @@ public struct iCloudDevice: Identifiable, Codable, Hashable, Sendable {
     public var stableIdentityDeviceId: String?
     public var registrationFingerprint: String?
     public var vendorDeviceId: String?
+    public var listenerReady: Bool?
+    public var controlPort: UInt16?
 
     public init(
         id: String,
@@ -534,7 +536,9 @@ public struct iCloudDevice: Identifiable, Codable, Hashable, Sendable {
         ipAddress: String? = nil,
         stableIdentityDeviceId: String? = nil,
         registrationFingerprint: String? = nil,
-        vendorDeviceId: String? = nil
+        vendorDeviceId: String? = nil,
+        listenerReady: Bool? = nil,
+        controlPort: UInt16? = nil
     ) {
         self.id = id
         self.name = name
@@ -549,6 +553,8 @@ public struct iCloudDevice: Identifiable, Codable, Hashable, Sendable {
         self.stableIdentityDeviceId = stableIdentityDeviceId
         self.registrationFingerprint = registrationFingerprint
         self.vendorDeviceId = vendorDeviceId
+        self.listenerReady = listenerReady
+        self.controlPort = controlPort
     }
 
  /// 设备类型图标
