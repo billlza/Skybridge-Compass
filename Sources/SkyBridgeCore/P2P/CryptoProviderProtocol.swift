@@ -294,11 +294,11 @@ public struct KeyMaterial: Sendable {
         
  // X-Wing + ML-DSA-65 (混合)
         case (0x0001, .keyExchange, true): return 1216   // X25519(32) + ML-KEM-768(1184)
-        case (0x0001, .keyExchange, false): return 2432  // X25519(32) + ML-KEM-768(2400)
+        case (0x0001, .keyExchange, false): return 64    // CryptoKit integrity-checked representation
         case (0x0001, .signing, true): return 1952       // ML-DSA-65 公钥
-        case (0x0001, .signing, false): return 4032      // ML-DSA-65 私钥
+        case (0x0001, .signing, false): return 64        // CryptoKit integrity-checked representation
         
-        default: return 0  // 未知套件，跳过长度检查
+        default: return 0  // 未知套件；调用方必须将缺失的长度契约视为错误
         }
     }
 }

@@ -8,20 +8,44 @@ import CryptoKit
 /// 验证两种实现可以互操作
 @available(macOS 26.0, *)
 final class ApplePQCCompatibilityTests: XCTestCase {
-    
+
+    private var originalEnablePQC = false
+    private var originalPQCSignatureAlgorithm = ""
+    private var originalUseSecureEnclaveMLDSA = false
+
     override func setUp() async throws {
- // 测试前准备
+        (
+            originalEnablePQC,
+            originalPQCSignatureAlgorithm,
+            originalUseSecureEnclaveMLDSA
+        ) = await MainActor.run {
+            (
+                SettingsManager.shared.enablePQC,
+                SettingsManager.shared.pqcSignatureAlgorithm,
+                SettingsManager.shared.useSecureEnclaveMLDSA
+            )
+        }
     }
-    
+
     override func tearDown() async throws {
- // 测试后清理
+        let enablePQC = originalEnablePQC
+        let signatureAlgorithm = originalPQCSignatureAlgorithm
+        let useSecureEnclaveMLDSA = originalUseSecureEnclaveMLDSA
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = enablePQC
+            SettingsManager.shared.pqcSignatureAlgorithm = signatureAlgorithm
+            SettingsManager.shared.useSecureEnclaveMLDSA = useSecureEnclaveMLDSA
+        }
     }
     
- // MARK: - 提供者检测测试
+    // MARK: - 提供者检测测试
     
     func testProviderSelection() throws {
-        let provider = PQCProviderFactory.makeProvider()
-        XCTAssertNotNil(provider, "PQC提供者应该可用")
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider() as? ApplePQCProvider,
+            "HAS_APPLE_PQC_SDK on macOS 26+ must select the Apple PQC provider"
+        )
+        XCTAssertEqual(provider.backend, .applePQC)
         
         let currentProvider = PQCProviderFactory.currentProvider
         XCTAssertEqual(currentProvider, "Apple CryptoKit (原生)", "macOS 26.0+应该使用Apple原生PQC")
@@ -248,10 +272,6 @@ final class ApplePQCCompatibilityTests: XCTestCase {
         XCTAssertTrue(isValid)
         print("✅ Secure Enclave签名验证成功")
         
- // 恢复默认设置
-        await MainActor.run {
-            SettingsManager.shared.useSecureEnclaveMLDSA = false
-        }
     }
     
  // MARK: - 性能对比测试
@@ -290,18 +310,17 @@ final class ApplePQCCompatibilityTests: XCTestCase {
             print("✅ Apple实现更快")
         }
         #else
-        print("⚠️ OQS不可用，跳过性能对比")
+        throw XCTSkip("OQSRAII is not compiled into this test target")
         #endif
     }
     
  // MARK: - 混合签名集成测试
     
     func testHybridSignatureWithApple() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
+        _ = try XCTUnwrap(
+            PQCProviderFactory.makeProvider() as? ApplePQCProvider,
+            "HAS_APPLE_PQC_SDK on macOS 26+ must select the Apple PQC provider"
+        )
         
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
@@ -336,11 +355,10 @@ final class ApplePQCCompatibilityTests: XCTestCase {
  // MARK: - 密钥迁移测试
     
     func testKeyMigration() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
+        _ = try XCTUnwrap(
+            PQCProviderFactory.makeProvider() as? ApplePQCProvider,
+            "HAS_APPLE_PQC_SDK on macOS 26+ must select the Apple PQC provider"
+        )
         
         let testPeerId = "migration-test"
         let testAlgorithm = "ML-DSA-65"
@@ -353,6 +371,13 @@ final class ApplePQCCompatibilityTests: XCTestCase {
         )
         
         print("✅ 密钥迁移测试通过")
+    }
+}
+#else
+@available(macOS 14.0, *)
+final class ApplePQCCompatibilityTests: XCTestCase {
+    func testApplePQCSDKBackendNotCompiled() throws {
+        throw XCTSkip("HAS_APPLE_PQC_SDK is not enabled for this build")
     }
 }
 #endif // HAS_APPLE_PQC_SDK

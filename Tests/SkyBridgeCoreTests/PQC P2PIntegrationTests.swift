@@ -5,7 +5,10 @@ import CryptoKit
 /// PQC在P2P通信中的集成测试
 /// 测试PQC与P2P网络、文件传输、远程桌面的集成
 final class PQCP2PIntegrationTests: XCTestCase {
-    
+
+    private var originalEnablePQC = false
+    private var originalPQCSignatureAlgorithm = ""
+
     var crypto: EnhancedPostQuantumCrypto!
     var keyManager: EnhancedQuantumKeyManager!
     
@@ -13,53 +16,51 @@ final class PQCP2PIntegrationTests: XCTestCase {
     let bob = "bob-peer"
     
     override func setUp() async throws {
+        (originalEnablePQC, originalPQCSignatureAlgorithm) = await MainActor.run {
+            (
+                SettingsManager.shared.enablePQC,
+                SettingsManager.shared.pqcSignatureAlgorithm
+            )
+        }
+
         crypto = EnhancedPostQuantumCrypto()
         keyManager = EnhancedQuantumKeyManager()
         
  // 启用PQC进行测试
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
-            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA"
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
     }
     
     override func tearDown() async throws {
         crypto = nil
         keyManager = nil
-        
- // 恢复默认设置
+
+        let enablePQC = originalEnablePQC
+        let signatureAlgorithm = originalPQCSignatureAlgorithm
         await MainActor.run {
-            SettingsManager.shared.enablePQC = false
+            SettingsManager.shared.enablePQC = enablePQC
+            SettingsManager.shared.pqcSignatureAlgorithm = signatureAlgorithm
         }
     }
     
  // MARK: - 端到端通信测试
     
     func testEndToEndMessageSigning() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         let message = "这是一条需要签名的P2P消息".utf8Data
         
  // Alice签名消息
         let (classicalSig, pqcSig) = try await crypto.hybridSign(message, for: alice)
-        
+        let pqcSignature = try XCTUnwrap(pqcSig)
+
         XCTAssertGreaterThan(classicalSig.count, 0)
-        
- // PQC签名可能因为密钥问题返回nil
-        guard pqcSig != nil else {
-            print("⚠️ PQC签名未生成，跳过验证测试")
-            return
-        }
         
  // Bob验证消息
         let isValid = try await crypto.verifyHybrid(
             message,
             classicalSignature: classicalSig,
-            pqcSignature: pqcSig,
+            pqcSignature: pqcSignature,
             peerId: alice
         )
         
@@ -69,10 +70,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testEndToEndMessageEncryption() async throws {
         #if canImport(liboqs)
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            XCTFail("PQC提供者不可用")
-            return
-        }
+        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
         
         let message = "这是一条需要加密的P2P消息 🔐".utf8Data
         
@@ -103,7 +101,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
         XCTAssertEqual(messageString, decryptedMessage, "解密后的消息应该与原消息相同")
         print("✅ 端到端消息加密/解密成功")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This KEM integration test requires a liboqs-enabled build")
         #endif
     }
     
@@ -115,6 +113,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
         
  // Alice签名
         let (classicalSig, pqcSig) = try await crypto.hybridSign(message, for: alice)
+        let pqcSignature = try XCTUnwrap(pqcSig)
         
  // 攻击者篡改消息
         let tamperedMessage = "篡改后的消息".utf8Data
@@ -123,33 +122,24 @@ final class PQCP2PIntegrationTests: XCTestCase {
         let isValid = try await crypto.verifyHybrid(
             tamperedMessage,
             classicalSignature: classicalSig,
-            pqcSignature: pqcSig,
+            pqcSignature: pqcSignature,
             peerId: alice
         )
         
         XCTAssertFalse(isValid, "篡改消息的验证应该失败")
         print("✅ 消息篡改检测成功")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This tampering test requires a liboqs-enabled build")
         #endif
     }
     
     func testSignatureTampering() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         let message = "测试消息".utf8Data
         
  // Alice签名
         let (classicalSig, pqcSig) = try await crypto.hybridSign(message, for: alice)
         
-        guard var pqcSignature = pqcSig else {
-            print("⚠️ PQC签名未生成，跳过篡改验证测试")
-            return
-        }
+        var pqcSignature = try XCTUnwrap(pqcSig)
         
  // 攻击者篡改PQC签名
         pqcSignature[0] ^= 0xFF
@@ -169,40 +159,25 @@ final class PQCP2PIntegrationTests: XCTestCase {
  // MARK: - 多对等节点通信测试
     
     func testMultiPeerCommunication() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         let peers = ["peer-1", "peer-2", "peer-3", "peer-4", "peer-5"]
         let message = "多对等节点测试消息".utf8Data
         
         var signatures: [(classical: Data, pqc: Data?)] = []
         
  // 每个peer都签名消息
-        var hasPQCSignature = false
         for peer in peers {
             let sig = try await crypto.hybridSign(message, for: peer)
             signatures.append(sig)
-            if sig.pqc != nil {
-                hasPQCSignature = true
-            }
-        }
-        
- // 如果没有任何PQC签名，跳过测试
-        guard hasPQCSignature else {
-            print("⚠️ 没有生成PQC签名，跳过多对等节点测试")
-            return
         }
         
  // 验证每个peer的签名
         for (index, peer) in peers.enumerated() {
             let sig = signatures[index]
+            let pqcSignature = try XCTUnwrap(sig.pqc, "peer \(peer) must produce a PQC signature")
             let isValid = try await crypto.verifyHybrid(
                 message,
                 classicalSignature: sig.classical,
-                pqcSignature: sig.pqc,
+                pqcSignature: pqcSignature,
                 peerId: peer
             )
             XCTAssertTrue(isValid, "peer \(peer) 的签名应该有效")
@@ -215,10 +190,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testSessionKeyNegotiation() async throws {
         #if canImport(liboqs)
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            XCTFail("PQC提供者不可用")
-            return
-        }
+        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
         
  // 模拟双向密钥协商（简化版）
         
@@ -281,7 +253,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
         
         print("✅ 会话密钥协商成功")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This session-key integration test requires a liboqs-enabled build")
         #endif
     }
     
@@ -289,10 +261,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testSecureFileTransfer() async throws {
         #if canImport(liboqs)
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            XCTFail("PQC提供者不可用")
-            return
-        }
+        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
         
  // 模拟文件内容（1MB）
         let fileContent = Data(repeating: 0xAB, count: 1024 * 1024)
@@ -325,14 +294,14 @@ final class PQCP2PIntegrationTests: XCTestCase {
         
  // 4. 接收方解密文件
         let decryptedFileString = try await crypto.decrypt(encryptedFile, using: decryptionKey)
-        let decryptedFile = Data(base64Encoded: decryptedFileString)!
+        let decryptedFile = try XCTUnwrap(Data(base64Encoded: decryptedFileString))
         
  // 5. 验证完整性
         XCTAssertEqual(fileContent, decryptedFile, "解密后的文件应该与原文件相同")
         
         print("✅ 安全文件传输测试通过")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This secure-file integration test requires a liboqs-enabled build")
         #endif
     }
     
@@ -350,22 +319,20 @@ final class PQCP2PIntegrationTests: XCTestCase {
         let startTime = Date()
         
         for _ in 0..<iterations {
-            _ = try await crypto.hybridSign(message, for: "\(alice)-perf")
+            let signature = try await crypto.hybridSign(message, for: "\(alice)-perf")
+            XCTAssertNotNil(signature.pqc)
         }
         
         let elapsed = Date().timeIntervalSince(startTime)
         print("混合签名性能: \(iterations)次签名耗时 \(String(format: "%.2f", elapsed * 1000))ms")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This signature benchmark requires a liboqs-enabled build")
         #endif
     }
     
     func testKEMBasedEncryptionPerformance() async throws {
         #if canImport(liboqs)
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            print("⚠️ liboqs不可用，跳过此测试")
-            return
-        }
+        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
         
         let message = Data(repeating: 0xAA, count: 1024 * 10) // 10KB
         let iterations = 10
@@ -387,7 +354,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(startTime)
         print("KEM加密性能: \(iterations)次加密耗时 \(String(format: "%.2f", elapsed * 1000))ms")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("This KEM benchmark requires a liboqs-enabled build")
         #endif
     }
     
@@ -419,32 +386,25 @@ final class PQCP2PIntegrationTests: XCTestCase {
         print("✅ 向后兼容性测试通过")
     }
     
-    func testHybridModeGracefulDegradation() async throws {
-        #if !canImport(liboqs)
- // 在没有liboqs的环境中，即使启用PQC也应该能正常工作
+    func testHybridModeMatchesProviderAvailabilityWithoutDowngrade() async throws {
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
-        
-        let message = "优雅降级测试".utf8Data
-        
-        let (classical, pqc) = try await crypto.hybridSign(message, for: alice)
-        
-        XCTAssertGreaterThan(classical.count, 0, "传统签名应该存在")
-        XCTAssertNil(pqc, "没有liboqs时PQC签名应该为nil")
-        
-        let isValid = try await crypto.verifyHybrid(
-            message,
-            classicalSignature: classical,
-            pqcSignature: nil,
-            peerId: alice
-        )
-        
-        XCTAssertTrue(isValid, "应该能够正常验证传统签名")
-        print("✅ 优雅降级测试通过")
-        #else
-        print("ℹ️ liboqs可用，跳过降级测试")
-        #endif
+
+        let message = "provider availability test".utf8Data
+
+        if PQCProviderFactory.makeProvider() != nil {
+            let signature = try await crypto.hybridSign(message, for: alice)
+            XCTAssertNotNil(signature.pqc)
+        } else {
+            do {
+                _ = try await crypto.hybridSign(message, for: alice)
+                XCTFail("PQC-enabled signing must not downgrade when no provider exists")
+            } catch let error as EnhancedPostQuantumCryptoError {
+                XCTAssertEqual(error, .pqcProviderUnavailable)
+            }
+        }
     }
     
  // MARK: - 安全特性测试
@@ -460,16 +420,11 @@ final class PQCP2PIntegrationTests: XCTestCase {
             }
             
             let (_, pqcSig) = try await crypto.hybridSign(message, for: "\(alice)-\(algorithm)")
-            XCTAssertNotNil(pqcSig, "算法 \(algorithm) 应该生成签名")
-            
-            if let sig = pqcSig {
-                print("✅ \(algorithm) 签名长度: \(sig.count) 字节")
-            }
+            let signature = try XCTUnwrap(pqcSig, "算法 \(algorithm) 应该生成签名")
+            XCTAssertGreaterThan(signature.count, 3_000)
         }
-        
-        print("✅ PQC算法选择测试通过")
         #else
-        print("⚠️ liboqs不可用，跳过此测试")
+        throw XCTSkip("The liboqs algorithm matrix requires a liboqs-enabled build")
         #endif
     }
 }

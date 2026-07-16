@@ -602,10 +602,10 @@ public class FileTransferEngine: ObservableObject {
         ])
         let checksum = try await calculateFileChecksum(session.localURL)
         let signerPeerId = securityManager.getDeviceId()
-        let pqcAlgo = await MainActor.run {
-            SettingsManager.normalizedPQCSignatureAlgorithm(SettingsManager.shared.pqcSignatureAlgorithm)
-        }
-        let signature = try await pqCrypto.signPQCRequired(Data(checksum.utf8), for: signerPeerId)
+        let requiredSignature = try await pqCrypto.signPQCRequiredWithAlgorithm(
+            Data(checksum.utf8),
+            for: signerPeerId
+        )
         let metadata = FileTransferMetadata(
             transferId: session.id,
             fileName: session.localURL.lastPathComponent,
@@ -616,8 +616,8 @@ public class FileTransferEngine: ObservableObject {
             compressionEnabled: session.configuration.compressionEnabled,
             encryptionEnabled: session.configuration.encryptionEnabled,
             chunkSize: configuration.chunkSize,
-            fileSignature: signature,
-            signatureAlgorithm: pqcAlgo,
+            fileSignature: requiredSignature.bytes,
+            signatureAlgorithm: requiredSignature.algorithm,
             signerPeerId: signerPeerId
         )
         

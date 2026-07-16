@@ -927,8 +927,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 let suite = CryptoSuite(wireId: key.suiteWireId)
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId) }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: key.suiteWireId) }
-                let expected = AppMessage.expectedKEMPublicKeyLength(for: suite)
-                guard expected == 0 || key.publicKey.count == expected else {
+                guard let expected = KEMIdentityKeyLengthContract.publicKeyLength(suite: suite) else {
+                    throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId)
+                }
+                guard key.publicKey.count == expected else {
                     throw KEMRefreshValidationError.invalidKEMPublicKeyLength(
                         wireId: key.suiteWireId,
                         expected: expected,
@@ -1429,13 +1431,5 @@ public enum AppMessage: Codable, Sendable, Equatable {
             bySuite[key.suiteWireId] = key
         }
         return bySuite.keys.sorted().compactMap { bySuite[$0] }
-    }
-
-    private static func expectedKEMPublicKeyLength(for suite: CryptoSuite) -> Int {
-        switch suite.canonicalKEMSuite.wireId {
-        case 0x0001: return 1216
-        case 0x0101, 0x0102: return 1184
-        default: return 0
-        }
     }
 }

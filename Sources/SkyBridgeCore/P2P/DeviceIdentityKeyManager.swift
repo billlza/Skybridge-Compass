@@ -188,10 +188,14 @@ public actor DeviceIdentityKeyManager {
     }
 
     private nonisolated static var useInMemoryKeychain: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = ProcessInfo.processInfo.environment
         if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
         if env["XCTestConfigurationFilePath"] != nil { return true }
         return NSClassFromString("XCTestCase") != nil
+        #else
+        return false
+        #endif
     }
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
@@ -721,6 +725,11 @@ public actor DeviceIdentityKeyManager {
         provider: any CryptoProvider
     ) async throws -> (publicKey: Data, privateKey: SecureBytes) {
         let storageSuite = suite.canonicalKEMSuite
+        guard provider.supportsSuite(storageSuite) else {
+            throw CryptoProviderError.unsupportedAlgorithm(
+                "\(provider.providerName) does not support \(storageSuite.rawValue)"
+            )
+        }
         let cacheKey = KEMCacheKey(suiteWireId: storageSuite.wireId, tier: provider.tier)
         if cachedKEMPublicKeys[cacheKey] != nil {
             if let record = try loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier) {
@@ -736,11 +745,30 @@ public actor DeviceIdentityKeyManager {
         }
         
         let keyPair = try await provider.generateKeyPair(for: .keyExchange)
+        guard keyPair.publicKey.usage == .keyExchange else {
+            throw CryptoProviderError.keyUsageMismatch(
+                expected: .keyExchange,
+                actual: keyPair.publicKey.usage
+            )
+        }
+        guard keyPair.privateKey.usage == .keyExchange else {
+            throw CryptoProviderError.keyUsageMismatch(
+                expected: .keyExchange,
+                actual: keyPair.privateKey.usage
+            )
+        }
+        guard keyPair.publicKey.suite.canonicalKEMSuite.wireId == storageSuite.wireId,
+              keyPair.privateKey.suite.canonicalKEMSuite.wireId == storageSuite.wireId else {
+            throw CryptoProviderError.unsupportedAlgorithm(
+                "\(provider.providerName) generated key material for a different KEM suite"
+            )
+        }
         let record = KEMIdentityKeyRecord(
             suiteWireId: storageSuite.wireId,
             publicKey: keyPair.publicKey.bytes,
             privateKey: keyPair.privateKey.bytes
         )
+        try validateKEMRecord(record, suiteWireId: storageSuite.wireId, tier: provider.tier)
         try saveKEMKeyRecord(record, tier: provider.tier)
         cachedKEMPublicKeys[cacheKey] = record.publicKey
         return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
@@ -751,11 +779,6 @@ public actor DeviceIdentityKeyManager {
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> Data {
-        let storageSuite = suite.canonicalKEMSuite
-        let cacheKey = KEMCacheKey(suiteWireId: storageSuite.wireId, tier: provider.tier)
-        if let cached = cachedKEMPublicKeys[cacheKey] {
-            return cached
-        }
         let record = try await getOrCreateKEMIdentityKey(for: suite, provider: provider)
         return record.publicKey
     }
@@ -1185,6 +1208,7 @@ public actor DeviceIdentityKeyManager {
     private func loadKEMKeyRecord(suiteWireId: UInt16, tier: CryptoTier) throws -> KEMIdentityKeyRecord? {
         let tierAccount = kemAccount(suiteWireId: suiteWireId, tier: tier)
         if let record = try loadKEMKeyRecord(account: tierAccount) {
+            try validateKEMRecord(record, suiteWireId: suiteWireId, tier: tier)
             return record
         }
         
@@ -1263,35 +1287,53 @@ public actor DeviceIdentityKeyManager {
         suiteWireId: UInt16,
         tier: CryptoTier
     ) -> Bool {
-        guard suiteWireId != CryptoSuite.qperiaptContextBound.wireId else {
+        guard record.suiteWireId == suiteWireId,
+              suiteWireId != CryptoSuite.qperiaptContextBound.wireId else {
             return false
         }
-        guard let expectedPriv = expectedKEMPrivateKeyLength(suiteWireId: suiteWireId, tier: tier),
-              let expectedPub = expectedKEMPublicKeyLength(suiteWireId: suiteWireId, tier: tier) else {
-            return true
+        guard let contract = KEMIdentityKeyLengthContract.resolve(
+            suite: CryptoSuite(wireId: suiteWireId),
+            providerTier: tier
+        ) else {
+            return false
         }
-        return record.privateKey.count == expectedPriv && record.publicKey.count == expectedPub
+        return record.privateKey.count == contract.privateKeyLength
+            && record.publicKey.count == contract.publicKeyLength
     }
 
-    private func expectedKEMPrivateKeyLength(suiteWireId: UInt16, tier: CryptoTier) -> Int? {
-        switch (suiteWireId, tier) {
-        case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength
-        case (0x0101, .nativePQC): return 96
-        case (0x0101, .liboqsPQC): return 2400
-        case (0x0102, .nativePQC): return 96
-        case (0x0102, .liboqsPQC): return 2400
-        case (0x0001, .nativePQC): return 64  // X-Wing MLKEM seed format
-        default: return nil
+    private func validateKEMRecord(
+        _ record: KEMIdentityKeyRecord,
+        suiteWireId: UInt16,
+        tier: CryptoTier
+    ) throws {
+        guard record.suiteWireId == suiteWireId else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "stored KEM suite does not match its identity slot"
+            )
         }
-    }
-
-    private func expectedKEMPublicKeyLength(suiteWireId: UInt16, tier: CryptoTier) -> Int? {
-        switch (suiteWireId, tier) {
-        case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength
-        case (0x0101, _): return 1184
-        case (0x0102, _): return 1184
-        case (0x0001, .nativePQC): return 1216
-        default: return nil
+        guard let contract = KEMIdentityKeyLengthContract.resolve(
+            suite: CryptoSuite(wireId: suiteWireId),
+            providerTier: tier
+        ) else {
+            throw CryptoProviderError.unsupportedAlgorithm(
+                "No KEM identity length contract for suite \(suiteWireId) and tier \(tier.rawValue)"
+            )
+        }
+        guard record.publicKey.count == contract.publicKeyLength else {
+            throw CryptoProviderError.invalidKeyLength(
+                expected: contract.publicKeyLength,
+                actual: record.publicKey.count,
+                suite: CryptoSuite(wireId: suiteWireId).rawValue,
+                usage: .keyExchange
+            )
+        }
+        guard record.privateKey.count == contract.privateKeyLength else {
+            throw CryptoProviderError.invalidKeyLength(
+                expected: contract.privateKeyLength,
+                actual: record.privateKey.count,
+                suite: CryptoSuite(wireId: suiteWireId).rawValue,
+                usage: .keyExchange
+            )
         }
     }
     

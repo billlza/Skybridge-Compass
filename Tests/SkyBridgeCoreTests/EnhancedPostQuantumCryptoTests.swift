@@ -10,12 +10,26 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
     let testPeerId = "test-peer-123"
     let testString = "Hello, Quantum World! 你好，量子世界！"
     var testData: Data { testString.utf8Data }
+    private var originalEnablePQC = true
+    private var originalPQCSignatureAlgorithm = "ML-DSA-65"
     
     override func setUp() async throws {
+        (originalEnablePQC, originalPQCSignatureAlgorithm) = await MainActor.run {
+            (
+                SettingsManager.shared.enablePQC,
+                SettingsManager.shared.pqcSignatureAlgorithm
+            )
+        }
         crypto = EnhancedPostQuantumCrypto()
     }
     
     override func tearDown() async throws {
+        let enablePQC = originalEnablePQC
+        let algorithm = originalPQCSignatureAlgorithm
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = enablePQC
+            SettingsManager.shared.pqcSignatureAlgorithm = algorithm
+        }
         crypto = nil
     }
     
@@ -104,57 +118,35 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
     }
     
     func testHybridSignatureWithPQCEnabled() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
  // 启用PQC
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
-            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA"
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
         
         let (classical, pqc) = try await crypto.hybridSign(testData, for: testPeerId)
-        
+        let pqcSignature = try XCTUnwrap(pqc)
+
         XCTAssertGreaterThan(classical.count, 0)
- // PQC签名可能因为密钥问题返回nil，这在测试环境中是可接受的
-        if let pqcSignature = pqc {
-            XCTAssertGreaterThan(pqcSignature.count, 0)
-            print("✅ PQC签名长度: \(pqcSignature.count) 字节")
-        } else {
-            print("⚠️ PQC签名未生成（可能是密钥问题），但传统签名成功")
-        }
+        XCTAssertGreaterThan(pqcSignature.count, 0)
     }
     
     func testHybridVerificationWithPQCEnabled() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
  // 启用PQC
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
-            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA"
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
         
  // 签名
         let (classical, pqc) = try await crypto.hybridSign(testData, for: testPeerId)
-        
- // PQC签名可能因为密钥问题返回nil
-        guard pqc != nil else {
-            print("⚠️ PQC签名未生成，跳过验证测试")
-            return
-        }
+        let pqcSignature = try XCTUnwrap(pqc)
         
  // 验证
         let isValid = try await crypto.verifyHybrid(
             testData,
             classicalSignature: classical,
-            pqcSignature: pqc,
+            pqcSignature: pqcSignature,
             peerId: testPeerId
         )
         
@@ -162,39 +154,168 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
     }
     
     func testHybridVerificationWithWrongData() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
-            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA"
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
         
         let (classical, pqc) = try await crypto.hybridSign(testData, for: testPeerId)
+        let pqcSignature = try XCTUnwrap(pqc)
         let wrongData = "Wrong data".utf8Data
         
         let isValid = try await crypto.verifyHybrid(
             wrongData,
             classicalSignature: classical,
-            pqcSignature: pqc,
+            pqcSignature: pqcSignature,
             peerId: testPeerId
         )
         
         XCTAssertFalse(isValid, "错误数据的签名验证应该失败")
     }
+
+    func testHybridVerificationRequiresPQCSignatureWhenEnabled() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
+        }
+
+        let (classical, pqc) = try await crypto.hybridSign(testData, for: testPeerId)
+        XCTAssertNotNil(pqc)
+
+        do {
+            _ = try await crypto.verifyHybrid(
+                testData,
+                classicalSignature: classical,
+                pqcSignature: nil,
+                peerId: testPeerId
+            )
+            XCTFail("PQC-enabled verification must reject a missing PQC signature")
+        } catch let error as EnhancedPostQuantumCryptoError {
+            XCTAssertEqual(error, .pqcSignatureRequired)
+        }
+    }
+
+    func testHybridVerificationRejectsTamperedPQCSignatureWithValidClassicalSignature() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
+        }
+
+        let (classical, pqc) = try await crypto.hybridSign(testData, for: testPeerId)
+        var tamperedPQC = try XCTUnwrap(pqc)
+        tamperedPQC[tamperedPQC.startIndex] ^= 0x01
+
+        let isValid = try await crypto.verifyHybrid(
+            testData,
+            classicalSignature: classical,
+            pqcSignature: tamperedPQC,
+            peerId: testPeerId
+        )
+        XCTAssertFalse(isValid)
+    }
+
+    func testHybridSigningRejectsUnknownPQCAlgorithm() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-unknown"
+        }
+
+        do {
+            _ = try await crypto.hybridSign(testData, for: testPeerId)
+            XCTFail("Unknown PQC algorithms must fail before provider dispatch")
+        } catch let error as EnhancedPostQuantumCryptoError {
+            XCTAssertEqual(error, .invalidPQCSignatureAlgorithm("ML-DSA-unknown"))
+        }
+    }
+
+    func testRequiredPQCSignatureBindsCanonicalAlgorithmAndRejectsTampering() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA"
+        }
+
+        let required = try await crypto.signPQCRequiredWithAlgorithm(testData, for: testPeerId)
+        XCTAssertEqual(required.algorithm, "ML-DSA-65")
+        XCTAssertGreaterThan(required.bytes.count, 3_000)
+        let verified = try await crypto.verifyPQCRequired(
+            testData,
+            signature: required.bytes,
+            for: testPeerId,
+            algorithm: required.algorithm
+        )
+        XCTAssertTrue(verified)
+
+        var tampered = required.bytes
+        tampered[tampered.startIndex] ^= 0x01
+        let tamperedVerified = try await crypto.verifyPQCRequired(
+            testData,
+            signature: tampered,
+            for: testPeerId,
+            algorithm: required.algorithm
+        )
+        XCTAssertFalse(tamperedVerified)
+    }
+
+    func testRequiredPQCVerificationRejectsUnknownAlgorithm() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
+        }
+        let required = try await crypto.signPQCRequiredWithAlgorithm(testData, for: testPeerId)
+
+        do {
+            _ = try await crypto.verifyPQCRequired(
+                testData,
+                signature: required.bytes,
+                for: testPeerId,
+                algorithm: "ML-DSA-unknown"
+            )
+            XCTFail("Unknown metadata algorithms must fail closed")
+        } catch let error as EnhancedPostQuantumCryptoError {
+            XCTAssertEqual(error, .invalidPQCSignatureAlgorithm("ML-DSA-unknown"))
+        }
+    }
+
+    func testFileTransferMetadataUsesTheAlgorithmBoundToItsPQCSignature() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let engineSource = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engineSource.contains("let requiredSignature = try await pqCrypto.signPQCRequiredWithAlgorithm("))
+        XCTAssertTrue(engineSource.contains("fileSignature: requiredSignature.bytes"))
+        XCTAssertTrue(engineSource.contains("signatureAlgorithm: requiredSignature.algorithm"))
+        XCTAssertFalse(engineSource.contains("let pqcAlgo = await MainActor.run"))
+    }
+
+    func testLocalPQCProviderStateIsScopedToCryptoInstance() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = true
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
+        }
+
+        let peerId = "provider-isolation-\(UUID().uuidString)"
+        let signer = EnhancedPostQuantumCrypto()
+        let signature = try await signer.signPQCRequiredWithAlgorithm(testData, for: peerId)
+        let unrelatedVerifier = EnhancedPostQuantumCrypto()
+
+        let verified = try await unrelatedVerifier.verifyPQCRequired(
+            testData,
+            signature: signature.bytes,
+            for: peerId,
+            algorithm: signature.algorithm
+        )
+        XCTAssertFalse(verified, "Local loopback key state must never become a process-global trust source")
+    }
     
  // MARK: - PQC算法测试
     
     func testMLDSA65Algorithm() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         let peerId = "test-peer-mldsa65"
         
         await MainActor.run {
@@ -203,12 +324,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         }
         
         let (classical, pqc) = try await crypto.hybridSign(testData, for: peerId)
-        
- // PQC签名可能因为密钥问题返回nil
-        guard let pqcSignature = pqc else {
-            print("⚠️ ML-DSA-65签名未生成，跳过此测试")
-            return
-        }
+        let pqcSignature = try XCTUnwrap(pqc)
         
  // ML-DSA-65的签名长度应该在合理范围内（约3293字节）
         XCTAssertGreaterThan(pqcSignature.count, 3000)
@@ -225,12 +341,6 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
     }
     
     func testMLDSA87Algorithm() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         let peerId = "test-peer-mldsa87"
         
         await MainActor.run {
@@ -239,12 +349,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         }
         
         let (classical, pqc) = try await crypto.hybridSign(testData, for: peerId)
-        
- // PQC签名可能因为密钥问题返回nil
-        guard let pqcSignature = pqc else {
-            print("⚠️ ML-DSA-87签名未生成，跳过此测试")
-            return
-        }
+        let pqcSignature = try XCTUnwrap(pqc)
         
  // ML-DSA-87的签名长度应该大于ML-DSA-65（约4595字节）
         XCTAssertGreaterThan(pqcSignature.count, 4000)
@@ -276,12 +381,6 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
     }
     
     func testPQCSignaturePerformance() async throws {
- // 检查PQC提供者是否可用
-        guard PQCProviderFactory.makeProvider() != nil else {
-            print("⚠️ PQC提供者不可用，跳过此测试")
-            return
-        }
-        
         await MainActor.run {
             SettingsManager.shared.enablePQC = true
             SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
@@ -302,33 +401,30 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
  // MARK: - 边界测试
     
     func testEmptyDataSignature() async throws {
-        let emptyData = Data()
-        
-        do {
-            let signature = try await crypto.sign(emptyData, for: testPeerId)
-            XCTAssertGreaterThan(signature.count, 0, "空数据也应该能够签名")
-            
-            if let publicKey = crypto.getPublicKey(for: testPeerId) {
-                let isValid = try await crypto.verify(emptyData, signature: signature, publicKey: publicKey)
-                XCTAssertTrue(isValid)
-            }
-        } catch {
- // 某些实现可能不支持空数据签名，这也是可以接受的
-            print("⚠️ 空数据签名不被支持")
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = false
         }
+        let emptyData = Data()
+
+        let signature = try await crypto.sign(emptyData, for: testPeerId)
+        XCTAssertGreaterThan(signature.count, 0, "空数据也应该能够签名")
+        let publicKey = try XCTUnwrap(crypto.getPublicKey(for: testPeerId))
+        let isValid = try await crypto.verify(emptyData, signature: signature, publicKey: publicKey)
+        XCTAssertTrue(isValid)
     }
     
     func testLargeDataSignature() async throws {
+        await MainActor.run {
+            SettingsManager.shared.enablePQC = false
+        }
  // 创建1MB的测试数据
         let largeData = Data(repeating: 0xFF, count: 1024 * 1024)
         
         let signature = try await crypto.sign(largeData, for: testPeerId)
         XCTAssertGreaterThan(signature.count, 0)
-        
-        if let publicKey = crypto.getPublicKey(for: testPeerId) {
-            let isValid = try await crypto.verify(largeData, signature: signature, publicKey: publicKey)
-            XCTAssertTrue(isValid)
-        }
+        let publicKey = try XCTUnwrap(crypto.getPublicKey(for: testPeerId))
+        let isValid = try await crypto.verify(largeData, signature: signature, publicKey: publicKey)
+        XCTAssertTrue(isValid)
     }
     
     func testLargeDataEncryption() async throws {

@@ -7,6 +7,55 @@
 
 import Foundation
 
+/// Canonical fixed-length contract for persisted or benchmark-scoped KEM identities.
+///
+/// Keeping this table beside KEM identity wire models prevents storage adapters
+/// from drifting on provider-specific private-key encodings while sharing the
+/// same public wire suite.
+public struct KEMIdentityKeyLengthContract: Sendable, Equatable {
+    public let publicKeyLength: Int
+    public let privateKeyLength: Int
+
+    init(publicKeyLength: Int, privateKeyLength: Int) {
+        precondition(publicKeyLength > 0, "KEM public-key length must be positive")
+        precondition(privateKeyLength > 0, "KEM private-key length must be positive")
+        self.publicKeyLength = publicKeyLength
+        self.privateKeyLength = privateKeyLength
+    }
+
+    public static func resolve(
+        suite: CryptoSuite,
+        providerTier: CryptoTier
+    ) -> Self? {
+        let canonicalSuite = suite.canonicalKEMSuite
+        switch (canonicalSuite.wireId, providerTier) {
+        case (0x0012, .qperiaptPQC):
+            return Self(
+                publicKeyLength: QPeriaptPlatformPolicy.publicKeyLength,
+                privateKeyLength: QPeriaptPlatformPolicy.privateKeyLength
+            )
+        case (0x0101, .nativePQC):
+            return Self(publicKeyLength: 1_184, privateKeyLength: 96)
+        case (0x0101, .liboqsPQC):
+            return Self(publicKeyLength: 1_184, privateKeyLength: 2_400)
+        case (0x0001, .nativePQC):
+            return Self(publicKeyLength: 1_216, privateKeyLength: 64)
+        default:
+            return nil
+        }
+    }
+
+    public static func publicKeyLength(suite: CryptoSuite) -> Int? {
+        let canonicalSuite = suite.canonicalKEMSuite
+        switch canonicalSuite.wireId {
+        case 0x0012: return QPeriaptPlatformPolicy.publicKeyLength
+        case 0x0101: return 1_184
+        case 0x0001: return 1_216
+        default: return nil
+        }
+    }
+}
+
 /// KEM 身份公钥信息
 public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
     public let suiteWireId: UInt16
@@ -63,16 +112,11 @@ public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
            !QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: platform, osVersion: osVersion) {
             return false
         }
-        return publicKey.count == Self.expectedPublicKeyLength(for: suite)
-    }
-
-    private static func expectedPublicKeyLength(for suite: CryptoSuite) -> Int {
-        switch suite.canonicalKEMSuite.wireId {
-        case CryptoSuite.xwingMLDSA.wireId: return 1_216
-        case CryptoSuite.qperiaptABI2PolicyBound.wireId: return QPeriaptPlatformPolicy.publicKeyLength
-        case CryptoSuite.mlkem768MLDSA65.wireId,
-             CryptoSuite.mlkem768MLDSA65FS.wireId: return 1_184
-        default: return 0
+        guard let expectedLength = KEMIdentityKeyLengthContract.publicKeyLength(
+            suite: suite
+        ) else {
+            return false
         }
+        return publicKey.count == expectedLength
     }
 }

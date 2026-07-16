@@ -242,6 +242,98 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
         )
     }
 
+    func testKEMIdentityRejectsProviderSuiteMismatchBeforeUsingSharedState() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple PQC is unavailable on this OS")
+        }
+
+        do {
+            _ = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
+                for: .xwingMLDSA,
+                provider: ApplePQCCryptoProvider()
+            )
+            XCTFail("An ML-KEM provider must never populate the X-Wing identity slot")
+        } catch CryptoProviderError.unsupportedAlgorithm(let description) {
+            XCTAssertTrue(description.contains("ApplePQC"))
+            XCTAssertTrue(description.contains(CryptoSuite.xwingMLDSA.rawValue))
+        }
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testAppleKEMIdentitySlotsRemainSuiteCorrectInBothLookupOrders() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple PQC is unavailable on this OS")
+        }
+
+        let manager = DeviceIdentityKeyManager.shared
+        let mlkemProvider = ApplePQCCryptoProvider()
+        let xwingProvider = AppleXWingCryptoProvider()
+        let mlkem = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: mlkemProvider
+        )
+        let xwing = try await manager.getKEMPublicKey(
+            for: .xwingMLDSA,
+            provider: xwingProvider
+        )
+
+        XCTAssertEqual(mlkem.count, 1_184)
+        XCTAssertEqual(xwing.count, 1_216)
+        let xwingAgain = try await manager.getKEMPublicKey(
+            for: .xwingMLDSA,
+            provider: xwingProvider
+        )
+        let mlkemAgain = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: mlkemProvider
+        )
+        XCTAssertEqual(xwingAgain, xwing)
+        XCTAssertEqual(mlkemAgain, mlkem)
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testAppleXWingTypedKeyMaterialUsesCryptoKitCompactLengths() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple X-Wing is unavailable on this OS")
+        }
+
+        let provider = AppleXWingCryptoProvider()
+        let exchange = try await provider.generateKeyPair(for: .keyExchange)
+        let signing = try await provider.generateKeyPair(for: .signing)
+
+        XCTAssertEqual(exchange.publicKey.bytes.count, 1_216)
+        XCTAssertEqual(exchange.privateKey.bytes.count, 64)
+        XCTAssertNoThrow(try exchange.publicKey.validate(isPublic: true))
+        XCTAssertNoThrow(try exchange.privateKey.validate(isPublic: false))
+        XCTAssertEqual(signing.publicKey.bytes.count, 1_952)
+        XCTAssertEqual(signing.privateKey.bytes.count, 64)
+        XCTAssertNoThrow(try signing.publicKey.validate(isPublic: true))
+        XCTAssertNoThrow(try signing.privateKey.validate(isPublic: false))
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testKEMIdentityRecordsHaveProviderSuiteUsageAndLengthContracts() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+
+        XCTAssertTrue(source.contains("guard provider.supportsSuite(storageSuite)"))
+        XCTAssertTrue(source.contains("keyPair.publicKey.usage == .keyExchange"))
+        XCTAssertTrue(source.contains("keyPair.privateKey.usage == .keyExchange"))
+        XCTAssertTrue(
+            source.contains("keyPair.publicKey.suite.canonicalKEMSuite.wireId == storageSuite.wireId")
+        )
+        XCTAssertTrue(source.contains("try validateKEMRecord(record"))
+        XCTAssertTrue(source.contains("record.suiteWireId == suiteWireId"))
+    }
+
     func testPartialPersistentIdentityMaterialFailsClosed() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
 

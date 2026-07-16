@@ -44,6 +44,48 @@ public struct EncryptedData: Codable, Sendable {
     }
 }
 
+/// A strict-PQC signature together with the exact algorithm that produced it.
+/// Keeping these values together prevents metadata from observing a different
+/// mutable setting between algorithm selection and signature generation.
+public struct PQCRequiredSignature: Sendable, Equatable {
+    public let bytes: Data
+    public let algorithm: String
+
+    public init(bytes: Data, algorithm: String) {
+        self.bytes = bytes
+        self.algorithm = algorithm
+    }
+}
+
+public enum EnhancedPostQuantumCryptoError: Error, LocalizedError, Sendable, Equatable {
+    case pqcDisabled
+    case invalidPQCSignatureAlgorithm(String)
+    case pqcProviderUnavailable
+    case pqcSigningFailed(algorithm: String)
+    case pqcSignatureRequired
+
+    public var errorDescription: String? {
+        switch self {
+        case .pqcDisabled:
+            return "PQC is disabled by the active security policy"
+        case .invalidPQCSignatureAlgorithm(let value):
+            return "Unsupported PQC signature algorithm: \(value)"
+        case .pqcProviderUnavailable:
+            return "A required PQC provider is unavailable"
+        case .pqcSigningFailed(let algorithm):
+            return "PQC signing failed for \(algorithm)"
+        case .pqcSignatureRequired:
+            return "A PQC signature is required while PQC is enabled"
+        }
+    }
+}
+
+private enum PQCProviderResolution {
+    case unresolved
+    case available(any PQCProvider)
+    case unavailable
+}
+
 /// 增强版后量子密码学实现 - 完整功能
 ///
 /// 改进点:
@@ -57,6 +99,7 @@ public struct EncryptedData: Codable, Sendable {
 /// - ✅ 所有可变状态通过 `OSAllocatedUnfairLock` 保护
 /// - ✅ `cryptoLock` 保护加密/解密操作
 /// - ✅ `signingLock` 封装密钥对字典，所有访问都在 `withLock` 闭包内
+/// - ✅ `pqcProviderResolution` 保证每个实例只解析并持有一个有状态 PQC provider
 /// - ✅ `logger` 是线程安全的
 /// - ⚠️ 需要确保 CryptoKit 类型（SymmetricKey, P256等）本身是线程安全的
 public class EnhancedPostQuantumCrypto: @unchecked Sendable {
@@ -75,6 +118,10 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
  /// 密钥对管理（封装在锁内，每个对等节点一个密钥对）
  /// 所有访问必须通过 signingLock.withLock { } 进行
     private let signingLock = OSAllocatedUnfairLock<[String: (private: P256.Signing.PrivateKey, public: P256.Signing.PublicKey)]>(initialState: [:])
+
+    /// Provider instances own local key state. Keep that state scoped to this
+    /// crypto instance, resolve it lazily, and never share it through a global cache.
+    private let pqcProviderResolution = OSAllocatedUnfairLock<PQCProviderResolution>(initialState: .unresolved)
     
  // MARK: - 对称加密/解密
     
@@ -168,35 +215,19 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         }
     }
     
- /// 签名数据 - 优先使用PQC，不可用时回退到P256 ECDSA
+ /// 签名数据。启用 PQC 时必须生成 PQC 签名；只有显式关闭 PQC 时才使用 P256。
  /// - Parameters:
  /// - data: 要签名的数据
  /// - peerId: 对等节点ID（用于密钥管理）
  /// - Returns: 签名数据
     public func sign(_ data: Data, for peerId: String) async throws -> Data {
- // 🔧 优化：优先使用PQC签名，如果PQC不可用或未启用，回退到P256
-        let enablePQC = await SettingsManager.shared.enablePQC
-        let algorithm = await SettingsManager.shared.pqcSignatureAlgorithm
-        
-        if enablePQC {
-            if #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() {
-                do {
- // 尝试使用PQC签名
-                    let pqcSignature = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
-                    logger.info("✅ PQC签名成功: \(algorithm), 签名长度: \(pqcSignature.count)字节")
-                    return pqcSignature
-                } catch {
-                    logger.warning("⚠️ PQC签名失败，回退到P256: \(error.localizedDescription)")
- // 回退到P256
-                }
-            } else {
-                logger.info("ℹ️ PQC提供者不可用，使用P256签名")
-            }
+        let settings = await Self.configuredPQCSigningSettings()
+        if settings.enabled {
+            let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+            return try await signPQC(data, for: peerId, algorithm: algorithm)
         }
-        
- // 回退到P256 ECDSA签名
-        logger.debug("✍️ 使用P256 ECDSA签名（回退方案）")
-        
+
+        logger.debug("✍️ PQC 已显式关闭；使用 P256 ECDSA 签名")
         return try cryptoLock.withLock { _ in
             do {
                 let keyPair = getOrCreateSigningKeyPair(for: peerId)
@@ -214,24 +245,25 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
     /// Strict-PQC signing path for production data-transfer metadata.
     /// This deliberately fails closed instead of returning a P-256 signature.
     public func signPQCRequired(_ data: Data, for peerId: String) async throws -> Data {
-        let enablePQC = await SettingsManager.shared.enablePQC
-        let algorithm = await MainActor.run {
-            SettingsManager.normalizedPQCSignatureAlgorithm(SettingsManager.shared.pqcSignatureAlgorithm)
-        }
+        try await signPQCRequiredWithAlgorithm(data, for: peerId).bytes
+    }
 
-        guard enablePQC else {
+    /// Strict signing variant for protocols that must bind the emitted algorithm
+    /// and signature into one immutable metadata snapshot.
+    public func signPQCRequiredWithAlgorithm(
+        _ data: Data,
+        for peerId: String
+    ) async throws -> PQCRequiredSignature {
+        let settings = await Self.configuredPQCSigningSettings()
+
+        guard settings.enabled else {
             logger.error("❌ Strict-PQC 签名失败：PQC 已被本地设置关闭")
-            throw QuantumNetworkError.signatureFailed
+            throw EnhancedPostQuantumCryptoError.pqcDisabled
         }
 
-        guard #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() else {
-            logger.error("❌ Strict-PQC 签名失败：本机没有可用 PQC Provider")
-            throw QuantumNetworkError.signatureFailed
-        }
-
-        let pqcSignature = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
-        logger.info("✅ Strict-PQC 签名成功: \(algorithm), 签名长度: \(pqcSignature.count)字节")
-        return pqcSignature
+        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+        let signature = try await signPQC(data, for: peerId, algorithm: algorithm)
+        return PQCRequiredSignature(bytes: signature, algorithm: algorithm)
     }
 
     /// Strict-PQC verification path for production data-transfer metadata.
@@ -242,41 +274,104 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         for peerId: String,
         algorithm rawAlgorithm: String?
     ) async throws -> Bool {
-        let enablePQC = await SettingsManager.shared.enablePQC
-        guard enablePQC else {
+        let settings = await Self.configuredPQCSigningSettings()
+        guard settings.enabled else {
             logger.error("❌ Strict-PQC 验签失败：PQC 已被本地设置关闭")
-            throw QuantumNetworkError.signatureFailed
+            throw EnhancedPostQuantumCryptoError.pqcDisabled
         }
 
-        guard let algorithm = Self.normalizedStrictPQCSignatureAlgorithm(rawAlgorithm) else {
-            logger.error("❌ Strict-PQC 验签失败：缺少或不支持的签名算法")
-            throw QuantumNetworkError.signatureFailed
-        }
+        let algorithm = try Self.requiredPQCSignatureAlgorithm(rawAlgorithm)
 
-        guard #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() else {
-            logger.error("❌ Strict-PQC 验签失败：本机没有可用 PQC Provider")
-            throw QuantumNetworkError.signatureFailed
-        }
-
-        let verified = await provider.verify(data: data, signature: signature, peerId: peerId, algorithm: algorithm)
+        let verified = try await verifyPQCUsingRequiredProvider(
+            data,
+            signature: signature,
+            peerId: peerId,
+            algorithm: algorithm
+        )
         if verified {
-            logger.info("✅ Strict-PQC 验签成功: \(algorithm), peerId: \(peerId)")
+            logger.info("✅ Strict-PQC 验签成功: \(algorithm)")
         } else {
-            logger.error("❌ Strict-PQC 验签失败: \(algorithm), peerId: \(peerId)")
+            logger.error("❌ Strict-PQC 验签失败: \(algorithm)")
         }
         return verified
     }
 
-    private static func normalizedStrictPQCSignatureAlgorithm(_ rawValue: String?) -> String? {
-        guard let rawValue else { return nil }
+    private static func configuredPQCSigningSettings() async -> (enabled: Bool, rawAlgorithm: String) {
+        await MainActor.run {
+            (
+                enabled: SettingsManager.shared.enablePQC,
+                rawAlgorithm: SettingsManager.shared.pqcSignatureAlgorithm
+            )
+        }
+    }
+
+    private static func requiredPQCSignatureAlgorithm(_ rawValue: String?) throws -> String {
+        guard let rawValue else {
+            throw EnhancedPostQuantumCryptoError.invalidPQCSignatureAlgorithm("<missing>")
+        }
         switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
             return "ML-DSA-65"
         case "ML-DSA-87", "MLDSA-87":
             return "ML-DSA-87"
         default:
-            return nil
+            throw EnhancedPostQuantumCryptoError.invalidPQCSignatureAlgorithm(rawValue)
         }
+    }
+
+    private func signPQC(_ data: Data, for peerId: String, algorithm: String) async throws -> Data {
+        let provider = try requiredPQCProvider()
+
+        do {
+            let signature = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
+            logger.info("✅ PQC 签名成功: \(algorithm), 签名长度: \(signature.count)字节")
+            return signature
+        } catch {
+            let nsError = error as NSError
+            logger.error(
+                "❌ PQC 签名失败: algorithm=\(algorithm) domain=\(nsError.domain, privacy: .public) code=\(nsError.code)"
+            )
+            throw EnhancedPostQuantumCryptoError.pqcSigningFailed(algorithm: algorithm)
+        }
+    }
+
+    private func verifyPQCUsingRequiredProvider(
+        _ data: Data,
+        signature: Data,
+        peerId: String,
+        algorithm: String
+    ) async throws -> Bool {
+        let provider = try requiredPQCProvider()
+        return await provider.verify(
+            data: data,
+            signature: signature,
+            peerId: peerId,
+            algorithm: algorithm
+        )
+    }
+
+    private func requiredPQCProvider() throws -> any PQCProvider {
+        let provider = pqcProviderResolution.withLock { resolution -> (any PQCProvider)? in
+            switch resolution {
+            case .unresolved:
+                guard let resolved = PQCProviderFactory.makeProvider() else {
+                    resolution = .unavailable
+                    return nil
+                }
+                resolution = .available(resolved)
+                return resolved
+            case .available(let resolved):
+                return resolved
+            case .unavailable:
+                return nil
+            }
+        }
+
+        guard let provider else {
+            logger.error("❌ PQC 操作失败：本机没有可用 Provider")
+            throw EnhancedPostQuantumCryptoError.pqcProviderUnavailable
+        }
+        return provider
     }
     
  /// 获取公钥（用于密钥交换）
@@ -326,26 +421,20 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         }
     }
     
- /// 验证签名（使用peerId查找公钥）- 优先使用PQC验证
+ /// 验证签名。启用 PQC 时绝不回退到 P256。
     public func verify(_ data: Data, signature: Data, for peerId: String) async throws -> Bool {
- // 🔧 优化：优先使用PQC验证
-        let enablePQC = await SettingsManager.shared.enablePQC
-        let algorithm = await SettingsManager.shared.pqcSignatureAlgorithm
-        
-        if enablePQC {
-            if #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() {
- // 尝试PQC验证
-                let pqcValid = await provider.verify(data: data, signature: signature, peerId: peerId, algorithm: algorithm)
-                if pqcValid {
-                    logger.info("✅ PQC签名验证成功: \(algorithm), peerId: \(peerId)")
-                    return true
-                } else {
-                    logger.debug("ℹ️ PQC验证失败，尝试P256验证")
-                }
-            }
+        let settings = await Self.configuredPQCSigningSettings()
+        if settings.enabled {
+            let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+            return try await verifyPQCUsingRequiredProvider(
+                data,
+                signature: signature,
+                peerId: peerId,
+                algorithm: algorithm
+            )
         }
-        
- // 回退到P256验证
+
+ // PQC 被显式关闭时验证 P256。
         var publicKey = getPublicKey(for: peerId)
         if publicKey == nil {
  // 尝试从 Keychain 加载持久化的对端签名公钥
@@ -355,7 +444,7 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             }
         }
         guard let publicKey else {
-            logger.error("❌ 未找到对等节点的公钥: \(peerId)")
+            logger.error("❌ 未找到对等节点的 P256 公钥")
             throw QuantumNetworkError.keyNotFound
         }
         
@@ -364,8 +453,7 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
     
  // MARK: - 未来扩展：后量子密码学
     
- /// 准备混合签名（传统+PQC）
- /// 使用P256作为传统签名，ML-DSA作为PQC签名
+ /// 准备混合签名（P256 + ML-DSA）。仅在 PQC 被显式关闭时返回 `pqc == nil`。
     public func hybridSign(_ data: Data, for peerId: String) async throws -> (classical: Data, pqc: Data?) {
  // 始终使用P256进行传统签名（不受enablePQC设置影响）
         let classical = try cryptoLock.withLock { _ in
@@ -374,22 +462,15 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             return signature.rawRepresentation
         }
         
-        let enablePQC = await SettingsManager.shared.enablePQC
-        let algorithm = await SettingsManager.shared.pqcSignatureAlgorithm
-        if enablePQC {
-            if #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() {
-                do {
-                    let pq = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
-                    logger.info("✅ PQC混合签名成功: 传统(\(classical.count)字节) + PQC(\(pq.count)字节)")
-                    return (classical: classical, pqc: pq)
-                } catch {
-                    logger.warning("⚠️ PQC签名失败，回退传统签名: \(error.localizedDescription)")
-                }
-            } else {
-                logger.info("ℹ️ 当前系统未检测到PQC提供者，使用传统签名")
-            }
+        let settings = await Self.configuredPQCSigningSettings()
+        guard settings.enabled else {
+            return (classical: classical, pqc: nil)
         }
-        return (classical: classical, pqc: nil)
+
+        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+        let pqc = try await signPQC(data, for: peerId, algorithm: algorithm)
+        logger.info("✅ PQC混合签名成功: 传统(\(classical.count)字节) + PQC(\(pqc.count)字节)")
+        return (classical: classical, pqc: pqc)
     }
     
  /// 验证混合签名
@@ -404,57 +485,28 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             }
         }
         guard let publicKey else {
-            logger.error("❌ 混合签名验证失败：未找到对等节点的P256公钥: \(peerId)")
+            logger.error("❌ 混合签名验证失败：未找到对等节点的 P256 公钥")
             throw QuantumNetworkError.keyNotFound
         }
         
         let classicalValid = try await verify(data, signature: classicalSignature, publicKey: publicKey)
-        
-        let enablePQC = await SettingsManager.shared.enablePQC
-        let algorithm = await SettingsManager.shared.pqcSignatureAlgorithm
-        if let pqcSig = pqcSignature, enablePQC {
-            if #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() {
-                let pqcValid = await provider.verify(data: data, signature: pqcSig, peerId: peerId, algorithm: algorithm)
-                logger.info("🔍 混合签名验证: 传统=\(classicalValid), PQC=\(pqcValid)")
-                return classicalValid && pqcValid
-            }
-        }
-        return classicalValid
-    }
 
- // MARK: - PQC实现（使用OQSBridge提供的ML-DSA算法）
- /// 执行PQC签名（根据算法选择），不可用时返回nil
-    private func performPQCSign(data: Data, algorithm: String, peerId: String) async throws -> Data? {
-        logger.info("🔐 尝试执行PQC签名: \(algorithm)")
-        
- // 检查PQC提供者是否可用
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            logger.warning("⚠️ PQC提供者不可用（liboqs未集成）")
-            return nil
+        let settings = await Self.configuredPQCSigningSettings()
+        guard settings.enabled else {
+            return classicalValid
         }
-        
-        do {
-            let signature = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
-            logger.info("✅ PQC签名成功: \(algorithm), 签名长度: \(signature.count)字节")
-            return signature
-        } catch {
-            logger.error("❌ PQC签名失败: \(error.localizedDescription)")
-            throw error
+
+        guard let pqcSignature else {
+            throw EnhancedPostQuantumCryptoError.pqcSignatureRequired
         }
-    }
-    
- /// 验证PQC签名（根据算法选择），不可用时返回false
-    private func verifyPQC(data: Data, signature: Data, peerId: String, algorithm: String) async -> Bool {
-        logger.info("🔍 尝试验证PQC签名: \(algorithm)")
-        
- // 检查PQC提供者是否可用
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            logger.warning("⚠️ PQC提供者不可用（liboqs未集成）")
-            return false
-        }
-        
-        let isValid = await provider.verify(data: data, signature: signature, peerId: peerId, algorithm: algorithm)
-        logger.info("验证结果: \(isValid ? "✅ 有效" : "❌ 无效")")
-        return isValid
+        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+        let pqcValid = try await verifyPQCUsingRequiredProvider(
+            data,
+            signature: pqcSignature,
+            peerId: peerId,
+            algorithm: algorithm
+        )
+        logger.info("🔍 混合签名验证: 传统=\(classicalValid), PQC=\(pqcValid)")
+        return classicalValid && pqcValid
     }
 }
