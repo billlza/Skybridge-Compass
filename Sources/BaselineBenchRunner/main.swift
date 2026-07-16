@@ -17,12 +17,17 @@ struct BaselineBenchRunner {
         let dtlsPort: UInt16
         let noisePort: UInt16
         let skybridgePort: UInt16
-        let p12Path: String
-        let p12Password: String
+        let certificatePath: String
+        let privateKeyPath: String
         let protocolFilter: Set<String>?
         let kickoffBytes: Int
         let tlsVersion: tls_protocol_version_t
         let quicAlpn: String
+    }
+
+    struct LoadedIdentity {
+        let secIdentity: SecIdentity
+        let certificateDER: Data
     }
 
     struct TimingSample {
@@ -37,24 +42,19 @@ struct BaselineBenchRunner {
     static func main() async {
         do {
             let config = makeConfig()
-            let skipIdentity = boolEnv(ProcessInfo.processInfo.environment, "BASELINE_SKIP_IDENTITY", defaultValue: false)
             if debugEnabled() {
                 let env = ProcessInfo.processInfo.environment
-                print("[BASELINE] ENV BASELINE_PROTOCOLS=\(env["BASELINE_PROTOCOLS"] ?? "<nil>") BASELINE_SKIP_IDENTITY=\(env["BASELINE_SKIP_IDENTITY"] ?? "<nil>")")
+                print("[BASELINE] ENV BASELINE_PROTOCOLS=\(env["BASELINE_PROTOCOLS"] ?? "<nil>")")
             }
             let needsIdentity = shouldRun("TLS13", filter: config.protocolFilter)
                 || shouldRun("QUIC", filter: config.protocolFilter)
                 || shouldRun("WebRTC-DTLS", filter: config.protocolFilter)
-            var identity: SecIdentity?
-            if needsIdentity && !skipIdentity {
-                do {
-                    identity = try loadIdentity(path: config.p12Path, password: config.p12Password)
-                } catch {
-                    print("[BASELINE] Skipping TLS/QUIC/DTLS: \(error)")
-                }
-            } else if needsIdentity && skipIdentity {
-                print("[BASELINE] Skipping TLS/QUIC/DTLS: BASELINE_SKIP_IDENTITY=1")
-            }
+            let identity = needsIdentity
+                ? try loadIdentity(
+                    certificatePath: config.certificatePath,
+                    privateKeyPath: config.privateKeyPath
+                )
+                : nil
 
             var samples: [TimingSample] = []
 
@@ -94,8 +94,10 @@ struct BaselineBenchRunner {
         let noisePort = UInt16(intEnv(env, "BASELINE_NOISE_PORT", defaultValue: 9446))
         let skybridgePort = UInt16(intEnv(env, "BASELINE_SKYBRIDGE_PORT", defaultValue: 9447))
 
-        let p12Path = env["BASELINE_P12_PATH"] ?? "Tests/Fixtures/loopback_identity.p12"
-        let p12Password = env["BASELINE_P12_PASSWORD"] ?? "skybridge"
+        let certificatePath = env["BASELINE_CERTIFICATE_PATH"]
+            ?? "Tests/Fixtures/loopback_test_server_certificate.der"
+        let privateKeyPath = env["BASELINE_PRIVATE_KEY_PATH"]
+            ?? "Tests/Fixtures/loopback_test_server_private_key.x963"
         let protocolFilter = parseProtocolFilter(env["BASELINE_PROTOCOLS"])
         let kickoffBytes = intEnv(env, "BASELINE_KICKOFF_BYTES", defaultValue: 0)
         let tlsVersion = parseTLSVersion(env["BASELINE_TLS_VERSION"]) ?? .TLSv13
@@ -111,8 +113,8 @@ struct BaselineBenchRunner {
             dtlsPort: dtlsPort,
             noisePort: noisePort,
             skybridgePort: skybridgePort,
-            p12Path: p12Path,
-            p12Password: p12Password,
+            certificatePath: certificatePath,
+            privateKeyPath: privateKeyPath,
             protocolFilter: protocolFilter,
             kickoffBytes: kickoffBytes,
             tlsVersion: tlsVersion,
@@ -174,26 +176,46 @@ struct BaselineBenchRunner {
         }
     }
 
-    private static func loadIdentity(path: String, password: String) throws -> SecIdentity {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
-        var items: CFArray?
-        let status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-        if status == errSecSuccess,
-           let array = items as? [[String: Any]],
-           let first = array.first,
-           let anyIdentity = first[kSecImportItemIdentity as String],
-           CFGetTypeID(anyIdentity as CFTypeRef) == SecIdentityGetTypeID() {
-            return unsafeDowncast(anyIdentity as AnyObject, to: SecIdentity.self)
+    private static func loadIdentity(
+        certificatePath: String,
+        privateKeyPath: String
+    ) throws -> LoadedIdentity {
+        let certificateData = try Data(contentsOf: URL(fileURLWithPath: certificatePath))
+        guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
+            throw NSError(domain: "BaselineBench", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid loopback certificate DER: \(certificatePath)"
+            ])
         }
 
-        throw NSError(domain: "BaselineBench", code: Int(status), userInfo: [
-            NSLocalizedDescriptionKey: "PKCS#12 import failed (\(status)). Use a legacy PKCS#12 (PBE-SHA1-3DES) via BASELINE_P12_PATH."
-        ])
+        let privateKeyData = try Data(contentsOf: URL(fileURLWithPath: privateKeyPath))
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 256
+        ]
+        var keyError: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateWithData(
+            privateKeyData as CFData,
+            attributes as CFDictionary,
+            &keyError
+        ) else {
+            let underlyingError = keyError?.takeRetainedValue()
+            throw NSError(domain: "BaselineBench", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid loopback private-key representation: \(privateKeyPath)",
+                NSUnderlyingErrorKey: underlyingError as Any
+            ])
+        }
+
+        guard let identity = SecIdentityCreate(nil, certificate, privateKey) else {
+            throw NSError(domain: "BaselineBench", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "Loopback certificate and private key do not match"
+            ])
+        }
+        return LoadedIdentity(secIdentity: identity, certificateDER: certificateData)
     }
 
     private static func makeTLSOptions(
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String? = nil
@@ -206,7 +228,7 @@ struct BaselineBenchRunner {
             version: version,
             alpn: alpn,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: !isServer,
             useVerifyBlock: true
         )
 
@@ -215,7 +237,7 @@ struct BaselineBenchRunner {
 
     private static func configureTLSOptions(
         _ secOptions: sec_protocol_options_t,
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String?,
@@ -233,8 +255,10 @@ struct BaselineBenchRunner {
             }
         }
 
+        sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
+
         if isServer {
-            if let secIdentity = sec_identity_create(identity) {
+            if let secIdentity = sec_identity_create(identity.secIdentity) {
                 sec_protocol_options_set_local_identity(secOptions, secIdentity)
             } else if debugEnabled() {
                 print("[BASELINE] Failed to create sec_identity_t for TLS server")
@@ -246,16 +270,23 @@ struct BaselineBenchRunner {
                     sec_protocol_options_set_tls_server_name(secOptions, base)
                 }
             }
-            sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
             if useVerifyBlock {
-                sec_protocol_options_set_verify_block(secOptions, { _, _, complete in
-                    complete(true)
+                let expectedCertificateDER = identity.certificateDER
+                sec_protocol_options_set_verify_block(secOptions, { _, trust, complete in
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    guard let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                          let leafCertificate = chain.first else {
+                        complete(false)
+                        return
+                    }
+                    let actualCertificateDER = SecCertificateCopyData(leafCertificate) as Data
+                    complete(actualCertificateDER == expectedCertificateDER)
                 }, .global())
             }
         }
     }
 
-    private static func runTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("TLS13", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] TLS13 bench start (iterations=\(config.iterations))")
         let tlsOptions = makeTLSOptions(identity: identity, isServer: true, version: config.tlsVersion)
@@ -278,7 +309,7 @@ struct BaselineBenchRunner {
         )
     }
 
-    private static func runQUICBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runQUICBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("QUIC", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] QUIC bench start (iterations=\(config.iterations))")
         let serverQuicOptions = NWProtocolQUIC.Options(alpn: [config.quicAlpn])
@@ -315,7 +346,7 @@ struct BaselineBenchRunner {
             version: .TLSv13,
             alpn: nil,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: true,
             useVerifyBlock: true
         )
         let clientParams = NWParameters(quic: clientQuicOptions)
@@ -333,7 +364,7 @@ struct BaselineBenchRunner {
         )
     }
 
-    private static func runDTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runDTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("WebRTC-DTLS", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] WebRTC-DTLS bench start (iterations=\(config.iterations))")
         let serverTlsOptions = makeTLSOptions(identity: identity, isServer: true, version: .DTLSv12, alpn: "webrtc")
@@ -366,24 +397,36 @@ struct BaselineBenchRunner {
             ])
         }
         let listener = try NWListener(using: .udp, on: noisePort)
+        defer {
+            listener.newConnectionHandler = nil
+            listener.cancel()
+        }
+        let serverConnectionStream = makeSingleConnectionStream(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
+        var serverConnectionIterator = serverConnectionStream.makeAsyncIterator()
+        try await startListenerAndWaitUntilReady(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
         let clientConnection = NWConnection(
             to: .hostPort(host: "127.0.0.1", port: noisePort),
             using: .udp
         )
-        listener.start(queue: queue)
+        defer { clientConnection.cancel() }
         clientConnection.start(queue: queue)
 
         let clientChannel = UDPChannel(connection: clientConnection)
-        let connectionTask = Task {
-            try await waitForNewConnection(
-                listener: listener,
-                queue: queue,
-                timeoutSeconds: config.timeoutSeconds
-            )
-        }
-        await Task.yield()
         try await clientChannel.send(Data([0x00]))
-        let serverConnection = try await connectionTask.value
+        guard let serverConnection = try await serverConnectionIterator.next() else {
+            throw NSError(domain: "BaselineBench", code: 9, userInfo: [
+                NSLocalizedDescriptionKey: "Noise listener did not accept a connection"
+            ])
+        }
+        defer { serverConnection.cancel() }
         let serverChannel = UDPChannel(connection: serverConnection)
         _ = try await serverChannel.receive()
 
@@ -392,7 +435,8 @@ struct BaselineBenchRunner {
 
         var samples: [TimingSample] = []
         for iteration in 0..<(config.warmup + config.iterations) {
-            let start = Date().timeIntervalSince1970
+            let startEpoch = Date().timeIntervalSince1970
+            let start = ContinuousClock.now
             async let responderTask: Void = try NoiseXX.runResponder(
                 staticKey: responderStatic,
                 send: serverChannel.send,
@@ -404,22 +448,20 @@ struct BaselineBenchRunner {
                 receive: clientChannel.receive
             )
             try await responderTask
-            let end = Date().timeIntervalSince1970
+            let elapsed = ContinuousClock.now - start
+            let endEpoch = Date().timeIntervalSince1970
             if iteration >= config.warmup {
                 samples.append(TimingSample(
                     protocolName: "Noise-XX",
                     iteration: iteration - config.warmup,
-                    startEpoch: start,
-                    endEpoch: end,
-                    durationMs: (end - start) * 1000.0,
+                    startEpoch: startEpoch,
+                    endEpoch: endEpoch,
+                    durationMs: durationToSeconds(elapsed) * 1_000.0,
                     ports: "\(config.noisePort)"
                 ))
             }
         }
 
-        clientConnection.cancel()
-        serverConnection.cancel()
-        listener.cancel()
         print("[BASELINE] Noise-XX bench done")
         return samples
     }
@@ -441,30 +483,48 @@ struct BaselineBenchRunner {
             ])
         }
         let listener = try NWListener(using: serverParameters, on: benchmarkPort)
+        defer {
+            listener.newConnectionHandler = nil
+            listener.cancel()
+        }
         listener.newConnectionHandler = { connection in
+            if debugEnabled() {
+                print("[BASELINE] \(protocolName) server accepted connection")
+            }
             connection.stateUpdateHandler = { state in
+                if debugEnabled() {
+                    print("[BASELINE] \(protocolName) server connection state: \(state)")
+                }
                 switch state {
                 case .ready:
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
-                        connection.cancel()
-                    }
-                case .failed, .cancelled:
+                    break
+                case .failed:
+                    connection.stateUpdateHandler = nil
                     connection.cancel()
+                case .cancelled:
+                    connection.stateUpdateHandler = nil
                 default:
                     break
                 }
             }
             connection.start(queue: queue)
         }
-        listener.start(queue: queue)
-        try await waitForListenerReady(listener: listener, queue: queue, timeoutSeconds: timeoutSeconds)
-        try await Task.sleep(for: .milliseconds(10))
+        try await startListenerAndWaitUntilReady(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: timeoutSeconds
+        )
 
         var samples: [TimingSample] = []
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: benchmarkPort)
         for iteration in 0..<(warmup + iterations) {
             let connection = NWConnection(to: endpoint, using: clientParameters)
-            let start = Date().timeIntervalSince1970
+            defer {
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+            }
+            let startEpoch = Date().timeIntervalSince1970
+            let start = ContinuousClock.now
             do {
                 try await waitForReady(
                     connection: connection,
@@ -473,26 +533,25 @@ struct BaselineBenchRunner {
                     kickoffBytes: kickoffBytes
                 )
             } catch {
-                connection.cancel()
                 throw NSError(domain: "BaselineBench", code: 5, userInfo: [
-                    NSLocalizedDescriptionKey: "\(protocolName) ready timeout on iteration \(iteration): \(error)"
+                    NSLocalizedDescriptionKey: "\(protocolName) client ready failed on iteration \(iteration): \(error)",
+                    NSUnderlyingErrorKey: error
                 ])
             }
-            let end = Date().timeIntervalSince1970
-            connection.cancel()
+            let elapsed = ContinuousClock.now - start
+            let endEpoch = Date().timeIntervalSince1970
             if iteration >= warmup {
                 samples.append(TimingSample(
                     protocolName: protocolName,
                     iteration: iteration - warmup,
-                    startEpoch: start,
-                    endEpoch: end,
-                    durationMs: (end - start) * 1000.0,
+                    startEpoch: startEpoch,
+                    endEpoch: endEpoch,
+                    durationMs: durationToSeconds(elapsed) * 1_000.0,
                     ports: "\(port)"
                 ))
             }
         }
 
-        listener.cancel()
         print("[BASELINE] \(protocolName) bench done")
         return samples
     }
@@ -943,12 +1002,16 @@ struct BaselineBenchRunner {
             connection.start(queue: queue)
             if kickoffBytes > 0 {
                 let payload = Data(repeating: 0x00, count: kickoffBytes)
-                connection.send(content: payload, completion: .contentProcessed { _ in })
+                connection.send(content: payload, completion: .contentProcessed { error in
+                    if let error {
+                        resumeOnce(.failure(error))
+                    }
+                })
             }
         }
     }
 
-    private static func waitForListenerReady(
+    private static func startListenerAndWaitUntilReady(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
@@ -993,6 +1056,7 @@ struct BaselineBenchRunner {
                     break
                 }
             }
+            listener.start(queue: queue)
         }
     }
 
@@ -1018,37 +1082,43 @@ struct BaselineBenchRunner {
         }
     }
 
-    private static func waitForNewConnection(
+    private static func makeSingleConnectionStream(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
-    ) async throws -> NWConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NWConnection, Error>) in
+    ) -> AsyncThrowingStream<NWConnection, Error> {
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
-                if didResume.exchange(true, ordering: .relaxed) { return }
+            let didFinish = ManagedAtomic(false)
+            let finishOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
+                if didFinish.exchange(true, ordering: .relaxed) { return }
                 timer.cancel()
                 listener.newConnectionHandler = nil
                 switch result {
                 case .success(let connection):
-                    continuation.resume(returning: connection)
+                    connection.start(queue: queue)
+                    continuation.yield(connection)
+                    continuation.finish()
                 case .failure(let error):
-                    continuation.resume(throwing: error)
+                    listener.cancel()
+                    continuation.finish(throwing: error)
                 }
             }
             timer.schedule(deadline: .now() + timeoutSeconds)
             timer.setEventHandler {
-                listener.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBench", code: 2, userInfo: [
+                finishOnce(.failure(NSError(domain: "BaselineBench", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
                 ])))
             }
             timer.activate()
 
             listener.newConnectionHandler = { connection in
-                connection.start(queue: queue)
-                resumeOnce(.success(connection))
+                finishOnce(.success(connection))
+            }
+            continuation.onTermination = { _ in
+                if didFinish.exchange(true, ordering: .relaxed) { return }
+                timer.cancel()
+                listener.newConnectionHandler = nil
             }
         }
     }

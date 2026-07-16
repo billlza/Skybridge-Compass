@@ -38,6 +38,18 @@ run_check_strict_no_warnings \
   env SRCROOT="${ROOT_DIR}" zsh "${ROOT_DIR}/Scripts/release_no_print_guard.zsh"
 
 run_check_strict_no_warnings \
+  "sensitive-artifact-policy" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/check_sensitive_artifacts.sh" "${ROOT_DIR}"
+
+run_check_strict_no_warnings \
+  "loopback-benchmark-fixture-policy" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_loopback_benchmark_fixture_policy.sh"
+
+run_check_strict_no_warnings \
   "ios-simulator-selection" \
   "code" \
   "source-quality" \

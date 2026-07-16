@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="${1:-.}"
-ALLOWLIST_RE='(^|/)Tests/Fixtures/loopback_(cert\.pem|key\.pem|identity\.p12)$'
+ALLOWLIST_RE='(^|/)Tests/Fixtures/loopback_test_server_(certificate\.der|private_key\.x963)$'
 
 collect_candidate_files() {
   if git -C "$ROOT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -26,7 +26,17 @@ import sys
 
 root_dir = os.path.abspath(sys.argv[1])
 allowlist = re.compile(sys.argv[2])
-sensitive_suffixes = (".p12", ".pfx", ".cer", ".crt", ".pem", ".key", ".mobileprovision")
+sensitive_suffixes = (
+    ".p12",
+    ".pfx",
+    ".cer",
+    ".crt",
+    ".der",
+    ".pem",
+    ".key",
+    ".x963",
+    ".mobileprovision",
+)
 
 raw = sys.stdin.buffer.read().split(b"\0")
 matches = []

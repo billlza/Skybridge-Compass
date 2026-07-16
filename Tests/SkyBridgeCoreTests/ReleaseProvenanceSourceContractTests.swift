@@ -93,6 +93,40 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         XCTAssertFalse(vendorPolicy.contains("SkyBridge Compass iOS/Vendor/qperiapt.xcframework"))
     }
 
+    func testLoopbackBenchmarkIdentityIsHeadBoundInMemoryAndCertificatePinned() throws {
+        let fixturePolicy = try repositorySource("Scripts/test_loopback_benchmark_fixture_policy.sh")
+        XCTAssertTrue(fixturePolicy.contains("git -C \"${ROOT_DIR}\" ls-files --error-unmatch"))
+        XCTAssertTrue(fixturePolicy.contains("git -C \"${ROOT_DIR}\" cat-file -e \"HEAD:${path}\""))
+        XCTAssertTrue(fixturePolicy.contains("required fixture differs across HEAD, index, and worktree"))
+        XCTAssertTrue(fixturePolicy.contains("CA:FALSE"))
+        XCTAssertTrue(fixturePolicy.contains("TLS Web Server Authentication"))
+        XCTAssertTrue(fixturePolicy.contains("CERTIFICATE_SHA256="))
+        XCTAssertTrue(fixturePolicy.contains("PRIVATE_KEY_SHA256="))
+
+        for sourcePath in [
+            "Sources/BaselineBenchRunner/main.swift",
+            "Tests/SkyBridgeBenchTests/BaselineLoopbackBenchTests.swift"
+        ] {
+            let source = try repositorySource(sourcePath)
+            XCTAssertTrue(source.contains("SecIdentityCreate(nil, certificate, privateKey)"))
+            XCTAssertTrue(source.contains("complete(actualCertificateDER == expectedCertificateDER)"))
+            XCTAssertTrue(source.contains("startListenerAndWaitUntilReady"))
+            XCTAssertTrue(source.contains("AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1))"))
+            XCTAssertFalse(source.contains("SecPKCS12Import"))
+            XCTAssertFalse(source.contains("SecItemAdd"))
+            XCTAssertFalse(source.contains("complete(true)"))
+        }
+
+        let sensitiveArtifacts = try repositorySource("Scripts/check_sensitive_artifacts.sh")
+        XCTAssertTrue(sensitiveArtifacts.contains("certificate\\.der|private_key\\.x963"))
+        XCTAssertTrue(sensitiveArtifacts.contains("\".der\""))
+        XCTAssertTrue(sensitiveArtifacts.contains("\".x963\""))
+
+        let sourceQualityGate = try repositorySource("Scripts/gates/source_quality_gate.sh")
+        XCTAssertTrue(sourceQualityGate.contains("test_loopback_benchmark_fixture_policy.sh"))
+        XCTAssertTrue(sourceQualityGate.contains("check_sensitive_artifacts.sh"))
+    }
+
     func testXPCHelpersBindMessagesToSignedApplicationIdentityWithoutPIDLookup() throws {
         let helperPaths = [
             "Sources/PowerMetricsHelper/main.swift",
