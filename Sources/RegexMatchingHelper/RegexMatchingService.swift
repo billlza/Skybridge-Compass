@@ -7,26 +7,22 @@ import Foundation
 import Security
 
 /// Authorizes an incoming XPC connection by verifying the caller is code-signed by the
-/// same team as this helper. Mirrors PowerMetricsHelper: on a Developer-ID/release build we
-/// require `identifier "<app>" and anchor apple generic and certificate leaf[subject.OU] = "<ourTeam>"`,
-/// and on an ad-hoc/unsigned development build we fall back to identifier-only so local dev works.
+/// same team as this helper. The connection itself evaluates this requirement against each
+/// message's audit token, avoiding the PID-reuse race of a separate SecCode guest lookup.
 /// This helper uses an anonymous listener (endpoint is not published), so this is defense-in-depth.
-private func isRegexClientTrusted(_ connection: NSXPCConnection, allowedIdentifier: String) -> Bool {
-    let pid = connection.processIdentifier
-    var guest: SecCode?
-    let attrs: [CFString: Any] = [kSecGuestAttributePid: pid]
-    guard SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, SecCSFlags(), &guest) == errSecSuccess,
-          let guest else { return false }
-    let reqString: String
-    if let team = regexHelperTeamIdentifier(), !team.isEmpty {
-        reqString = "identifier \"\(allowedIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
-    } else {
-        reqString = "identifier \"\(allowedIdentifier)\""
+private func regexClientRequirementString() -> String? {
+    guard let team = regexHelperTeamIdentifier(), isValidRegexHelperTeamIdentifier(team) else {
+        return nil
     }
-    var requirement: SecRequirement?
-    guard SecRequirementCreateWithString(reqString as CFString, SecCSFlags(), &requirement) == errSecSuccess,
-          let requirement else { return false }
-    return SecCodeCheckValidity(guest, SecCSFlags(), requirement) == errSecSuccess
+    return "identifier \"com.skybridge.compass.pro\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+}
+
+private func isValidRegexHelperTeamIdentifier(_ candidate: String) -> Bool {
+    let bytes = Array(candidate.utf8)
+    return bytes.count == 10 && bytes.allSatisfy { byte in
+        (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+            || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+    }
 }
 
 private func regexHelperTeamIdentifier() -> String? {
@@ -211,10 +207,11 @@ private final class MatchingState: @unchecked Sendable {
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
- // Reject connections that are not signed by our own team (defense-in-depth).
-        guard isRegexClientTrusted(newConnection, allowedIdentifier: "com.skybridge.compass.pro") else {
+ // Reject connections when this helper has no valid signing-team identity.
+        guard let requirement = regexClientRequirementString() else {
             return false
         }
+        newConnection.setCodeSigningRequirement(requirement)
  // Configure the connection
         newConnection.exportedInterface = NSXPCInterface(with: RegexMatchingProtocol.self)
         
@@ -240,8 +237,8 @@ private final class MatchingState: @unchecked Sendable {
         let service = RegexMatchingService(maxInputSize: maxInputSize)
         newConnection.exportedObject = service
         
- // Resume the connection
-        newConnection.resume()
+ // Activate only after the signing requirement and exported surface are complete.
+        newConnection.activate()
         
         return true
     }

@@ -9,7 +9,7 @@ private let sharedPowerMetricsProvider = PowerMetricsProvider()
 let helperDelegate = XPCDelegate(provider: sharedPowerMetricsProvider)
 let helperListener = NSXPCListener(machServiceName: "com.skybridge.PowerMetricsHelper")
 helperListener.delegate = helperDelegate
-helperListener.resume()
+helperListener.activate()
 RunLoop.current.run()
 
 final class XPCDelegate: NSObject, NSXPCListenerDelegate {
@@ -21,48 +21,37 @@ final class XPCDelegate: NSObject, NSXPCListenerDelegate {
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
-        let allowedIdentifier = "com.skybridge.compass.pro"
-        guard verifyConnectionIdentifier(newConnection, allowedIdentifier: allowedIdentifier) else {
+        guard let requirement = trustedClientRequirementString() else {
             return false
         }
+        // NSXPCConnection performs this check against the message's audit token,
+        // avoiding the PID-reuse race inherent in SecCode guest lookup by PID.
+        newConnection.setCodeSigningRequirement(requirement)
         newConnection.exportedInterface = NSXPCInterface(with: PowerMetricsXPCProtocol.self)
         newConnection.exportedObject = provider
-        newConnection.resume()
+        newConnection.activate()
         return true
     }
 }
 
-private func verifyConnectionIdentifier(_ connection: NSXPCConnection, allowedIdentifier: String) -> Bool {
-    // NOTE: NSXPCConnection.auditToken is not public API; the PID guest lookup is the supported path.
-    // PID reuse is a narrow race, but it is mitigated by the code-signing requirement enforced below
-    // (the racing process would also have to be signed by our own Developer-ID team).
-    let pid = connection.processIdentifier
-    var guest: SecCode?
-    let attrs: [CFString: Any] = [kSecGuestAttributePid: pid]
-    let statusGuest = SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, SecCSFlags(), &guest)
-    guard statusGuest == errSecSuccess, let guest else { return false }
-    var requirement: SecRequirement?
-    let reqString = trustedClientRequirementString(allowedIdentifier: allowedIdentifier)
-    let statusReq = SecRequirementCreateWithString(reqString as CFString, SecCSFlags(), &requirement)
-    guard statusReq == errSecSuccess, let requirement else { return false }
-    let statusValid = SecCodeCheckValidity(guest, SecCSFlags(), requirement)
-    return statusValid == errSecSuccess
-}
-
 /// Builds the SecRequirement string used to authorize incoming XPC clients.
 ///
-/// We deliberately bind to the *same* signing team as this helper rather than a hardcoded
-/// Team ID. On a Developer-ID / release build the helper carries a Team Identifier, so we
-/// require the caller to be `identifier "<app>" and anchor apple generic and
-/// certificate leaf[subject.OU] = "<ourTeam>"` — a self-signed or unsigned binary that merely
-/// spoofs the bundle identifier can no longer connect to this root daemon. On an ad-hoc /
-/// unsigned development build there is no Team Identifier, so we fall back to the original
-/// identifier-only requirement to keep `Scripts/run_app.sh` local development working.
-private func trustedClientRequirementString(allowedIdentifier: String) -> String {
-    if let team = currentTeamIdentifier(), !team.isEmpty {
-        return "identifier \"\(allowedIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+/// The helper derives its own Team Identifier and fails closed when it is absent
+/// or malformed. Identifier-only fallback would allow an unsigned process to
+/// impersonate the application at this privileged boundary.
+private func trustedClientRequirementString() -> String? {
+    guard let team = currentTeamIdentifier(), isValidTeamIdentifier(team) else {
+        return nil
     }
-    return "identifier \"\(allowedIdentifier)\""
+    return "identifier \"com.skybridge.compass.pro\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+}
+
+private func isValidTeamIdentifier(_ candidate: String) -> Bool {
+    let bytes = Array(candidate.utf8)
+    return bytes.count == 10 && bytes.allSatisfy { byte in
+        (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+            || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+    }
 }
 
 /// Returns this helper's own Team Identifier (nil for ad-hoc/unsigned builds).
@@ -83,8 +72,8 @@ private func currentTeamIdentifier() -> String? {
 }
 
 final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked Sendable {
-    private static let helperVersion = "2.4.0"
-    private static let helperVersionMarker = "SKYBRIDGE_HELPER_VERSION=2.4.0"
+    private static let helperVersion = "2.5.0"
+    private static let helperVersionMarker = "SKYBRIDGE_HELPER_VERSION=2.5.0"
     private static let protocolVersion = 3
 
     private enum MonitoringMode: String, Codable {

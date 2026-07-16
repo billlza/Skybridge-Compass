@@ -71,14 +71,65 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
 
     func testQPeriaptVendorPolicyRejectsLocalPathArtifacts() throws {
         let builder = try repositorySource("Scripts/build_qperiapt_xcframework.sh")
-        XCTAssertTrue(builder.contains("CARGO_ENCODED_RUSTFLAGS"))
-        XCTAssertTrue(builder.contains("--remap-path-prefix=${QPERIAPT_REPO}=qperiapt-src"))
-        XCTAssertTrue(builder.contains("--remap-path-prefix=${HOME}/.cargo/registry/src=cargo-registry"))
-        XCTAssertTrue(builder.contains("--remap-path-prefix=${HOME}/.rustup/toolchains=rust-toolchain"))
+        XCTAssertTrue(builder.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2\""))
+        XCTAssertTrue(builder.contains("releases/download/${QPERIAPT_RELEASE_TAG}"))
+        XCTAssertTrue(builder.contains("require_sha256 \"$DOWNLOAD_DIR/CQPeriapt.xcframework.zip\""))
+        XCTAssertTrue(builder.contains("validate_archive_shape"))
+        XCTAssertTrue(builder.contains("codesign --verify --deep --strict"))
+        XCTAssertTrue(builder.contains("assert_exact_symbols \"$header\" \"$library\""))
+        XCTAssertTrue(builder.contains("PROVENANCE_SOURCE=\"$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2.json\""))
+        XCTAssertFalse(builder.contains("QPERIAPT_REPO"))
+        XCTAssertFalse(builder.contains("CARGO_ENCODED_RUSTFLAGS"))
+        XCTAssertFalse(builder.contains("IOS_VENDOR_OUT"))
+        XCTAssertFalse(builder.contains("INSTALL_IOS_MIRROR"))
 
         let vendorPolicy = try repositorySource("Scripts/test_vendor_artifact_policy.sh")
         XCTAssertTrue(vendorPolicy.contains("assert_no_user_home_paths_in_static_library"))
         XCTAssertTrue(vendorPolicy.contains("leaks a non-toolchain local user path into the vendored binary"))
+        XCTAssertTrue(vendorPolicy.contains("git -C \"${ROOT_DIR}\" ls-files --error-unmatch"))
+        XCTAssertTrue(vendorPolicy.contains("git -C \"${ROOT_DIR}\" cat-file -e \"HEAD:${path}\""))
+        XCTAssertTrue(vendorPolicy.contains("required vendor artifact differs across HEAD, index, and worktree"))
+        XCTAssertTrue(vendorPolicy.contains("assert_exact_head_bound_qperiapt_tree"))
+        XCTAssertFalse(vendorPolicy.contains("SkyBridge Compass iOS/Vendor/qperiapt.xcframework"))
+    }
+
+    func testXPCHelpersBindMessagesToSignedApplicationIdentityWithoutPIDLookup() throws {
+        let helperPaths = [
+            "Sources/PowerMetricsHelper/main.swift",
+            "Sources/RegexMatchingHelper/RegexMatchingService.swift"
+        ]
+
+        for helperPath in helperPaths {
+            let source = try repositorySource(helperPath)
+            let requirementRange = try XCTUnwrap(
+                source.range(of: "setCodeSigningRequirement(requirement)"),
+                "\(helperPath) must bind NSXPC messages to a code-signing requirement"
+            )
+            let interfaceRange = try XCTUnwrap(
+                source.range(of: "newConnection.exportedInterface"),
+                "\(helperPath) must configure an explicit exported interface"
+            )
+            let activationRange = try XCTUnwrap(
+                source.range(of: "newConnection.activate()"),
+                "\(helperPath) must explicitly activate accepted connections"
+            )
+
+            XCTAssertLessThan(requirementRange.lowerBound, interfaceRange.lowerBound)
+            XCTAssertLessThan(requirementRange.lowerBound, activationRange.lowerBound)
+            XCTAssertTrue(source.contains("anchor apple generic"))
+            XCTAssertTrue(source.contains("certificate leaf[subject.OU]"))
+            XCTAssertFalse(source.contains("kSecGuestAttributePid"))
+            XCTAssertFalse(source.contains("SecCodeCopyGuestWithAttributes"))
+            XCTAssertFalse(source.contains("connection.processIdentifier"))
+            XCTAssertFalse(source.contains("newConnection.resume()"))
+        }
+
+        let powerMetrics = try repositorySource("Sources/PowerMetricsHelper/main.swift")
+        XCTAssertTrue(powerMetrics.contains("guard let team = currentTeamIdentifier(), isValidTeamIdentifier(team)"))
+        XCTAssertTrue(powerMetrics.contains("SKYBRIDGE_HELPER_VERSION=2.5.0"))
+
+        let regex = try repositorySource("Sources/RegexMatchingHelper/RegexMatchingService.swift")
+        XCTAssertTrue(regex.contains("guard let team = regexHelperTeamIdentifier(), isValidRegexHelperTeamIdentifier(team)"))
     }
 
     private func repositorySource(_ relativePath: String) throws -> String {
