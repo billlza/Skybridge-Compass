@@ -260,7 +260,7 @@ private struct MockPQCProvider: CryptoProvider, Sendable {
         guard encapsulatedKey.count == 1088 else {
             throw CryptoProviderError.decapsulationFailed("ciphertext length mismatch")
         }
-        let privateData = privateKey.noCopyData()
+        let privateData = privateKey.copyData()
         guard privateData.count >= 32 else {
             throw CryptoProviderError.invalidKeyLength(
                 expected: 32,

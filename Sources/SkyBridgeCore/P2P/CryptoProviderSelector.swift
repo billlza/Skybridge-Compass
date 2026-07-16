@@ -114,7 +114,8 @@ public actor CryptoProviderSelector {
  /// 缓存的最佳 Provider
     private var _cachedBestProvider: CryptoProviderType?
 
- /// 缓存的本机能力
+    /// 缓存的基础能力。Q-Periapt admission/policy identity is overlaid on
+    /// every read because it can change after signed-policy activation.
     private var _cachedCapabilities: CryptoCapabilities?
 
  // MARK: - Initialization
@@ -177,15 +178,12 @@ public actor CryptoProviderSelector {
 
         switch providerType {
         case .qPeriapt:
-            #if canImport(CQPeriapt)
-            if isQPeriaptBetaEnabled() {
-                return QPeriaptKEMProvider()
-            }
-            #endif
             return UnavailableKEMProvider(
-                algorithmName: P2PCryptoAlgorithm.qperiaptContextBound.rawValue,
+                algorithmName: P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue,
                 isPQC: true,
-                error: CryptoProviderError.providerNotAvailable(.qPeriapt)
+                error: CryptoProviderError.operationFailed(
+                    "Q-Periapt ABI2 requires an authenticated runtime session and an explicit application context"
+                )
             )
 
         case .cryptoKitPQC:
@@ -208,19 +206,49 @@ public actor CryptoProviderSelector {
 
  /// 按协商出的套件名称获取 KEM Provider（可加性新增）。
  ///
- /// 当协商结果为 "Q-Periapt-ContextBound" 时必须返回 Q provider；若本机 Q-Periapt
- /// admission 未通过，显式抛错，禁止回退到 X25519/其它 provider 掩盖协商漂移。
+ /// Q-Periapt ABI2 cannot be constructed through this context-free compatibility
+ /// API. Call the application-context overload after negotiation instead.
  /// - Parameter negotiatedSuiteName: 协商得到的 KEM 套件名（`P2PCryptoAlgorithm.rawValue`）
     public func getKEMProvider(forNegotiatedSuite negotiatedSuiteName: String) async throws -> any KEMProvider {
-        guard negotiatedSuiteName == P2PCryptoAlgorithm.qperiaptContextBound.rawValue else {
+        guard negotiatedSuiteName != P2PCryptoAlgorithm.qperiaptContextBound.rawValue else {
+            throw CryptoProviderError.operationFailed(
+                "Q-Periapt ABI1 suite 0x0011 is decode-only and cannot be negotiated"
+            )
+        }
+        guard negotiatedSuiteName != P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue else {
+            throw CryptoProviderError.operationFailed(
+                "Q-Periapt ABI2 requires the protocol-derived application context"
+            )
+        }
+        return await getKEMProvider()
+    }
+
+    /// Constructs Q-Periapt ABI2 only when the exact negotiated suite, an
+    /// admitted signed-policy session, and a non-empty protocol context exist.
+    public func getKEMProvider(
+        forNegotiatedSuite negotiatedSuiteName: String,
+        applicationContext: Data
+    ) async throws -> any KEMProvider {
+        guard negotiatedSuiteName != P2PCryptoAlgorithm.qperiaptContextBound.rawValue else {
+            throw CryptoProviderError.operationFailed(
+                "Q-Periapt ABI1 suite 0x0011 is decode-only and cannot be negotiated"
+            )
+        }
+        guard negotiatedSuiteName == P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue else {
             return await getKEMProvider()
         }
         #if canImport(CQPeriapt)
-        if isQPeriaptBetaEnabled() {
-            return QPeriaptKEMProvider()
+        guard isQPeriaptBetaEnabled(),
+              let session = QPeriaptPlatformPolicy.currentRuntimeSession() else {
+            throw CryptoProviderError.providerNotAvailable(.qPeriapt)
         }
-        #endif
+        return try QPeriaptKEMProvider(
+            session: session,
+            applicationContext: applicationContext
+        )
+        #else
         throw CryptoProviderError.providerNotAvailable(.qPeriapt)
+        #endif
     }
 
  /// 获取签名 Provider
@@ -254,7 +282,7 @@ public actor CryptoProviderSelector {
  /// 获取本机加密能力
     public func getLocalCapabilities() async -> CryptoCapabilities {
         if let cached = _cachedCapabilities {
-            return cached
+            return capabilitiesIncludingAdmittedQPeriapt(cached)
         }
 
         let providerType = await bestAvailableProvider
@@ -271,15 +299,14 @@ public actor CryptoProviderSelector {
  // 根据 Provider 类型确定支持的算法
         switch providerType {
         case .qPeriapt:
-            supportedKEM = [
-                P2PCryptoAlgorithm.qperiaptContextBound.rawValue
-            ]
+            // This provider type alone is not admission evidence. The dynamic
+            // overlay below publishes Q only with an authenticated session.
+            supportedKEM = []
             supportedSignature = [
                 P2PCryptoAlgorithm.mlDSA65.rawValue,
                 P2PCryptoAlgorithm.p256.rawValue
             ]
             supportedAuthProfiles = [
-                QPeriaptPlatformPolicy.authProfile,
                 AuthProfile.hybrid.displayName,
                 AuthProfile.pqc.displayName
             ]
@@ -334,20 +361,6 @@ public actor CryptoProviderSelector {
             supportedAuthProfiles = [AuthProfile.classic.displayName]
         }
 
-        // Q-Periapt ContextBound (beta) 通告：可加性、默认 OFF。
-        // 只有显式请求且本机 macOS/iOS 26+ CQPeriapt self-test 通过才通告。
-        // 开启时把 "Q-Periapt-ContextBound" 前置到 supportedKEM，使其在 KEM 协商中
-        // 优先于既有 PQC 套件被选中；关闭时此分支不执行，通告与今天逐字节一致。
-        #if canImport(CQPeriapt)
-        if isQPeriaptBetaEnabled(),
-           !supportedKEM.contains(P2PCryptoAlgorithm.qperiaptContextBound.rawValue) {
-            supportedKEM.insert(P2PCryptoAlgorithm.qperiaptContextBound.rawValue, at: 0)
-            if !supportedAuthProfiles.contains(QPeriaptPlatformPolicy.authProfile) {
-                supportedAuthProfiles.insert(QPeriaptPlatformPolicy.authProfile, at: 0)
-            }
-        }
-        #endif
-
         let capabilities = CryptoCapabilities(
             supportedKEM: supportedKEM,
             supportedSignature: supportedSignature,
@@ -359,7 +372,45 @@ public actor CryptoProviderSelector {
         )
 
         _cachedCapabilities = capabilities
-        return capabilities
+        return capabilitiesIncludingAdmittedQPeriapt(capabilities)
+    }
+
+    private func capabilitiesIncludingAdmittedQPeriapt(
+        _ base: CryptoCapabilities
+    ) -> CryptoCapabilities {
+        #if canImport(CQPeriapt)
+        guard isQPeriaptBetaEnabled(),
+              let session = QPeriaptPlatformPolicy.currentRuntimeSession() else {
+            return base
+        }
+        return CryptoCapabilities(
+            supportedKEM: prependingIfMissing(
+                P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue,
+                to: base.supportedKEM
+            ),
+            supportedSignature: prependingIfMissing(
+                P2PCryptoAlgorithm.mlDSA65.rawValue,
+                to: base.supportedSignature
+            ),
+            supportedAuthProfiles: prependingIfMissing(
+                session.authProfile,
+                to: base.supportedAuthProfiles
+            ),
+            supportedAEAD: prependingIfMissing(
+                P2PCryptoAlgorithm.aes256GCM.rawValue,
+                to: base.supportedAEAD
+            ),
+            pqcAvailable: true,
+            platformVersion: base.platformVersion,
+            providerType: .qPeriapt
+        )
+        #else
+        return base
+        #endif
+    }
+
+    private func prependingIfMissing(_ value: String, to values: [String]) -> [String] {
+        values.contains(value) ? values : [value] + values
     }
 
     private func isAppleXWingAvailable() -> Bool {
@@ -382,7 +433,7 @@ public actor CryptoProviderSelector {
         return UserDefaults.standard.bool(forKey: SettingsStorageKeys.preferXWingHybrid)
     }
 
-    /// Q-Periapt ContextBound (beta) 是否启用。
+    /// Q-Periapt ABI2 PolicyBound (beta) 是否启用。
     ///
     /// 默认 OFF：未启用时，本机能力通告与 provider 选择与今天完全一致（逐字节不变）。
     /// 启用条件（任一）：

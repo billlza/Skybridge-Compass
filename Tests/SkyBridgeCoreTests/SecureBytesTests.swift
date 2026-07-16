@@ -7,10 +7,27 @@
 // **Validates: Requirements 2.6**
 //
 
+import Dispatch
 import XCTest
 @testable import SkyBridgeCore
 
 final class SecureBytesTests: XCTestCase {
+    private final class CoherenceProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _observedTornCopy = false
+
+        var observedTornCopy: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return _observedTornCopy
+        }
+
+        func recordTornCopy() {
+            lock.lock()
+            _observedTornCopy = true
+            lock.unlock()
+        }
+    }
     
  // MARK: - Property 3: SecureBytes Zeroization
     
@@ -20,7 +37,7 @@ final class SecureBytesTests: XCTestCase {
  /// **Validates: Requirements 2.6**
  ///
  /// **注意**：不直接验证内存内容（不可靠），而是通过注入 wipingFunction 验证擦除路径被调用
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
     func testProperty3_WipingFunctionCalledOnDeinit() {
         let tracker = SecureBytesWipeTracker()
         let originalWipingFunction = SecureBytes.wipingFunction
@@ -188,7 +205,7 @@ final class SecureBytesTests: XCTestCase {
         }
         
  // 获取 data 副本
-        let dataCopy = secureBytes.data
+        let dataCopy = secureBytes.copyData()
         
  // 修改 SecureBytes
         secureBytes.withUnsafeMutableBytes { buffer in
@@ -197,6 +214,41 @@ final class SecureBytesTests: XCTestCase {
         
  // 验证 data 副本不受影响
         XCTAssertEqual(dataCopy[0], 0x11, "Data copy should be independent")
+    }
+
+    func testCopiedDataRemainsValidAfterOwnerDeinit() {
+        let expected = Data([0x10, 0x20, 0x30, 0x40])
+
+        let copy = autoreleasepool {
+            SecureBytes(data: expected).copyData()
+        }
+
+        XCTAssertEqual(copy, expected)
+    }
+
+    func testConcurrentReadsAndWritesReturnCoherentCopies() {
+        let secureBytes = SecureBytes(count: 64)
+        let probe = CoherenceProbe()
+
+        DispatchQueue.concurrentPerform(iterations: 1_000) { iteration in
+            if iteration.isMultiple(of: 2) {
+                let value = UInt8(truncatingIfNeeded: iteration)
+                secureBytes.withUnsafeMutableBytes { buffer in
+                    for index in buffer.indices {
+                        buffer[index] = value
+                    }
+                }
+            } else {
+                let copy = secureBytes.copyData()
+                guard let first = copy.first,
+                      copy.allSatisfy({ $0 == first }) else {
+                    probe.recordTornCopy()
+                    return
+                }
+            }
+        }
+
+        XCTAssertFalse(probe.observedTornCopy)
     }
     
     func testSecureBytesLargeAllocation() {

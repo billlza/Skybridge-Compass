@@ -97,8 +97,9 @@ let package = Package(
             name: "liboqs",
             path: "Sources/Vendor/liboqs.xcframework"
         ),
-        // Q-Periapt ContextBound hybrid KEM (ML-KEM-768 + X25519) FFI.
-        // Additive, feature-flagged at runtime; mirrors how liboqs is vendored.
+        // Q-Periapt ABI2 PolicyBound hybrid KEM (ML-KEM-768 + X25519) FFI.
+        // Admission requires an authenticated signed-policy session and remains
+        // beta/default-off; the binary artifact is pinned by release provenance.
         .binaryTarget(
             name: "QPeriaptFFI",
             path: "Sources/Vendor/qperiapt.xcframework"
@@ -405,6 +406,9 @@ let package = Package(
             ],
             path: "Tests/SkyBridgeCoreTests",
             exclude: [
+            ],
+            resources: [
+                .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json")
             ],
             swiftSettings: ([
                 // 测试目标同样会导入 WebRTC，保持与主模块一致的头文件覆盖路径，避免 clang 依赖扫描误报。

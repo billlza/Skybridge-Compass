@@ -21,26 +21,64 @@ import Foundation
 /// - 使用手动分配的 UnsafeMutableRawPointer，避免 Swift Array 的 COW 复制
 /// - deinit 时使用 explicit_bzero（Darwin 可用）确保擦除不被优化掉
 /// - 对外只暴露 Data in/out，内部生命周期可控
-/// - 可注入 wipingFunction 用于测试验证擦除路径
+/// - 显式测试构建可注入 wipingFunction 验证擦除路径；生产构建固定调用 secureZero
 public final class SecureBytes: @unchecked Sendable {
     
  // MARK: - Properties
     
     private let pointer: UnsafeMutableRawPointer
     private let count: Int
+    private let accessLock = NSRecursiveLock()
     
- /// 可注入的擦除函数（用于测试验证）
- /// 默认使用 secureZero
- /// 使用 nonisolated(unsafe) 因为擦除函数本身是线程安全的
-    nonisolated(unsafe) public static var wipingFunction: (UnsafeMutableRawPointer, Int) -> Void = { ptr, len in
-        secureZero(ptr, len)
+    public typealias WipingFunction = @Sendable (UnsafeMutableRawPointer, Int) -> Void
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private final class WipingFunctionStorage: @unchecked Sendable {
+        private let lock = NSLock()
+        private var function: WipingFunction
+
+        init(function: @escaping WipingFunction) {
+            self.function = function
+        }
+
+        func load() -> WipingFunction {
+            lock.lock()
+            defer { lock.unlock() }
+            return function
+        }
+
+        func store(_ function: @escaping WipingFunction) {
+            lock.lock()
+            self.function = function
+            lock.unlock()
+        }
     }
+
+    private static let wipingFunctionStorage = WipingFunctionStorage { pointer, count in
+        secureZero(pointer, count)
+    }
+
+    /// Test-only zeroization probe. Access is synchronized so concurrently scheduled
+    /// test code cannot race the function storage itself.
+    public static var wipingFunction: WipingFunction {
+        get { wipingFunctionStorage.load() }
+        set { wipingFunctionStorage.store(newValue) }
+    }
+#else
+    /// Production zeroization entry point shared by in-module crypto providers.
+    /// It is immutable in ordinary Release builds, so callers cannot replace the
+    /// secure wipe implementation at runtime.
+    internal static let wipingFunction: WipingFunction = { pointer, count in
+        secureZero(pointer, count)
+    }
+#endif
     
  // MARK: - Initialization
     
  /// 创建指定大小的安全字节容器（初始化为零）
  /// - Parameter count: 字节数
     public init(count: Int) {
+        precondition(count >= 0, "SecureBytes count must not be negative")
         self.count = count
  // 至少分配 1 字节避免空分配问题
         let allocSize = max(count, 1)
@@ -91,9 +129,8 @@ public final class SecureBytes: @unchecked Sendable {
     }
     
     deinit {
- // 安全擦除 - 使用可注入的擦除函数
         if count > 0 {
-            Self.wipingFunction(pointer, count)
+            Self.wipe(pointer, count: count)
         }
         pointer.deallocate()
     }
@@ -110,39 +147,49 @@ public final class SecureBytes: @unchecked Sendable {
         count == 0
     }
     
- /// 导出为 Data（会创建副本）
- /// 注意：导出的 Data 不受 SecureBytes 保护
+    /// 导出为 Data（会创建独立副本）。
+    /// 返回值不依赖 SecureBytes 的生命周期，也不受其清零保护。
     public var data: Data {
+        copyData()
+    }
+
+    /// 导出为具有独立所有权的 Data 副本。
+    public func copyData() -> Data {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         guard count > 0 else { return Data() }
         return Data(bytes: pointer, count: count)
     }
     
- /// 导出为 Data（不拷贝）
- /// 注意：返回的 Data 依赖 SecureBytes 的生命周期
-    public func noCopyData() -> Data {
-        guard count > 0 else { return Data() }
-        return Data(bytesNoCopy: pointer, count: count, deallocator: .none)
-    }
-    
  /// 安全访问字节（只读）
- /// - Parameter body: 访问闭包
- /// - Returns: 闭包返回值
+    /// - Parameter body: 访问闭包
+    /// - Returns: 闭包返回值
     public func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
-        try body(UnsafeRawBufferPointer(start: pointer, count: count))
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return try body(UnsafeRawBufferPointer(start: pointer, count: count))
     }
     
  /// 安全访问字节（可写）
- /// - Parameter body: 访问闭包
- /// - Returns: 闭包返回值
+    /// - Parameter body: 访问闭包
+    /// - Returns: 闭包返回值
     public func withUnsafeMutableBytes<R>(_ body: (UnsafeMutableRawBufferPointer) throws -> R) rethrows -> R {
-        try body(UnsafeMutableRawBufferPointer(start: pointer, count: count))
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return try body(UnsafeMutableRawBufferPointer(start: pointer, count: count))
     }
     
- /// 手动擦除（不等待 deinit）
+    /// 手动擦除（不等待 deinit）
     public func zeroize() {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         if count > 0 {
-            Self.wipingFunction(pointer, count)
+            Self.wipe(pointer, count: count)
         }
+    }
+
+    private static func wipe(_ pointer: UnsafeMutableRawPointer, count: Int) {
+        wipingFunction(pointer, count)
     }
 }
 
@@ -162,11 +209,12 @@ import Darwin
 /// - ptr: 内存指针
 /// - count: 字节数
 private func secureZero(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
-    if let fn = loadExplicitBzero() {
+    let symbols = SecureZeroSymbols.shared
+    if let fn = symbols.explicitBzero {
         fn(ptr, count)
         return
     }
-    if let fn = loadMemsetS() {
+    if let fn = symbols.memsetS {
         _ = fn(ptr, count, 0, count)
         return
     }
@@ -177,24 +225,34 @@ private func secureZero(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
     withExtendedLifetime(ptr) { _ in }
 }
 
-#if canImport(Darwin)
 private typealias ExplicitBzeroFn = @convention(c) (UnsafeMutableRawPointer?, Int) -> Void
 private typealias MemsetSFn = @convention(c) (UnsafeMutableRawPointer?, Int, Int32, Int) -> Int32
 
-private func loadExplicitBzero() -> ExplicitBzeroFn? {
-    guard let symbol = dlsym(dlopen(nil, RTLD_NOW), "explicit_bzero") else {
-        return nil
-    }
-    return unsafeBitCast(symbol, to: ExplicitBzeroFn.self)
-}
+/// `dlopen(nil, ...)` acquires a process-image handle. Keep exactly one handle for
+/// the process lifetime so secure wipes do not repeatedly acquire and leak handles.
+private final class SecureZeroSymbols: @unchecked Sendable {
+    static let shared = SecureZeroSymbols()
 
-private func loadMemsetS() -> MemsetSFn? {
-    guard let symbol = dlsym(dlopen(nil, RTLD_NOW), "memset_s") else {
-        return nil
+    let explicitBzero: ExplicitBzeroFn?
+    let memsetS: MemsetSFn?
+    private let processHandle: UnsafeMutableRawPointer?
+
+    private init() {
+        let handle = dlopen(nil, RTLD_NOW)
+        processHandle = handle
+        if let handle {
+            explicitBzero = dlsym(handle, "explicit_bzero").map {
+                unsafeBitCast($0, to: ExplicitBzeroFn.self)
+            }
+            memsetS = dlsym(handle, "memset_s").map {
+                unsafeBitCast($0, to: MemsetSFn.self)
+            }
+        } else {
+            explicitBzero = nil
+            memsetS = nil
+        }
     }
-    return unsafeBitCast(symbol, to: MemsetSFn.self)
 }
-#endif
 
 #else
 
@@ -214,7 +272,7 @@ private func secureZero(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 /// 测试用擦除追踪器
 public final class SecureBytesWipeTracker: @unchecked Sendable {
     private let lock = NSLock()
@@ -246,7 +304,7 @@ public final class SecureBytesWipeTracker: @unchecked Sendable {
     }
     
  /// 创建追踪擦除函数
-    public func makeWipingFunction() -> (UnsafeMutableRawPointer, Int) -> Void {
+    public func makeWipingFunction() -> SecureBytes.WipingFunction {
         return { [weak self] ptr, len in
  // 先执行真正的擦除
             secureZero(ptr, len)

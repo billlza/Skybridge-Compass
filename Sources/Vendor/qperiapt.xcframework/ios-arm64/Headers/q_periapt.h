@@ -6,8 +6,8 @@
  * any access, so an overlap is a defined error, not UB. Pass distinct buffers regardless.
  */
 
-#ifndef Q_PERIAPT_H
-#define Q_PERIAPT_H
+#ifndef Q_PERIAPT_ABI2_H
+#define Q_PERIAPT_ABI2_H
 
 #pragma once
 
@@ -21,7 +21,17 @@
 /**
  * C ABI version for this header/library contract.
  */
-#define Q_PERIAPT_ABI_VERSION 1
+#define Q_PERIAPT_ABI_VERSION 2
+
+/**
+ * Maximum exact signed-policy document size accepted by the policy ABI.
+ */
+#define Q_PERIAPT_MAX_SIGNED_POLICY_BYTES 65536
+
+/**
+ * Maximum application-context size accepted by policy-bound operations.
+ */
+#define Q_PERIAPT_MAX_APPLICATION_CONTEXT_BYTES 65536
 
 /**
  * Success.
@@ -68,9 +78,9 @@
 #define Q_PERIAPT_ERR_ALIASING -7
 
 /**
- * `profile = 1`: fast X-Wing-compatible combiner.
+ * The operating-system cryptographic random-number generator failed.
  */
-#define Q_PERIAPT_PROFILE_COMPAT_XWING 1
+#define Q_PERIAPT_ERR_ENTROPY -8
 
 /**
  * `profile = 2`: context-bound combiner.
@@ -78,14 +88,37 @@
 #define Q_PERIAPT_PROFILE_CONTEXT_BOUND 2
 
 /**
+ * Canonical signed-policy decision encoding version.
+ */
+#define Q_PERIAPT_POLICY_DECISION_VERSION 1
+
+/**
+ * Length of a trusted policy state (`version_be || SHA3-256(exact_policy_bytes)`).
+ */
+#define Q_PERIAPT_TRUSTED_POLICY_STATE_LEN 36
+
+/**
+ * Length of an authenticated fixed-suite decision.
+ *
+ * Layout: `decision_version || suite_code || profile_code || key_format_code ||
+ * policy_version_be || policy_digest`.
+ */
+#define Q_PERIAPT_POLICY_DECISION_LEN 40
+
+/**
+ * Suite code for the fixed ML-KEM-768 + X25519 ABI.
+ */
+#define Q_PERIAPT_SUITE_MLKEM768_X25519 1
+
+/**
+ * Expanded/importable secret-key representation.
+ */
+#define Q_PERIAPT_KEY_FORMAT_EXPANDED 1
+
+/**
  * ML-KEM-768 secret-key length, bytes.
  */
 #define Q_PERIAPT_MLKEM768_SK_LEN 2400
-
-/**
- * ML-KEM-768 X-Wing seed secret length, bytes.
- */
-#define Q_PERIAPT_MLKEM768_XWING_SEED_LEN 32
 
 /**
  * ML-KEM-768 public-key length, bytes.
@@ -134,164 +167,130 @@ uintptr_t q_periapt_fixed_suite_id_len(void);
 const char *q_periapt_status_name(int32_t code);
 
 /**
- * Verify a detached-signed agility policy (`toml` + `signature`) under `vk` with the suite's
- * ML-DSA-65 root verifier, and write the combiner profile code its `select_profile()` chooses
- * into `out_profile` (one byte: [`Q_PERIAPT_PROFILE_COMPAT_XWING`] or
- * [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`]). This threads the policy engine into the C ABI: load a
- * signed policy once, then pass the returned code to encapsulate/decapsulate instead of
- * hard-coding a profile. **Fail-closed:** an unauthenticated, weak-signer, or rolled-back policy
- * yields [`Q_PERIAPT_ERR_POLICY`]. Rollback is enforced against `last_trusted_version`: a
- * validly-signed policy whose `policy_version` is *older* than that is refused (pass `0` to accept
- * any version on first load; persist the accepted `policy_version` and pass it back thereafter).
+ * Verify a detached, domain-separated signed agility policy and atomically resolve it against
+ * the only suite implemented by this ABI (ML-KEM-768 + X25519).
+ *
+ * On success `out_decision` receives [`Q_PERIAPT_POLICY_DECISION_LEN`] canonical bytes containing
+ * the selected suite, profile, key format, non-zero policy version, and SHA3-256 identity of the
+ * exact signed policy. A policy that requires L5/ML-KEM-1024 is rejected instead of silently
+ * executing this L3 fixed suite. Persist bytes 4..40 as the next `last_trusted_state`; pass an
+ * empty state only for an explicitly provisioned first load. A lower version or different policy
+ * reusing the same version is rejected. The verification key is a trust root and therefore must
+ * be pinned by the host; accepting it from the same untrusted channel as the policy permits an
+ * attacker to self-sign a replacement policy. **Fail-closed:** after the caller supplies a valid,
+ * disjoint, exact-length output, every subsequent length/authentication/parse/resolve error leaves
+ * that output all-zero. Earlier public output-contract or aliasing errors return without writing an
+ * output whose extent or disjointness is invalid. A legacy ABI 1 four-byte version is rejected:
+ * it cannot be upgraded without the exact previously accepted policy bytes and must go through an
+ * explicit host-authorized re-enrollment/reset flow.
  *
  * # Safety
- * `toml`/`signature`/`vk` must be readable for their lengths; `out_profile` writable for
- * `out_profile_len` (which must be `1`). Input and output buffers must not overlap (see the
- * module-level no-aliasing convention).
+ * `toml`/`signature`/`vk`/`last_trusted_state` must be readable for their lengths;
+ * `out_decision` writable for `out_decision_len`, which must equal
+ * [`Q_PERIAPT_POLICY_DECISION_LEN`]. `last_trusted_state_len` must be zero or
+ * [`Q_PERIAPT_TRUSTED_POLICY_STATE_LEN`]. Inputs and output must not overlap.
  */
-int32_t q_periapt_profile_from_signed_policy(const uint8_t *toml,
-                                             uintptr_t toml_len,
-                                             const uint8_t *signature,
-                                             uintptr_t signature_len,
-                                             const uint8_t *vk,
-                                             uintptr_t vk_len,
-                                             uint32_t last_trusted_version,
-                                             uint8_t *out_profile,
-                                             uintptr_t out_profile_len);
+int32_t q_periapt_decision_from_signed_policy(const uint8_t *toml,
+                                              uintptr_t toml_len,
+                                              const uint8_t *signature,
+                                              uintptr_t signature_len,
+                                              const uint8_t *vk,
+                                              uintptr_t vk_len,
+                                              const uint8_t *last_trusted_state,
+                                              uintptr_t last_trusted_state_len,
+                                              uint8_t *out_decision,
+                                              uintptr_t out_decision_len);
 
 /**
- * Deterministically derive an ML-KEM-768 key pair from a 64-byte `seed`.
+ * Generate the fixed-suite ML-KEM-768 and X25519 key pairs from the operating
+ * system CSPRNG under one authenticated policy decision.
+ *
+ * The decision must select the context-bound/expanded-key product profile. No
+ * deterministic seed is accepted by the product ABI; deterministic derivation
+ * remains an internal KAT facility so production callers cannot accidentally
+ * reuse low-entropy test material.
+ *
+ * The encoded decision is an integrity-preserving value between trusted
+ * components in one process, not an unforgeable capability. The host must pin
+ * the verification key used to create it and isolate untrusted native code.
  *
  * # Safety
- * `seed`/`out_sk`/`out_pk` must point to readable/writable regions of the given
- * lengths (`64` / [`Q_PERIAPT_MLKEM768_SK_LEN`] / [`Q_PERIAPT_MLKEM768_PK_LEN`]).
+ * `decision` must be readable for `decision_len`. All four outputs must be
+ * writable for their exact published lengths and disjoint from the input and
+ * from one another.
  */
-int32_t q_periapt_mlkem768_keypair(const uint8_t *seed,
-                                   uintptr_t seed_len,
-                                   uint8_t *out_sk,
-                                   uintptr_t out_sk_len,
-                                   uint8_t *out_pk,
-                                   uintptr_t out_pk_len);
+int32_t q_periapt_generate_keypair(const uint8_t *decision,
+                                   uintptr_t decision_len,
+                                   uint8_t *out_sk_pq,
+                                   uintptr_t out_sk_pq_len,
+                                   uint8_t *out_pk_pq,
+                                   uintptr_t out_pk_pq_len,
+                                   uint8_t *out_sk_trad,
+                                   uintptr_t out_sk_trad_len,
+                                   uint8_t *out_pk_trad,
+                                   uintptr_t out_pk_trad_len);
 
 /**
- * Deterministically derive an X-Wing-compatible ML-KEM-768 key pair from a 32-byte seed.
+ * Hybrid encapsulation authorized by an authenticated policy decision.
  *
- * The returned secret key is the 32-byte seed accepted by
- * [`Q_PERIAPT_PROFILE_COMPAT_XWING`] decapsulation. The expanded 2400-byte secret key
- * produced by [`q_periapt_mlkem768_keypair`] is intentionally **not** admitted to
- * `CompatXWing`; use it with [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`].
+ * This is the only product encapsulation entry point. It derives suite/profile/version from one
+ * canonical decision and injectively wraps `application_context` together with the exact signed
+ * policy digest before invoking the context-bound combiner. `CompatXWing` decisions are rejected
+ * because that profile intentionally ignores context and therefore cannot commit the digest.
+ * Encapsulation coins come from the operating-system CSPRNG; deterministic coins are not exposed
+ * by the product ABI.
+ *
+ * The decision is an integrity-preserving high-level API between trusted components of one
+ * process; C memory is caller-writable, so hostile native code in the same process can still forge
+ * it or bypass this entry point. Use process isolation when local native callers are untrusted.
  *
  * # Safety
- * `seed`/`out_sk_seed`/`out_pk` must point to readable/writable regions of the given
- * lengths (`32` / [`Q_PERIAPT_MLKEM768_XWING_SEED_LEN`] /
- * [`Q_PERIAPT_MLKEM768_PK_LEN`]).
+ * Every `(ptr, len)` pair must describe a valid region. Outputs must be writable and disjoint
+ * from every input and from each other.
  */
-int32_t q_periapt_mlkem768_xwing_keypair(const uint8_t *seed,
-                                         uintptr_t seed_len,
-                                         uint8_t *out_sk_seed,
-                                         uintptr_t out_sk_seed_len,
-                                         uint8_t *out_pk,
-                                         uintptr_t out_pk_len);
+int32_t q_periapt_encapsulate(const uint8_t *decision,
+                              uintptr_t decision_len,
+                              const uint8_t *pk_pq,
+                              uintptr_t pk_pq_len,
+                              const uint8_t *pk_trad,
+                              uintptr_t pk_trad_len,
+                              const uint8_t *application_context,
+                              uintptr_t application_context_len,
+                              uint8_t *out_ct_pq,
+                              uintptr_t out_ct_pq_len,
+                              uint8_t *out_ct_trad,
+                              uintptr_t out_ct_trad_len,
+                              uint8_t *out_secret,
+                              uintptr_t out_secret_len);
 
 /**
- * Deterministically derive an X25519 key pair from a 32-byte scalar.
+ * Hybrid decapsulation authorized by an authenticated policy decision.
+ *
+ * Suite/profile/version and the policy-bound context are reconstructed exactly as in
+ * [`q_periapt_encapsulate`]. See that function for the same-process trust
+ * boundary and `CompatXWing` rejection rationale.
  *
  * # Safety
- * All pointers must be valid for the given lengths (`32` each).
+ * Every `(ptr, len)` pair must describe a valid region. `out_secret` must be writable and
+ * disjoint from every input.
  */
-int32_t q_periapt_x25519_keypair(const uint8_t *secret,
-                                 uintptr_t secret_len,
-                                 uint8_t *out_sk,
-                                 uintptr_t out_sk_len,
-                                 uint8_t *out_pk,
-                                 uintptr_t out_pk_len);
+int32_t q_periapt_decapsulate(const uint8_t *decision,
+                              uintptr_t decision_len,
+                              const uint8_t *sk_pq,
+                              uintptr_t sk_pq_len,
+                              const uint8_t *ct_pq,
+                              uintptr_t ct_pq_len,
+                              const uint8_t *pk_pq,
+                              uintptr_t pk_pq_len,
+                              const uint8_t *sk_trad,
+                              uintptr_t sk_trad_len,
+                              const uint8_t *ct_trad,
+                              uintptr_t ct_trad_len,
+                              const uint8_t *pk_trad,
+                              uintptr_t pk_trad_len,
+                              const uint8_t *application_context,
+                              uintptr_t application_context_len,
+                              uint8_t *out_secret,
+                              uintptr_t out_secret_len);
 
-/**
- * Hybrid encapsulation to `(pk_pq, pk_trad)`.
- *
- * Writes `out_ct_pq` ([`Q_PERIAPT_MLKEM768_CT_LEN`]), `out_ct_trad` ([`Q_PERIAPT_X25519_LEN`])
- * and `out_secret` ([`Q_PERIAPT_SECRET_LEN`]). `context` is bound only under
- * [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`] and must then be non-empty. `CompatXWing`
- * uses the X-Wing-safe ML-KEM seed backend internally; `ContextBound` uses the
- * expanded ML-KEM backend.
- *
- * # Safety
- * Every `(ptr, len)` pair must describe a valid region; output buffers must be
- * writable for their lengths.
- */
-int32_t q_periapt_hybrid_encapsulate(uint8_t profile,
-                                     const uint8_t *suite_id,
-                                     uintptr_t suite_id_len,
-                                     uint32_t policy_version,
-                                     const uint8_t *pk_pq,
-                                     uintptr_t pk_pq_len,
-                                     const uint8_t *pk_trad,
-                                     uintptr_t pk_trad_len,
-                                     const uint8_t *context,
-                                     uintptr_t context_len,
-                                     const uint8_t *rand_pq,
-                                     uintptr_t rand_pq_len,
-                                     const uint8_t *rand_trad,
-                                     uintptr_t rand_trad_len,
-                                     uint8_t *out_ct_pq,
-                                     uintptr_t out_ct_pq_len,
-                                     uint8_t *out_ct_trad,
-                                     uintptr_t out_ct_trad_len,
-                                     uint8_t *out_secret,
-                                     uintptr_t out_secret_len);
-
-/**
- * Hybrid decapsulation. Returns [`Q_PERIAPT_OK`] and writes `out_secret`
- * ([`Q_PERIAPT_SECRET_LEN`]) for any correctly-sized ciphertext; an invalid ciphertext
- * yields a pseudorandom secret (implicit rejection — no oracle).
- *
- * `sk_pq` is profile-specific: [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`] expects the
- * 2400-byte expanded key from [`q_periapt_mlkem768_keypair`], while
- * [`Q_PERIAPT_PROFILE_COMPAT_XWING`] expects the 32-byte seed from
- * [`q_periapt_mlkem768_xwing_keypair`].
- *
- * # Safety
- * Every `(ptr, len)` pair must describe a valid region; `out_secret` must be
- * writable for [`Q_PERIAPT_SECRET_LEN`].
- */
-int32_t q_periapt_hybrid_decapsulate(uint8_t profile,
-                                     const uint8_t *suite_id,
-                                     uintptr_t suite_id_len,
-                                     uint32_t policy_version,
-                                     const uint8_t *sk_pq,
-                                     uintptr_t sk_pq_len,
-                                     const uint8_t *ct_pq,
-                                     uintptr_t ct_pq_len,
-                                     const uint8_t *pk_pq,
-                                     uintptr_t pk_pq_len,
-                                     const uint8_t *sk_trad,
-                                     uintptr_t sk_trad_len,
-                                     const uint8_t *ct_trad,
-                                     uintptr_t ct_trad_len,
-                                     const uint8_t *pk_trad,
-                                     uintptr_t pk_trad_len,
-                                     const uint8_t *context,
-                                     uintptr_t context_len,
-                                     uint8_t *out_secret,
-                                     uintptr_t out_secret_len);
-
-/**
- * Derive a combined secret directly from the combiner inputs — exposes the
- * `combine()` core (not the full hybrid) so the `ContextBound` / `CompatXWing`
- * reference vectors are reproducible byte-for-byte across every binding face.
- *
- * `input` is the nine combiner fields, each 8-byte big-endian length-prefixed, in
- * the canonical order: `suite_id`, `policy_version` (a 4-byte big-endian `u32`),
- * `ss_pq`, `ss_trad`, `ct_pq`, `pk_pq`, `ct_trad`, `pk_trad`, `context`. `profile`
- * is [`Q_PERIAPT_PROFILE_COMPAT_XWING`] or [`Q_PERIAPT_PROFILE_CONTEXT_BOUND`].
- *
- * # Safety
- * `input`/`out_secret` must be valid for `input_len` / [`Q_PERIAPT_SECRET_LEN`].
- */
-int32_t q_periapt_combine(uint8_t profile,
-                          const uint8_t *input,
-                          uintptr_t input_len,
-                          uint8_t *out_secret,
-                          uintptr_t out_secret_len);
-
-#endif  /* Q_PERIAPT_H */
+#endif  /* Q_PERIAPT_ABI2_H */

@@ -352,7 +352,10 @@ public enum P2PCryptoAlgorithm: String, Codable, Sendable {
     case xWing = "X-Wing"           // X25519 + ML-KEM-768 (iOS 26+)
     case mlKEM768 = "ML-KEM-768"    // 纯 PQC KEM
     case x25519 = "X25519"          // 经典 ECDH
-    case qperiaptContextBound = "Q-Periapt-ContextBound" // X25519 + ML-KEM-768 ContextBound 混合 (beta, 仅在启用 q-periapt 时通告)
+    /// Legacy ABI 1 identifier. Decode-only; never advertise for a new session.
+    case qperiaptContextBound = "Q-Periapt-ContextBound"
+    /// ABI 2 authenticated-policy/application-context-bound hybrid KEM.
+    case qperiaptABI2PolicyBound = "Q-Periapt-ABI2-PolicyBound"
     
  // 签名算法
     case mlDSA65 = "ML-DSA-65"      // PQC 签名 (iOS 26+)
@@ -365,7 +368,7 @@ public enum P2PCryptoAlgorithm: String, Codable, Sendable {
  /// 是否为 PQC 算法
     public var isPQC: Bool {
         switch self {
-        case .xWing, .mlKEM768, .mlDSA65, .qperiaptContextBound:
+        case .xWing, .mlKEM768, .mlDSA65, .qperiaptContextBound, .qperiaptABI2PolicyBound:
             return true
         default:
             return false

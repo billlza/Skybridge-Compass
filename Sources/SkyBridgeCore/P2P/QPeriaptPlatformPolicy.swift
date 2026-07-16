@@ -1,7 +1,47 @@
 import Foundation
+import os
 #if canImport(CQPeriapt)
 import CQPeriapt
 #endif
+
+private final class QPeriaptRuntimeAdmissionState: Sendable {
+    private let runtimeSession = OSAllocatedUnfairLock<QPeriaptRuntimeSession?>(initialState: nil)
+
+    func session() -> QPeriaptRuntimeSession? {
+        runtimeSession.withLock { $0 }
+    }
+
+    func install(_ session: QPeriaptRuntimeSession) throws {
+        try runtimeSession.withLock { installedSession in
+            if let current = installedSession,
+               current.trustRootIdentifier != session.trustRootIdentifier {
+                throw CryptoProviderError.operationFailed(
+                    "Q-Periapt trust root replacement requires an explicit reset/re-enrollment flow"
+                )
+            }
+            if let current = installedSession {
+                guard session.policyVersion >= current.policyVersion else {
+                    throw CryptoProviderError.operationFailed(
+                        "Q-Periapt runtime session rollback was rejected"
+                    )
+                }
+                guard session.policyVersion != current.policyVersion
+                        || session.policyDigest == current.policyDigest else {
+                    throw CryptoProviderError.operationFailed(
+                        "Q-Periapt runtime session reused a policy version with a different digest"
+                    )
+                }
+            }
+            installedSession = session
+        }
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    func resetForTesting() {
+        runtimeSession.withLock { $0 = nil }
+    }
+    #endif
+}
 
 /// Runtime admission policy for the experimental Q-Periapt suite.
 ///
@@ -10,7 +50,13 @@ import CQPeriapt
 /// make older Apple platforms look Q-capable.
 @available(macOS 14.0, iOS 17.0, *)
 public enum QPeriaptPlatformPolicy {
-    public static let authProfile = "q-periapt-beta"
+    /// The exact policy identity is part of capability negotiation. This
+    /// placeholder is never advertised because runtime admission stays false
+    /// until a verified session is activated.
+    public static var authProfile: String {
+        runtimeAdmissionState.session()?.authProfile
+            ?? "q-periapt-abi2-policy-unprovisioned"
+    }
     #if canImport(CQPeriapt)
     public static let publicKeyLength = Int(Q_PERIAPT_MLKEM768_PK_LEN) + Int(Q_PERIAPT_X25519_LEN)
     public static let privateKeyLength = Int(Q_PERIAPT_MLKEM768_SK_LEN)
@@ -24,14 +70,7 @@ public enum QPeriaptPlatformPolicy {
 
     private static let minimumAppleMajorVersion = 26
 
-    private static let localRuntimeProbeSucceeded: Bool = {
-        #if canImport(CQPeriapt)
-        if #available(macOS 26.0, iOS 26.0, *) {
-            return QPeriaptCryptoProvider.quickRuntimeProbe()
-        }
-        #endif
-        return false
-    }()
+    private static let runtimeAdmissionState = QPeriaptRuntimeAdmissionState()
 
     public static func isRequested(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -52,8 +91,44 @@ public enum QPeriaptPlatformPolicy {
     }
 
     public static var isLocalRuntimeSupported: Bool {
-        localRuntimeProbeSucceeded
+        runtimeAdmissionState.session() != nil
     }
+
+    /// Existing settings initialization calls this method before a product
+    /// policy has necessarily been provisioned. It is intentionally fail-closed;
+    /// only `activateRuntimeSession` can install an authenticated session.
+    public static func prepareLocalRuntimeSupport() async -> Bool {
+        isLocalRuntimeSupported
+    }
+
+    /// Activates one session only after signed-policy verification, durable
+    /// trusted-state persistence, ABI validation, and a native round trip.
+    public static func activateRuntimeSession(_ session: QPeriaptRuntimeSession) async throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw CryptoProviderError.providerNotAvailable(.qPeriapt)
+        }
+        guard try await QPeriaptCryptoProvider.quickRuntimeProbe(session: session) else {
+            throw CryptoProviderError.operationFailed("Q-Periapt ABI2 runtime round-trip probe failed")
+        }
+        try runtimeAdmissionState.install(session)
+    }
+
+    static func currentRuntimeSession() -> QPeriaptRuntimeSession? {
+        runtimeAdmissionState.session()
+    }
+
+    static func makeCryptoProvider() -> QPeriaptCryptoProvider? {
+        currentRuntimeSession().map(QPeriaptCryptoProvider.init(session:))
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    /// Restores the process-wide admission boundary between tests. Production
+    /// builds intentionally expose no reset because replacing an enrolled trust
+    /// root requires the explicit product re-enrollment flow.
+    static func resetRuntimeSessionForTesting() {
+        runtimeAdmissionState.resetForTesting()
+    }
+    #endif
 
     public static func isEnabledForLocalRuntime(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -117,10 +192,18 @@ public enum QPeriaptPlatformPolicy {
     }
 
     public static func isHandshakePeerEligible(_ capabilities: CryptoCapabilities) -> Bool {
-        capabilities.pqcAvailable &&
-            capabilities.supportedKEM.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(P2PCryptoAlgorithm.qperiaptContextBound.rawValue) } &&
+        guard let session = currentRuntimeSession() else { return false }
+        return isHandshakePeerEligible(capabilities, for: session)
+    }
+
+    static func isHandshakePeerEligible(
+        _ capabilities: CryptoCapabilities,
+        for session: QPeriaptRuntimeSession
+    ) -> Bool {
+        return capabilities.pqcAvailable &&
+            capabilities.supportedKEM.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue) } &&
             capabilities.supportedSignature.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(P2PCryptoAlgorithm.mlDSA65.rawValue) } &&
-            capabilities.supportedAuthProfiles.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(authProfile) } &&
+            capabilities.supportedAuthProfiles.contains { $0 == session.authProfile } &&
             capabilities.providerType == .qPeriapt &&
             isPeerPlatformVersionStringEligible(capabilities.platformVersion)
     }
@@ -128,7 +211,7 @@ public enum QPeriaptPlatformPolicy {
     public static func requireHandshakePeerEligible(_ capabilities: CryptoCapabilities) throws {
         guard isHandshakePeerEligible(capabilities) else {
             throw CryptoProviderError.unsupportedAlgorithm(
-                "Q-Periapt peer capability requires Q provider, ML-DSA-65, q-periapt-beta, and supported platform"
+                "Q-Periapt peer capability requires ABI2 PolicyBound, ML-DSA-65, an exact signed-policy identity, and a supported platform"
             )
         }
     }

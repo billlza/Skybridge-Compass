@@ -775,11 +775,11 @@ public actor DeviceIdentityKeyManager {
         appleXWingAvailable: Bool,
         qPeriaptEnabled: Bool = false
     ) -> [CryptoSuite] {
-        var suites = provider.supportedSuites.filter { $0.isPQCGroup }
+        var suites = provider.supportedSuites.filter { $0.isPQCGroup && $0.isNegotiable }
 
         #if canImport(CQPeriapt)
         if qPeriaptEnabled {
-            suites.append(.qperiaptContextBound)
+            suites.append(.qperiaptABI2PolicyBound)
         }
         #endif
 
@@ -817,15 +817,19 @@ public actor DeviceIdentityKeyManager {
         }
         guard !suites.isEmpty else { return [] }
 
-        var requiredWireIds = Set(provider.supportedSuites.filter { $0.isPQCGroup }.map(\.wireId))
-        if suites.contains(where: { $0.wireId == CryptoSuite.qperiaptContextBound.wireId }) {
-            requiredWireIds.insert(CryptoSuite.qperiaptContextBound.wireId)
+        var requiredWireIds = Set(
+            provider.supportedSuites
+                .filter { $0.isPQCGroup && $0.isNegotiable }
+                .map(\.wireId)
+        )
+        if suites.contains(where: { $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId }) {
+            requiredWireIds.insert(CryptoSuite.qperiaptABI2PolicyBound.wireId)
         }
         var kemKeys: [KEMPublicKeyInfo] = []
         kemKeys.reserveCapacity(suites.count)
 
         for suite in suites {
-            let suiteProvider = Self.pairingIdentityProvider(for: suite, baseProvider: provider)
+            let suiteProvider = try Self.pairingIdentityProvider(for: suite, baseProvider: provider)
             do {
                 let publicKey = try await getKEMPublicKey(for: suite, provider: suiteProvider)
                 kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
@@ -845,11 +849,14 @@ public actor DeviceIdentityKeyManager {
     private nonisolated static func pairingIdentityProvider(
         for suite: CryptoSuite,
         baseProvider: any CryptoProvider
-    ) -> any CryptoProvider {
+    ) throws -> any CryptoProvider {
         #if canImport(CQPeriapt)
-        if suite == .qperiaptContextBound,
-           QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
-            return QPeriaptCryptoProvider()
+        if suite == .qperiaptABI2PolicyBound {
+            guard QPeriaptPlatformPolicy.isEnabledForLocalRuntime(),
+                  let provider = QPeriaptPlatformPolicy.makeCryptoProvider() else {
+                throw CryptoProviderError.providerNotAvailable(.qPeriapt)
+            }
+            return provider
         }
         #endif
 
@@ -1256,6 +1263,9 @@ public actor DeviceIdentityKeyManager {
         suiteWireId: UInt16,
         tier: CryptoTier
     ) -> Bool {
+        guard suiteWireId != CryptoSuite.qperiaptContextBound.wireId else {
+            return false
+        }
         guard let expectedPriv = expectedKEMPrivateKeyLength(suiteWireId: suiteWireId, tier: tier),
               let expectedPub = expectedKEMPublicKeyLength(suiteWireId: suiteWireId, tier: tier) else {
             return true
@@ -1265,7 +1275,7 @@ public actor DeviceIdentityKeyManager {
 
     private func expectedKEMPrivateKeyLength(suiteWireId: UInt16, tier: CryptoTier) -> Int? {
         switch (suiteWireId, tier) {
-        case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength
+        case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength
         case (0x0101, .nativePQC): return 96
         case (0x0101, .liboqsPQC): return 2400
         case (0x0102, .nativePQC): return 96
@@ -1277,7 +1287,7 @@ public actor DeviceIdentityKeyManager {
 
     private func expectedKEMPublicKeyLength(suiteWireId: UInt16, tier: CryptoTier) -> Int? {
         switch (suiteWireId, tier) {
-        case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength
+        case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength
         case (0x0101, _): return 1184
         case (0x0102, _): return 1184
         case (0x0001, .nativePQC): return 1216

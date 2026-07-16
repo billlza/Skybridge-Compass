@@ -700,6 +700,7 @@ run_source_contract_guardrail_scripts() {
   bash Scripts/test_check_macos_deps.sh || return 1
   bash Scripts/test_build_freerdp_dylibs_policy.sh || return 1
   bash Scripts/test_vendor_artifact_policy.sh || return 1
+  bash Scripts/test_qperiapt_install_transaction.sh || return 1
   bash Scripts/test_check_ios_test_configuration.sh || return 1
   bash Scripts/test_verify_xcode_toolchain.sh || return 1
   bash Scripts/test_package_build_policy.sh || return 1
