@@ -120,19 +120,33 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
     func testQPeriaptBootstrapExportRequiresRuntimeProbeAndPlatformMetadata() throws {
         let policy = try readSource("Sources/SkyBridgeCore/P2P/QPeriaptPlatformPolicy.swift")
         XCTAssertTrue(policy.contains("#available(macOS 26.0, iOS 26.0, *)"))
-        XCTAssertTrue(policy.contains("QPeriaptCryptoProvider.quickRuntimeProbe()"))
+        XCTAssertTrue(policy.contains("QPeriaptCryptoProvider.quickRuntimeProbe(session: session)"))
+        XCTAssertTrue(policy.contains("runtimeAdmissionState.install(session)"))
+        XCTAssertTrue(policy.contains("prepareLocalRuntimeSupport() async"))
+        XCTAssertTrue(policy.contains("only `activateRuntimeSession` can install an authenticated session"))
+        XCTAssertTrue(policy.contains("currentRuntimeSession()"))
+        XCTAssertTrue(policy.contains("makeCryptoProvider()"))
         XCTAssertTrue(policy.contains("SB_ENABLE_QPERIAPT"))
         XCTAssertTrue(policy.contains("SKYBRIDGE_PQC_PREFERRED_SUITE"))
 
+        let runtime = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptPolicyRuntime.swift")
+        XCTAssertTrue(runtime.contains("verificationKeySHA256Pin"))
+        XCTAssertTrue(runtime.contains("case missingTrustedState"))
+        XCTAssertTrue(runtime.contains("compareAndSwapTrustedState"))
+        XCTAssertTrue(runtime.contains("case trustedStateChangedConcurrently"))
+        XCTAssertTrue(runtime.contains("State is persisted before the authenticated decision becomes observable"))
+
         let deviceIdentity = try readSource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
         XCTAssertTrue(deviceIdentity.contains("QPeriaptPlatformPolicy.isEnabledForLocalRuntime()"))
-        XCTAssertTrue(deviceIdentity.contains("QPeriaptCryptoProvider()"))
-        XCTAssertTrue(deviceIdentity.contains("requiredWireIds.insert(CryptoSuite.qperiaptContextBound.wireId)"))
-        XCTAssertTrue(deviceIdentity.contains("case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength"))
-        XCTAssertTrue(deviceIdentity.contains("case (0x0011, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength"))
+        XCTAssertTrue(deviceIdentity.contains("QPeriaptPlatformPolicy.makeCryptoProvider()"))
+        XCTAssertTrue(deviceIdentity.contains("suite == .qperiaptABI2PolicyBound"))
+        XCTAssertFalse(deviceIdentity.contains("QPeriaptCryptoProvider()"))
+        XCTAssertTrue(deviceIdentity.contains("requiredWireIds.insert(CryptoSuite.qperiaptABI2PolicyBound.wireId)"))
+        XCTAssertTrue(deviceIdentity.contains("case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.privateKeyLength"))
+        XCTAssertTrue(deviceIdentity.contains("case (0x0012, .qperiaptPQC): return QPeriaptPlatformPolicy.publicKeyLength"))
 
         let keyInfo = try readSource("Sources/SkyBridgeCore/P2P/KEMIdentityModels.swift")
-        XCTAssertTrue(keyInfo.contains("case CryptoSuite.qperiaptContextBound.wireId"))
+        XCTAssertTrue(keyInfo.contains("case CryptoSuite.qperiaptABI2PolicyBound.wireId"))
         XCTAssertTrue(keyInfo.contains("QPeriaptPlatformPolicy.publicKeyLength"))
 
         let signaling = try readSource("Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/WebRTCSignalingEnvelope.swift")
@@ -144,34 +158,128 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(crossNetwork.contains("osVersion: QPeriaptPlatformPolicy.localOSVersionString()"))
     }
 
+    func testQPeriaptRemainsDormantUntilProductProvisioningIsImplemented() throws {
+        let sourceRoots = [
+            repositoryRoot().appendingPathComponent("Sources"),
+            repositoryRoot().appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources")
+        ]
+        var activationOccurrences: [String] = []
+        var productionStoreConformances: [String] = []
+
+        for root in sourceRoots {
+            let enumerator = try XCTUnwrap(
+                FileManager.default.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                )
+            )
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                let source = try String(contentsOf: url, encoding: .utf8)
+                let relativePath = url.path.replacingOccurrences(
+                    of: repositoryRoot().path + "/",
+                    with: ""
+                )
+                if source.contains("activateRuntimeSession(") {
+                    activationOccurrences.append(relativePath)
+                }
+                if source.range(
+                    of: #":\s*QPeriaptTrustedStateStore\b"#,
+                    options: .regularExpression
+                ) != nil {
+                    productionStoreConformances.append(relativePath)
+                }
+            }
+        }
+
+        XCTAssertEqual(
+            activationOccurrences,
+            ["Sources/SkyBridgeCore/P2P/QPeriaptPlatformPolicy.swift"],
+            "Production must not activate Q-Periapt until product trust-root provisioning and a durable CAS store are implemented."
+        )
+        XCTAssertTrue(
+            productionStoreConformances.isEmpty,
+            "A production Q-Periapt trusted-state store requires an explicit provisioning, migration, and recovery design."
+        )
+
+        let settings = try readSource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
+        XCTAssertTrue(settings.contains("@Published public var preferQPeriaptBeta: Bool = false"))
+
+        let policy = try readSource("Sources/SkyBridgeCore/P2P/QPeriaptPlatformPolicy.swift")
+        XCTAssertTrue(policy.contains("isRequested(environment: environment, userDefaults: userDefaults) && isLocalRuntimeSupported"))
+        XCTAssertTrue(policy.contains("q-periapt-abi2-policy-unprovisioned"))
+        XCTAssertFalse(policy.contains("@unchecked Sendable"))
+
+        let adapter = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptNativeAdapter.swift")
+        XCTAssertTrue(adapter.contains("maximumWaiters: Int = 8"))
+        XCTAssertTrue(adapter.contains("maximumWaitDuration: Duration = HandshakeConstants.defaultTimeout"))
+        XCTAssertTrue(adapter.contains("case waitDeadlineExceeded"))
+        XCTAssertTrue(adapter.contains("DispatchQueue("))
+        XCTAssertTrue(adapter.contains("withCheckedThrowingContinuation"))
+        XCTAssertTrue(adapter.contains("OSAllocatedUnfairLock"))
+        XCTAssertFalse(adapter.contains("DispatchSemaphore"))
+        XCTAssertFalse(adapter.contains("@unchecked Sendable"))
+    }
+
     func testQPeriaptAppleBindingFailsClosedOnABIAndSuiteDrift() throws {
         let contract = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptRuntimeContract.swift")
         XCTAssertTrue(contract.contains("q_periapt_abi_version()"))
         XCTAssertTrue(contract.contains("q_periapt_fixed_suite_id_len()"))
         XCTAssertTrue(contract.contains("q_periapt_fixed_suite_id()"))
         XCTAssertTrue(contract.contains("Q-Periapt C ABI mismatch"))
-        XCTAssertTrue(contract.contains("Q-Periapt header changed the SkyBridge ContextBound wire contract"))
+        XCTAssertTrue(contract.contains("Q-Periapt header changed the frozen SkyBridge ABI2 PolicyBound contract"))
+        XCTAssertTrue(contract.contains("expectedRuntimeVersion = \"0.1.0-alpha.2\""))
 
         let provider = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptCryptoProvider.swift")
-        XCTAssertTrue(provider.contains("try QPeriaptRuntimeContract.requireCompatible()"))
-        XCTAssertTrue(provider.contains("privateKey.withUnsafeBytes"))
+        XCTAssertTrue(provider.contains("QPeriaptNativeAdapter(session: session)"))
+        XCTAssertTrue(provider.contains("ApplicationContextBoundCryptoProvider"))
+        XCTAssertTrue(provider.contains("Q-Periapt ABI2 requires the protocol-derived application context"))
         XCTAssertFalse(
-            provider.contains("let blob = privateKey.data"),
-            "Q-Periapt decapsulation must not duplicate the complete private-key blob into ordinary Data."
+            provider.contains("q_periapt_hybrid_encapsulate") ||
+                provider.contains("q_periapt_hybrid_decapsulate"),
+            "ABI2 provider must not retain ABI1 entry points."
         )
-        XCTAssertTrue(provider.contains("SecureBytes.wipingFunction(baseAddress, bytes.count)"))
 
         let kemProvider = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptKEMProvider.swift")
-        XCTAssertTrue(kemProvider.contains("try QPeriaptRuntimeContract.requireCompatible()"))
-        XCTAssertTrue(kemProvider.contains("privateKey.withUnsafeBytes"))
-        XCTAssertTrue(kemProvider.contains("SecureBytes.wipingFunction(baseAddress, bytes.count)"))
+        XCTAssertTrue(kemProvider.contains("QPeriaptNativeAdapter(session: session)"))
+        XCTAssertTrue(kemProvider.contains("requires a non-empty application context"))
+
+        let adapter = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptNativeAdapter.swift")
+        XCTAssertTrue(adapter.contains("try QPeriaptRuntimeContract.requireCompatible()"))
+        XCTAssertTrue(adapter.contains("q_periapt_generate_keypair("))
+        XCTAssertTrue(adapter.contains("q_periapt_encapsulate("))
+        XCTAssertTrue(adapter.contains("q_periapt_decapsulate("))
+        XCTAssertTrue(adapter.contains("session.decision.encoded.withUnsafeBytes"))
+        XCTAssertTrue(adapter.contains("privateKey.withUnsafeBytes"))
+        XCTAssertTrue(adapter.contains("privateKey: SecureBytes"))
+        XCTAssertTrue(adapter.contains("let privateKey = SecureBytes(count: Self.privateKeyLength)"))
+        XCTAssertFalse(adapter.contains("var privateKey = Data(capacity: Self.privateKeyLength)"))
+        XCTAssertFalse(adapter.contains("privateKey.copyData()"))
+        XCTAssertTrue(provider.contains("bytes: keys.privateKey.copyData()"))
+        XCTAssertTrue(kemProvider.contains("privateKey: keys.privateKey.copyData()"))
 
         let buildScript = try readSource("Scripts/build_qperiapt_xcframework.sh")
         XCTAssertTrue(buildScript.contains("assert_header_contract"))
-        XCTAssertTrue(buildScript.contains("assert_required_symbols"))
-        XCTAssertTrue(buildScript.contains("assert_xcframework_contract"))
+        XCTAssertTrue(buildScript.contains("assert_exact_symbols"))
+        XCTAssertTrue(buildScript.contains("assert_original_release"))
+        XCTAssertTrue(buildScript.contains("assert_derivative"))
+        XCTAssertTrue(buildScript.contains("validate_archive_shape"))
+        XCTAssertTrue(buildScript.contains("codesign --verify --deep --strict"))
         XCTAssertTrue(buildScript.contains("q_periapt_abi_version"))
         XCTAssertTrue(buildScript.contains("q_periapt_fixed_suite_id"))
+        XCTAssertTrue(buildScript.contains("Q_PERIAPT_POLICY_DECISION_LEN 40"))
+        XCTAssertTrue(buildScript.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2\""))
+        XCTAssertTrue(buildScript.contains("QPERIAPT_SOURCE_COMMIT=\"f15917ee7daa7b07976ee147eb102d2afb468b76\""))
+        XCTAssertTrue(buildScript.contains("QPERIAPT_ZIP_SHA256="))
+        XCTAssertTrue(buildScript.contains("declared_qperiapt_symbols"))
+        XCTAssertTrue(buildScript.contains("frozen ABI2 exact-nine symbol set"))
+        XCTAssertTrue(buildScript.contains("module.modulemap"))
+        XCTAssertTrue(buildScript.contains("linked .a bytes remain exact"))
+        XCTAssertTrue(
+            buildScript.contains("q_periapt_hybrid_encapsulate_with_decision")
+                && buildScript.contains("! grep -Fq \"$forbidden\" \"$header\""),
+            "The installer must name and reject guessed pre-ABI2 entry points, not treat their mention in the denylist as an export."
+        )
     }
 
     func testOSVersionOrHardwareChecksDoNotAdvertisePQCWithoutCryptoEvidence() throws {
