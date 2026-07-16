@@ -50,17 +50,66 @@ struct IdentityResolver {
         return false
     }
     func resolveIsLocal(_ device: DiscoveredDevice, selfId: SelfIdentitySnapshot) async -> Bool {
-        if !selfId.deviceId.isEmpty, let deviceId = device.deviceId, deviceId == selfId.deviceId { return true }
-        if !selfId.pubKeyFP.isEmpty, let fp = device.pubKeyFP, fp == selfId.pubKeyFP { return true }
-        if !selfId.macSet.isEmpty, !device.macSet.isEmpty {
-            let inter = device.macSet.intersection(selfId.macSet)
-            if !inter.isEmpty { return true }
-        }
-        return false
+        Self.resolveIsLocalSynchronously(device: device, selfId: selfId)
     }
     
     static func resolveIsLocal(device: DiscoveredDevice, selfId: SelfIdentitySnapshot) async -> Bool {
-        return await IdentityResolver().resolveIsLocal(device, selfId: selfId)
+        resolveIsLocalSynchronously(device: device, selfId: selfId)
+    }
+
+    static func resolveIsLocalSynchronously(
+        device: DiscoveredDevice,
+        selfId: SelfIdentitySnapshot
+    ) -> Bool {
+        if !selfId.deviceId.isEmpty,
+           let deviceId = device.deviceId,
+           deviceId == selfId.deviceId {
+            return true
+        }
+        if isCanonicalSHA256Fingerprint(selfId.pubKeyFP),
+           let fingerprint = device.pubKeyFP,
+           isCanonicalSHA256Fingerprint(fingerprint),
+           fingerprint == selfId.pubKeyFP {
+            return true
+        }
+
+        let localMACs = selfId.macSet.filter(isUsableCanonicalMACAddress)
+        let remoteMACs = device.macSet.filter(isUsableCanonicalMACAddress)
+        return !localMACs.isEmpty && !localMACs.isDisjoint(with: remoteMACs)
+    }
+
+    private static func isCanonicalSHA256Fingerprint(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { byte in
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+        }
+    }
+
+    private static func isUsableCanonicalMACAddress(_ value: String) -> Bool {
+        let components = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count == 6 else { return false }
+
+        var octets: [UInt8] = []
+        octets.reserveCapacity(6)
+        for component in components {
+            guard component.utf8.count == 2,
+                  component.utf8.allSatisfy({ byte in
+                      (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                          || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+                  }),
+                  let octet = UInt8(component, radix: 16) else {
+                return false
+            }
+            octets.append(octet)
+        }
+
+        guard let firstOctet = octets.first,
+              firstOctet & 0x01 == 0,
+              octets.contains(where: { $0 != 0 }),
+              octets.contains(where: { $0 != 0xFF }) else {
+            return false
+        }
+        return true
     }
     
     func findMergeIndex(in devices: [DiscoveredDevice], candidate: DiscoveredDevice, candidateFP: IdentityFingerprint?) async -> Int? {

@@ -6,6 +6,11 @@ import CryptoKit
 /// 验证本机强身份生成、持久化和判定逻辑
 @available(macOS 14.0, *)
 final class SelfIdentityProviderTests: XCTestCase {
+    private static let deterministicIdentity = SelfIdentitySnapshot(
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        pubKeyFP: String(repeating: "a", count: 64),
+        macSet: ["02:11:22:33:44:55"]
+    )
     private static let localNameCollisionProbe = {
         let host = ProcessInfo.processInfo.hostName.trimmingCharacters(in: .whitespacesAndNewlines)
         return host.isEmpty ? "SkyBridgeLocalNameProbe" : host
@@ -110,17 +115,10 @@ final class SelfIdentityProviderTests: XCTestCase {
         XCTAssertTrue(isLocal, "deviceId 匹配应判定为本机")
     }
     
- /// 测试：强身份硬匹配 - pubKeyFP 匹配
+    /// 测试：强身份硬匹配 - pubKeyFP 匹配
     func testIsLocalDetection_PubKeyFPMatch() async throws {
-        let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
-        
-        let selfId = await provider.snapshot()
+        let selfId = Self.deterministicIdentity
         let resolver = IdentityResolver()
-        
-        guard !selfId.pubKeyFP.isEmpty else {
-            throw XCTSkip("本测试需要本机公钥指纹")
-        }
         
  // 构造与本机 pubKeyFP 相同的设备
         let localDevice = DiscoveredDevice(
@@ -143,19 +141,10 @@ final class SelfIdentityProviderTests: XCTestCase {
         XCTAssertTrue(isLocal, "pubKeyFP 匹配应判定为本机")
     }
     
- /// 测试：强身份硬匹配 - MAC 地址匹配
+    /// 测试：强身份硬匹配 - MAC 地址匹配
     func testIsLocalDetection_MACMatch() async throws {
-        let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
-        
-        let selfId = await provider.snapshot()
+        let selfId = Self.deterministicIdentity
         let resolver = IdentityResolver()
-        
-        guard !selfId.macSet.isEmpty else {
-            throw XCTSkip("本测试需要本机 MAC 地址")
-        }
-        
-        let firstMAC = selfId.macSet.first!
         
  // 构造与本机 MAC 地址有交集的设备
         let localDevice = DiscoveredDevice(
@@ -171,11 +160,47 @@ final class SelfIdentityProviderTests: XCTestCase {
             isLocalDevice: false,
             deviceId: nil,
             pubKeyFP: nil,
-            macSet: [firstMAC] // 匹配本机 MAC
+            macSet: ["02:11:22:33:44:55"] // 匹配固定合法 MAC
         )
         
         let isLocal = await resolver.resolveIsLocal(localDevice, selfId: selfId)
         XCTAssertTrue(isLocal, "MAC 地址匹配应判定为本机")
+    }
+
+    func testIsLocalDetection_MalformedOrNonUnicastMACIsNotStrongIdentity() async {
+        let resolver = IdentityResolver()
+        for invalidMAC in [
+            "02-11-22-33-44-55",
+            "02:11:22:33:44",
+            "FF:FF:FF:FF:FF:FF",
+            "ff:ff:ff:ff:ff:ff",
+            "00:00:00:00:00:00",
+            "01:00:5e:00:00:01"
+        ] {
+            let selfId = SelfIdentitySnapshot(
+                deviceId: "",
+                pubKeyFP: "",
+                macSet: [invalidMAC]
+            )
+            let device = DiscoveredDevice(
+                id: UUID(),
+                name: "remote",
+                ipv4: "127.0.0.1",
+                ipv6: nil,
+                services: ["_skybridge._tcp"],
+                portMap: [:],
+                connectionTypes: [.wifi],
+                uniqueIdentifier: nil,
+                signalStrength: nil,
+                isLocalDevice: false,
+                deviceId: nil,
+                pubKeyFP: nil,
+                macSet: [invalidMAC]
+            )
+
+            let isLocal = await resolver.resolveIsLocal(device, selfId: selfId)
+            XCTAssertFalse(isLocal, "Invalid or multicast MAC must not be a strong identity: \(invalidMAC)")
+        }
     }
     
  /// 测试：弱特征不匹配 - 同名设备不应判定为本机

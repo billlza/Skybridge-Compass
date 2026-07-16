@@ -324,46 +324,9 @@ public class DeviceDiscoveryManager: BaseManager {
         device.setIsLocalDeviceByDiscovery(local)
     }
 
- /// 同步版本的本机判定（内联 IdentityResolver 逻辑）
+ /// 同步版本复用唯一的强身份判定，避免异步/同步路径语义漂移。
     private func resolveIsLocalSync(device: DiscoveredDevice, selfId: SelfIdentitySnapshot) -> Bool {
- // 前置检查：selfId 为空不允许判定本机
-        if selfId.deviceId.isEmpty || selfId.pubKeyFP.isEmpty {
-            if let id = device.deviceId, id == selfId.deviceId, !id.isEmpty {
-                return true
-            }
-            return false
-        }
-
- // 优先级 A：deviceId 硬匹配
-        if let deviceId = device.deviceId,
-           !deviceId.isEmpty,
-           deviceId.count >= 8,
-           !selfId.deviceId.isEmpty,
-           selfId.deviceId.count >= 8,
-           deviceId == selfId.deviceId {
-            return true
-        }
-
- // 优先级 B：pubKeyFP 硬匹配
-        if let pubKeyFP = device.pubKeyFP,
-           !pubKeyFP.isEmpty,
-           pubKeyFP.count == 64,
-           pubKeyFP.allSatisfy({ $0.isHexDigit }),
-           !selfId.pubKeyFP.isEmpty,
-           selfId.pubKeyFP.count == 64,
-           pubKeyFP == selfId.pubKeyFP {
-            return true
-        }
-
- // 优先级 C：MAC 地址匹配（仅 SkyBridge 来源）
-        if !device.macSet.isEmpty && !selfId.macSet.isEmpty {
-            let overlap = device.macSet.intersection(selfId.macSet)
-            if !overlap.isEmpty {
-                return true
-            }
-        }
-
-        return false
+        IdentityResolver.resolveIsLocalSynchronously(device: device, selfId: selfId)
     }
 
  /// B. 刷新后清洗：对历史缓存污染进行一次性清洗
