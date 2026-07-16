@@ -2,17 +2,105 @@ import XCTest
 import CryptoKit
 import Security
 @testable import SkyBridgeCore
+import SkyBridgeBenchmarkSupport
 
 @available(macOS 14.0, iOS 17.0, *)
 final class HandshakeV2PFSTests: XCTestCase {
+    func testKEMIdentityLengthContractCoversBenchmarkProviderEncodings() {
+        XCTAssertEqual(
+            KEMIdentityKeyLengthContract.resolve(
+                suite: .mlkem768MLDSA65,
+                providerTier: .nativePQC
+            )?.publicKeyLength,
+            1_184
+        )
+        XCTAssertEqual(
+            KEMIdentityKeyLengthContract.resolve(
+                suite: .mlkem768MLDSA65,
+                providerTier: .liboqsPQC
+            )?.privateKeyLength,
+            2_400
+        )
+        XCTAssertEqual(
+            KEMIdentityKeyLengthContract.resolve(
+                suite: .xwingMLDSA,
+                providerTier: .nativePQC
+            )?.privateKeyLength,
+            64
+        )
+        XCTAssertEqual(
+            KEMIdentityKeyLengthContract.resolve(
+                suite: .mlkem768MLDSA65FS,
+                providerTier: .nativePQC
+            )?.privateKeyLength,
+            96
+        )
+        XCTAssertNil(
+            KEMIdentityKeyLengthContract.resolve(
+                suite: .xwingMLDSA,
+                providerTier: .liboqsPQC
+            )
+        )
+    }
+
+    func testBenchmarkKEMStoreMapsV2AliasToCanonicalIdentity() async throws {
+        let provider = MockPQCProvider(
+            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+        )
+        let offeredSuites: [CryptoSuite] = [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+        let store = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: offeredSuites,
+            provider: provider
+        )
+
+        let publicKeys = try store.trustPublicKeys(for: offeredSuites)
+        XCTAssertEqual(publicKeys.count, 2)
+        XCTAssertEqual(publicKeys[.mlkem768MLDSA65FS], publicKeys[.mlkem768MLDSA65])
+
+        let v2Identity = try await store.getOrCreateKEMIdentityKey(
+            for: .mlkem768MLDSA65FS,
+            provider: provider
+        )
+        let v1Identity = try await store.getOrCreateKEMIdentityKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        XCTAssertEqual(v2Identity.publicKey, v1Identity.publicKey)
+    }
+
+    func testBenchmarkKEMStoreReturnsIndependentSecureBytes() async throws {
+        let provider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65])
+        let store = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: [.mlkem768MLDSA65],
+            provider: provider
+        )
+
+        let first = try await store.getOrCreateKEMIdentityKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        let expectedPrivateKey = first.privateKey.data
+        first.privateKey.zeroize()
+
+        let second = try await store.getOrCreateKEMIdentityKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        XCTAssertFalse(first.privateKey === second.privateKey)
+        XCTAssertEqual(second.privateKey.data, expectedPrivateKey)
+    }
+
     func testV2HandshakeBuildsForwardSecureSession() async throws {
         let initiatorProvider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65])
         let responderProvider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65])
         let signingProvider = ClassicCryptoProvider()
 
-        let responderKEMPublicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-            for: .mlkem768MLDSA65,
+        let responderKEMStore = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: [.mlkem768MLDSA65],
             provider: responderProvider
+        )
+        let responderKEMPublicKey = try XCTUnwrap(
+            responderKEMStore.trustPublicKeys(for: [.mlkem768MLDSA65])[.mlkem768MLDSA65]
         )
 
         let initiator = try await HandshakeContext.create(
@@ -22,7 +110,8 @@ final class HandshakeV2PFSTests: XCTestCase {
         )
         let responder = try await HandshakeContext.create(
             role: .responder,
-            cryptoProvider: responderProvider
+            cryptoProvider: responderProvider,
+            kemIdentityStore: responderKEMStore
         )
 
         let initiatorSigning = try await signingProvider.generateKeyPair(for: .signing)
@@ -61,9 +150,12 @@ final class HandshakeV2PFSTests: XCTestCase {
     func testStrictPolicyRejectsClassicDowngradeForV2Offer() async throws {
         let initiatorProvider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65])
         let signingProvider = ClassicCryptoProvider()
-        let responderKEMPublicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-            for: .mlkem768MLDSA65,
+        let responderKEMStore = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: [.mlkem768MLDSA65],
             provider: initiatorProvider
+        )
+        let responderKEMPublicKey = try XCTUnwrap(
+            responderKEMStore.trustPublicKeys(for: [.mlkem768MLDSA65])[.mlkem768MLDSA65]
         )
 
         let initiator = try await HandshakeContext.create(
@@ -114,9 +206,12 @@ final class HandshakeV2PFSTests: XCTestCase {
         let responderProvider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65])
         let signingProvider = ClassicCryptoProvider()
 
-        let responderKEMPublicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-            for: .mlkem768MLDSA65,
+        let responderKEMStore = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: [.mlkem768MLDSA65],
             provider: responderProvider
+        )
+        let responderKEMPublicKey = try XCTUnwrap(
+            responderKEMStore.trustPublicKeys(for: [.mlkem768MLDSA65])[.mlkem768MLDSA65]
         )
 
         let initiator = try await HandshakeContext.create(
@@ -126,7 +221,8 @@ final class HandshakeV2PFSTests: XCTestCase {
         )
         let responder = try await HandshakeContext.create(
             role: .responder,
-            cryptoProvider: responderProvider
+            cryptoProvider: responderProvider,
+            kemIdentityStore: responderKEMStore
         )
 
         let initiatorSigning = try await signingProvider.generateKeyPair(for: .signing)

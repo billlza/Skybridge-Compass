@@ -6,6 +6,22 @@ CERTIFICATE_PATH="Tests/Fixtures/loopback_test_server_certificate.der"
 PRIVATE_KEY_PATH="Tests/Fixtures/loopback_test_server_private_key.x963"
 CERTIFICATE_SHA256="b745f9d72a335f1c92444209ecb052dba0dd1f11a534b2a8dbe5ab95b5c35f24"
 PRIVATE_KEY_SHA256="1e3552f72f70f7fd0ae2c23ee126f3895efe989af22485ebc784a504ebdfbb87"
+BENCHMARK_SUPPORT_FILES=(
+  "Sources/SkyBridgeBenchmarkSupport/NetworkLoopbackLifecycle.swift"
+  "Sources/SkyBridgeBenchmarkSupport/TimedEvent.swift"
+  "Sources/SkyBridgeBenchmarkSupport/ConnectionLifecycle.swift"
+  "Sources/SkyBridgeBenchmarkSupport/AcceptedConnectionMailbox.swift"
+  "Sources/SkyBridgeBenchmarkSupport/ListenerLifecycle.swift"
+  "Sources/SkyBridgeBenchmarkSupport/BenchmarkHandshakeKEMIdentityStore.swift"
+)
+BENCHMARK_KEM_CONSUMERS=(
+  "Sources/BaselineBenchRunner/main.swift"
+  "Sources/HandshakeBenchRunner/main.swift"
+  "Tests/SkyBridgeBenchTests/HandshakeBenchmarkTests.swift"
+  "Tests/SkyBridgeCoreTests/HandshakeBenchmarkTests.swift"
+  "Tests/SkyBridgeCoreTests/SystemImpactBenchTests.swift"
+  "Tests/SkyBridgeCoreTests/HandshakeV2PFSTests.swift"
+)
 
 fail() {
   echo "[test-loopback-benchmark-fixture-policy] $1" >&2
@@ -60,6 +76,9 @@ require_command shasum
 
 require_head_bound_file "${CERTIFICATE_PATH}"
 require_head_bound_file "${PRIVATE_KEY_PATH}"
+for support_file in "${BENCHMARK_SUPPORT_FILES[@]}"; do
+  require_head_bound_file "${support_file}"
+done
 require_sha256 "${CERTIFICATE_PATH}" "${CERTIFICATE_SHA256}"
 require_sha256 "${PRIVATE_KEY_PATH}" "${PRIVATE_KEY_SHA256}"
 
@@ -117,5 +136,69 @@ for source_path in \
     fail "${source_path} contains a forbidden Keychain import or unconditional trust path"
   fi
 done
+
+package_source="$(<"${ROOT_DIR}/Package.swift")"
+package_head_source="$(git -C "${ROOT_DIR}" show HEAD:Package.swift)"
+grep -Fq 'name: "SkyBridgeBenchmarkSupport"' <<<"${package_source}" \
+  || fail "Package.swift must isolate loopback lifecycle code in SkyBridgeBenchmarkSupport"
+grep -Fq 'name: "SkyBridgeBenchmarkSupport"' <<<"${package_head_source}" \
+  || fail "HEAD Package.swift must contain SkyBridgeBenchmarkSupport"
+for consumer_path in \
+  "Sources/BaselineBenchRunner/main.swift" \
+  "Tests/SkyBridgeBenchTests/BaselineLoopbackBenchTests.swift"; do
+  consumer_source="$(<"${ROOT_DIR}/${consumer_path}")"
+  grep -Fq "import SkyBridgeBenchmarkSupport" <<<"${consumer_source}" \
+    || fail "${consumer_path} must import SkyBridgeBenchmarkSupport"
+done
+
+for consumer_path in "${BENCHMARK_KEM_CONSUMERS[@]}"; do
+  consumer_source="$(<"${ROOT_DIR}/${consumer_path}")"
+  consumer_head_source="$(git -C "${ROOT_DIR}" show "HEAD:${consumer_path}")"
+  for source_variant in "${consumer_source}" "${consumer_head_source}"; do
+    grep -Fq "import SkyBridgeBenchmarkSupport" <<<"${source_variant}" \
+      || fail "${consumer_path} must import committed SkyBridgeBenchmarkSupport"
+    grep -Fq "BenchmarkHandshakeKEMIdentityStore" <<<"${source_variant}" \
+      || fail "${consumer_path} must use the committed benchmark-local KEM identity store"
+    if grep -Eq 'DeviceIdentityKeyManager\.shared|getKEMPublicKey\(' <<<"${source_variant}"; then
+      fail "${consumer_path} must not use the process-wide device KEM identity store"
+    fi
+  done
+done
+
+kem_store_source="$(<"${ROOT_DIR}/Sources/SkyBridgeBenchmarkSupport/BenchmarkHandshakeKEMIdentityStore.swift")"
+for kem_store_contract in \
+  "KEMIdentityKeyLengthContract.resolve" \
+  "privateKey: SecureBytes" \
+  "ObjectIdentifier(type(of: provider))"; do
+  grep -Fq "${kem_store_contract}" <<<"${kem_store_source}" \
+    || fail "benchmark KEM identity store is missing required contract: ${kem_store_contract}"
+done
+if grep -Eq 'DeviceIdentityKeyManager\.shared|String\(reflecting:|@unchecked Sendable' <<<"${kem_store_source}"; then
+  fail "benchmark KEM identity store contains a forbidden global-state or unsafe type-binding pattern"
+fi
+runner_source="$(<"${ROOT_DIR}/Sources/BaselineBenchRunner/main.swift")"
+for runner_contract in \
+  "private static func parseProtocolFilter(_ value: String?) throws" \
+  "try validateTimingSamples(samples, config: config)" \
+  "baseline evidence count mismatch"; do
+  grep -Fq "${runner_contract}" <<<"${runner_source}" \
+    || fail "BaselineBenchRunner is missing fail-closed evidence contract: ${runner_contract}"
+done
+if grep -Eq 'Skipping SkyBridge|normalized\.contains\(' <<<"${runner_source}"; then
+  fail "BaselineBenchRunner contains a silent provider skip or substring protocol filter"
+fi
+
+support_source="$(for support_file in "${BENCHMARK_SUPPORT_FILES[@]}"; do printf '%s\n' "$(<"${ROOT_DIR}/${support_file}")"; done)"
+for required_contract in \
+  "received a connection without an active reservation" \
+  "kickoffCompleted" \
+  "waitForTerminal" \
+  "maximumTimeoutSeconds"; do
+  grep -Fq "${required_contract}" <<<"${support_source}" \
+    || fail "loopback lifecycle support is missing required contract: ${required_contract}"
+done
+if grep -Eq 'DispatchSemaphore|Task\.detached|@unchecked Sendable|(^|[^[:alnum:]_])Mutex([^[:alnum:]_]|$)|var buffered:' <<<"${support_source}"; then
+  fail "loopback lifecycle support contains a forbidden concurrency or buffering pattern"
+fi
 
 echo "Loopback benchmark fixture policy passed"

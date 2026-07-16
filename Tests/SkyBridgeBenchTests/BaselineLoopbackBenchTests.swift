@@ -4,6 +4,7 @@ import Network
 import Security
 import NoiseKit
 import Atomics
+import SkyBridgeBenchmarkSupport
 
 final class BaselineLoopbackBenchTests: XCTestCase {
     private struct BenchConfig {
@@ -22,6 +23,57 @@ final class BaselineLoopbackBenchTests: XCTestCase {
 
     private var shouldRunBenchmarks: Bool {
         ProcessInfo.processInfo.environment["BASELINE_RUN_BENCH"] == "1"
+    }
+
+    func testLoopbackLifecycleRejectsUnsafeConfiguration() async throws {
+        let invalidConfigurations: [(iterations: Int, warmup: Int, timeoutSeconds: Double, kickoffBytes: Int)] = [
+            (0, 0, 5, 0),
+            (100_000, 1, 5, 0),
+            (1, 0, 300.000_1, 0),
+            (1, 0, 5, 1_048_577)
+        ]
+
+        for configuration in invalidConfigurations {
+            do {
+                _ = try await NetworkLoopbackLifecycle.measureHandshakes(
+                    protocolName: "configuration-validation",
+                    serverParameters: .tcp,
+                    clientParameters: .tcp,
+                    iterations: configuration.iterations,
+                    warmup: configuration.warmup,
+                    timeoutSeconds: configuration.timeoutSeconds,
+                    kickoffBytes: configuration.kickoffBytes
+                )
+                XCTFail("Unsafe loopback configuration must fail before allocating a listener")
+            } catch let error as NetworkLoopbackLifecycleError {
+                if case .invalidConfiguration = error {
+                    continue
+                }
+                XCTFail("Expected invalidConfiguration, received \(error)")
+            }
+        }
+    }
+
+    func testLoopbackLifecycleCancellationFailsAfterCleanup() async throws {
+        let operation = Task {
+            try await NetworkLoopbackLifecycle.measureHandshakes(
+                protocolName: "cancellation",
+                serverParameters: .tcp,
+                clientParameters: .tcp,
+                iterations: 10_000,
+                warmup: 0,
+                timeoutSeconds: 5,
+                kickoffBytes: 1
+            )
+        }
+        operation.cancel()
+
+        do {
+            _ = try await operation.value
+            XCTFail("A cancelled benchmark must not return successful samples")
+        } catch let error as NetworkLoopbackLifecycleError {
+            XCTAssertTrue(error.description.contains("task cancelled"), "Unexpected cancellation error: \(error)")
+        }
     }
 
     func testLoopbackBaselines() async throws {
@@ -52,6 +104,39 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         reportStats(label: "Noise-XX", samples: noise)
     }
 
+    func testLoopbackConnectionTeardownStress() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set BASELINE_RUN_BENCH=1 to run loopback baselines")
+
+        let standardConfig = BenchConfig(
+            iterations: 50,
+            warmup: 5,
+            timeoutSeconds: 5.0,
+            kickoffBytes: 1,
+            tlsVersion: .TLSv13,
+            quicAlpn: "sbq"
+        )
+        let dtlsStressConfig = BenchConfig(
+            iterations: 256,
+            warmup: 5,
+            timeoutSeconds: 5.0,
+            kickoffBytes: 1,
+            tlsVersion: .TLSv13,
+            quicAlpn: "sbq"
+        )
+        let identity = try loadIdentity(
+            certificatePath: "Tests/Fixtures/loopback_test_server_certificate.der",
+            privateKeyPath: "Tests/Fixtures/loopback_test_server_private_key.x963"
+        )
+
+        let tls = try await runTLSBench(config: standardConfig, identity: identity)
+        let quic = try await runQUICBench(config: standardConfig, identity: identity)
+        let dtls = try await runDTLSBench(config: dtlsStressConfig, identity: identity)
+
+        XCTAssertEqual(tls.count, standardConfig.iterations)
+        XCTAssertEqual(quic.count, standardConfig.iterations)
+        XCTAssertEqual(dtls.count, dtlsStressConfig.iterations)
+    }
+
     private func reportStats(label: String, samples: [Double]) {
         XCTAssertFalse(samples.isEmpty, "\(label) produced no samples")
         let p50 = percentile(samples, p: 0.50)
@@ -62,11 +147,9 @@ final class BaselineLoopbackBenchTests: XCTestCase {
     private func runTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [Double] {
         let tlsOptions = makeTLSOptions(identity: identity, isServer: true, version: config.tlsVersion)
         let serverParams = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        serverParams.allowLocalEndpointReuse = true
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: config.tlsVersion)
         let clientParams = NWParameters(tls: clientTlsOptions, tcp: NWProtocolTCP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "TLS13",
@@ -95,7 +178,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             useVerifyBlock: false
         )
         let serverParams = NWParameters(quic: serverQuicOptions)
-        serverParams.allowLocalEndpointReuse = true
 
         let clientQuicOptions = NWProtocolQUIC.Options(alpn: [config.quicAlpn])
         clientQuicOptions.direction = .bidirectional
@@ -115,7 +197,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             useVerifyBlock: true
         )
         let clientParams = NWParameters(quic: clientQuicOptions)
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "QUIC",
@@ -128,11 +209,9 @@ final class BaselineLoopbackBenchTests: XCTestCase {
     private func runDTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [Double] {
         let serverTlsOptions = makeTLSOptions(identity: identity, isServer: true, version: .DTLSv12, alpn: "webrtc")
         let serverParams = NWParameters(dtls: serverTlsOptions, udp: NWProtocolUDP.Options())
-        serverParams.allowLocalEndpointReuse = true
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: .DTLSv12, alpn: "webrtc")
         let clientParams = NWParameters(dtls: clientTlsOptions, udp: NWProtocolUDP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "WebRTC-DTLS",
@@ -217,68 +296,16 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         clientParameters: NWParameters,
         config: BenchConfig
     ) async throws -> [Double] {
-        let queue = DispatchQueue(label: "baseline.\(protocolName.lowercased()).tests")
-        let listener = try NWListener(using: serverParameters)
-        defer {
-            listener.newConnectionHandler = nil
-            listener.cancel()
-        }
-        listener.newConnectionHandler = { connection in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    break
-                case .failed:
-                    connection.stateUpdateHandler = nil
-                    connection.cancel()
-                case .cancelled:
-                    connection.stateUpdateHandler = nil
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-        }
-        try await Self.startListenerAndWaitUntilReady(
-            listener: listener,
-            queue: queue,
-            timeoutSeconds: config.timeoutSeconds
+        let lifecycleSamples = try await NetworkLoopbackLifecycle.measureHandshakes(
+            protocolName: protocolName,
+            serverParameters: serverParameters,
+            clientParameters: clientParameters,
+            iterations: config.iterations,
+            warmup: config.warmup,
+            timeoutSeconds: config.timeoutSeconds,
+            kickoffBytes: config.kickoffBytes
         )
-        guard let port = listener.port else {
-            throw NSError(domain: "BaselineBenchTests", code: 6, userInfo: [
-                NSLocalizedDescriptionKey: "Listener port unavailable"
-            ])
-        }
-
-        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
-        var samples: [Double] = []
-        for iteration in 0..<(config.warmup + config.iterations) {
-            let connection = NWConnection(to: endpoint, using: clientParameters)
-            defer {
-                connection.stateUpdateHandler = nil
-                connection.cancel()
-            }
-            let start = ContinuousClock.now
-            do {
-                try await Self.waitForReady(
-                    connection: connection,
-                    queue: queue,
-                    timeoutSeconds: config.timeoutSeconds,
-                    kickoffBytes: config.kickoffBytes
-                )
-            } catch {
-                throw NSError(domain: "BaselineBenchTests", code: 9, userInfo: [
-                    NSLocalizedDescriptionKey: "\(protocolName) client ready failed on iteration \(iteration): \(error)",
-                    NSUnderlyingErrorKey: error
-                ])
-            }
-            let elapsed = ContinuousClock.now - start
-            if iteration >= config.warmup {
-                samples.append(Self.durationToMilliseconds(elapsed))
-            }
-        }
-
-        return samples
+        return lifecycleSamples.map { Self.durationToMilliseconds($0.readyDuration) }
     }
 
     private func loadIdentity(
@@ -384,61 +411,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
                     let actualCertificateDER = SecCertificateCopyData(leafCertificate) as Data
                     complete(actualCertificateDER == expectedCertificateDER)
                 }, .global())
-            }
-        }
-    }
-
-    private static func waitForReady(
-        connection: NWConnection,
-        queue: DispatchQueue,
-        timeoutSeconds: Double,
-        kickoffBytes: Int
-    ) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<Void, Error>) -> Void = { result in
-                guard didResume.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
-                timer.cancel()
-                connection.stateUpdateHandler = nil
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-            timer.schedule(deadline: .now() + timeoutSeconds)
-            timer.setEventHandler {
-                connection.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBenchTests", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
-                ])))
-            }
-            timer.activate()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    resumeOnce(.success(()))
-                case .failed(let error):
-                    resumeOnce(.failure(error))
-                case .cancelled:
-                    resumeOnce(.failure(NSError(domain: "BaselineBenchTests", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey: "Connection cancelled"
-                    ])))
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-            if kickoffBytes > 0 {
-                let payload = Data(repeating: 0x00, count: kickoffBytes)
-                connection.send(content: payload, completion: .contentProcessed { error in
-                    if let error {
-                        resumeOnce(.failure(error))
-                    }
-                })
             }
         }
     }

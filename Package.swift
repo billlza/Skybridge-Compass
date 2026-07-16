@@ -180,6 +180,14 @@ let package = Package(
                 .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
+        .target(
+            name: "SkyBridgeBenchmarkSupport",
+            dependencies: ["SkyBridgeCore"],
+            path: "Sources/SkyBridgeBenchmarkSupport",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
         .executableTarget(
             name: "LocalLanInteropHost",
             dependencies: [
@@ -402,6 +410,7 @@ let package = Package(
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
                 "OQSRAII",
+                "SkyBridgeBenchmarkSupport",
                 "PrivateSensorBridge"
             ],
             path: "Tests/SkyBridgeCoreTests",
@@ -424,7 +433,8 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "OQSRAII",
-                "NoiseKit"
+                "NoiseKit",
+                "SkyBridgeBenchmarkSupport"
             ],
             path: "Tests/SkyBridgeBenchTests",
             swiftSettings: ([
@@ -534,7 +544,8 @@ let package = Package(
             name: "BaselineBenchRunner",
             dependencies: [
                 "SkyBridgeCore",
-                "NoiseKit"
+                "NoiseKit",
+                "SkyBridgeBenchmarkSupport"
             ],
             path: "Sources/BaselineBenchRunner",
             swiftSettings: [
@@ -550,7 +561,8 @@ let package = Package(
             name: "HandshakeBenchRunner",
             dependencies: [
                 "SkyBridgeCore",
-                "OQSRAII"
+                "OQSRAII",
+                "SkyBridgeBenchmarkSupport"
             ],
             path: "Sources/HandshakeBenchRunner",
             swiftSettings: [

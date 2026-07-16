@@ -5,6 +5,7 @@
 import XCTest
 import Foundation
 @testable import SkyBridgeCore
+import SkyBridgeBenchmarkSupport
 
 /// Benchmark tests for handshake latency and throughput measurements.
 /// Run with `SKYBRIDGE_RUN_BENCH=1 swift test --filter HandshakeBenchmarkTests`
@@ -209,6 +210,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         let peer: PeerIdentifier
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
+        let kemIdentityStore: BenchmarkHandshakeKEMIdentityStore
         let handshakeTimeout: Duration
         let handshakePolicy: HandshakePolicy
         let cryptoPolicy: CryptoPolicy
@@ -228,26 +230,6 @@ final class HandshakeBenchmarkTests: XCTestCase {
     ]
     private static let wireSizeRecorder = WireSizeRecorder()
     
-    private func makeKEMPublicKeysForPeer(
-        offeredSuites: [CryptoSuite],
-        provider: any CryptoProvider
-    ) async throws -> [CryptoSuite: Data] {
-        let pqcSuites = offeredSuites.filter { $0.isPQC }
-        guard !pqcSuites.isEmpty else {
-            return [:]
-        }
-        
-        var kemPublicKeys: [CryptoSuite: Data] = [:]
-        for suite in pqcSuites {
-            let publicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-                for: suite,
-                provider: provider
-            )
-            kemPublicKeys[suite] = publicKey
-        }
-        return kemPublicKeys
-    }
-
     private func prepareBenchmarkContext(
         providerType: ProviderType
     ) async throws -> BenchmarkContext {
@@ -283,10 +265,21 @@ final class HandshakeBenchmarkTests: XCTestCase {
             #endif
         }
 
-        let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
-        let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
-        guard case .suites(let offeredSuites) = offeredSuitesResult else {
-            throw HandshakeError.emptyOfferedSuites
+        let offeredSuites: [CryptoSuite]
+        switch providerType {
+        case .classic:
+            let result = TwoAttemptHandshakeManager.getSuites(
+                for: .classicOnly,
+                cryptoProvider: provider
+            )
+            guard case .suites(let suites) = result else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .liboqsPQC, .applePQC:
+            offeredSuites = [.mlkem768MLDSA65]
+        case .appleXWing:
+            offeredSuites = [.xwingMLDSA]
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -306,10 +299,11 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let peer = PeerIdentifier(deviceId: "bench-peer")
-        let peerKEMPublicKeys = try await makeKEMPublicKeysForPeer(
+        let kemIdentityStore = try await BenchmarkHandshakeKEMIdentityStore.make(
             offeredSuites: offeredSuites,
             provider: provider
         )
+        let peerKEMPublicKeys = try kemIdentityStore.trustPublicKeys(for: offeredSuites)
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
         if peerKEMPublicKeys.isEmpty {
@@ -354,6 +348,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
             peer: peer,
             trustProviderInitiator: trustProviderInitiator,
             trustProviderResponder: trustProviderResponder,
+            kemIdentityStore: kemIdentityStore,
             handshakeTimeout: handshakeTimeout,
             handshakePolicy: handshakePolicy,
             cryptoPolicy: cryptoPolicy
@@ -451,7 +446,8 @@ final class HandshakeBenchmarkTests: XCTestCase {
             policy: context.handshakePolicy,
             cryptoPolicy: context.cryptoPolicy,
             timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderInitiator
+            trustProvider: context.trustProviderInitiator,
+            kemIdentityStore: context.kemIdentityStore
         )
         
         let responderDriver = try HandshakeDriver(
@@ -465,7 +461,8 @@ final class HandshakeBenchmarkTests: XCTestCase {
             policy: context.handshakePolicy,
             cryptoPolicy: context.cryptoPolicy,
             timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderResponder
+            trustProvider: context.trustProviderResponder,
+            kemIdentityStore: context.kemIdentityStore
         )
         
         await initiatorTransport.setOnSend { [responderDriver] peer, data in

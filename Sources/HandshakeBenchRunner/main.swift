@@ -1,5 +1,6 @@
 import Foundation
 import SkyBridgeCore
+import SkyBridgeBenchmarkSupport
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -38,6 +39,7 @@ struct HandshakeBenchRunner {
         let peer: PeerIdentifier
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
+        let kemIdentityStore: BenchmarkHandshakeKEMIdentityStore
         let handshakeTimeout: Duration
         let handshakePolicy: HandshakePolicy
         let cryptoPolicy: CryptoPolicy
@@ -351,11 +353,7 @@ struct HandshakeBenchRunner {
             }
             offeredSuites = suites
         case .appleXWing:
-            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .pqcOnly, cryptoProvider: provider)
-            guard case .suites(let suites) = offeredSuitesResult else {
-                throw HandshakeError.emptyOfferedSuites
-            }
-            offeredSuites = suites
+            offeredSuites = [.xwingMLDSA]
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -375,10 +373,11 @@ struct HandshakeBenchRunner {
         )
 
         let peer = PeerIdentifier(deviceId: "bench-peer")
-        let peerKEMPublicKeys = try await makeKEMPublicKeysForPeer(
+        let kemIdentityStore = try await BenchmarkHandshakeKEMIdentityStore.make(
             offeredSuites: offeredSuites,
             provider: provider
         )
+        let peerKEMPublicKeys = try kemIdentityStore.trustPublicKeys(for: offeredSuites)
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
         if peerKEMPublicKeys.isEmpty {
@@ -423,30 +422,11 @@ struct HandshakeBenchRunner {
             peer: peer,
             trustProviderInitiator: trustProviderInitiator,
             trustProviderResponder: trustProviderResponder,
+            kemIdentityStore: kemIdentityStore,
             handshakeTimeout: handshakeTimeout,
             handshakePolicy: handshakePolicy,
             cryptoPolicy: cryptoPolicy
         )
-    }
-
-    private static func makeKEMPublicKeysForPeer(
-        offeredSuites: [CryptoSuite],
-        provider: any CryptoProvider
-    ) async throws -> [CryptoSuite: Data] {
-        let pqcSuites = offeredSuites.filter { $0.isPQC }
-        guard !pqcSuites.isEmpty else {
-            return [:]
-        }
-
-        var kemPublicKeys: [CryptoSuite: Data] = [:]
-        for suite in pqcSuites {
-            let publicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-                for: suite,
-                provider: provider
-            )
-            kemPublicKeys[suite] = publicKey
-        }
-        return kemPublicKeys
     }
 
     private static func measureHandshakeLatencyAndRTT(
@@ -508,7 +488,8 @@ struct HandshakeBenchRunner {
             policy: context.handshakePolicy,
             cryptoPolicy: context.cryptoPolicy,
             timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderInitiator
+            trustProvider: context.trustProviderInitiator,
+            kemIdentityStore: context.kemIdentityStore
         )
 
         let responderDriver = try HandshakeDriver(
@@ -522,7 +503,8 @@ struct HandshakeBenchRunner {
             policy: context.handshakePolicy,
             cryptoPolicy: context.cryptoPolicy,
             timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderResponder
+            trustProvider: context.trustProviderResponder,
+            kemIdentityStore: context.kemIdentityStore
         )
 
         await initiatorTransport.setOnSend { [responderDriver] peer, data in
