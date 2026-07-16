@@ -21,6 +21,9 @@ make_fixture() {
   cp "${ROOT_DIR}/project.yml" "${fixture_root}/project.yml"
   cp "${ROOT_DIR}/SkyBridge Compass iOS/project.yml" "${fixture_root}/SkyBridge Compass iOS/project.yml"
   cp "${ROOT_DIR}/SkyBridge Compass iOS/Package.swift" "${fixture_root}/SkyBridge Compass iOS/Package.swift"
+  mkdir -p "${fixture_root}/SkyBridge Compass iOS/Scripts"
+  cp "${ROOT_DIR}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" "${fixture_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
+  cp "${ROOT_DIR}/SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh" "${fixture_root}/SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh"
   cp "${ROOT_DIR}/Package.swift" "${fixture_root}/Package.swift"
   printf '%s\n' "${fixture_root}"
 }
@@ -46,9 +49,126 @@ expect_failure_contains() {
   fi
 }
 
+remove_warning_setting_from_stage() {
+  local script_path="$1"
+  local stage_style="$2"
+  local stage="$3"
+  local setting="$4"
+
+  python3 - "${script_path}" "${stage_style}" "${stage}" "${setting}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+stage_style = sys.argv[2]
+stage = sys.argv[3]
+setting = sys.argv[4]
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+candidate_ranges: list[tuple[int, int]] = []
+if stage_style == "continued-command":
+    for start, line in enumerate(lines):
+        if line.strip() != "run_xcodebuild_with_retry \\":
+            continue
+        for end in range(start + 1, len(lines)):
+            candidate_stage = lines[end].strip()
+            if candidate_stage not in ("build-for-testing", "test-without-building"):
+                continue
+            if candidate_stage == stage:
+                candidate_ranges.append((start, end + 1))
+            break
+elif stage_style == "array-append":
+    for start, line in enumerate(lines):
+        if not line.strip().endswith("_args+=("):
+            continue
+        for end in range(start + 1, len(lines)):
+            if lines[end].strip() != ")":
+                continue
+            if any(candidate.strip() == stage for candidate in lines[start:end]):
+                candidate_ranges.append((start, end + 1))
+            break
+else:
+    raise SystemExit(f"unsupported stage style: {stage_style}")
+
+if len(candidate_ranges) != 1:
+    raise SystemExit(
+        f"expected one {stage_style} block for {stage}, found {len(candidate_ranges)}"
+    )
+
+start, end = candidate_ranges[0]
+matching_indexes = [
+    index
+    for index in range(start, end)
+    if lines[index].strip().removesuffix("\\").strip() == setting
+]
+if len(matching_indexes) != 1:
+    raise SystemExit(
+        f"expected one {setting} in {stage}, found {len(matching_indexes)}"
+    )
+
+del lines[matching_indexes[0]]
+path.write_text("".join(lines), encoding="utf-8")
+PY
+}
+
 positive_root="$(make_fixture positive)"
 bash "${CHECK_SCRIPT}" --root "${positive_root}" --static-only >/dev/null \
   || fail "positive fixture should pass static validation"
+
+missing_simulator_build_swift_gate_root="$(make_fixture missing-simulator-build-swift-gate)"
+remove_warning_setting_from_stage \
+  "${missing_simulator_build_swift_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" \
+  continued-command \
+  build-for-testing \
+  SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+expect_failure_contains \
+  "simulator build stage missing Swift warnings-as-errors" \
+  "iOS 模拟器 XCTest lane 的 build-for-testing 阶段必须设置 SWIFT_TREAT_WARNINGS_AS_ERRORS=YES" \
+  bash "${CHECK_SCRIPT}" --root "${missing_simulator_build_swift_gate_root}" --static-only
+
+missing_simulator_test_clang_gate_root="$(make_fixture missing-simulator-test-clang-gate)"
+remove_warning_setting_from_stage \
+  "${missing_simulator_test_clang_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" \
+  continued-command \
+  test-without-building \
+  GCC_TREAT_WARNINGS_AS_ERRORS=YES
+expect_failure_contains \
+  "simulator test stage missing Clang warnings-as-errors" \
+  "iOS 模拟器 XCTest lane 的 test-without-building 阶段必须设置 GCC_TREAT_WARNINGS_AS_ERRORS=YES" \
+  bash "${CHECK_SCRIPT}" --root "${missing_simulator_test_clang_gate_root}" --static-only
+
+missing_simulator_pqc_gate_root="$(make_fixture missing-simulator-pqc-gate)"
+remove_warning_setting_from_stage \
+  "${missing_simulator_pqc_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" \
+  continued-command \
+  test-without-building \
+  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
+expect_failure_contains \
+  "simulator test stage missing probe-authorized Apple PQC condition" \
+  "iOS 模拟器 XCTest lane 的 test-without-building 阶段必须在 symbol probe 后启用 HAS_APPLE_PQC_SDK" \
+  bash "${CHECK_SCRIPT}" --root "${missing_simulator_pqc_gate_root}" --static-only
+
+missing_device_build_clang_gate_root="$(make_fixture missing-device-build-clang-gate)"
+remove_warning_setting_from_stage \
+  "${missing_device_build_clang_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh" \
+  array-append \
+  build-for-testing \
+  GCC_TREAT_WARNINGS_AS_ERRORS=YES
+expect_failure_contains \
+  "device build stage missing Clang warnings-as-errors" \
+  "iOS 真机 XCTest lane 的 build-for-testing 阶段必须设置 GCC_TREAT_WARNINGS_AS_ERRORS=YES" \
+  bash "${CHECK_SCRIPT}" --root "${missing_device_build_clang_gate_root}" --static-only
+
+missing_device_test_swift_gate_root="$(make_fixture missing-device-test-swift-gate)"
+remove_warning_setting_from_stage \
+  "${missing_device_test_swift_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh" \
+  array-append \
+  test-without-building \
+  SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+expect_failure_contains \
+  "device test stage missing Swift warnings-as-errors" \
+  "iOS 真机 XCTest lane 的 test-without-building 阶段必须设置 SWIFT_TREAT_WARNINGS_AS_ERRORS=YES" \
+  bash "${CHECK_SCRIPT}" --root "${missing_device_test_swift_gate_root}" --static-only
 
 missing_pqc_sdk_root="$(make_fixture missing-pqc-sdk-setting)"
 python3 - "${missing_pqc_sdk_root}/SkyBridge Compass iOS/project.yml" <<'PY'

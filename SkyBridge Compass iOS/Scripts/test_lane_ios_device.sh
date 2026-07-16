@@ -589,6 +589,8 @@ if [[ -n "${SKYBRIDGE_APPLE_PQC_SDK_CONDITION:-}" ]]; then
 fi
 
 build_args+=(
+  SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+  GCC_TREAT_WARNINGS_AS_ERRORS=YES
   build-for-testing
 )
 
@@ -610,6 +612,8 @@ if [[ -n "${SKYBRIDGE_IOS_DEVICE_ONLY_TESTING:-}" ]]; then
 fi
 
 test_args+=(
+  SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+  GCC_TREAT_WARNINGS_AS_ERRORS=YES
   test-without-building
 )
 

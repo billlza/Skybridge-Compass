@@ -16,7 +16,9 @@ usage() {
 5. 若存在 XcodeGen project.yml，则其 target / scheme 源配置也必须保持一致
 6. iOS app/test target 的 Apple PQC 编译条件必须由 probe 后显式 build setting 注入，不能由 SDK selector 默认启用
 7. iOS/macOS 最低部署目标不得因 OS 27 适配被抬高（含根 macOS XcodeGen 与已提交 Xcode 工程）
-8. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
+8. iOS 模拟器/真机 XCTest lane 的每个构建与执行阶段都必须将 Swift/Clang warning 视为 error
+9. 模拟器 lane 必须先通过 Apple PQC symbol probe，并在两个阶段显式启用编译条件
+10. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
 EOF
 }
 
@@ -65,6 +67,8 @@ macos_pbxproj_path = root / "SkyBridgeWidgets.xcodeproj" / "project.pbxproj"
 tests_dir = root / "SkyBridge Compass iOS" / "SkyBridgeCompassiOSTests"
 root_package_path = root / "Package.swift"
 ios_package_path = root / "SkyBridge Compass iOS" / "Package.swift"
+ios_test_lane_path = root / "SkyBridge Compass iOS" / "Scripts" / "test_lane_ios.sh"
+ios_device_test_lane_path = root / "SkyBridge Compass iOS" / "Scripts" / "test_lane_ios_device.sh"
 
 required_paths = [
     pbxproj_path,
@@ -76,6 +80,8 @@ required_paths = [
     ios_package_path,
     root_project_yaml_path,
     macos_pbxproj_path,
+    ios_test_lane_path,
+    ios_device_test_lane_path,
 ]
 
 errors: list[str] = []
@@ -95,6 +101,8 @@ root_project_yaml_text = root_project_yaml_path.read_text(encoding="utf-8")
 macos_pbxproj_text = macos_pbxproj_path.read_text(encoding="utf-8")
 root_package_text = root_package_path.read_text(encoding="utf-8")
 ios_package_text = ios_package_path.read_text(encoding="utf-8")
+ios_test_lane_text = ios_test_lane_path.read_text(encoding="utf-8")
+ios_device_test_lane_text = ios_device_test_lane_path.read_text(encoding="utf-8")
 
 APP_TARGET_NAME = "SkyBridgeCompass-iOS"
 TEST_TARGET_NAME = "SkyBridgeCompassiOSTests"
@@ -195,6 +203,112 @@ def nested_key_present(payload: object, key: str) -> bool:
     if isinstance(payload, list):
         return any(nested_key_present(item, key) for item in payload)
     return False
+
+
+WARNING_AS_ERROR_SETTINGS = (
+    "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
+    "GCC_TREAT_WARNINGS_AS_ERRORS=YES",
+)
+XCTEST_STAGES = ("build-for-testing", "test-without-building")
+
+
+def normalized_shell_lines(block: str) -> set[str]:
+    return {
+        line.strip().removesuffix("\\").strip()
+        for line in block.splitlines()
+        if line.strip()
+    }
+
+
+def continued_command_stage_blocks(text: str, command: str) -> dict[str, list[str]]:
+    lines = text.splitlines()
+    blocks: dict[str, list[str]] = {stage: [] for stage in XCTEST_STAGES}
+    index = 0
+    command_prefix = f"{command} \\"
+
+    while index < len(lines):
+        if lines[index].strip() != command_prefix:
+            index += 1
+            continue
+
+        block_lines = [lines[index]]
+        index += 1
+        while index < len(lines):
+            block_lines.append(lines[index])
+            stage = lines[index].strip()
+            index += 1
+            if stage in XCTEST_STAGES:
+                blocks[stage].append("\n".join(block_lines))
+                break
+
+    return blocks
+
+
+def array_backed_stage_blocks(
+    text: str,
+    expected_array_by_stage: dict[str, str],
+) -> dict[str, list[str]]:
+    lines = text.splitlines()
+    blocks: dict[str, list[str]] = {stage: [] for stage in XCTEST_STAGES}
+    index = 0
+
+    while index < len(lines):
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\+=\(", lines[index].strip())
+        if match is None:
+            index += 1
+            continue
+
+        array_name = match.group(1)
+        block_lines = [lines[index]]
+        index += 1
+        while index < len(lines) and lines[index].strip() != ")":
+            block_lines.append(lines[index])
+            index += 1
+        if index >= len(lines):
+            break
+        block_lines.append(lines[index])
+        index += 1
+
+        normalized_lines = normalized_shell_lines("\n".join(block_lines))
+        for stage in XCTEST_STAGES:
+            if stage not in normalized_lines:
+                continue
+            if array_name != expected_array_by_stage[stage]:
+                continue
+            base_array_pattern = re.compile(
+                rf"(?ms)^{re.escape(array_name)}=\(\s*\n\s*xcodebuild(?:\s|$).*?^\)\s*$"
+            )
+            run_step_reference = f'"${{{array_name}[@]}}"'
+            has_matching_run_step = any(
+                line.strip().startswith(f'run_xcodebuild_step "{stage}" ')
+                and run_step_reference in line
+                for line in lines
+            )
+            if base_array_pattern.search(text) is not None and has_matching_run_step:
+                blocks[stage].append("\n".join(block_lines))
+
+    return blocks
+
+
+def require_warning_gates_by_stage(
+    blocks: dict[str, list[str]],
+    lane_name: str,
+) -> None:
+    for stage in XCTEST_STAGES:
+        stage_blocks = blocks.get(stage, [])
+        require(
+            len(stage_blocks) == 1,
+            f"{lane_name} 必须且只能定义一个 {stage} xcodebuild 阶段",
+        )
+        if len(stage_blocks) != 1:
+            continue
+
+        normalized_lines = normalized_shell_lines(stage_blocks[0])
+        for setting in WARNING_AS_ERROR_SETTINGS:
+            require(
+                setting in normalized_lines,
+                f"{lane_name} 的 {stage} 阶段必须设置 {setting}",
+            )
 
 
 app_scheme = parse_scheme(app_scheme_path)
@@ -319,6 +433,52 @@ require(
 require(
     ".iOS(.v17)" in ios_package_text,
     "iOS Package.swift 必须保持 .iOS(.v17)，OS 27 适配不得抬高最低 iOS 版本",
+)
+simulator_stage_blocks = continued_command_stage_blocks(
+    ios_test_lane_text,
+    "run_xcodebuild_with_retry",
+)
+require_warning_gates_by_stage(simulator_stage_blocks, "iOS 模拟器 XCTest lane")
+for stage in XCTEST_STAGES:
+    stage_blocks = simulator_stage_blocks.get(stage, [])
+    if len(stage_blocks) == 1:
+        require(
+            "SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK"
+            in normalized_shell_lines(stage_blocks[0]),
+            f"iOS 模拟器 XCTest lane 的 {stage} 阶段必须在 symbol probe 后启用 HAS_APPLE_PQC_SDK",
+        )
+require(
+    'source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"' in ios_test_lane_text,
+    "iOS 模拟器 XCTest lane 必须加载 Apple PQC symbol probe",
+)
+require(
+    "skybridge_require_apple_pqc_sdk_symbol_probe iphonesimulator" in ios_test_lane_text,
+    "iOS 模拟器 XCTest lane 必须 fail-closed 要求 iphonesimulator Apple PQC symbol probe",
+)
+require(
+    "validate_ios_simulator_runtime_diagnostics.sh" in ios_test_lane_text,
+    "iOS 模拟器 XCTest lane 必须分类并约束 CoreSimulator runtime diagnostics",
+)
+for reset_command in (
+    'xcrun simctl terminate "${SIM_ID}" "${IOS_APP_BUNDLE_ID}"',
+    'xcrun simctl uninstall "${SIM_ID}" "${IOS_APP_BUNDLE_ID}"',
+    'xcrun simctl shutdown "${SIM_ID}"',
+    'xcrun simctl boot "${SIM_ID}"',
+    'xcrun simctl bootstatus "${SIM_ID}" -b',
+):
+    require(
+        reset_command in ios_test_lane_text,
+        f"iOS 模拟器 XCTest lane 缺少确定性 simulator reset 步骤: {reset_command}",
+    )
+require_warning_gates_by_stage(
+    array_backed_stage_blocks(
+        ios_device_test_lane_text,
+        {
+            "build-for-testing": "build_args",
+            "test-without-building": "test_args",
+        },
+    ),
+    "iOS 真机 XCTest lane",
 )
 
 # 3. App scheme 必须引用共享 test plan，且能构建测试 target
