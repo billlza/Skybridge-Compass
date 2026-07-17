@@ -420,7 +420,7 @@ public actor ServiceAdvertiserCenter {
         let listener = try NWListener(using: parameters)
 
         // 默认携带基础 TXT（iOS 端用于显示系统版本等）；若调用方提供 TXT，则在此基础上覆盖/补充。
-        let baseTXT = await makeDefaultTXTRecord()
+        let baseTXT = try await makeDefaultTXTRecord()
         var finalTXT = baseTXT
         if let txtRecord {
             for (key, value) in txtRecord.dictionary {
@@ -523,7 +523,7 @@ public actor ServiceAdvertiserCenter {
         )
     }
 
-    private func makeDefaultTXTRecord() async -> NWTXTRecord {
+    private func makeDefaultTXTRecord() async throws -> NWTXTRecord {
         let localPresentation = LocalDevicePresentation.current()
         var record = NWTXTRecord()
         record["platform"] = "macos"
@@ -533,7 +533,8 @@ public actor ServiceAdvertiserCenter {
         LocalNetworkLinkStatusProvider.attachCurrentStatus(to: &record)
 
         if #available(macOS 14.0, *) {
-            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            let snap = try await SelfIdentityProvider.shared
+                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
             if !snap.deviceId.isEmpty {
                 record["deviceId"] = snap.deviceId
                 record["uniqueId"] = snap.deviceId
@@ -553,8 +554,8 @@ public actor ServiceAdvertiserCenter {
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
         let classic = ClassicCryptoProvider()
         var suiteIds: [UInt16] = []
-        suiteIds.append(contentsOf: provider.supportedSuites.map { $0.wireId })
-        suiteIds.append(contentsOf: classic.supportedSuites.map { $0.wireId })
+        suiteIds.append(contentsOf: provider.supportedSuites.filter(\.isNegotiable).map(\.wireId))
+        suiteIds.append(contentsOf: classic.supportedSuites.filter(\.isNegotiable).map(\.wireId))
         var seen = Set<UInt16>()
         let uniqueSuites = suiteIds.filter { seen.insert($0).inserted }
         if !uniqueSuites.isEmpty {
@@ -604,7 +605,10 @@ public actor ServiceAdvertiserCenter {
             return nil
         }
         let keys = KEMPublicKeyInfo.normalizedValidKeys(rawKeys)
-            .filter { CryptoSuite(wireId: $0.suiteWireId).isPQCGroup }
+            .filter {
+                let suite = CryptoSuite(wireId: $0.suiteWireId)
+                return suite.isNegotiable && suite.isPQCGroup
+            }
             .sorted { $0.suiteWireId < $1.suiteWireId }
         guard !keys.isEmpty else { return nil }
 

@@ -1159,6 +1159,71 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(rekeyBody.contains("messageA: messageA"))
     }
 
+    func testInboundRekeyKeepsAuthenticatedSessionUntilCandidateEstablishes() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let receiveStart = try XCTUnwrap(
+            source.range(of: "private func handleReceivedMessage("))
+        let receiveEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct InboundBootstrapControlResponse",
+                range: receiveStart.lowerBound..<source.endIndex))
+        let receiveBody = String(source[receiveStart.lowerBound..<receiveEnd.lowerBound])
+
+        let rekeyStart = try XCTUnwrap(
+            source.range(of: "private func ensureInboundRekeyDriverIfNeeded("))
+        let rekeyEnd = try XCTUnwrap(
+            source.range(
+                of: "private func isLikelyHandshakeControlPacket",
+                range: rekeyStart.lowerBound..<source.endIndex))
+        let rekeyBody = String(source[rekeyStart.lowerBound..<rekeyEnd.lowerBound])
+
+        let discardStart = try XCTUnwrap(
+            source.range(of: "private func discardInboundRekeyCandidateAfterFailure("))
+        let discardEnd = try XCTUnwrap(
+            source.range(
+                of: "private func shouldUseSOA(",
+                range: discardStart.lowerBound..<source.endIndex))
+        let discardBody = String(source[discardStart.lowerBound..<discardEnd.lowerBound])
+
+        XCTAssertTrue(receiveBody.contains("let hasTransactionalInboundRekeyCandidate"))
+        XCTAssertTrue(receiveBody.contains("inboundRekeyCandidatePeerIds.contains(peerId)"))
+        XCTAssertTrue(receiveBody.contains("isLikelyHandshakeControlPacket(unwrapped)"))
+        XCTAssertTrue(receiveBody.contains("case .failed(let reason) = await driver.getCurrentState()"))
+        XCTAssertTrue(receiveBody.contains("discardInboundRekeyCandidateAfterFailure(for: peerId, reason: reason)"))
+        XCTAssertTrue(receiveBody.contains("handshakeDrivers[peerId] == nil || hasTransactionalInboundRekeyCandidate"))
+        XCTAssertTrue(rekeyBody.contains("authenticatedIncomingEstablishedPolicy: .replaceAuthenticated"))
+        XCTAssertTrue(rekeyBody.contains("guard sessionKeys[peerId] != nil else { return nil }"))
+        XCTAssertTrue(rekeyBody.contains("inboundRekeyCandidatePeerIds.insert(peerId)"))
+        XCTAssertFalse(rekeyBody.contains("releaseArbiterState(for: peerId)"))
+        XCTAssertFalse(rekeyBody.contains("sessionKeys.removeValue(forKey: peerId)"))
+        XCTAssertFalse(rekeyBody.contains("rekeyInProgress.insert(peerId)"))
+        XCTAssertFalse(source.contains("previousSessionKeysBeforeRekey"))
+        XCTAssertFalse(discardBody.contains("setSessionKeys("))
+        XCTAssertFalse(discardBody.contains("markEstablished("))
+        XCTAssertTrue(discardBody.contains("guard let retainedKeys = sessionKeys[peerId]"))
+    }
+
+    func testRekeyTargetSelectionNeverFallsBackToClassicOffer() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func preferredRekeyTargetSuite("))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func setRekeyPresentationStatus(",
+                range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("$0.isNegotiable && $0.isPQCGroup"))
+        XCTAssertTrue(body.contains("if !offeredSuites.isEmpty"))
+        XCTAssertFalse(body.contains("firstOffered"))
+        XCTAssertTrue(body.contains("target.isNegotiable"))
+        XCTAssertTrue(body.contains("target.isPQCGroup"))
+    }
+
     func testStrictPQCTrustProviderDoesNotUseEndpointAliasesAsPinMaterial() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
@@ -1470,7 +1535,9 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             "Protocol payloads must keep the raw local device id; redaction is limited to diagnostics."
         )
         XCTAssertTrue(
-            reviewedPairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"),
+            reviewedPairingDiagnostics.contains(
+                "await KEMTrustStore.shared.upsert(\n            deviceId: declaredDeviceId"
+            ),
             "Trust/KEM storage keys must remain raw and deterministic."
         )
     }
@@ -1744,6 +1811,28 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768, target: .mlkem768fs))
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768fs, target: .mlkem768))
         XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.xwing, target: .mlkem768fs))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.qperiaptABI2PolicyBound, target: .xwing))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.xwing, target: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.qperiaptContextBound, target: .qperiaptContextBound))
+        XCTAssertFalse(
+            P2PConnectionManager.canSatisfyStrictPQCWithTrustedKEM(
+                trustedPeerKEMSuites: [.qperiaptContextBound],
+                preferredTargetSuite: nil
+            )
+        )
+    }
+
+    func testPlatformAdapterRejectsHybridAliasAndExplicitSuiteFallbacks() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Platform/PlatformAdapter.swift"
+        )
+
+        XCTAssertTrue(source.contains("if suite == .xwing"))
+        XCTAssertTrue(source.contains("if suite.isHybrid {"))
+        XCTAssertTrue(source.contains("if let offeredSuites {"))
+        XCTAssertTrue(source.contains("offeredSuites.allSatisfy(\\.isNegotiable)"))
+        XCTAssertTrue(source.contains("throw HandshakeError.failed(.suiteNotSupported)"))
+        XCTAssertFalse(source.contains("if let offeredSuites, !offeredSuites.isEmpty"))
     }
 
     func testInboundResponderRequiresXWingRuntimeSupportForXWingOnlyPeer() throws {

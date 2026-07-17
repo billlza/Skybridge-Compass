@@ -271,6 +271,19 @@ struct SkyBridgeCompassApp: App {
         }
 
         do {
+            // Smoke IDs are accepted only at this explicit launch boundary and
+            // remain actor-memory-only. Production resolution ignores the
+            // environment and converges through the shared Keychain authority.
+            try await ProtocolDeviceIdentity.configureExplicitSmokeOverrideIfPresent()
+            _ = try await ProtocolDeviceIdentity.resolveDeviceId()
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "❌ 协议身份 authority 初始化失败，拒绝启动任何可通告服务: \(error.localizedDescription)"
+            )
+            return
+        }
+
+        do {
             // 1. 初始化 PQC 加密系统
             SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：PQC 初始化")
             let pqcStartedAt = Date()
@@ -308,7 +321,13 @@ struct SkyBridgeCompassApp: App {
 
         // 5. 监听器启动完成后再发布 KVS presence。启动失败时会显式发布离线，
         // 避免 Mac 将心跳存活误判为 P2P 控制端口可达。
-        ICloudDevicePresenceService.shared.start()
+        do {
+            try await ICloudDevicePresenceService.shared.start()
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "❌ iCloud presence identity 初始化失败，保持离线: \(error.localizedDescription)"
+            )
+        }
 
         // 6. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
         if SettingsManager.instance.enableCloudKitSync {
@@ -446,7 +465,13 @@ struct SkyBridgeCompassApp: App {
                 SkyBridgeLogger.shared.error("❌ 前台恢复 P2P 监听器失败: \(error.localizedDescription)")
             }
             // 回到前台：在监听器启动结果确定后重启 presence。start() 会立即发布一次。
-            ICloudDevicePresenceService.shared.start()
+            do {
+                try await ICloudDevicePresenceService.shared.start()
+            } catch {
+                SkyBridgeLogger.shared.error(
+                    "❌ 前台恢复 iCloud presence 失败，保持离线: \(error.localizedDescription)"
+                )
+            }
             applyClipboardSettings()
 
         case .background:

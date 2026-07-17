@@ -21,10 +21,10 @@ final class PQCKeyEncapsulationTests: XCTestCase {
     func testMLKEM768Encapsulation() async throws {
         #if canImport(OQSRAII)
         if #available(macOS 14.0, *) {
-            guard let provider = PQCProviderFactory.makeProvider() else {
-                print("⚠️ PQC提供者不可用，跳过此测试")
-                return
-            }
+            let keychain = PQCKeychainTestContext()
+            let provider = try requireMLKEMMLDSAProvider(
+                scopeSource: keychain.scopeSource
+            )
             
  // 执行密钥封装
             let (sharedSecret1, ciphertext) = try await provider.kemEncapsulate(
@@ -56,17 +56,17 @@ final class PQCKeyEncapsulationTests: XCTestCase {
             print("✅ ML-KEM-768解封装成功，密钥匹配")
         }
         #else
-        print("⚠️ OQSRAII不可用，跳过此测试")
+        throw XCTSkip("This ML-KEM test requires OQSRAII")
         #endif
     }
     
     func testMLKEM1024Encapsulation() async throws {
         #if canImport(OQSRAII)
         if #available(macOS 14.0, *) {
-            guard let provider = PQCProviderFactory.makeProvider() else {
-                print("⚠️ PQC提供者不可用，跳过此测试")
-                return
-            }
+            let keychain = PQCKeychainTestContext()
+            let provider = try requireMLKEMMLDSAProvider(
+                scopeSource: keychain.scopeSource
+            )
             
             let (sharedSecret1, ciphertext) = try await provider.kemEncapsulate(
                 peerId: testPeerId + "-1024",
@@ -94,7 +94,7 @@ final class PQCKeyEncapsulationTests: XCTestCase {
             print("✅ ML-KEM-1024解封装成功，密钥匹配")
         }
         #else
-        print("⚠️ OQSRAII不可用，跳过此测试")
+        throw XCTSkip("This ML-KEM test requires OQSRAII")
         #endif
     }
     
@@ -103,12 +103,12 @@ final class PQCKeyEncapsulationTests: XCTestCase {
     func testDecapsulateWithWrongCiphertext() async throws {
         #if canImport(OQSRAII)
         if #available(macOS 14.0, *) {
-            guard let provider = PQCProviderFactory.makeProvider() else {
-                print("⚠️ PQC提供者不可用，跳过此测试")
-                return
-            }
+            let keychain = PQCKeychainTestContext()
+            let provider = try requireMLKEMMLDSAProvider(
+                scopeSource: keychain.scopeSource
+            )
             
-            let (_, ciphertext) = try await provider.kemEncapsulate(
+            let (expectedSecret, ciphertext) = try await provider.kemEncapsulate(
                 peerId: testPeerId,
                 kemVariant: "ML-KEM-768"
             )
@@ -118,22 +118,23 @@ final class PQCKeyEncapsulationTests: XCTestCase {
             wrongCiphertext[0] ^= 0xFF
             
             do {
-                let _ = try await provider.kemDecapsulate(
+                let rejectedSecret = try await provider.kemDecapsulate(
                     peerId: testPeerId,
                     encapsulated: wrongCiphertext,
                     kemVariant: "ML-KEM-768"
                 )
-                
- // 注意：某些KEM实现可能不会失败，而是返回一个随机的共享密钥（用于防止侧信道攻击）
- // 这是符合ML-KEM规范的行为
-                print("⚠️ 解封装没有失败（可能是隐式拒绝实现）")
+                XCTAssertEqual(rejectedSecret.count, expectedSecret.count)
+                XCTAssertNotEqual(
+                    rejectedSecret,
+                    expectedSecret,
+                    "Implicit rejection must never reproduce the valid ML-KEM shared secret"
+                )
             } catch {
- // 显式拒绝实现
-                print("✅ 错误密文被正确拒绝")
+                XCTAssertFalse((error as NSError).localizedDescription.isEmpty)
             }
         }
         #else
-        print("⚠️ OQSRAII不可用，跳过此测试")
+        throw XCTSkip("This ML-KEM test requires OQSRAII")
         #endif
     }
     
@@ -142,10 +143,10 @@ final class PQCKeyEncapsulationTests: XCTestCase {
     func testMultipleEncapsulations() async throws {
         #if canImport(OQSRAII)
         if #available(macOS 14.0, *) {
-            guard let provider = PQCProviderFactory.makeProvider() else {
-                print("⚠️ PQC提供者不可用，跳过此测试")
-                return
-            }
+            let keychain = PQCKeychainTestContext()
+            let provider = try requireMLKEMMLDSAProvider(
+                scopeSource: keychain.scopeSource
+            )
             
             var secrets: [Data] = []
             var ciphertexts: [Data] = []
@@ -177,7 +178,7 @@ final class PQCKeyEncapsulationTests: XCTestCase {
             print("✅ 多次封装测试通过，所有密钥和密文都不相同")
         }
         #else
-        print("⚠️ OQSRAII不可用，跳过此测试")
+        throw XCTSkip("This ML-KEM test requires OQSRAII")
         #endif
     }
     
@@ -186,12 +187,16 @@ final class PQCKeyEncapsulationTests: XCTestCase {
     func testKEMWithSymmetricEncryption() async throws {
         #if canImport(OQSRAII)
         if #available(macOS 14.0, *) {
-            guard let provider = PQCProviderFactory.makeProvider() else {
-                print("⚠️ PQC提供者不可用，跳过此测试")
-                return
-            }
+            let keychain = PQCKeychainTestContext()
+            let provider = try requireMLKEMMLDSAProvider(
+                scopeSource: keychain.scopeSource
+            )
             
-            let crypto = EnhancedPostQuantumCrypto()
+            let deviceIdentity = try DeviceIdentityKeychainTestContext()
+            defer { XCTAssertNoThrow(try deviceIdentity.reset()) }
+            let crypto = EnhancedPostQuantumCrypto(
+                deviceIdentityKeyManager: deviceIdentity.manager
+            )
             let testMessage = "这是一条使用KEM密钥加密的消息"
             
  // 1. 执行密钥封装
@@ -221,7 +226,7 @@ final class PQCKeyEncapsulationTests: XCTestCase {
             print("✅ KEM + 对称加密集成测试通过")
         }
         #else
-        print("⚠️ OQSRAII不可用，跳过此测试")
+        throw XCTSkip("This ML-KEM test requires OQSRAII")
         #endif
     }
 }

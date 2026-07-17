@@ -348,6 +348,26 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         XCTAssertFalse(twoAttempt.contains("UserDefaults.standard.bool(forKey: \"Settings.PreferXWingHybrid\")"))
     }
 
+    func testQPeriaptSettingsStayDormantUntilSignedPolicyRuntimeIsProvisioned() throws {
+        let settings = try readSource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
+        let settingsView = try readSource("Sources/SkyBridgeCore/Views/SettingsView.swift")
+        let preferencesView = try readSource("Sources/SkyBridgeCompassApp/PreferencesView.swift")
+        let capabilities = try readSource("Sources/SkyBridgeProtocolCore/P2P/CryptoCapabilities.swift")
+
+        XCTAssertTrue(settings.contains("preferQPeriaptBeta && !QPeriaptPlatformPolicy.isLocalRuntimeSupported"))
+        XCTAssertTrue(settings.contains("guard !value || QPeriaptPlatformPolicy.isLocalRuntimeSupported"))
+
+        for source in [settingsView, preferencesView] {
+            XCTAssertTrue(source.contains("Q-Periapt ABI2 PolicyBound 混合套件（beta）"))
+            XCTAssertTrue(source.contains(".disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)"))
+            XCTAssertTrue(source.contains("尚未安装并验证 Q-Periapt 签名策略与信任根"))
+            XCTAssertFalse(source.contains("Q-Periapt ContextBound 混合套件"))
+        }
+
+        XCTAssertTrue(capabilities.contains("Q-Periapt-ABI2-PolicyBound"))
+        XCTAssertTrue(capabilities.contains("Q-Periapt ABI2 PolicyBound (Beta)"))
+    }
+
     func testStrictPQCSecuritySourcesDoNotExposeFakeSuccessFallbacks() throws {
         let pake = try readSource("Sources/SkyBridgeCore/P2P/PAKEService.swift")
         let providers = try readSource("Sources/SkyBridgeCore/P2P/CryptoProviders.swift")
@@ -391,44 +411,35 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         let discovery = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift")
         let protocolIdentity = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/ProtocolDeviceIdentity.swift")
 
-        XCTAssertTrue(discovery.contains("private func createTXTRecord(port: UInt16) async -> NWTXTRecord"))
-        XCTAssertTrue(discovery.contains("await createTXTRecord(port: port)"))
-        XCTAssertTrue(discovery.contains("ProtocolDeviceIdentity.stableDeviceId()"))
-        XCTAssertTrue(discovery.contains("localProtocolIdentityFingerprintForAdvertisement()"))
-        XCTAssertTrue(discovery.contains("SkyBridgeiOSCore.shared.getProtocolSigningPublicKey(for: algorithm)"))
-        XCTAssertTrue(discovery.contains("let advertisedDeviceId = protocolDeviceId.isEmpty ? mobileStableId : protocolDeviceId"))
-        XCTAssertTrue(discovery.contains("record[\"deviceId\"] = advertisedDeviceId"))
-        XCTAssertTrue(discovery.contains("record[\"uniqueId\"] = advertisedDeviceId"))
-        XCTAssertTrue(discovery.contains("record[\"appleMobileStableId\"] = mobileStableId"))
-        XCTAssertFalse(discovery.contains("record[\"deviceId\"] = snapshot.stableDeviceId"))
-        XCTAssertFalse(discovery.contains("record[\"deviceId\"] = mobileSnapshot.stableDeviceId"))
+        XCTAssertTrue(discovery.contains("private func createTXTRecord(port: UInt16) async throws -> NWTXTRecord"))
+        XCTAssertTrue(discovery.contains("try await createTXTRecord(port: port)"))
+        XCTAssertTrue(discovery.contains("currentProtocolIdentitySnapshot()"))
+        XCTAssertTrue(discovery.contains("record[\"deviceId\"] = protocolIdentity.deviceId"))
+        XCTAssertTrue(discovery.contains("record[\"uniqueId\"] = protocolIdentity.deviceId"))
+        XCTAssertTrue(discovery.contains("record[\"pubKeyFP\"] = protocolIdentity.signingPublicKeyFingerprint"))
+        XCTAssertTrue(discovery.contains("record[\"protocolSigningAlgorithm\"] = protocolIdentity.signingAlgorithm.rawValue"))
+        XCTAssertFalse(discovery.contains("ProtocolDeviceIdentity.stableDeviceId()"))
+        XCTAssertFalse(discovery.contains("localProtocolIdentityFingerprintForAdvertisement()"))
+        XCTAssertFalse(discovery.contains("let advertisedDeviceId = protocolDeviceId.isEmpty"))
+        XCTAssertFalse(discovery.contains("mobileSnapshot.stableDeviceId"))
 
-        XCTAssertTrue(protocolIdentity.contains("SkyBridge.P2P.DeviceIdentity.DeviceID"))
-        XCTAssertTrue(protocolIdentity.contains("SkyBridge.DeviceId"))
-        XCTAssertTrue(protocolIdentity.contains("UserDefaults.standard.string(forKey: protocolIdentityMirrorDefaultsKey)"))
-        XCTAssertTrue(protocolIdentity.contains("mirrorDeviceIdToLegacyDefaultsIfNeeded"))
+        XCTAssertTrue(protocolIdentity.contains("actor ProtocolDeviceIdentityAuthority"))
+        XCTAssertTrue(protocolIdentity.contains("insertDeviceAuthorityIfAbsent"))
+        XCTAssertTrue(protocolIdentity.contains("insertSigningAuthorityIfAbsent"))
+        XCTAssertTrue(protocolIdentity.contains("configureExplicitSmokeOverrideIfPresent"))
+        XCTAssertFalse(protocolIdentity.contains("static func stableDeviceId()"))
 
         let p2pModels = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PModels.swift")
-        let getDeviceIdBody = try extract(
-            source: p2pModels,
-            from: "private static func getOrCreateDeviceId() -> String",
-            to: "@MainActor"
-        )
-        XCTAssertTrue(getDeviceIdBody.contains("ProtocolDeviceIdentity.stableDeviceId()"))
-        XCTAssertFalse(
-            getDeviceIdBody.contains("UUID().uuidString"),
-            "Legacy iOS P2PDeviceInfo must mirror the protocol identity instead of generating a second device id that splits Bonjour/Cloud/P2P identity."
-        )
+        XCTAssertTrue(p2pModels.contains("public static func current() async throws -> P2PDeviceInfo"))
+        XCTAssertTrue(p2pModels.contains("currentProtocolIdentitySnapshot()"))
+        XCTAssertFalse(p2pModels.contains("private static func getOrCreateDeviceId()"))
 
         let macP2PModels = try readSource("Sources/SkyBridgeCore/P2P/P2PDeviceModels.swift")
-        let macGetDeviceIdBody = try extract(
-            source: macP2PModels,
-            from: "private static func getOrCreateDeviceId() -> String",
-            to: "private static func getDeviceName()"
-        )
-        XCTAssertTrue(macP2PModels.contains("SkyBridge.P2P.DeviceIdentity.DeviceID"))
-        XCTAssertTrue(macP2PModels.contains("SkyBridge.DeviceId"))
-        XCTAssertTrue(macGetDeviceIdBody.contains("mirrorDeviceIdToLegacyDefaultsIfNeeded"))
+        XCTAssertTrue(macP2PModels.contains("public static func current() async throws -> P2PDeviceInfo"))
+        XCTAssertTrue(macP2PModels.contains("snapshotEnsuringProtocolDeviceId(allowCreate: true)"))
+        XCTAssertTrue(macP2PModels.contains("publicKeyFingerprint: identity.pubKeyFP"))
+        XCTAssertFalse(macP2PModels.contains("private static func getOrCreateDeviceId()"))
+        XCTAssertFalse(macP2PModels.contains("UUID().uuidString"))
     }
 
     private func readSource(_ relativePath: String) throws -> String {

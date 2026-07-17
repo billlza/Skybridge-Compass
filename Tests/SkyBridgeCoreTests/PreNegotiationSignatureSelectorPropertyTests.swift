@@ -139,6 +139,21 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
             XCTAssertFalse(isCompatible, "P-256 ECDSA should never be compatible for sigA with suite \(suite.rawValue)")
         }
     }
+
+    func testProperty2_4_LegacyABI1SuiteIsNeverSignatureCompatible() {
+        XCTAssertFalse(
+            PreNegotiationSignatureSelector.validateSuiteCompatibility(
+                selectedSuite: .qperiaptContextBound,
+                sigAAlgorithm: .mlDSA65
+            )
+        )
+        XCTAssertFalse(
+            PreNegotiationSignatureSelector.validateSuiteCompatibility(
+                selectedSuite: .qperiaptContextBound,
+                sigAAlgorithm: .ed25519
+            )
+        )
+    }
     
     // MARK: - Property 3: Signature Provider Selection
     
@@ -373,6 +388,24 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
         } else {
             XCTFail("Should return .suites when PQC suites available")
         }
+    }
+
+    func testHandshakeOfferedSuitesNeverAdvertisesLegacyABI1QPeriaptSuite() {
+        let result = HandshakeOfferedSuites.build(
+            strategy: .pqcOnly,
+            availableSuites: [
+                .qperiaptContextBound,
+                .qperiaptABI2PolicyBound,
+                .mlkem768MLDSA65
+            ]
+        )
+
+        guard case .suites(let suites) = result else {
+            XCTFail("Expected negotiable PQC suites")
+            return
+        }
+        XCTAssertEqual(suites, [.qperiaptABI2PolicyBound, .mlkem768MLDSA65])
+        XCTAssertFalse(suites.contains(.qperiaptContextBound))
     }
     
  /// Test HandshakeOfferedSuites.build with classicOnly strategy

@@ -35,7 +35,7 @@ public enum SignatureAlgorithm: String, Sendable, Codable {
 /// `Codable` 与 macOS `SkyBridgeProtocolCore.ProtocolSigningAlgorithm` 一致：
 /// `String` 原始值（"Ed25519" / "ML-DSA-65"）按默认 JSON 编解码，wire 字节相同，
 /// 使 `WebRTCSignalingEnvelope.Payload` 能继续合成 `Codable` 并承载 join 引导身份。
-public enum ProtocolSigningAlgorithm: String, Sendable, Codable {
+public enum ProtocolSigningAlgorithm: String, Sendable, Codable, Hashable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
     
@@ -431,6 +431,35 @@ public struct HandshakeMessageA: Sendable {
         self.initiatorContribution = initiatorContribution
         self.secureEnclaveSignature = secureEnclaveSignature
     }
+
+    /// Structural admission check for a newly negotiated handshake. Legacy
+    /// suites remain wire-decodable, but must fail here before any established
+    /// session state is paused or replaced.
+    public var hasNegotiableOfferShape: Bool {
+        guard !supportedSuites.isEmpty,
+              !keyShares.isEmpty,
+              supportedSuites.allSatisfy(\.isNegotiable) else {
+            return false
+        }
+
+        let supportedWireIds = supportedSuites.map(\.wireId)
+        guard Set(supportedWireIds).count == supportedWireIds.count else {
+            return false
+        }
+
+        var seenKeyShareWireIds = Set<UInt16>()
+        var lastSupportedIndex = -1
+        for keyShare in keyShares {
+            guard keyShare.suite.isNegotiable,
+                  seenKeyShareWireIds.insert(keyShare.suite.wireId).inserted,
+                  let supportedIndex = supportedWireIds.firstIndex(of: keyShare.suite.wireId),
+                  supportedIndex > lastSupportedIndex else {
+                return false
+            }
+            lastSupportedIndex = supportedIndex
+        }
+        return true
+    }
     
     /// 使用结构化身份公钥初始化
     public init(
@@ -516,6 +545,9 @@ public struct HandshakeMessageA: Sendable {
             }
             supportedSuites.append(suite)
         }
+        guard Set(supportedSuites.map(\.wireId)).count == supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Duplicate supported suite"))
+        }
         
         // keyShares
         let keyShareCount = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
@@ -553,7 +585,7 @@ public struct HandshakeMessageA: Sendable {
             guard let index = supportedSuites.firstIndex(where: { $0.wireId == share.suite.wireId }) else {
                 throw HandshakeError.failed(.invalidMessageFormat("keyShare suite not in supportedSuites"))
             }
-            guard index >= lastIndex else {
+            guard index > lastIndex else {
                 throw HandshakeError.failed(.invalidMessageFormat("keyShares out of order"))
             }
             lastIndex = index

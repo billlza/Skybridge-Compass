@@ -735,14 +735,11 @@ struct CurrentPathProbe {
 
     private static func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
         let algorithm: ProtocolSigningAlgorithm = .ed25519
-        await SelfIdentityProvider.shared.loadOrCreate()
-        let selfIdentity = await SelfIdentityProvider.shared.snapshot()
-        let deviceID = selfIdentity.deviceId.isEmpty
-            ? await DeviceIdentityKeyManager.shared.getDeviceId()
-            : selfIdentity.deviceId
+        let selfIdentity = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: true)
         let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
         return try ProtocolIdentityBinding(
-            deviceId: deviceID,
+            deviceId: selfIdentity.deviceId,
             protocolSigningAlgorithm: algorithm,
             protocolPublicKeyBytes: publicKey
         )

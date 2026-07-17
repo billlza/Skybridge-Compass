@@ -56,7 +56,7 @@ enum P2PDiscoveryKEMAliasRepairPolicy {
         let displayNames = trustDisplayNameCandidates(for: device)
 
         var matchesByDeviceId: [String: TrustRecord] = [:]
-        for record in records where !record.isTombstone && !record.isExpired {
+        for record in records where record.isAuthenticationEligible {
             guard let kemKeys = record.kemPublicKeys,
                   !KEMPublicKeyInfo.normalizedValidKeys(kemKeys).isEmpty else {
                 continue

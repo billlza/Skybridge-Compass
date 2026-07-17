@@ -108,7 +108,7 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
 
     func testMessageAQPeriaptProviderTypeRoundTrip() throws {
         let capabilities = CryptoCapabilities(
-            supportedKEM: [P2PCryptoAlgorithm.qperiaptContextBound.rawValue],
+            supportedKEM: [P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue],
             supportedSignature: ["ML-DSA-65"],
             supportedAuthProfiles: [QPeriaptPlatformPolicy.authProfile],
             supportedAEAD: ["AES-GCM"],
@@ -117,10 +117,10 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
             providerType: .qPeriapt
         )
         let message = HandshakeMessageA(
-            supportedSuites: [.qperiaptContextBound],
+            supportedSuites: [.qperiaptABI2PolicyBound],
             keyShares: [
                 HandshakeKeyShare(
-                    suite: .qperiaptContextBound,
+                    suite: .qperiaptABI2PolicyBound,
                     shareBytes: Data(repeating: 0x31, count: 1_120)
                 )
             ],
@@ -134,9 +134,79 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
 
         let decoded = try HandshakeMessageA.decode(from: message.encoded)
         XCTAssertEqual(decoded.capabilities.providerType, CryptoProviderType.qPeriapt)
-        XCTAssertEqual(decoded.capabilities.supportedKEM, [P2PCryptoAlgorithm.qperiaptContextBound.rawValue])
+        XCTAssertEqual(decoded.capabilities.supportedKEM, [P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue])
         XCTAssertEqual(decoded.policy.minimumTier, .qperiaptPQC)
-        XCTAssertEqual(decoded.supportedSuites, [CryptoSuite.qperiaptContextBound])
+        XCTAssertEqual(decoded.supportedSuites, [CryptoSuite.qperiaptABI2PolicyBound])
+        XCTAssertTrue(decoded.hasNegotiableOfferShape)
+    }
+
+    func testMessageALegacyABI1QPeriaptSuiteRemainsParseableButNotNegotiable() throws {
+        let message = HandshakeMessageA(
+            supportedSuites: [.qperiaptContextBound],
+            keyShares: [
+                HandshakeKeyShare(
+                    suite: .qperiaptContextBound,
+                    shareBytes: Data(repeating: 0x31, count: 1_120)
+                )
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: HandshakePolicy(
+                requirePQC: true,
+                allowClassicFallback: false,
+                minimumTier: .qperiaptPQC
+            ),
+            capabilities: CryptoCapabilities(
+                supportedKEM: [P2PCryptoAlgorithm.qperiaptContextBound.rawValue],
+                supportedSignature: [P2PCryptoAlgorithm.mlDSA65.rawValue],
+                supportedAuthProfiles: [QPeriaptPlatformPolicy.authProfile],
+                supportedAEAD: [P2PCryptoAlgorithm.aes256GCM.rawValue],
+                pqcAvailable: true,
+                platformVersion: "Android 16 / API 36",
+                providerType: .qPeriapt
+            ),
+            signature: Data(repeating: 0xA1, count: 64),
+            identityPublicKey: Data(repeating: 0xB2, count: 32),
+            initiatorContribution: Data(repeating: 0x5A, count: 32)
+        )
+
+        let decoded = try HandshakeMessageA.decode(from: message.encoded)
+        XCTAssertEqual(decoded.supportedSuites, [.qperiaptContextBound])
+        XCTAssertTrue(decoded.supportedSuites[0].isLegacyOnly)
+        XCTAssertFalse(decoded.supportedSuites[0].isNegotiable)
+        XCTAssertFalse(decoded.hasNegotiableOfferShape)
+    }
+
+    func testMessageADecodeRejectsDuplicateSupportedSuitesBeforeAdmission() throws {
+        let message = HandshakeMessageA(
+            supportedSuites: [.x25519Ed25519, .x25519Ed25519],
+            keyShares: [
+                HandshakeKeyShare(
+                    suite: .x25519Ed25519,
+                    shareBytes: Data(repeating: 0x31, count: 32)
+                )
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: .default,
+            capabilities: CryptoCapabilities(
+                supportedKEM: [P2PCryptoAlgorithm.x25519.rawValue],
+                supportedSignature: ["Ed25519"],
+                supportedAuthProfiles: [AuthProfile.classic.displayName],
+                supportedAEAD: [P2PCryptoAlgorithm.aes256GCM.rawValue],
+                pqcAvailable: false,
+                platformVersion: "14.0",
+                providerType: .classic
+            ),
+            signature: Data(repeating: 0xA1, count: 64),
+            identityPublicKey: Data(repeating: 0xB2, count: 32)
+        )
+
+        XCTAssertFalse(message.hasNegotiableOfferShape)
+        XCTAssertThrowsError(try HandshakeMessageA.decode(from: message.encoded)) { error in
+            guard case HandshakeError.failed(.invalidMessageFormat) = error else {
+                XCTFail("Expected duplicate suite format rejection, got \(error)")
+                return
+            }
+        }
     }
 
     func testMessageBQPeriaptAllowsEmptyResponderShare() throws {
@@ -147,7 +217,7 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
             tag: Data(repeating: 0x66, count: 16)
         )
         let message = HandshakeMessageB(
-            selectedSuite: .qperiaptContextBound,
+            selectedSuite: .qperiaptABI2PolicyBound,
             responderShare: Data(),
             serverNonce: Data(repeating: 0x88, count: 32),
             encryptedPayload: sealedBox,
@@ -156,7 +226,7 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
         )
 
         let decoded = try HandshakeMessageB.decode(from: message.encoded)
-        XCTAssertEqual(decoded.selectedSuite, .qperiaptContextBound)
+        XCTAssertEqual(decoded.selectedSuite, .qperiaptABI2PolicyBound)
         XCTAssertEqual(decoded.responderShare.count, 0)
         XCTAssertEqual(decoded.encryptedPayload.encapsulatedKey.count, 0)
     }

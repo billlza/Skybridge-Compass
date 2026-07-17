@@ -9,6 +9,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
     }
 
     func authoritativeProtocolPins(for record: TrustRecord) -> [ProtocolIdentityPin] {
+        guard record.isAuthenticationEligible else { return [] }
         let storedPins = record.currentPathAuthorityPins
         if !storedPins.isEmpty {
             return storedPins
@@ -62,10 +63,11 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         matchingRecords: [TrustRecord]
     ) -> Set<String> {
         var recordsById: [String: TrustRecord] = [:]
-        if let directRecord {
+        if let directRecord, directRecord.isAuthenticationEligible {
             recordsById[directRecord.deviceId] = directRecord
         }
-        for record in matchingRecords where recordsById[record.deviceId] == nil {
+        for record in matchingRecords
+        where record.isAuthenticationEligible && recordsById[record.deviceId] == nil {
             recordsById[record.deviceId] = record
         }
 
@@ -134,7 +136,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
 
         var matched: [String: TrustRecord] = [:]
 
-        for record in records where !record.isTombstone {
+        for record in records where record.isAuthenticationEligible {
             if matched[record.deviceId] != nil {
                 continue
             }
@@ -197,7 +199,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
 
     private func trustRecords() async -> [TrustRecord] {
         if let trustRecordsSnapshot {
-            return trustRecordsSnapshot.filter { !$0.isTombstone && !$0.isExpired }
+            return trustRecordsSnapshot.filter(\.isAuthenticationEligible)
         }
         return await MainActor.run {
             TrustSyncService.shared.activeTrustRecords
@@ -208,8 +210,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         let normalized = deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         return records.first {
-            !$0.isTombstone
-                && !$0.isExpired
+            $0.isAuthenticationEligible
                 && $0.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
         }
     }

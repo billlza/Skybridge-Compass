@@ -35,6 +35,7 @@ public class AuthenticationManager: ObservableObject {
 
     private struct RiskCheckOutcome {
         let auditTicket: String?
+        let deviceFingerprint: String
     }
 
     private static var shouldResetStateForUITests: Bool {
@@ -150,16 +151,27 @@ public class AuthenticationManager: ObservableObject {
         loadSession()
     }
 
-    private func registrationDeviceFingerprint() -> String {
-        let vendorID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-vendor"
-        let seed = [
-            vendorID,
-            UIDevice.current.model,
-            UIDevice.current.systemName,
-            UIDevice.current.systemVersion,
-            Bundle.main.bundleIdentifier ?? "com.skybridge.compass.ios"
-        ].joined(separator: "|")
-        let digest = SHA256.hash(data: Data(seed.utf8))
+    private func registrationDeviceFingerprint() async throws -> String {
+        let identity = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot()
+        return Self.registrationDeviceFingerprint(
+            deviceId: identity.deviceId,
+            signingPublicKeyFingerprint: identity.signingPublicKeyFingerprint
+        )
+    }
+
+    nonisolated static func registrationDeviceFingerprint(
+        deviceId: String,
+        signingPublicKeyFingerprint: String
+    ) -> String {
+        var material = Data("com.skybridge.registration-device-fingerprint.v1".utf8)
+        for value in [deviceId, signingPublicKeyFingerprint] {
+            let field = Data(value.utf8)
+            var length = UInt64(field.count).bigEndian
+            withUnsafeBytes(of: &length) { material.append(contentsOf: $0) }
+            material.append(field)
+        }
+        let digest = SHA256.hash(data: material)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -201,7 +213,7 @@ public class AuthenticationManager: ObservableObject {
             SkyBridgeLogger.shared.info("🔐 登录路径已通过本地短窗口软限流，继续执行服务端登录风控")
         }
 
-        let fingerprint = registrationDeviceFingerprint()
+        let fingerprint = try await registrationDeviceFingerprint()
 
         do {
             let decision = try await SupabaseService.shared.assessRegistrationRisk(
@@ -245,7 +257,10 @@ public class AuthenticationManager: ObservableObject {
             }
 
             captchaChallengeRequired = decision.requiresCaptcha
-            return RiskCheckOutcome(auditTicket: decision.auditTicket)
+            return RiskCheckOutcome(
+                auditTicket: decision.auditTicket,
+                deviceFingerprint: fingerprint
+            )
         } catch let error as AuthFlowError {
             throw error
         } catch {
@@ -288,6 +303,7 @@ public class AuthenticationManager: ObservableObject {
         identifier: String,
         identifierType: SupabaseService.RegistrationIdentifierType,
         attemptType: SupabaseService.RegistrationAttemptType,
+        deviceFingerprint: String,
         success: Bool,
         failureReason: String? = nil,
         auditTicket: String? = nil
@@ -295,7 +311,7 @@ public class AuthenticationManager: ObservableObject {
         await SupabaseService.shared.recordRegistrationAttempt(
             identifier: identifier,
             identifierType: identifierType,
-            deviceFingerprint: registrationDeviceFingerprint(),
+            deviceFingerprint: deviceFingerprint,
             attemptType: attemptType,
             success: success,
             failureReason: failureReason,
@@ -396,6 +412,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: auditIdentifier,
                 identifierType: .username,
                 attemptType: .login,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
             )
@@ -406,6 +423,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: auditIdentifier,
                 identifierType: .username,
                 attemptType: .login,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: message,
                 auditTicket: riskOutcome.auditTicket
@@ -441,7 +459,7 @@ public class AuthenticationManager: ObservableObject {
                     "display_name": displayName,
                     "registration_source": "SkyBridge Compass iOS",
                     "nebula_id": nebulaId,
-                    "device_fingerprint": registrationDeviceFingerprint()
+                    "device_fingerprint": riskOutcome.deviceFingerprint
                 ],
                 captchaToken: captchaToken
             )
@@ -450,6 +468,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: email,
                 identifierType: .email,
                 attemptType: .register,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
                 auditTicket: riskOutcome.auditTicket
@@ -464,6 +483,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: email,
                 identifierType: .email,
                 attemptType: .register,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
             )
@@ -496,6 +516,7 @@ public class AuthenticationManager: ObservableObject {
             identifier: email,
             identifierType: .email,
             attemptType: .register,
+            deviceFingerprint: riskOutcome.deviceFingerprint,
             success: true,
             auditTicket: riskOutcome.auditTicket
         )
@@ -524,6 +545,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: email,
                 identifierType: .email,
                 attemptType: .login,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: message,
                 auditTicket: riskOutcome.auditTicket
@@ -538,6 +560,7 @@ public class AuthenticationManager: ObservableObject {
             identifier: email,
             identifierType: .email,
             attemptType: .login,
+            deviceFingerprint: riskOutcome.deviceFingerprint,
             success: true,
             auditTicket: riskOutcome.auditTicket
         )
@@ -560,6 +583,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: phoneNumber,
                 identifierType: .phone,
                 attemptType: .verifyCode,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
                 auditTicket: riskOutcome.auditTicket
@@ -571,6 +595,7 @@ public class AuthenticationManager: ObservableObject {
             identifier: phoneNumber,
             identifierType: .phone,
             attemptType: .verifyCode,
+            deviceFingerprint: riskOutcome.deviceFingerprint,
             success: true,
             auditTicket: riskOutcome.auditTicket
         )
@@ -591,6 +616,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: email,
                 identifierType: .email,
                 attemptType: .verifyCode,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
             )
@@ -601,6 +627,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: email,
                 identifierType: .email,
                 attemptType: .verifyCode,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: message,
                 auditTicket: riskOutcome.auditTicket
@@ -628,6 +655,7 @@ public class AuthenticationManager: ObservableObject {
                 identifier: phoneNumber,
                 identifierType: .phone,
                 attemptType: .login,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: message,
                 auditTicket: riskOutcome.auditTicket
@@ -642,6 +670,7 @@ public class AuthenticationManager: ObservableObject {
             identifier: phoneNumber,
             identifierType: .phone,
             attemptType: .login,
+            deviceFingerprint: riskOutcome.deviceFingerprint,
             success: true,
             auditTicket: riskOutcome.auditTicket
         )

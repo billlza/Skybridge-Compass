@@ -40,7 +40,9 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  ///
  /// **Validates: Requirements 1.1, 1.4**
     func testProperty1_ProtocolSigningKeyAlgorithmConsistency() async throws {
-        let manager = DeviceIdentityKeyManager.shared
+        let deviceIdentity = try DeviceIdentityKeychainTestContext()
+        defer { XCTAssertNoThrow(try deviceIdentity.reset()) }
+        let manager = deviceIdentity.manager
         let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65]
         
         for iteration in 0..<Self.minIterations {
@@ -97,7 +99,9 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  ///
  /// **Validates: Requirements 1.1, 1.4**
     func testProperty1_2_KeyHandleCanSign() async throws {
-        let manager = DeviceIdentityKeyManager.shared
+        let deviceIdentity = try DeviceIdentityKeychainTestContext()
+        defer { XCTAssertNoThrow(try deviceIdentity.reset()) }
+        let manager = deviceIdentity.manager
         let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65]
         
         for iteration in 0..<Self.minIterations {

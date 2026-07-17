@@ -17,6 +17,13 @@ import UIKit
 /// 文件传输网络服务
 @available(iOS 17.0, *)
 public actor FileTransferNetworkService {
+    typealias ProtocolIdentityResolver = @Sendable () async throws
+        -> ProtocolIdentitySnapshot
+    typealias ListenerFactory = @Sendable (
+        NWParameters,
+        NWEndpoint.Port
+    ) throws -> NWListener
+
     private final class StartState: @unchecked Sendable {
         private let lock = NSLock()
         private var finished = false
@@ -83,6 +90,8 @@ public actor FileTransferNetworkService {
     
     /// 监听端口
     private let port: UInt16
+    private let protocolIdentityResolver: ProtocolIdentityResolver
+    private let listenerFactory: ListenerFactory
     
     /// 服务队列
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer.network", qos: .userInitiated)
@@ -98,6 +107,23 @@ public actor FileTransferNetworkService {
     
     public init(port: UInt16 = FileTransferConstants.defaultPort) {
         self.port = port
+        protocolIdentityResolver = {
+            try await SkyBridgeiOSCore.shared
+                .currentProtocolIdentitySnapshot()
+        }
+        listenerFactory = { parameters, port in
+            try NWListener(using: parameters, on: port)
+        }
+    }
+
+    init(
+        port: UInt16,
+        protocolIdentityResolver: @escaping ProtocolIdentityResolver,
+        listenerFactory: @escaping ListenerFactory
+    ) {
+        self.port = port
+        self.protocolIdentityResolver = protocolIdentityResolver
+        self.listenerFactory = listenerFactory
     }
     
     /// 设置文件接收回调（便于从 MainActor 安全注入处理逻辑）
@@ -117,6 +143,10 @@ public actor FileTransferNetworkService {
         if listener != nil {
             stopListening()
         }
+
+        // Resolve the complete bound identity before allocating a listener so
+        // cancellation/storage failure cannot leave a half-started service.
+        let protocolIdentity = try await protocolIdentityResolver()
         listenerHealthState = .starting
         
         let parameters = NWParameters.tcp
@@ -130,7 +160,10 @@ public actor FileTransferNetworkService {
             tcp.keepaliveCount = 4
         }
         
-        listener = try NWListener(using: parameters, on: NWEndpoint.Port(integerLiteral: port))
+        listener = try listenerFactory(
+            parameters,
+            NWEndpoint.Port(integerLiteral: port)
+        )
         
         // 配置 Bonjour 以便 macOS 端发现 (修复"未建立可用文件传输通道"错误)
         #if canImport(UIKit)
@@ -143,11 +176,13 @@ public actor FileTransferNetworkService {
         let model = "iOS Device"
         #endif
 
-        let deviceId = ProtocolDeviceIdentity.stableDeviceId()
+        let deviceId = protocolIdentity.deviceId
 
         let txtRecord = Self.makeBonjourTXTRecord(
             deviceName: deviceName,
             deviceId: deviceId,
+            protocolSigningAlgorithm: protocolIdentity.signingAlgorithm.rawValue,
+            protocolIdentityFingerprint: protocolIdentity.signingPublicKeyFingerprint,
             model: model,
             systemVersion: systemVersion,
             port: port
@@ -240,6 +275,8 @@ public actor FileTransferNetworkService {
     private static func makeBonjourTXTRecord(
         deviceName: String,
         deviceId: String,
+        protocolSigningAlgorithm: String,
+        protocolIdentityFingerprint: String,
         model: String,
         systemVersion: String,
         port: UInt16
@@ -252,6 +289,9 @@ public actor FileTransferNetworkService {
             "device": Data(deviceName.utf8),
             "deviceId": Data(deviceId.utf8),
             "uuid": Data(deviceId.utf8),
+            "protocolSigningAlgorithm": Data(protocolSigningAlgorithm.utf8),
+            "pubKeyFP": Data(protocolIdentityFingerprint.utf8),
+            "identityFingerprint": Data(protocolIdentityFingerprint.utf8),
             "model": Data(model.utf8),
             "osVersion": Data(systemVersion.utf8),
             "capabilities": Data("file,file_transfer,\(ClassicTransferCapability.classicResume)".utf8),

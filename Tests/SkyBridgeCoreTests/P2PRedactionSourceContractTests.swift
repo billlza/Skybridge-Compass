@@ -179,7 +179,9 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         XCTAssertTrue(pairingDiagnostics.contains("peer=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("declaredDeviceId=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("deviceId: localId"))
-        XCTAssertTrue(pairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"))
+        XCTAssertTrue(pairingDiagnostics.contains(
+            "await KEMTrustStore.shared.upsert(\n            deviceId: declaredDeviceId"
+        ))
         assertSource(
             pairingDiagnostics,
             named: "iOS pairingIdentityExchange diagnostics",
@@ -198,6 +200,11 @@ final class P2PRedactionSourceContractTests: XCTestCase {
                 "pairingIdentityExchange sent: peer=\\(deviceId)"
             ]
         )
+
+        XCTAssertTrue(source.contains(
+            "peer=\\(Self.protocolIdentityLogRedaction) reason=\\(reason.rawValue)"
+        ))
+        XCTAssertFalse(source.contains("peer=\\(peerId) reason=\\(reason)"))
 
         let traceStart = try XCTUnwrap(source.range(of: "private func handleIncomingConnection"))
         let traceEnd = try XCTUnwrap(

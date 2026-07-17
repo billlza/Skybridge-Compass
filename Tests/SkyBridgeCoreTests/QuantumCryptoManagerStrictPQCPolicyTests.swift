@@ -171,13 +171,13 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
             source.contains("TLSSecurityError.pqcMaterialUnavailable"),
             "Missing HPKE provider or keychain key material must surface as an explicit TLS error."
         )
+        XCTAssertFalse(source.contains("TLSQuantumCryptoManager"))
+        XCTAssertFalse(source.contains("strictPQCQuantumCryptoManager"))
+        XCTAssertFalse(source.contains("classicQuantumCryptoManager"))
         XCTAssertTrue(
-            source.contains("strictPQCQuantumCryptoManager = QuantumCryptoManager(mode: .pqcOnly)"),
-            "PQC-only TLS profiles must use QuantumCryptoManager(mode: .pqcOnly) so PQC failures do not fall back to AES-GCM."
-        )
-        XCTAssertTrue(
-            source.contains("classicQuantumCryptoManager = QuantumCryptoManager(mode: .classicOnly)"),
-            "Classic TLS profiles should use an explicit classic manager so compatibility mode is not mislabeled as PQC."
+            source.contains("case .pqcMlKemMlDsa, .classicP256:") &&
+                source.contains("应用层安全数据仅支持 hybridXWing(真实 HPKE)"),
+            "Non-hybrid profiles must fail explicitly instead of retaining a misleading transitional AES path."
         )
         XCTAssertFalse(
             source.contains("PQC Provider unavailable; fallback classic"),
@@ -192,15 +192,141 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
             "Optional HPKE checks must not allow the hybridXWing path to fall through into AES-GCM."
         )
         XCTAssertTrue(
-            source.contains("hybridXWingAAD(senderDeviceId: localDeviceId, recipientDeviceId: recipientDeviceId)") &&
-                source.contains("hybridXWingAAD(senderDeviceId: remoteDeviceId, recipientDeviceId: localDeviceId)"),
+            source.contains("identityContext.outboundHybridAAD(") &&
+                source.contains("identityContext.inboundHybridAAD("),
             "Hybrid X-Wing payloads must derive identical AAD on both peers from sender and recipient identity."
         )
+        XCTAssertTrue(source.contains("identityContextByRemoteDeviceId"))
+        XCTAssertFalse(source.contains("private var localDeviceId: String?"))
         XCTAssertFalse(
             source.contains("ctx.seal(data, authenticating: Data(recipientDeviceId.utf8))") ||
                 source.contains("authenticating: Data(remoteDeviceId.utf8)"),
             "Hybrid X-Wing AAD must not use opposite one-sided device ids that make real peer decrypt fail."
         )
+        XCTAssertTrue(
+            source.contains("requiredAuthenticatedXWingRemotePublicKey") &&
+                source.contains("requiredLocalXWingPrivateKey") &&
+                source.contains("XWingKeyMaterialStore"),
+            "TLS X-Wing send/receive consumers must use the reconciled role-specific store."
+        )
+        XCTAssertFalse(
+            source.contains("PQCKeyTags.v2Kem") ||
+                source.contains("requiredPQCKey("),
+            "The shared v2 service must be migration-only, never an active TLS key reader."
+        )
+        XCTAssertTrue(
+            source.contains("sec_protocol_options_set_peer_authentication_required") &&
+                source.contains("sec_protocol_options_set_local_identity") &&
+                source.contains("peerIsServer: true") &&
+                source.contains("peerIsServer: false"),
+            "Transport identity binding requires symmetric mTLS plus role-correct certificate policies."
+        )
+        XCTAssertTrue(source.contains("pendingConnections"))
+        XCTAssertTrue(source.contains("case .ready:"))
+        XCTAssertTrue(source.contains("throw TLSSecurityError.noMutualCryptoProfile"))
+        XCTAssertFalse(
+            source.contains("for p in offered { if supported.contains(p) { return p } }\n        return .classicP256")
+        )
+    }
+
+    func testTLSConnectionIdentityContextBindsSymmetricRolesAndRejectsAliases() throws {
+        let client = try TLSConnectionIdentityContext(
+            localDeviceId: "device-a",
+            remoteDeviceId: "device-b"
+        )
+        let server = try TLSConnectionIdentityContext(
+            localDeviceId: "device-b",
+            remoteDeviceId: "device-a"
+        )
+        let profile = TLSSecurityManager.CryptoProfile.hybridXWing.rawValue
+
+        XCTAssertEqual(
+            client.outboundHybridAAD(profile: profile),
+            server.inboundHybridAAD(profile: profile)
+        )
+        XCTAssertEqual(
+            server.outboundHybridAAD(profile: profile),
+            client.inboundHybridAAD(profile: profile)
+        )
+        XCTAssertNotEqual(
+            client.outboundHybridAAD(profile: profile),
+            client.inboundHybridAAD(profile: profile)
+        )
+
+        for invalid in [
+            "",
+            " device-a",
+            "device-a ",
+            "device\na",
+            "device\0a",
+            String(repeating: "a", count: 257)
+        ] {
+            XCTAssertThrowsError(
+                try TLSConnectionIdentityContext(
+                    localDeviceId: invalid,
+                    remoteDeviceId: "device-b"
+                )
+            )
+            XCTAssertThrowsError(
+                try TLSConnectionIdentityContext(
+                    localDeviceId: "device-a",
+                    remoteDeviceId: invalid
+                )
+            )
+        }
+        XCTAssertThrowsError(
+            try TLSConnectionIdentityContext(
+                localDeviceId: "same-device",
+                remoteDeviceId: "same-device"
+            )
+        )
+
+        // Length-prefixing prevents delimiter-bearing identities from
+        // producing the same AAD tuple under a different role split.
+        let delimiterBearing = try TLSConnectionIdentityContext(
+            localDeviceId: "device|sender=x",
+            remoteDeviceId: "recipient=y"
+        )
+        let alternateSplit = try TLSConnectionIdentityContext(
+            localDeviceId: "device",
+            remoteDeviceId: "sender=x|recipient=y"
+        )
+        XCTAssertNotEqual(
+            delimiterBearing.outboundHybridAAD(profile: profile),
+            alternateSplit.outboundHybridAAD(profile: profile)
+        )
+    }
+
+    func testTLSConfigurationRejectsUnboundedOrIncoherentValues() throws {
+        for invalidTimeout in [
+            -1.0,
+            0.0,
+            301.0,
+            Double.nan,
+            Double.infinity
+        ] {
+            XCTAssertThrowsError(
+                try TLSConfiguration(connectionTimeout: invalidTimeout)
+            )
+        }
+        for invalidKeepalive in [
+            -1.0,
+            0.0,
+            301.0,
+            Double.nan,
+            Double.infinity
+        ] {
+            XCTAssertThrowsError(
+                try TLSConfiguration(keepaliveInterval: invalidKeepalive)
+            )
+        }
+        XCTAssertThrowsError(
+            try TLSConfiguration(
+                enableCertificateVerification: false,
+                requireClientCertificate: true
+            )
+        )
+        XCTAssertNoThrow(try TLSConfiguration())
     }
 
     func testTLSSecurityManagerDoesNotCountTransportPQCWithoutNegotiatedGroupProof() throws {
@@ -236,10 +362,19 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
             pinningBody.contains("return true"),
             "TLS handshake pinning must not accept an unknown certificate as a success branch."
         )
+        XCTAssertFalse(source.contains("CertificateFingerprint_"))
+        XCTAssertFalse(source.contains("fingerprintCache"))
+        XCTAssertFalse(
+            source.contains("UserDefaults.standard"),
+            "Legacy preferences/TOFU state must never override the scoped Keychain certificate identity."
+        )
     }
 
     func testTLSSecurityManagerDoesNotNameClassicCertificatesQuantumSafe() throws {
         let source = try Self.tlsSecurityManagerSource()
+        let builder = try Self.readRepositorySource(
+            "Sources/SkyBridgeCore/Security/TLSSelfSignedCertificateBuilder.swift"
+        )
 
         XCTAssertFalse(
             source.contains("validateQuantumSafeCertificate"),
@@ -259,7 +394,10 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         )
         XCTAssertTrue(source.contains("kSecAttrKeyTypeECSECPrimeRandom"))
         XCTAssertTrue(source.contains("kSecAttrKeySizeInBits as String: 256"))
-        XCTAssertTrue(source.contains("ecdsaSignatureMessageX962SHA256"))
+        XCTAssertTrue(
+            builder.contains("ecdsaSignatureMessageX962SHA256"),
+            "The side-effect-free certificate builder must sign with P-256/ECDSA-SHA256."
+        )
     }
 
     func testTLSSecurityManagerRecoverableTrustFailureIsPinnedSelfSignedOnly() throws {
@@ -277,9 +415,22 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
 
         XCTAssertTrue(validityBody.contains("case .recoverableTrustFailure:"))
         XCTAssertTrue(
-            validityBody.contains("guard validatePinnedSelfSignedLocalCertificateContract(trust, for: deviceId) else"),
+            validityBody.contains("validatePinnedSelfSignedLocalCertificateContract(") &&
+                validityBody.contains("peerIsServer: peerIsServer"),
             "Recoverable trust failures must be constrained to an explicit pinned self-signed local certificate contract."
         )
+        XCTAssertTrue(validityBody.contains("SecPolicyCreateSSL(peerIsServer, nil)"))
+        XCTAssertTrue(
+            validityBody.contains(
+                "guard SecTrustSetPolicies(trust, policy) == errSecSuccess"
+            )
+        )
+        XCTAssertTrue(
+            validityBody.contains(
+                "guard SecTrustSetNetworkFetchAllowed("
+            )
+        )
+        XCTAssertTrue(pinnedSelfSignedBody.contains("SecPolicyCreateSSL(peerIsServer, nil)"))
         XCTAssertFalse(
             validityBody.contains("证书信任问题，但可恢复") || validityBody.contains("在P2P场景中允许继续"),
             "Recoverable trust failures must not be broadly accepted as generic P2P self-signed certificates."
@@ -289,6 +440,7 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         XCTAssertTrue(pinnedSelfSignedBody.contains("isSelfSignedCertificate(leafCertificate)"))
         XCTAssertTrue(pinnedSelfSignedBody.contains("SecTrustSetAnchorCertificates(pinnedTrust, [leafCertificate] as CFArray)"))
         XCTAssertTrue(pinnedSelfSignedBody.contains("SecTrustSetAnchorCertificatesOnly(pinnedTrust, true)"))
+        XCTAssertTrue(pinnedSelfSignedBody.contains("guard SecTrustSetNetworkFetchAllowed("))
         XCTAssertTrue(pinnedSelfSignedBody.contains("SecTrustEvaluateWithError(pinnedTrust"))
     }
 
@@ -347,7 +499,8 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
             "Supported profile lists must be derived from suite-specific provider evidence, not a hardcoded local array."
         )
         XCTAssertTrue(
-            source.contains("negotiateApplicationCryptoProfile(peerOfferedProfiles: nil)"),
+            source.contains("negotiateApplicationCryptoProfile(") &&
+                source.contains("peerOfferedProfiles: nil"),
             "When no authenticated peer profile offer exists, TLS setup should explicitly negotiate the application crypto profile as classic."
         )
         XCTAssertTrue(
@@ -468,11 +621,6 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
 
     func testPQCProviderFactoryRequiresSuiteSpecificXWingHPKEProbe() throws {
         let source = try Self.readRepositorySource("Sources/SkyBridgeCore/QuantumSecure/PQCProvider.swift")
-        let makeProviderBody = try Self.functionBody(
-            named: "makeProvider(for suite: PQCAlgorithmSuite)",
-            in: source,
-            before: "public static func makeHPKEProvider"
-        )
         let makeHPKEProviderBody = try Self.functionBody(
             named: "makeHPKEProvider(for suite: PQCAlgorithmSuite)",
             in: source,
@@ -480,8 +628,8 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            makeProviderBody.contains("case .hybridXWing:") &&
-                makeProviderBody.contains("return makeHPKEProvider(for: .hybridXWing)"),
+            source.contains("case .hybridXWing:\n            return makeHPKEProvider(") &&
+                source.contains("for: .hybridXWing,\n                scopeSource: scopeSource"),
             "Generic provider selection must route hybridXWing through the HPKE-specific provider path."
         )
         XCTAssertTrue(
@@ -496,11 +644,11 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("HPKE.Ciphersuite.XWingMLKEM768X25519_SHA256_AES_GCM_256"))
         XCTAssertTrue(source.contains("recipient.open(ciphertext, authenticating: info) == plaintext"))
         XCTAssertTrue(
-            source.contains("return ApplePQCProvider(suite: .hybridXWing)"),
+            source.contains("return ApplePQCProvider(\n                suite: .hybridXWing,"),
             "X-Wing factory output must carry hybridXWing suite metadata."
         )
         XCTAssertTrue(
-            source.contains("return ApplePQCProvider(suite: .pqcMlKemMlDsa)"),
+            source.contains("return ApplePQCProvider(\n                        suite: .pqcMlKemMlDsa,"),
             "ML-KEM/ML-DSA factory output must carry ML-KEM/ML-DSA suite metadata."
         )
         XCTAssertTrue(source.contains("nonisolated let suite: PQCAlgorithmSuite"))
@@ -539,8 +687,12 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         let providerSource = try Self.readRepositorySource("Sources/SkyBridgeCore/QuantumSecure/PQCProvider.swift")
         let oqsBridgeSource = try Self.readRepositorySource("Sources/SkyBridgeCore/QuantumSecure/OQSBridge.swift")
 
-        XCTAssertTrue(providerSource.contains("private func persistPQCKeyMaterial"))
-        XCTAssertTrue(providerSource.contains("(keychain_write_failed)"))
+        XCTAssertTrue(
+            providerSource.contains("XWingKeyMaterialStore.persistAuthenticatedRemotePublicKey") &&
+                providerSource.contains("KeychainManager.shared.insertKeyIfAbsent") &&
+                providerSource.contains("loadAuthoritativeRemotePublicKey"),
+            "X-Wing persistence must use add-only CAS and reload the immutable winner."
+        )
         XCTAssertFalse(
             providerSource.contains("_ = KeychainManager.shared.importKey"),
             "PQCProvider must not ignore keychain persistence failures and then return process-local key material."
@@ -554,7 +706,10 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
         XCTAssertTrue(providerSource.contains("缺少已认证的X-Wing对端公钥"))
         XCTAssertTrue(providerSource.contains("缺少本地X-Wing私钥"))
 
-        XCTAssertTrue(oqsBridgeSource.contains("private static func persistKeyMaterial"))
+        XCTAssertTrue(
+            oqsBridgeSource.contains("PQCKeyPairStore.loadOrCreate"),
+            "OQS key material must use the canonical create-only pair store."
+        )
         XCTAssertFalse(
             oqsBridgeSource.contains("_ = KeychainManager.shared.importKey"),
             "OQSBridge must not ignore keychain persistence failures in liboqs-backed compatibility paths."

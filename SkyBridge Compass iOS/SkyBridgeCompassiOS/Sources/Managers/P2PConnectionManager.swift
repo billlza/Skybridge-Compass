@@ -80,6 +80,13 @@ public class P2PConnectionManager: ObservableObject {
     public static let instance = P2PConnectionManager()
     private static let pathRecoveryInProgressMessage = "网络路径切换，正在恢复直连"
 
+    private enum StaleInboundSessionCleanupReason: String {
+        case connectRequiresAuthenticatedSession = "connect_requires_authenticated_session"
+        case messageAWithoutAuthenticatedSession = "message_a_without_authenticated_session"
+        case strictAuthenticatedInboundReconnectReplacedStableSession =
+            "strict_authenticated_inbound_reconnect_replaced_stable_session"
+    }
+
     public struct RekeyPresentationStatus: Sendable, Equatable {
         public let fromSuite: String
         public let toSuite: String
@@ -206,7 +213,7 @@ public class P2PConnectionManager: ObservableObject {
     private var listener: NWListener?
     private var connections: [String: NWConnection] = [:]
     private var sessionKeys: [String: SessionKeys] = [:] // device.id -> SessionKeys
-    private var previousSessionKeysBeforeRekey: [String: SessionKeys] = [:]
+    private var inboundRekeyCandidatePeerIds: Set<String> = []
     /// 握手驱动器缓存（用于响应方角色）
     private var handshakeDrivers: [String: HandshakeDriver] = [:]
     /// 兼容旧逻辑：握手过程中/早期阶段可能缓存 shared secret（最终以 sessionKeys 为准）
@@ -755,7 +762,10 @@ public class P2PConnectionManager: ObservableObject {
 
     private func preferredStrictPQCHandshakeTargetSuite() -> CryptoSuite? {
         guard let raw = preferredRekeyTargetSuite() else { return nil }
-        return CryptoSuite(rawValue: raw)
+        guard let suite = CryptoSuite(rawValue: raw),
+              suite.isNegotiable,
+              suite.isPQCGroup else { return nil }
+        return suite
     }
 
     private func shouldUseClassicBootstrapForStrictPQC(device: DiscoveredDevice) async throws -> Bool {
@@ -970,13 +980,15 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("no signed LAN refresh bootstrap endpoint candidates")
         }
 
-        let requestedSuites = signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
+        let requestedSuites = try signedLANRefreshRequestedSuites(
+            preferredTargetSuite: preferredTargetSuite
+        )
         let requesterProtocolIdentityFingerprint = try await localProtocolIdentityFingerprintForSignedLANRefresh()
         guard let targetProtocolDeviceId = stableProtocolIdentityCandidate(from: candidates) else {
             throw signedLANRefreshFailure("missing stable protocol identity target; refusing endpoint alias target")
         }
         let request = AppMessage.KEMRefreshRequestPayload(
-            requesterDeviceId: localStablePersistentDeviceIdentifier(),
+            requesterDeviceId: try localStablePersistentDeviceIdentifier(),
             targetDeviceId: targetProtocolDeviceId,
             requesterProtocolIdentityFingerprint: requesterProtocolIdentityFingerprint,
             targetProtocolIdentityFingerprint: pinnedProtocolFingerprints.count == 1 ? pinnedProtocolFingerprints.sorted().first : nil,
@@ -1099,7 +1111,7 @@ public class P2PConnectionManager: ObservableObject {
             throw protocolIdentityBindingFailure("missing stable protocol identity target; refusing endpoint alias target")
         }
         let unsignedRequest = AppMessage.ProtocolIdentityBindingRequestPayload(
-            requesterDeviceId: localStablePersistentDeviceIdentifier(),
+            requesterDeviceId: try localStablePersistentDeviceIdentifier(),
             targetDeviceId: targetProtocolDeviceId,
             requestedProtocolSigningAlgorithms: [
                 ProtocolSigningAlgorithm.mlDSA65.rawValue,
@@ -1385,12 +1397,30 @@ public class P2PConnectionManager: ObservableObject {
         return true
     }
 
-    private func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) -> [CryptoSuite] {
-        let preferred = preferredTargetSuite?.canonicalKEMSuite
-        if let preferred, preferred.isKnown, preferred.isPQCGroup {
-            return [preferred]
+    private func signedLANRefreshRequestedSuites(
+        preferredTargetSuite: CryptoSuite?
+    ) throws -> [CryptoSuite] {
+        let providerSuites = CryptoProviderFactory.make(policy: .requirePQC).supportedSuites
+            .filter {
+                $0.isNegotiable
+                    && $0.isPQCGroup
+                    && $0 != .qperiaptABI2PolicyBound
+            }
+            .map(\.canonicalKEMSuite)
+        var suites = providerSuites
+        if let preferred = preferredTargetSuite?.canonicalKEMSuite,
+           preferred.isNegotiable,
+           preferred.isPQCGroup,
+           preferred != .qperiaptABI2PolicyBound,
+           providerSuites.contains(preferred) {
+            suites.insert(preferred, at: 0)
         }
-        return [.xwingMLDSA]
+        var seen = Set<UInt16>()
+        let unique = suites.filter { seen.insert($0.wireId).inserted }
+        guard !unique.isEmpty else {
+            throw signedLANRefreshFailure("no SKR-1-eligible suite from the active PQC provider")
+        }
+        return unique
     }
 
     private func signedLANRefreshEndpointDigest(for device: DiscoveredDevice) -> String? {
@@ -1489,7 +1519,9 @@ public class P2PConnectionManager: ObservableObject {
         device: DiscoveredDevice
     ) async throws {
         let peerId = canonicalPeerLookupKey(device.id)
-        let targetSuite = preferredRekeyTargetSuite() ?? CryptoSuite.xwing.rawValue
+        guard let targetSuite = preferredRekeyTargetSuite() else {
+            throw P2PError.pqcRequiredUnavailable
+        }
 
         SkyBridgeLogger.shared.info(
             "🧩 P2P classic bootstrap start: peer=\(Self.protocolIdentityLogRedaction) targetSuite=\(targetSuite)"
@@ -1539,6 +1571,7 @@ public class P2PConnectionManager: ObservableObject {
 
         while clock.now < deadline {
             if let suite = resolvedNegotiatedSuite(forAnyPeerId: runtimePeerId),
+               suite.isNegotiable,
                suite.isPQCGroup {
                 SkyBridgeLogger.shared.info(
                     "✅ bootstrap-assisted PQC rekey 完成: peer=\(Self.protocolIdentityLogRedaction) suite=\(suite.rawValue)"
@@ -1683,7 +1716,7 @@ public class P2PConnectionManager: ObservableObject {
         }
         for key in stateKeysMatchingAliases(candidateSet, keys: sessionKeys.keys) {
             sessionKeys.removeValue(forKey: key)
-            previousSessionKeysBeforeRekey.removeValue(forKey: key)
+            inboundRekeyCandidatePeerIds.remove(key)
             sharedSecrets.removeValue(forKey: key)
             handshakeDrivers.removeValue(forKey: key)
             await transport?.removeConnection(for: key)
@@ -1863,7 +1896,7 @@ public class P2PConnectionManager: ObservableObject {
             SkyBridgeLogger.shared.info("🔐 P2P 连接已命中受信任设备别名: \(resolvedTargetDevice.id) -> \(preferredTrustedPeerId)")
         }
 
-        if isSelfConnectionTarget(targetDevice) {
+        if try isSelfConnectionTarget(targetDevice) {
             connectionStatusByDeviceId[targetDevice.id] = .failed
             connectionErrorByDeviceId[targetDevice.id] = "已阻止自连接"
             SkyBridgeLogger.shared.warning("⚠️ 已阻止可能的自连接目标: \(targetDevice.id)")
@@ -1911,7 +1944,7 @@ public class P2PConnectionManager: ObservableObject {
         if connections[targetDevice.id] != nil || connections[runtimePeerId] != nil || hasStoredSessionMaterial(for: targetDevice.id) {
             clearStaleInboundSessionState(
                 for: targetDevice.id,
-                reason: "connect_requires_authenticated_session"
+                reason: .connectRequiresAuthenticatedSession
             )
             let aliases = connectionAliasSet(for: runtimePeerId)
                 .union(PeerIdentityAliasResolver.lookupCandidates(for: targetDevice.id))
@@ -1980,7 +2013,7 @@ public class P2PConnectionManager: ObservableObject {
                 connection.cancel()
                 connections.removeValue(forKey: targetDevice.id)
                 sessionKeys.removeValue(forKey: targetDevice.id)
-                previousSessionKeysBeforeRekey.removeValue(forKey: targetDevice.id)
+                inboundRekeyCandidatePeerIds.remove(targetDevice.id)
                 handshakeDrivers.removeValue(forKey: targetDevice.id)
                 sharedSecrets.removeValue(forKey: targetDevice.id)
                 await transport?.removeConnection(for: targetDevice.id)
@@ -2027,13 +2060,13 @@ public class P2PConnectionManager: ObservableObject {
 
         if pqcManager.enforcePQCHandshake,
            let negotiated = sessionKeys[targetDevice.id]?.negotiatedSuite,
-           !negotiated.isPQCGroup {
+           !(negotiated.isNegotiable && negotiated.isPQCGroup) {
             let message = "严格 PQC 已启用，但会话竟然协商到了 Classic suite=\(negotiated.rawValue)；已拒绝保留该连接。"
             SkyBridgeLogger.shared.error("⛔️ \(message)")
             establishedConnection?.cancel()
             connections.removeValue(forKey: targetDevice.id)
             sessionKeys.removeValue(forKey: targetDevice.id)
-            previousSessionKeysBeforeRekey.removeValue(forKey: targetDevice.id)
+            inboundRekeyCandidatePeerIds.remove(targetDevice.id)
             handshakeDrivers.removeValue(forKey: targetDevice.id)
             sharedSecrets.removeValue(forKey: targetDevice.id)
             await transport?.removeConnection(for: targetDevice.id)
@@ -2097,7 +2130,7 @@ public class P2PConnectionManager: ObservableObject {
                 connections.removeValue(forKey: runtimePeerId)
                 sharedSecrets.removeValue(forKey: runtimePeerId)
                 sessionKeys.removeValue(forKey: runtimePeerId)
-                previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
+                inboundRekeyCandidatePeerIds.remove(runtimePeerId)
                 negotiatedSuiteByDeviceId.removeValue(forKey: runtimePeerId)
                 handshakeDrivers.removeValue(forKey: runtimePeerId)
                 await transport?.removeConnection(for: runtimePeerId)
@@ -2462,7 +2495,7 @@ public class P2PConnectionManager: ObservableObject {
         handshakeDrivers.removeValue(forKey: peerId)
         sharedSecrets.removeValue(forKey: peerId)
         sessionKeys.removeValue(forKey: peerId)
-        previousSessionKeysBeforeRekey.removeValue(forKey: peerId)
+        inboundRekeyCandidatePeerIds.remove(peerId)
         negotiatedSuiteByDeviceId.removeValue(forKey: peerId)
         heartbeatTasks[peerId]?.cancel()
         heartbeatTasks.removeValue(forKey: peerId)
@@ -2493,44 +2526,63 @@ public class P2PConnectionManager: ObservableObject {
             "p2p-inbound message peer=\(Self.protocolIdentityLogRedaction) bytes=\(unwrapped.count) existingDriver=\(handshakeDrivers[peerId] == nil ? 0 : 1) hasSession=\(hasStoredSessionMaterial(for: peerId) ? 1 : 0)"
         )
 
-        // 已有握手驱动器：交给握手状态机处理
+        let hasTransactionalInboundRekeyCandidate =
+            handshakeDrivers[peerId] != nil
+            && inboundRekeyCandidatePeerIds.contains(peerId)
+
+        // A rekey candidate must not suspend the authenticated session it is trying
+        // to replace. Route only handshake control frames to the candidate; business
+        // ciphertext continues to use the old keys until the candidate is established.
         if let driver = handshakeDrivers[peerId] {
-            smokeInboundTrace(
-                "p2p-inbound dispatch existing-driver peer=\(Self.protocolIdentityLogRedaction)"
-            )
-            await processHandshakeFrame(unwrapped, from: peerId, initialDriver: driver)
-            return
+            if hasTransactionalInboundRekeyCandidate,
+               case .failed(let reason) = await driver.getCurrentState() {
+                inboundRekeyCandidatePeerIds.remove(peerId)
+                discardInboundRekeyCandidateAfterFailure(for: peerId, reason: reason)
+                smokeInboundTrace(
+                    "p2p-inbound discarded-expired-rekey-candidate peer=\(Self.protocolIdentityLogRedaction)"
+                )
+            } else if !hasTransactionalInboundRekeyCandidate
+                || isLikelyHandshakeControlPacket(unwrapped) {
+                smokeInboundTrace(
+                    "p2p-inbound dispatch existing-driver peer=\(Self.protocolIdentityLogRedaction) transactionalRekey=\(hasTransactionalInboundRekeyCandidate ? 1 : 0)"
+                )
+                await processHandshakeFrame(unwrapped, from: peerId, initialDriver: driver)
+                return
+            }
         }
 
-        if await handlePreHandshakeBootstrapControlMessage(unwrapped, from: peerId) {
-            smokeInboundTrace(
-                "p2p-inbound bootstrap-control-consumed peer=\(Self.protocolIdentityLogRedaction)"
-            )
-            return
-        }
+        if !hasTransactionalInboundRekeyCandidate {
+            if await handlePreHandshakeBootstrapControlMessage(unwrapped, from: peerId) {
+                smokeInboundTrace(
+                    "p2p-inbound bootstrap-control-consumed peer=\(Self.protocolIdentityLogRedaction)"
+                )
+                return
+            }
 
-        // 支持“握手失败后的同连接重试”：
-        // 若此前 driver 已进入 failed 并被移除，需要在这里按新的 MessageA 重新创建 driver。
-        if let freshInboundDriver = await ensureInboundHandshakeDriverIfNeeded(for: peerId, frame: unwrapped) {
-            smokeInboundTrace(
-                "p2p-inbound dispatch fresh-handshake peer=\(Self.protocolIdentityLogRedaction)"
-            )
-            await processHandshakeFrame(unwrapped, from: peerId, initialDriver: freshInboundDriver)
-            return
-        }
+            // 支持“握手失败后的同连接重试”：
+            // 若此前 driver 已进入 failed 并被移除，需要在这里按新的 MessageA 重新创建 driver。
+            if let freshInboundDriver = await ensureInboundHandshakeDriverIfNeeded(for: peerId, frame: unwrapped) {
+                smokeInboundTrace(
+                    "p2p-inbound dispatch fresh-handshake peer=\(Self.protocolIdentityLogRedaction)"
+                )
+                await processHandshakeFrame(unwrapped, from: peerId, initialDriver: freshInboundDriver)
+                return
+            }
 
-        // 支持“已建立会话上的入站 rekey”：
-        // 若当前无 driver 但已存在 sessionKeys，且收到的是 MessageA，则切换回握手模式而不是误当业务密文。
-        if let rekeyDriver = await ensureInboundRekeyDriverIfNeeded(for: peerId, frame: unwrapped) {
-            smokeInboundTrace(
-                "p2p-inbound dispatch rekey peer=\(Self.protocolIdentityLogRedaction)"
-            )
-            await processHandshakeFrame(unwrapped, from: peerId, initialDriver: rekeyDriver)
-            return
+            // 支持“已建立会话上的入站 rekey”：
+            // 若当前无 driver 但已存在 sessionKeys，且收到的是 MessageA，则建立候选握手。
+            if let rekeyDriver = await ensureInboundRekeyDriverIfNeeded(for: peerId, frame: unwrapped) {
+                smokeInboundTrace(
+                    "p2p-inbound dispatch rekey peer=\(Self.protocolIdentityLogRedaction)"
+                )
+                await processHandshakeFrame(unwrapped, from: peerId, initialDriver: rekeyDriver)
+                return
+            }
         }
 
         // 握手完成后的业务消息（加密通道）
-        if handshakeDrivers[peerId] == nil, sessionKeys[peerId] != nil {
+        if sessionKeys[peerId] != nil,
+           handshakeDrivers[peerId] == nil || hasTransactionalInboundRekeyCandidate {
             // 兼容：避免把握手控制包（尤其是 Finished 38 bytes）当作业务消息去解密，导致 CryptoKitError 3 日志
             if isLikelyHandshakeControlPacket(unwrapped) {
                 SkyBridgeLogger.shared.debug("ℹ️ 收到握手控制包（忽略）：\(unwrapped.count) bytes")
@@ -2713,7 +2765,7 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("no requested PQC KEM public key available")
         }
 
-        let localId = localStablePersistentDeviceIdentifier()
+        let localId = try localStablePersistentDeviceIdentifier()
         let now = Date()
         let generation = UInt64(max(0, (now.timeIntervalSince1970 * 1000.0).rounded(.down)))
         let keyId = Self.signedLANRefreshKeyId(
@@ -2807,7 +2859,7 @@ public class P2PConnectionManager: ObservableObject {
         let selectedIdentity = try await localProtocolIdentityProofForProtocolBinding(
             candidateAlgorithms: candidateAlgorithms
         )
-        let localId = localStablePersistentDeviceIdentifier()
+        let localId = try localStablePersistentDeviceIdentifier()
         let now = Date()
         let unsigned = AppMessage.SignedProtocolIdentityBindingPayload(
             deviceId: localId,
@@ -3051,6 +3103,12 @@ public class P2PConnectionManager: ObservableObject {
             )
             return nil
         }
+        guard messageA.hasNegotiableOfferShape else {
+            smokeInboundTrace(
+                "p2p-inbound messageA-non-negotiable peer=\(Self.protocolIdentityLogRedaction)"
+            )
+            return nil
+        }
         smokeInboundTrace(
             "p2p-inbound messageA-decoded peer=\(Self.protocolIdentityLogRedaction) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
@@ -3059,7 +3117,7 @@ public class P2PConnectionManager: ObservableObject {
             if !hasActiveAuthenticatedSession(for: peerId) {
                 clearStaleInboundSessionState(
                     for: peerId,
-                    reason: "message_a_without_authenticated_session"
+                    reason: .messageAWithoutAuthenticatedSession
                 )
                 SkyBridgeLogger.shared.warning(
                     "🧹 清理陈旧入站会话状态，按 fresh handshake 重新处理: peer=\(Self.protocolIdentityLogRedaction)"
@@ -3076,7 +3134,7 @@ public class P2PConnectionManager: ObservableObject {
             }
         }
 
-        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         let previousPolicy = inboundResponderSelectionPolicy(peerHasPQCGroup: peerHasPQCGroup)
         let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
         if pqcManager.enforcePQCHandshake {
@@ -3114,7 +3172,7 @@ public class P2PConnectionManager: ObservableObject {
                 let driver = try skyBridgeCore.createHandshakeDriver(
                     transport: transport,
                     peerSupportedSuites: messageA.supportedSuites,
-                    localSOAPeerId: localSOAPeerIdBytes(),
+                    localSOAPeerId: try localSOAPeerIdBytes(),
                     expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId),
                     trustProvider: strictTrustContext?.provider,
                     authenticatedIncomingEstablishedPolicy: strictTrustContext == nil
@@ -3158,13 +3216,25 @@ public class P2PConnectionManager: ObservableObject {
                 )
             }
             setSessionKeys(keys, for: peerId)
-            previousSessionKeysBeforeRekey.removeValue(forKey: peerId)
+            inboundRekeyCandidatePeerIds.remove(peerId)
             let pairKeySourcePeerId = strictStablePeerId ?? peerId
             if let remotePeerId = soaPeerIdBytes(for: pairKeySourcePeerId) {
-                let pairKey = PeerSessionArbiter.pairKey(
-                    localPeerId: localSOAPeerIdBytes(),
-                    remotePeerId: remotePeerId
-                )
+                let pairKey: Data
+                do {
+                    pairKey = PeerSessionArbiter.pairKey(
+                        localPeerId: try localSOAPeerIdBytes(),
+                        remotePeerId: remotePeerId
+                    )
+                } catch {
+                    sessionKeys.removeValue(forKey: peerId)
+                    handshakeDrivers.removeValue(forKey: peerId)
+                    connectionStatusByDeviceId[peerId] = .failed
+                    connectionErrorByDeviceId[peerId] = error.localizedDescription
+                    SkyBridgeLogger.shared.error(
+                        "⛔️ 入站握手完成后本机 identity snapshot 不可用，拒绝发布会话: \(Self.diagnosticErrorSummary(error))"
+                    )
+                    return
+                }
                 pairKeyByDeviceId[peerId] = pairKey
                 if pairKeySourcePeerId != peerId {
                     pairKeyByDeviceId[pairKeySourcePeerId] = pairKey
@@ -3191,10 +3261,9 @@ public class P2PConnectionManager: ObservableObject {
             syncPresentationState(for: peerId)
 
         case .failed(let reason):
-            if let previousKeys = previousSessionKeysBeforeRekey.removeValue(forKey: peerId) {
-                await restoreActiveSessionAfterRekeyFailure(
+            if inboundRekeyCandidatePeerIds.remove(peerId) != nil {
+                discardInboundRekeyCandidateAfterFailure(
                     for: peerId,
-                    previousKeys: previousKeys,
                     reason: reason
                 )
                 return
@@ -3222,6 +3291,7 @@ public class P2PConnectionManager: ObservableObject {
         guard handshakeDrivers[peerId] == nil else { return handshakeDrivers[peerId] }
         guard hasStoredSessionMaterial(for: peerId) else { return nil }
         guard hasActiveAuthenticatedSession(for: peerId) else { return nil }
+        guard sessionKeys[peerId] != nil else { return nil }
 
         let handshakeFrame = HandshakePadding.unwrapIfNeeded(frame, label: "rx")
         guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame) else {
@@ -3236,11 +3306,17 @@ public class P2PConnectionManager: ObservableObject {
             )
             return nil
         }
+        guard messageA.hasNegotiableOfferShape else {
+            smokeInboundTrace(
+                "p2p-inbound rekey-messageA-non-negotiable peer=\(Self.protocolIdentityLogRedaction)"
+            )
+            return nil
+        }
         smokeInboundTrace(
             "p2p-inbound rekey-messageA-decoded peer=\(Self.protocolIdentityLogRedaction) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
 
-        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         let previousPolicy = inboundResponderSelectionPolicy(peerHasPQCGroup: peerHasPQCGroup)
         let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
         if pqcManager.enforcePQCHandshake {
@@ -3278,12 +3354,10 @@ public class P2PConnectionManager: ObservableObject {
                 let driver = try skyBridgeCore.createHandshakeDriver(
                     transport: transport,
                     peerSupportedSuites: messageA.supportedSuites,
-                    localSOAPeerId: localSOAPeerIdBytes(),
+                    localSOAPeerId: try localSOAPeerIdBytes(),
                     expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId),
                     trustProvider: strictTrustContext?.provider,
-                    authenticatedIncomingEstablishedPolicy: strictTrustContext == nil
-                        ? .rejectDuplicate
-                        : .replaceAuthenticated
+                    authenticatedIncomingEstablishedPolicy: .replaceAuthenticated
                 )
                 handshakeDrivers[peerId] = driver
             }
@@ -3299,16 +3373,11 @@ public class P2PConnectionManager: ObservableObject {
             ?? resolvedNegotiatedSuite(forAnyPeerId: peerId)?.rawValue
             ?? "Classic"
         let targetSuite = preferredRekeyTargetSuite(offeredSuites: messageA.supportedSuites) ?? currentSuite
-        if let existingKeys = sessionKeys[peerId] {
-            previousSessionKeysBeforeRekey[peerId] = existingKeys
-        }
-        await releaseArbiterState(for: peerId)
-        sessionKeys.removeValue(forKey: peerId)
+        inboundRekeyCandidatePeerIds.insert(peerId)
         setRekeyPresentationStatus(for: peerId, fromSuite: currentSuite, toSuite: targetSuite)
-        rekeyInProgress.insert(peerId)
-        currentHandshakeState = "收到对端 rekey 请求，重新握手中..."
+        currentHandshakeState = "收到对端 rekey 请求，候选握手中..."
         SkyBridgeLogger.shared.info(
-            "🔁 收到对端 rekey 请求，切换到握手模式: peer=\(Self.protocolIdentityLogRedaction) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
+            "🔁 收到对端 rekey 请求，保留旧会话并启动候选握手: peer=\(Self.protocolIdentityLogRedaction) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
         )
         smokeInboundTrace(
             "p2p-inbound driver-created peer=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
@@ -3429,7 +3498,10 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
-    private func clearStaleInboundSessionState(for peerId: String, reason: String) {
+    private func clearStaleInboundSessionState(
+        for peerId: String,
+        reason: StaleInboundSessionCleanupReason
+    ) {
         let runtimePeerId = runtimePeerId(forAnyPeerId: peerId)
         let presentationPeerId = presentationPeerId(for: runtimePeerId)
         let aliases = connectionAliasSet(for: runtimePeerId)
@@ -3439,8 +3511,8 @@ public class P2PConnectionManager: ObservableObject {
         for key in stateKeysMatchingAliases(aliases, keys: sessionKeys.keys) {
             sessionKeys.removeValue(forKey: key)
         }
-        for key in stateKeysMatchingAliases(aliases, keys: previousSessionKeysBeforeRekey.keys) {
-            previousSessionKeysBeforeRekey.removeValue(forKey: key)
+        for key in stateKeysMatchingAliases(aliases, keys: inboundRekeyCandidatePeerIds) {
+            inboundRekeyCandidatePeerIds.remove(key)
         }
         for key in stateKeysMatchingAliases(aliases, keys: sharedSecrets.keys) {
             sharedSecrets.removeValue(forKey: key)
@@ -3463,7 +3535,7 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         SkyBridgeLogger.shared.debug(
-            "🧹 已清理陈旧入站会话材料: peer=\(peerId) reason=\(reason)"
+            "🧹 已清理陈旧入站会话材料: peer=\(Self.protocolIdentityLogRedaction) reason=\(reason.rawValue)"
         )
     }
 
@@ -3485,7 +3557,7 @@ public class P2PConnectionManager: ObservableObject {
         }
         clearStaleInboundSessionState(
             for: stablePeerId,
-            reason: "strict_authenticated_inbound_reconnect_replaced_stable_session"
+            reason: .strictAuthenticatedInboundReconnectReplacedStableSession
         )
     }
 
@@ -3944,8 +4016,18 @@ public class P2PConnectionManager: ObservableObject {
         // Store under both the "declared" deviceId and the current peerId key.
         // Reason: in discovery/bonjour flows the runtime peerId can be "bonjour:<name>@local." while the
         // pairing identity exchange uses a stable deviceId. If we only store one, PQC lookup may miss.
-        await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId, kemPublicKeys: payload.kemPublicKeys)
-        await KEMTrustStore.shared.upsert(deviceId: peerId, kemPublicKeys: payload.kemPublicKeys)
+        await KEMTrustStore.shared.upsert(
+            deviceId: declaredDeviceId,
+            kemPublicKeys: payload.kemPublicKeys,
+            platform: payload.platform,
+            osVersion: payload.osVersion
+        )
+        await KEMTrustStore.shared.upsert(
+            deviceId: peerId,
+            kemPublicKeys: payload.kemPublicKeys,
+            platform: payload.platform,
+            osVersion: payload.osVersion
+        )
         await ProtocolIdentityTrustStore.shared.upsert(
             deviceId: declaredDeviceId,
             protocolIdentityPublicKeys: payload.protocolIdentityPublicKeys
@@ -3989,7 +4071,7 @@ public class P2PConnectionManager: ObservableObject {
 
         if pqcManager.enforcePQCHandshake,
            let negotiatedSuite = resolvedNegotiatedSuite(forAnyPeerId: peerId),
-           !negotiatedSuite.isPQCGroup,
+           !(negotiatedSuite.isNegotiable && negotiatedSuite.isPQCGroup),
            let targetSuite = preferredRekeyTargetSuite() {
             scheduleBootstrapRekeyIfNeeded(peerId: peerId, suiteRaw: targetSuite)
         }
@@ -4017,6 +4099,7 @@ public class P2PConnectionManager: ObservableObject {
         // Avoid mixing business traffic during in-band rekey.
         if rekeyInProgress.contains(deviceId) {
             if let negotiatedSuite = resolvedNegotiatedSuite(forAnyPeerId: deviceId),
+               negotiatedSuite.isNegotiable,
                negotiatedSuite.isPQCGroup {
                 clearRekeyInProgress(for: deviceId)
                 SkyBridgeLogger.shared.info(
@@ -4042,11 +4125,7 @@ public class P2PConnectionManager: ObservableObject {
 
         // 设备 ID：用于对端把我们写入 trust store 的 key（尽量与 discovery 的 deviceId 对齐）
         let snapshot = AppleMobileDeviceIdentity.currentSnapshot()
-        let localId = localStableDeviceIdentifier().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !localId.isEmpty else {
-            SkyBridgeLogger.shared.warning("⚠️ 跳过 pairingIdentityExchange：本机 stable deviceId 为空")
-            return
-        }
+        let localId = try localStableDeviceIdentifier()
         let serviceHints = localPeerServiceHints()
         let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
         let message = AppMessage.pairingIdentityExchange(.init(
@@ -4178,7 +4257,7 @@ public class P2PConnectionManager: ObservableObject {
     private func hasStrictPQCTrustBootstrapMaterial(for peerId: String) async -> Bool {
         let candidates = bootstrapKEMLookupCandidates(for: peerId)
         let kemKeys = await Self.trustedPeerKEMPublicKeysFromAllStores(forAny: candidates)
-        guard kemKeys.keys.contains(where: \.isPQCGroup) else {
+        guard kemKeys.keys.contains(where: { $0.isNegotiable && $0.isPQCGroup }) else {
             return false
         }
 
@@ -4312,7 +4391,7 @@ public class P2PConnectionManager: ObservableObject {
             connections.removeValue(forKey: runtimePeerId)
             selectedEndpointDescriptionByDeviceId.removeValue(forKey: runtimePeerId)
             sessionKeys.removeValue(forKey: runtimePeerId)
-            previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
+            inboundRekeyCandidatePeerIds.remove(runtimePeerId)
             handshakeDrivers.removeValue(forKey: runtimePeerId)
             sharedSecrets.removeValue(forKey: runtimePeerId)
             await transport?.removeConnection(for: runtimePeerId)
@@ -4336,7 +4415,7 @@ public class P2PConnectionManager: ObservableObject {
             connections.removeValue(forKey: runtimePeerId)
             selectedEndpointDescriptionByDeviceId.removeValue(forKey: runtimePeerId)
             sessionKeys.removeValue(forKey: runtimePeerId)
-            previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
+            inboundRekeyCandidatePeerIds.remove(runtimePeerId)
             handshakeDrivers.removeValue(forKey: runtimePeerId)
             sharedSecrets.removeValue(forKey: runtimePeerId)
             await transport?.removeConnection(for: runtimePeerId)
@@ -4389,7 +4468,7 @@ public class P2PConnectionManager: ObservableObject {
 
                 do {
                     let snapshot = AppleMobileDeviceIdentity.currentSnapshot()
-                    let localId = self.localStableDeviceIdentifier()
+                    let localId = try self.localStableDeviceIdentifier()
                     let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
                     
                     let message = AppMessage.heartbeat(.init(
@@ -5448,11 +5527,13 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     private func preferredRekeyTargetSuite(offeredSuites: [CryptoSuite] = []) -> String? {
-        if let preferredOfferedPQC = offeredSuites.first(where: { $0.isPQCGroup }) {
+        if let preferredOfferedPQC = offeredSuites.first(where: {
+            $0.isNegotiable && $0.isPQCGroup
+        }) {
             return preferredOfferedPQC.rawValue
         }
-        if let firstOffered = offeredSuites.first {
-            return firstOffered.rawValue
+        if !offeredSuites.isEmpty {
+            return nil
         }
 
         let capability = CryptoProviderFactory.detectCapability()
@@ -5460,7 +5541,12 @@ public class P2PConnectionManager: ObservableObject {
             return nil
         }
         let provider = CryptoProviderFactory.make(policy: effectiveSelectionPolicy(enforcePQC: true))
-        return Self.preferredBootstrapRekeyTargetSuite(using: provider)?.rawValue
+        guard let target = Self.preferredBootstrapRekeyTargetSuite(using: provider),
+              target.isNegotiable,
+              target.isPQCGroup else {
+            return nil
+        }
+        return target.rawValue
     }
 
     private func setRekeyPresentationStatus(
@@ -6012,9 +6098,9 @@ public class P2PConnectionManager: ObservableObject {
         P2PConnectionEndpointPolicy.isLoopbackAddress(ipAddress)
     }
 
-    private func isSelfConnectionTarget(_ device: DiscoveredDevice) -> Bool {
-        let localId = localStableDeviceIdentifier().lowercased()
-        let persistentLocalId = localStablePersistentDeviceIdentifier().lowercased()
+    private func isSelfConnectionTarget(_ device: DiscoveredDevice) throws -> Bool {
+        let localId = try localStableDeviceIdentifier().lowercased()
+        let persistentLocalId = try localStablePersistentDeviceIdentifier().lowercased()
         let normalizedDeviceId = device.id.lowercased()
         if normalizedDeviceId == localId || normalizedDeviceId == persistentLocalId {
             return true
@@ -6096,24 +6182,29 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
-    private func restoreActiveSessionAfterRekeyFailure(
+    private func discardInboundRekeyCandidateAfterFailure(
         for peerId: String,
-        previousKeys: SessionKeys,
         reason: HandshakeFailureReason
-    ) async {
-        setSessionKeys(previousKeys, for: peerId)
+    ) {
         handshakeDrivers.removeValue(forKey: peerId)
         rekeyInProgress.remove(peerId)
         clearRekeyPresentationStatus(for: peerId)
-        if let pairKey = activeSOAPairKey(for: peerId) {
-            pairKeyByDeviceId[peerId] = pairKey
-            await PeerSessionArbiter.shared.markEstablished(pairKey: pairKey)
+        strictInboundStablePeerIdByRuntimePeerId.removeValue(forKey: peerId)
+
+        guard let retainedKeys = sessionKeys[peerId] else {
+            let message = "入站 rekey 候选失败且旧会话丢失"
+            currentHandshakeState = message
+            connectionStatusByDeviceId[peerId] = .failed
+            connectionErrorByDeviceId[peerId] = message
+            SkyBridgeLogger.shared.error(
+                "⛔️ \(message): peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.diagnosticHandshakeFailureCode(reason))"
+            )
+            return
         }
 
-        currentHandshakeState = "rekey失败，保留原会话 (Suite: \(previousKeys.negotiatedSuite.rawValue))"
+        currentHandshakeState = "rekey失败，旧会话未受影响 (Suite: \(retainedKeys.negotiatedSuite.rawValue))"
         connectionStatusByDeviceId[peerId] = .connected
         connectionErrorByDeviceId.removeValue(forKey: peerId)
-        startHeartbeatIfNeeded(deviceId: peerId)
 
         let activeDevice = makeActiveConnectionDevice(
             peerId: peerId,
@@ -6123,7 +6214,7 @@ public class P2PConnectionManager: ObservableObject {
         syncPresentationState(for: peerId)
 
         SkyBridgeLogger.shared.warning(
-            "⚠️ rekey失败，已恢复原会话: \(peerId) - \(reason)"
+            "⚠️ rekey 候选失败，已丢弃候选并保留旧会话: \(Self.protocolIdentityLogRedaction) - \(Self.diagnosticHandshakeFailureCode(reason))"
         )
     }
 
@@ -6131,17 +6222,17 @@ public class P2PConnectionManager: ObservableObject {
         device.capabilities.contains("hs_soa") || device.advertisedCapabilities.contains("hs_soa")
     }
 
-    private func localStableDeviceIdentifier() -> String {
-        ProtocolDeviceIdentity.stableDeviceId()
+    private func localStableDeviceIdentifier() throws -> String {
+        try skyBridgeCore.requireCurrentProtocolIdentitySnapshot().deviceId
     }
 
-    private func localStablePersistentDeviceIdentifier() -> String {
-        let raw = localStableDeviceIdentifier()
+    private func localStablePersistentDeviceIdentifier() throws -> String {
+        let raw = try localStableDeviceIdentifier()
         return PeerIdentityAliasResolver.persistentDeviceId(from: raw) ?? raw
     }
 
-    private func localSOAPeerIdBytes() -> Data {
-        var persistent = localStablePersistentDeviceIdentifier()
+    private func localSOAPeerIdBytes() throws -> Data {
+        var persistent = try localStablePersistentDeviceIdentifier()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if persistent.hasPrefix("id:") {
@@ -6229,7 +6320,7 @@ public class P2PConnectionManager: ObservableObject {
         return Data(bytes)
     }
 
-    private func activeSOAPairKey(for deviceId: String) -> Data? {
+    private func activeSOAPairKey(for deviceId: String) throws -> Data? {
         if let pairKey = pairKeyByDeviceId[deviceId] {
             return pairKey
         }
@@ -6237,13 +6328,13 @@ public class P2PConnectionManager: ObservableObject {
             return nil
         }
         return PeerSessionArbiter.pairKey(
-            localPeerId: localSOAPeerIdBytes(),
+            localPeerId: try localSOAPeerIdBytes(),
             remotePeerId: remotePeerId
         )
     }
 
-    private func clearArbiterEstablishedStateForRekey(for deviceId: String) async -> Data? {
-        guard let pairKey = activeSOAPairKey(for: deviceId) else {
+    private func clearArbiterEstablishedStateForRekey(for deviceId: String) async throws -> Data? {
+        guard let pairKey = try activeSOAPairKey(for: deviceId) else {
             return nil
         }
         SkyBridgeLogger.shared.info("🧩 rekey: releasing SOA established guard for \(deviceId)")
@@ -6317,7 +6408,7 @@ public class P2PConnectionManager: ObservableObject {
             let outboundSOATargetPeerId = strictTrustContext?.stablePeerId ?? peerId
             let canBindSOATarget = soaPeerIdBytes(for: outboundSOATargetPeerId) != nil
             let shouldAdvertiseSOA = allowSOA && (shouldUseSOA(for: device) || canBindSOATarget)
-            let localPeerId = shouldAdvertiseSOA ? localSOAPeerIdBytes() : nil
+            let localPeerId = shouldAdvertiseSOA ? try localSOAPeerIdBytes() : nil
             let remotePeerId = shouldAdvertiseSOA ? soaPeerIdBytes(for: outboundSOATargetPeerId) : nil
             if let localPeerId, let remotePeerId {
                 pairKeyByDeviceId[peerId] = PeerSessionArbiter.pairKey(
@@ -6381,8 +6472,17 @@ public class P2PConnectionManager: ObservableObject {
     public func rekeyToPreferPQC(deviceId: String, allowSOA: Bool = false) async throws {
         let deviceId = canonicalPeerLookupKey(deviceId)
         let fromSuite = resolvedNegotiatedSuite(forAnyPeerId: deviceId)?.rawValue ?? "Classic"
-        let targetSuite = preferredRekeyTargetSuite() ?? fromSuite
-        let rekeyPairKey = allowSOA ? await clearArbiterEstablishedStateForRekey(for: deviceId) : nil
+        let targetSuite: String
+        if let preferredTargetSuite = preferredRekeyTargetSuite() {
+            targetSuite = preferredTargetSuite
+        } else if pqcManager.enforcePQCHandshake {
+            throw P2PError.pqcRequiredUnavailable
+        } else {
+            targetSuite = fromSuite
+        }
+        let rekeyPairKey = allowSOA
+            ? try await clearArbiterEstablishedStateForRekey(for: deviceId)
+            : nil
         setRekeyPresentationStatus(for: deviceId, fromSuite: fromSuite, toSuite: targetSuite)
         rekeyInProgress.insert(deviceId)
         defer {
@@ -6669,7 +6769,7 @@ extension P2PConnectionManager {
         localPQCAvailable: Bool = true
     ) -> Bool {
         guard pqcManager.enforcePQCHandshake else { return false }
-        guard supportedSuites.contains(where: { $0.isPQCGroup }) else { return true }
+        guard supportedSuites.contains(where: { $0.isNegotiable && $0.isPQCGroup }) else { return true }
         return !localPQCAvailable
     }
 

@@ -4,14 +4,18 @@ import OSLog
 import SystemConfiguration
 
 /// SelfIdentityProvider - 本机强身份提供者
-/// 中文说明：负责生成、持久化和提供本机的权威身份标识，用于设备发现时精确判定"本机"。
+/// 中文说明：提供由 DeviceIdentity authority 统一绑定的本机强身份，用于设备发现时精确判定"本机"。
 /// 身份组成：
-/// 1. selfDeviceId: UUID（持久化至 Keychain，首次启动生成）
-/// 2. selfPubKeyFingerprint: P-256 公钥 SHA256 指纹（hex小写）
+/// 1. selfDeviceId: immutable identity authority 中的 device ID
+/// 2. selfPubKeyFingerprint: 同一 authority 中 P-256 公钥的 SHA256 指纹（hex小写）
 /// 3. selfInterfaceMACSet: 本机物理网卡 MAC 地址集合
 @available(macOS 14.0, *)
 public actor SelfIdentityProvider {
     public static let shared = SelfIdentityProvider()
+
+    private typealias IdentityLoader = @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?
+    private typealias DeviceIDMirror = @Sendable (String) -> Bool
+    private typealias MACAddressLoader = @Sendable () async -> Set<String>
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SelfIdentity")
     
@@ -20,8 +24,42 @@ public actor SelfIdentityProvider {
     private(set) var deviceId: String = ""
     private(set) var pubKeyFP: String = ""
     private(set) var macSet: Set<String> = []
-    
-    private init() {}
+
+    private let identityLoader: IdentityLoader
+    private let deviceIDMirror: DeviceIDMirror
+    private let macAddressLoader: MACAddressLoader
+
+    private init() {
+        identityLoader = { allowCreate in
+            let manager = DeviceIdentityKeyManager.shared
+            if allowCreate {
+                return try await manager.getOrCreateIdentityKey()
+            }
+            return try await manager.existingIdentityKeyInfoStrict()
+        }
+        deviceIDMirror = { deviceID in
+            guard let data = deviceID.data(using: .utf8) else { return false }
+            return KeychainManager.shared.importKey(
+                data: data,
+                service: DeviceIDStorage.service,
+                account: DeviceIDStorage.account
+            )
+        }
+        macAddressLoader = {
+            await NetworkInterfaceInspector.currentPhysicalMACs()
+        }
+    }
+
+    /// Deterministic persistence seam for strict identity/error-path tests.
+    init(
+        identityLoader: @escaping @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?,
+        deviceIDMirror: @escaping @Sendable (String) -> Bool = { _ in true },
+        macAddressLoader: @escaping @Sendable () async -> Set<String> = { [] }
+    ) {
+        self.identityLoader = identityLoader
+        self.deviceIDMirror = deviceIDMirror
+        self.macAddressLoader = macAddressLoader
+    }
 
     private enum DeviceIDStorage {
         static let service = "SkyBridge.SelfIdentity"
@@ -30,23 +68,25 @@ public actor SelfIdentityProvider {
     
  // MARK: - 加载或创建本机身份
     
- /// 加载或创建本机强身份（应在 App 启动时调用一次）
-    public func loadOrCreate() async {
- // 1) 加载或生成 deviceId（持久化到 Keychain）
-        await loadOrCreateDeviceId()
-        
- // 2) 加载本机 P-256 公钥指纹
-        await loadPubKeyFingerprint()
-        
- // 3) 获取本机物理网卡 MAC 地址集合
+    /// 加载或创建本机强身份（应在 App 启动时调用一次）。
+    ///
+    /// Device ID 与公钥指纹必须来自同一次 authority 解析；Keychain 损坏、
+    /// 迁移冲突和缺少 entitlement 都直接传播给调用方。
+    public func loadOrCreate() async throws {
+        _ = try await loadAuthoritativeIdentity(allowCreate: true)
         await loadMACAddresses()
         
         logger.info("✅ 本机强身份已加载: deviceId=\(self.deviceId.prefix(8))..., pubKeyFP=\(self.pubKeyFP.prefix(16))..., MACs=\(self.macSet.count)")
     }
     
-    /// 获取当前身份快照（供外部判定使用）
-    public func snapshot() -> SelfIdentitySnapshot {
-        return SelfIdentitySnapshot(
+    /// Return the currently published presentation snapshot.
+    ///
+    /// This internal view may be empty before authority prewarm and is suitable only
+    /// for non-authorizing discovery cleanup or diagnostics. Security, signaling,
+    /// persistence and trust paths must use `snapshotEnsuringProtocolDeviceId` or
+    /// `protocolIdentityDeviceId`, both of which fail closed.
+    func presentationSnapshot() -> SelfIdentitySnapshot {
+        SelfIdentitySnapshot(
             deviceId: deviceId,
             pubKeyFP: pubKeyFP,
             macSet: macSet
@@ -58,32 +98,16 @@ public actor SelfIdentityProvider {
     /// Some transport control paths run before the full self-identity actor has
     /// been warmed.  A blank deviceId is worse than an omitted optional field:
     /// peers can cache it as a successful bootstrap with no stable authority.
-    public func protocolIdentityDeviceId(allowCreate: Bool) async -> String {
-        let cached = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cached.isEmpty {
-            return cached
-        }
-
-        let resolved: String?
-        if allowCreate {
-            resolved = await DeviceIdentityKeyManager.shared.getDeviceId()
-        } else {
-            resolved = await DeviceIdentityKeyManager.shared.existingDeviceId()
-        }
-
-        guard let resolved = resolved?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !resolved.isEmpty else {
-            return ""
-        }
-
-        deviceId = resolved
-        return resolved
+    public func protocolIdentityDeviceId(allowCreate: Bool) async throws -> String {
+        try await loadAuthoritativeIdentity(allowCreate: allowCreate).deviceId
     }
 
-    public func snapshotEnsuringProtocolDeviceId(allowCreate: Bool) async -> SelfIdentitySnapshot {
-        let resolvedDeviceId = await protocolIdentityDeviceId(allowCreate: allowCreate)
+    public func snapshotEnsuringProtocolDeviceId(
+        allowCreate: Bool
+    ) async throws -> SelfIdentitySnapshot {
+        _ = try await loadAuthoritativeIdentity(allowCreate: allowCreate)
         return SelfIdentitySnapshot(
-            deviceId: resolvedDeviceId,
+            deviceId: deviceId,
             pubKeyFP: pubKeyFP,
             macSet: macSet
         )
@@ -91,80 +115,63 @@ public actor SelfIdentityProvider {
     
  // MARK: - 注册安全相关方法
     
- /// 生成用于注册的设备指纹
- ///
- /// 该指纹用于防止恶意注册，整合了 deviceId、pubKeyFP 和 macSet
- /// - Returns: 设备指纹哈希（SHA256 hex）
-    public func generateRegistrationFingerprint() -> String {
- // 组合所有身份信息
-        var components: [String] = []
-        
- // 添加设备ID
-        if !deviceId.isEmpty {
-            components.append("device:\(deviceId)")
-        }
-        
- // 添加公钥指纹
-        if !pubKeyFP.isEmpty {
-            components.append("pubkey:\(pubKeyFP)")
-        }
-        
- // 添加排序后的MAC地址
-        let sortedMACs = macSet.sorted().joined(separator: ",")
-        if !sortedMACs.isEmpty {
-            components.append("macs:\(sortedMACs)")
-        }
-        
- // 添加硬件信息（增加指纹的唯一性）
-        let hardwareInfo = getHardwareInfo()
-        if !hardwareInfo.isEmpty {
-            components.append("hw:\(hardwareInfo)")
-        }
-        
- // 生成最终指纹
-        let combined = components.joined(separator: "|")
-        let fingerprint = sha256Hex(Data(combined.utf8))
+    /// Generate the registration-policy fingerprint from the canonical authority tuple.
+    ///
+    /// The input is deliberately limited to the immutable authority device ID and its
+    /// matching P-256 public-key fingerprint. Host names, MAC addresses, model data and
+    /// other mutable hardware presentation fields are not identity authority.
+    public func generateRegistrationFingerprint(
+        allowCreate: Bool
+    ) async throws -> String {
+        let identity = try await loadAuthoritativeIdentity(allowCreate: allowCreate)
+        let fingerprint = Self.registrationFingerprint(
+            deviceId: identity.deviceId,
+            publicKeyFingerprint: identity.pubKeyFP
+        )
         
         logger.debug("🔐 生成注册设备指纹: \(fingerprint.prefix(16))...")
         return fingerprint
     }
+
+    /// Versioned and length-delimited encoding prevents tuple ambiguity and makes future
+    /// migrations explicit instead of silently changing an account-policy identifier.
+    nonisolated static func registrationFingerprint(
+        deviceId: String,
+        publicKeyFingerprint: String
+    ) -> String {
+        var material = Data("com.skybridge.registration-device-fingerprint.v1".utf8)
+        appendRegistrationFingerprintField(deviceId, to: &material)
+        appendRegistrationFingerprintField(publicKeyFingerprint, to: &material)
+        let digest = SHA256.hash(data: material)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func appendRegistrationFingerprintField(
+        _ value: String,
+        to data: inout Data
+    ) {
+        let field = Data(value.utf8)
+        var byteCount = UInt64(field.count).bigEndian
+        withUnsafeBytes(of: &byteCount) { data.append(contentsOf: $0) }
+        data.append(field)
+    }
     
  /// 获取设备指纹信息（用于注册安全服务）
  /// - Returns: 设备指纹信息结构
-    public func getRegistrationDeviceInfo() -> RegistrationDeviceInfo {
+    public func getRegistrationDeviceInfo(
+        allowCreate: Bool
+    ) async throws -> RegistrationDeviceInfo {
+        let identity = try await loadAuthoritativeIdentity(allowCreate: allowCreate)
         return RegistrationDeviceInfo(
-            deviceId: deviceId,
-            fingerprint: generateRegistrationFingerprint(),
+            deviceId: identity.deviceId,
+            fingerprint: Self.registrationFingerprint(
+                deviceId: identity.deviceId,
+                publicKeyFingerprint: identity.pubKeyFP
+            ),
             macAddresses: Array(macSet),
             hardwareModel: getHardwareModel(),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString
         )
-    }
-    
- /// 获取硬件信息（用于指纹生成）
-    private func getHardwareInfo() -> String {
-        var components: [String] = []
-        
- // 获取主机名
-        if let hostname = Host.current().localizedName {
-            components.append(hostname)
-        }
-        
- // 获取处理器数量
-        let processorCount = ProcessInfo.processInfo.processorCount
-        components.append("cpu:\(processorCount)")
-        
- // 获取物理内存
-        let physicalMemory = ProcessInfo.processInfo.physicalMemory
-        components.append("mem:\(physicalMemory)")
-        
- // 获取硬件型号
-        let model = getHardwareModel()
-        if !model.isEmpty {
-            components.append("model:\(model)")
-        }
-        
-        return components.joined(separator: "_")
     }
     
  /// 获取硬件型号（避免使用已废弃的 String(cString:)）
@@ -188,115 +195,58 @@ public actor SelfIdentityProvider {
     }
     
  // MARK: - 私有加载逻辑
-    
-    private func loadOrCreateDeviceId() async {
-        let protocolIdentityDeviceID = await DeviceIdentityKeyManager.shared
-            .getDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if !protocolIdentityDeviceID.isEmpty {
-            let currentStored = loadPersistedDeviceId()
-            if currentStored != protocolIdentityDeviceID {
-                if persistDeviceId(protocolIdentityDeviceID) {
-                    if let currentStored, !currentStored.isEmpty {
-                        logger.notice(
-                            "🔁 SelfIdentityProvider deviceId migrated to protocol identity source: old=\(currentStored.prefix(8), privacy: .public)... new=\(protocolIdentityDeviceID.prefix(8), privacy: .public)..."
-                        )
-                    } else {
-                        logger.debug("📱 SelfIdentityProvider deviceId mirrored from protocol identity source: \(protocolIdentityDeviceID.prefix(8))...")
-                    }
-                } else if let currentStored, !currentStored.isEmpty {
-                    logger.error("❌ SelfIdentityProvider deviceId migration persistence failed; using protocol identity ID in-memory")
-                }
-            } else {
-                logger.debug("📱 SelfIdentityProvider 使用协议身份 deviceId: \(protocolIdentityDeviceID.prefix(8))...")
-            }
-            deviceId = protocolIdentityDeviceID
-            return
+    private func loadAuthoritativeIdentity(
+        allowCreate: Bool
+    ) async throws -> DeviceIdentityKeyInfo {
+        guard let identity = try await identityLoader(allowCreate) else {
+            throw DeviceIdentityKeyError.keyNotFound
         }
-
-        if let existing = loadPersistedDeviceId() {
-            deviceId = existing
-            logger.debug("📱 从 Keychain 加载 deviceId: \(existing.prefix(8))...")
-            return
-        }
-
-        let newId = UUID().uuidString
-        if persistDeviceId(newId) {
-            deviceId = newId
-            logger.info("🆕 生成新 deviceId 并已持久化: \(newId.prefix(8))...")
-        } else {
-            logger.error("❌ deviceId 持久化失败，使用临时 ID")
-            deviceId = newId
-        }
-    }
-
-    private func loadPersistedDeviceId() -> String? {
-        if let data = KeychainManager.shared.exportKey(
-            service: DeviceIDStorage.service,
-            account: DeviceIDStorage.account
-        ),
-           let existing = String(data: data, encoding: .utf8),
-           !existing.isEmpty {
-            return existing
-        }
-        return nil
-    }
-
-    @discardableResult
-    private func persistDeviceId(_ deviceId: String) -> Bool {
-        guard let data = deviceId.data(using: .utf8) else { return false }
-        return KeychainManager.shared.importKey(
-            data: data,
-            service: DeviceIDStorage.service,
-            account: DeviceIDStorage.account
+        let normalizedDeviceID = identity.deviceId.trimmingCharacters(
+            in: .whitespacesAndNewlines
         )
-    }
-    
-    private func loadPubKeyFingerprint() async {
- // 尝试从 Keychain 读取本机 P-256 公钥（nonisolated 方法，不需要 await）
-        let tag = "default" // 与你现有的密钥标签对齐
-        
- // 优先尝试读取 Secure Enclave 公钥
-        if let pubKey = KeychainManager.shared.loadSecureEnclavePublicKey(tag: tag) {
-            let pubData = pubKey.rawRepresentation
-            pubKeyFP = sha256Hex(pubData)
-            logger.debug("🔐 从 Secure Enclave 加载公钥指纹: \(self.pubKeyFP.prefix(16))...")
-            return
+        guard normalizedDeviceID == identity.deviceId,
+              !normalizedDeviceID.isEmpty,
+              identity.keyType == .p256Signing else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Self identity is not a valid P-256 device authority"
+            )
         }
-        
- // 回退：尝试读取普通 P-256 公钥
-        if let pubKey = KeychainManager.shared.loadP256PublicKey(tag: tag) {
-            let pubData = pubKey.rawRepresentation
-            pubKeyFP = sha256Hex(pubData)
-            logger.debug("🔑 从 Keychain 加载 P-256 公钥指纹: \(self.pubKeyFP.prefix(16))...")
-            return
+        do {
+            _ = try P256.Signing.PublicKey(
+                x963Representation: identity.publicKey
+            )
+        } catch {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Self identity authority contains an invalid P-256 public key"
+            )
         }
-        
- // 如果公钥不存在，生成新密钥对（兼容首次启动）
-        logger.warning("⚠️ 本机 P-256 公钥不存在，尝试生成新密钥对")
-        if let keyPair = KeychainManager.shared.generateP256SigningKeypair(tag: tag) {
-            let pubData = keyPair.public.rawRepresentation
-            pubKeyFP = sha256Hex(pubData)
-            logger.info("🆕 生成新 P-256 密钥对，指纹: \(self.pubKeyFP.prefix(16))...")
-        } else {
-            logger.error("❌ 无法生成 P-256 密钥对，公钥指纹为空")
-            pubKeyFP = ""
+        guard identity.pubKeyFP == DeviceIdentityAuthorityRecord.fingerprint(
+            for: identity.publicKey
+        ) else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Self identity fingerprint does not match its authority public key"
+            )
         }
+
+        // Publish both fields together only after the complete authority tuple
+        // has passed validation. The historical store is write-only here and can
+        // never become an identity source.
+        deviceId = identity.deviceId
+        pubKeyFP = identity.pubKeyFP
+        if !deviceIDMirror(identity.deviceId) {
+            logger.warning(
+                "⚠️ Failed to update the non-authoritative device ID mirror"
+            )
+        }
+        return identity
     }
     
     private func loadMACAddresses() async {
-        macSet = await NetworkInterfaceInspector.currentPhysicalMACs()
+        macSet = await macAddressLoader()
         logger.debug("🌐 获取本机物理网卡 MAC: \(self.macSet)")
     }
     
- // MARK: - 辅助函数
-    
- /// SHA256 指纹计算（小写 hex）
-    nonisolated private func sha256Hex(_ data: Data) -> String {
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
 }
 
 // MARK: - 本机身份快照（Sendable，供跨 actor 传递）

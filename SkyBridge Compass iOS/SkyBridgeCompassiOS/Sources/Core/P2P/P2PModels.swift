@@ -185,27 +185,22 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
         self.publicKeyFingerprint = publicKeyFingerprint
 	    }
 	    
-	    /// 获取当前设备信息
-	    @MainActor
-	    public static func current() -> P2PDeviceInfo {
+    /// 获取当前设备信息
+    @MainActor
+	    public static func current() async throws -> P2PDeviceInfo {
+	        let authority = try await SkyBridgeiOSCore.shared
+	            .currentProtocolIdentitySnapshot()
 	        return P2PDeviceInfo(
-	            id: getOrCreateDeviceId(),
+	            id: authority.deviceId,
 	            name: getDeviceName(),
 	            type: getCurrentDeviceType(),
             address: "0.0.0.0",
             port: 8080,
             osVersion: getOSVersion(),
             capabilities: getSupportedCapabilities(),
-            publicKeyFingerprint: ""
+            publicKeyFingerprint: authority.signingPublicKeyFingerprint
         )
     }
-    
-    /// 获取或创建设备ID
-    private static func getOrCreateDeviceId() -> String {
-        let deviceId = ProtocolDeviceIdentity.stableDeviceId()
-        ProtocolDeviceIdentity.mirrorDeviceIdToLegacyDefaultsIfNeeded(deviceId)
-        return deviceId
-	    }
 	    
 	    @MainActor
 	    private static func getDeviceName() -> String {

@@ -17,7 +17,7 @@ struct PQCKEMRoundTripTests {
     
     @Test("ML-KEM-768 封装/解封装 Round-Trip", arguments: (0..<10).map { _ in UUID().uuidString })
     func testMLKEM768RoundTrip(peerId: String) async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -48,7 +48,7 @@ struct PQCKEMRoundTripTests {
     
     @Test("ML-KEM-1024 封装/解封装 Round-Trip", arguments: (0..<10).map { _ in UUID().uuidString })
     func testMLKEM1024RoundTrip(peerId: String) async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -74,7 +74,7 @@ struct PQCKEMRoundTripTests {
     
     @Test("KEM 封装产生不同的封装数据")
     func testKEMEncapsulationUniqueness() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -110,7 +110,7 @@ struct PQCDigitalSignatureTests {
     
     @Test("ML-DSA-65 签名验证正确性", arguments: [16, 64, 256, 1024])
     func testMLDSA65SignatureVerification(dataSize: Int) async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -123,16 +123,31 @@ struct PQCDigitalSignatureTests {
         
  // 签名
         let signature = try await adapter.sign(data: data, peerId: peerId, variant: .mldsa65)
-        
+
+        #expect(
+            await adapter.verify(
+                data: data,
+                signature: signature,
+                peerId: peerId,
+                variant: .mldsa65
+            ) == false
+        )
+        let publicKey = try await adapter.localSigningPublicKey(peerId: peerId, variant: .mldsa65)
+        try await adapter.registerAuthenticatedSigningPublicKey(
+            publicKey,
+            peerId: peerId,
+            variant: .mldsa65
+        )
+
  // 验证签名
         let isValid = await adapter.verify(data: data, signature: signature, peerId: peerId, variant: .mldsa65)
         
         #expect(isValid == true)
     }
     
-    @Test("ML-DSA-87 签名验证正确性", arguments: [16, 64, 256, 1024])
-    func testMLDSA87SignatureVerification(dataSize: Int) async throws {
-        let adapter = PQCProtocolAdapter()
+    @Test("ML-DSA-87 primitive 不进入生产协议适配层", arguments: [16, 64, 256, 1024])
+    func testMLDSA87IsRejectedByProductionAdapter(dataSize: Int) async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -143,15 +158,20 @@ struct PQCDigitalSignatureTests {
         let peerId = UUID().uuidString
         let data = Self.generateRandomData(size: dataSize)
         
-        let signature = try await adapter.sign(data: data, peerId: peerId, variant: .mldsa87)
-        let isValid = await adapter.verify(data: data, signature: signature, peerId: peerId, variant: .mldsa87)
-        
-        #expect(isValid == true)
+        do {
+            _ = try await adapter.sign(data: data, peerId: peerId, variant: .mldsa87)
+            Issue.record("Production adapter must not dispatch ML-DSA-87 before the trust model binds it")
+        } catch let error as PQCProtocolError {
+            guard case .unsupportedSignatureVariant("ML-DSA-87") = error else {
+                Issue.record("Unexpected error: \(error)")
+                return
+            }
+        }
     }
     
     @Test("篡改数据后签名验证失败")
     func testTamperedDataVerificationFails() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -164,6 +184,12 @@ struct PQCDigitalSignatureTests {
         
  // 签名原始数据
         let signature = try await adapter.sign(data: originalData, peerId: peerId, variant: .mldsa65)
+        let publicKey = try await adapter.localSigningPublicKey(peerId: peerId, variant: .mldsa65)
+        try await adapter.registerAuthenticatedSigningPublicKey(
+            publicKey,
+            peerId: peerId,
+            variant: .mldsa65
+        )
         
  // 篡改数据
         var tamperedData = originalData
@@ -177,7 +203,7 @@ struct PQCDigitalSignatureTests {
     
     @Test("篡改签名后验证失败")
     func testTamperedSignatureVerificationFails() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
             "SkyBridgeCoreTests declares OQSRAII, so the PQC adapter must have an ML-KEM/ML-DSA provider"
@@ -190,6 +216,12 @@ struct PQCDigitalSignatureTests {
         
         var signature = try await adapter.sign(data: data, peerId: peerId, variant: .mldsa65)
         try #require(!signature.isEmpty, "ML-DSA must not produce an empty signature")
+        let publicKey = try await adapter.localSigningPublicKey(peerId: peerId, variant: .mldsa65)
+        try await adapter.registerAuthenticatedSigningPublicKey(
+            publicKey,
+            peerId: peerId,
+            variant: .mldsa65
+        )
         
  // 篡改签名
         signature[0] ^= 0xFF
@@ -311,8 +343,8 @@ struct PQCHPKERoundTripTests {
 struct PQCCapabilityNegotiationTests {
     
     @Test("能力声明生成")
-    func testCapabilityDeclarationGeneration() async {
-        let adapter = PQCProtocolAdapter()
+    func testCapabilityDeclarationGeneration() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         let declaration = await adapter.generateCapabilityDeclaration()
         
  // 验证声明包含必要字段
@@ -321,6 +353,18 @@ struct PQCCapabilityNegotiationTests {
         #expect(!declaration.supportedSignatureVariants.isEmpty)
         #expect(!declaration.preferredSuite.isEmpty)
         #expect(!declaration.backend.isEmpty)
+    }
+
+    @Test("生产能力声明取 provider runtime 与 trust contract 交集")
+    func testCapabilityDeclarationExcludesPrimitiveOnlyAlgorithms() async {
+        let keychain = PQCKeychainTestContext()
+        let provider = OQSProvider(scopeSource: keychain.scopeSource)
+        let adapter = PQCProtocolAdapter(provider: provider)
+        let declaration = await adapter.generateCapabilityDeclaration()
+
+        #expect(Set(declaration.supportedKEMVariants) == provider.supportedKEMVariants)
+        #expect(Set(declaration.supportedSignatureVariants) == ["ML-DSA-65"])
+        #expect(!declaration.supportedSignatureVariants.contains("ML-DSA-87"))
     }
     
     #if HAS_APPLE_PQC_SDK
@@ -332,7 +376,7 @@ struct PQCCapabilityNegotiationTests {
     )
     #endif
     func testSuiteNegotiationBothSupportHybrid() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         
         let remoteCapability = PQCProtocolAdapter.PQCCapabilityDeclaration(
             supportedSuites: ["classic", "pqc", "hybrid"],
@@ -354,7 +398,7 @@ struct PQCCapabilityNegotiationTests {
     
     @Test("套件协商 - 降级到 pqc")
     func testSuiteNegotiationFallbackToPQC() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         
  // 远端只支持 classic 和 pqc
         let remoteCapability = PQCProtocolAdapter.PQCCapabilityDeclaration(
@@ -377,7 +421,7 @@ struct PQCCapabilityNegotiationTests {
     
     @Test("套件协商 - 降级到 classic")
     func testSuiteNegotiationFallbackToClassic() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         
  // 远端只支持 classic
         let remoteCapability = PQCProtocolAdapter.PQCCapabilityDeclaration(
@@ -393,8 +437,8 @@ struct PQCCapabilityNegotiationTests {
     }
     
     @Test("套件协商 - 无共同套件抛出错误")
-    func testSuiteNegotiationNoCommonSuite() async {
-        let adapter = PQCProtocolAdapter()
+    func testSuiteNegotiationNoCommonSuite() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         
  // 远端只支持一个不存在的套件
         let remoteCapability = PQCProtocolAdapter.PQCCapabilityDeclaration(
@@ -420,8 +464,8 @@ struct PQCCapabilityNegotiationTests {
     }
     
     @Test("KEM 变体协商")
-    func testKEMVariantNegotiation() async {
-        let adapter = PQCProtocolAdapter()
+    func testKEMVariantNegotiation() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         
  // 测试优先选择更高安全级别
         let variant1 = await adapter.negotiateKEMVariant(with: ["ML-KEM-768", "ML-KEM-1024"])
@@ -435,11 +479,11 @@ struct PQCCapabilityNegotiationTests {
     }
     
     @Test("签名变体协商")
-    func testSignatureVariantNegotiation() async {
-        let adapter = PQCProtocolAdapter()
+    func testSignatureVariantNegotiation() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         
         let variant1 = await adapter.negotiateSignatureVariant(with: ["ML-DSA-65", "ML-DSA-87"])
-        #expect(variant1 == .mldsa87)
+        #expect(variant1 == .mldsa65)
         
         let variant2 = await adapter.negotiateSignatureVariant(with: ["ML-DSA-65"])
         #expect(variant2 == .mldsa65)
@@ -456,7 +500,7 @@ struct PQCSuiteManagementTests {
     
     @Test("设置支持的套件成功")
     func testSetSupportedSuite() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         
  // classic 应该总是支持的
         try await adapter.setSuite(.classic)
@@ -465,8 +509,8 @@ struct PQCSuiteManagementTests {
     }
     
     @Test("套件可用性声明与设置行为一致")
-    func testSetUnsupportedSuiteFails() async {
-        let adapter = PQCProtocolAdapter()
+    func testSetUnsupportedSuiteFails() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         let supportedSuites = await adapter.getSupportedSuites()
         
         if supportedSuites.contains(.hybrid) {
@@ -495,7 +539,7 @@ struct PQCSuiteManagementTests {
     
     @Test("经典模式下 KEM 操作失败")
     func testKEMInClassicModeFails() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try await adapter.setSuite(.classic)
         
         do {
@@ -514,7 +558,7 @@ struct PQCSuiteManagementTests {
     
     @Test("经典模式下签名操作失败")
     func testSignInClassicModeFails() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         try await adapter.setSuite(.classic)
         
         do {
@@ -533,7 +577,7 @@ struct PQCSuiteManagementTests {
     
     @Test("非 hybrid 模式下 HPKE 操作失败")
     func testHPKEInNonHybridModeFails() async throws {
-        let adapter = PQCProtocolAdapter()
+        let adapter = try makePQCProtocolAdapterForTesting()
         
         let supportedSuites = await adapter.getSupportedSuites()
         try #require(
@@ -564,8 +608,8 @@ struct PQCSuiteManagementTests {
 struct PQCStatusReportTests {
     
     @Test("状态报告生成")
-    func testStatusReportGeneration() async {
-        let adapter = PQCProtocolAdapter()
+    func testStatusReportGeneration() async throws {
+        let adapter = try makePQCProtocolAdapterForTesting()
         let report = await adapter.generateStatusReport()
         
         #expect(!report.backend.isEmpty)

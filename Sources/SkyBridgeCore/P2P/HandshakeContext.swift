@@ -355,7 +355,7 @@ public actor HandshakeContext {
                 }
                 let encapsResult: (encapsulatedKey: Data, sharedSecret: SecureBytes)
                 if suite == .qperiaptABI2PolicyBound {
-                    guard let policyBoundProvider = provider as? any ApplicationContextBoundCryptoProvider else {
+                    guard let policyBoundProvider = provider as? any ApplicationPolicyBoundCryptoProvider else {
                         throw HandshakeError.invalidState(
                             "Q-Periapt ABI2 provider does not expose its application-context contract"
                         )
@@ -669,7 +669,8 @@ public actor HandshakeContext {
               Set(messageA.supportedSuites.map(\.wireId)).count == messageA.supportedSuites.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid or duplicate supported suite"))
         }
-        guard messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
+        guard !messageA.keyShares.isEmpty,
+              messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
               messageA.keyShares.count <= messageA.supportedSuites.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA keyShare count"))
         }
@@ -683,7 +684,7 @@ public actor HandshakeContext {
         for keyShare in messageA.keyShares {
             guard keyShare.suite.isNegotiable,
                   let index = supportedIndexes[keyShare.suite.wireId],
-                  index >= previousIndex else {
+                  index > previousIndex else {
                 throw HandshakeError.failed(
                     .invalidMessageFormat("MessageA keyShares are unsupported or out of order")
                 )
@@ -882,7 +883,7 @@ public actor HandshakeContext {
             RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-decapsulate-start suite=\(selectedSuite.rawValue)")
             let sharedSecret: SecureBytes
             if selectedSuite == .qperiaptABI2PolicyBound {
-                guard let policyBoundProvider = provider as? any ApplicationContextBoundCryptoProvider else {
+                guard let policyBoundProvider = provider as? any ApplicationPolicyBoundCryptoProvider else {
                     throw HandshakeError.invalidState(
                         "Q-Periapt ABI2 provider does not expose its application-context contract"
                     )
@@ -1171,6 +1172,7 @@ public actor HandshakeContext {
         guard messageB.serverNonce.count == 32 else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB nonce length"))
         }
+        try validateMessageBAdmission(messageB)
         if policy.requirePQC && !messageB.selectedSuite.isPQC {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
@@ -1256,12 +1258,7 @@ public actor HandshakeContext {
 
         let candidateTranscriptB = Data(SHA256.hash(data: messageB.transcriptBytes))
 
- // 检查 suite 是否在 supportedSuites 且有 keyShare
         let selectedSuite = messageB.selectedSuite
-        guard sentSupportedSuites.contains(selectedSuite),
-              sentKeyShares[selectedSuite] != nil else {
-            throw HandshakeError.failed(.suiteNegotiationFailed)
-        }
 
         if selectedSuite.requiresV2EphemeralContribution {
             guard messageB.responderShare.count == 32 else {
@@ -1408,6 +1405,18 @@ public actor HandshakeContext {
         )
         completed = true
         return sessionKeys
+    }
+
+    /// Performs the initiator's structural MessageB admission before signature
+    /// verification or any identity-pinning/trust callback. The responder may
+    /// select only a currently negotiable suite for which this exact context
+    /// sent both an offer and a key share.
+    func validateMessageBAdmission(_ messageB: HandshakeMessageB) throws {
+        guard messageB.selectedSuite.isNegotiable,
+              sentSupportedSuites.contains(messageB.selectedSuite),
+              sentKeyShares[messageB.selectedSuite] != nil else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
     }
 
     private func commitProcessedMessageB(
@@ -1841,14 +1850,11 @@ extension HandshakeContext {
 @available(macOS 14.0, iOS 17.0, *)
 extension HandshakeContext {
     private func providerForSuite(_ suite: CryptoSuite) -> (any CryptoProvider)? {
- // 可加性新增（Q-Periapt ContextBound, beta）：
- // 这是 Q-Periapt 套件在本握手层（`CryptoProvider` / `CryptoSuite` 抽象）的
- // 路由挂载点。`QPeriaptCryptoProvider`（本仓库新增）是一个完整的 `CryptoProvider`
- // 适配器：KEM = Q-Periapt 混合 (ML-KEM-768 + X25519)，DEM/签名与 `OQSPQCProvider`
- // 逐字节一致。仅当显式请求且本机 macOS/iOS 26+ CQPeriapt self-test 通过时挂载；否则与今天对该套件的
- // 行为完全一致（返回 nil → 后续 fall-through 也不会命中既有 provider，逐字节不变）。
- // 注意 `QPeriaptKEMProvider` 实现的是 `KEMProvider` 协议（见 CryptoProviderSelector.swift），
- // 与本函数返回的 `CryptoProvider` 协议面不同；二者各自服务于不同的接入层。
+        guard suite.isNegotiable else { return nil }
+
+        // ABI2 is routable only after an authenticated PolicyBound runtime
+        // session has been installed. A preference or environment request alone
+        // cannot construct the provider or advertise the suite.
         if suite == .qperiaptABI2PolicyBound {
             #if canImport(CQPeriapt)
             if QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
@@ -1871,13 +1877,14 @@ extension HandshakeContext {
         return nil
     }
 
-    /// Q-Periapt ContextBound (beta) 是否启用。
+    /// Q-Periapt ABI2 PolicyBound 是否已被显式请求且完成运行时 admission。
     ///
     /// 默认 OFF。镜像 `CryptoProviderSelector.isQPeriaptBetaEnabled()` 的判定逻辑：
     /// - 环境变量 `SB_ENABLE_QPERIAPT` 为真值（1/true/yes/on）；或
     /// - UserDefaults 中 `SettingsStorageKeys.preferQPeriaptBeta` 为 true。
     ///
-    /// 仅当本机 macOS/iOS 26+、CQPeriapt 模块可导入、且 runtime self-test 通过时才可能为真。
+    /// 仅当签名策略与信任根已验证、持久化状态已提交、原生 ABI 与 round trip
+    /// 均通过，并且调用方明确请求该套件时才可能为真。
     nonisolated static func isQPeriaptBetaEnabled() -> Bool {
         QPeriaptPlatformPolicy.isEnabledForLocalRuntime()
     }
@@ -1959,7 +1966,8 @@ extension HandshakeContext {
     }
 
     private func resolveSupportedSuites(offeredSuites: [CryptoSuite], policy: HandshakePolicy) throws -> [CryptoSuite] {
-        guard !offeredSuites.isEmpty else {
+        guard !offeredSuites.isEmpty,
+              offeredSuites.allSatisfy(\.isNegotiable) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
 
@@ -2008,7 +2016,10 @@ extension HandshakeContext {
             }
         }
 
-        let primarySuite = cryptoProvider.supportedSuites.first ?? cryptoProvider.activeSuite
+        guard let primarySuite = cryptoProvider.supportedSuites.first(where: \.isNegotiable)
+            ?? (cryptoProvider.activeSuite.isNegotiable ? cryptoProvider.activeSuite : nil) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
         if suites.isEmpty {
             guard suiteMeetsHandshakePolicy(primarySuite, policy: policy),
                   suiteMeetsLocalCryptoPolicy(primarySuite) else {
@@ -2061,6 +2072,8 @@ extension HandshakeContext {
     }
 
     private func suiteMeetsHandshakePolicy(_ suite: CryptoSuite, policy: HandshakePolicy) -> Bool {
+        guard suite.isNegotiable else { return false }
+
         if policy.requirePQC && !suite.isPQC {
             return false
         }

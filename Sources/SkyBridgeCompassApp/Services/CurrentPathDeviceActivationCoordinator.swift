@@ -98,7 +98,7 @@ final class CurrentPathDeviceActivationCoordinator {
 
     private static func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
         let algorithm: ProtocolSigningAlgorithm = .ed25519
-        let deviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let deviceID = try await DeviceIdentityKeyManager.shared.getDeviceId()
         guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CurrentPathActivationError.identityNotProvisioned("deviceId")
         }

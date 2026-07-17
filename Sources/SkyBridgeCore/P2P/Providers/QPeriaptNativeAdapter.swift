@@ -24,15 +24,23 @@ public enum QPeriaptCryptoAdmissionError: Error, LocalizedError, Sendable, Equat
 actor QPeriaptCryptoAdmissionGate {
     static let shared = QPeriaptCryptoAdmissionGate()
 
+    private struct Permit {
+        let token: UUID
+        let deadline: ContinuousClock.Instant?
+    }
+
     private struct Waiter {
         let token: UUID
-        let continuation: CheckedContinuation<UUID, any Error>
+        let deadline: ContinuousClock.Instant
+        let continuation: CheckedContinuation<Permit, any Error>
         let deadlineTask: Task<Void, Never>
     }
 
     private let maximumWaiters: Int
     private let maximumWaitDuration: Duration
     private let sleepUntilDeadline: @Sendable (Duration) async throws -> Void
+    private let now: @Sendable () -> ContinuousClock.Instant
+    private let beforeWaiterAppendForTesting: @Sendable () -> Void
     private var ownerToken: UUID?
     private var waiters: [Waiter] = []
 
@@ -41,40 +49,56 @@ actor QPeriaptCryptoAdmissionGate {
         maximumWaitDuration: Duration = HandshakeConstants.defaultTimeout,
         sleepUntilDeadline: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
-        }
+        },
+        now: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock().now
+        },
+        beforeWaiterAppendForTesting: @escaping @Sendable () -> Void = {}
     ) {
         precondition(maximumWaiters >= 0)
         precondition(maximumWaitDuration > .zero)
         self.maximumWaiters = maximumWaiters
         self.maximumWaitDuration = maximumWaitDuration
         self.sleepUntilDeadline = sleepUntilDeadline
+        self.now = now
+        self.beforeWaiterAppendForTesting = beforeWaiterAppendForTesting
     }
 
     var pendingWaiterCount: Int {
         waiters.count
     }
 
+    #if DEBUG || SKYBRIDGE_TESTING
+    var hasElapsedPendingWaiterForTesting: Bool {
+        let currentInstant = now()
+        return waiters.contains { currentInstant >= $0.deadline }
+    }
+    #endif
+
     func run<T: Sendable>(
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
-        let token = try await acquire()
-        defer { release(token: token) }
+        let permit = try await acquire()
+        defer { release(token: permit.token) }
+        try validate(permit: permit)
         try Task.checkCancellation()
         let result = try await operation()
         try Task.checkCancellation()
         return result
     }
 
-    private func acquire() async throws -> UUID {
+    private func acquire() async throws -> Permit {
         try Task.checkCancellation()
         let token = UUID()
         if ownerToken == nil {
             ownerToken = token
-            return token
+            return Permit(token: token, deadline: nil)
         }
+        rejectElapsedWaiters()
         guard waiters.count < maximumWaiters else {
             throw QPeriaptCryptoAdmissionError.waiterLimitExceeded(maximum: maximumWaiters)
         }
+        let deadline = now().advanced(by: maximumWaitDuration)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let deadlineTask = Task { [maximumWaitDuration, sleepUntilDeadline] in
@@ -85,13 +109,21 @@ actor QPeriaptCryptoAdmissionGate {
                     }
                     self.expireWaiter(token: token)
                 }
+                beforeWaiterAppendForTesting()
                 waiters.append(
                     Waiter(
                         token: token,
+                        deadline: deadline,
                         continuation: continuation,
                         deadlineTask: deadlineTask
                     )
                 )
+                // Cancellation can race between the initial check above and
+                // installation of this waiter. In that ordering `onCancel`
+                // observes no queued token, so close the race after append.
+                if Task.isCancelled {
+                    cancelWaiter(token: token)
+                }
             }
         } onCancel: {
             Task { await self.cancelWaiter(token: token) }
@@ -107,20 +139,53 @@ actor QPeriaptCryptoAdmissionGate {
 
     private func expireWaiter(token: UUID) {
         guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
+        guard now() >= waiters[index].deadline else { return }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: QPeriaptCryptoAdmissionError.waitDeadlineExceeded)
     }
 
+    private func validate(permit: Permit) throws {
+        guard let deadline = permit.deadline else { return }
+        guard now() < deadline else {
+            throw QPeriaptCryptoAdmissionError.waitDeadlineExceeded
+        }
+    }
+
+    private func rejectElapsedWaiters() {
+        let currentInstant = now()
+        var activeWaiters: [Waiter] = []
+        activeWaiters.reserveCapacity(waiters.count)
+        for waiter in waiters {
+            guard currentInstant >= waiter.deadline else {
+                activeWaiters.append(waiter)
+                continue
+            }
+            waiter.deadlineTask.cancel()
+            waiter.continuation.resume(
+                throwing: QPeriaptCryptoAdmissionError.waitDeadlineExceeded
+            )
+        }
+        waiters = activeWaiters
+    }
+
     private func release(token: UUID) {
         precondition(ownerToken == token, "Only the active Q-Periapt admission owner may release it")
-        guard !waiters.isEmpty else {
-            ownerToken = nil
+        while !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            next.deadlineTask.cancel()
+            guard now() < next.deadline else {
+                next.continuation.resume(
+                    throwing: QPeriaptCryptoAdmissionError.waitDeadlineExceeded
+                )
+                continue
+            }
+            ownerToken = next.token
+            next.continuation.resume(
+                returning: Permit(token: next.token, deadline: next.deadline)
+            )
             return
         }
-        let next = waiters.removeFirst()
-        next.deadlineTask.cancel()
-        ownerToken = next.token
-        next.continuation.resume(returning: next.token)
+        ownerToken = nil
     }
 }
 

@@ -1159,7 +1159,9 @@ public final class RemoteControlManager: BaseManager {
         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
             guard keys.negotiatedSuite.isKnown else { return nil }
             let rawValue = keys.negotiatedSuite.rawValue
-            return keys.negotiatedSuite.isPQCGroup ? "\(rawValue) PQC" : "\(rawValue) secure channel"
+            return keys.negotiatedSuite.isNegotiable && keys.negotiatedSuite.isPQCGroup
+                ? "\(rawValue) PQC"
+                : "\(rawValue) secure channel"
         }
         return nil
     }
@@ -2107,7 +2109,22 @@ public final class RemoteControlManager: BaseManager {
         let peerRole = peer.role
         let peerIdentity = ObjectIdentifier(peer)
 
-        let localDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let localDeviceId: String
+        do {
+            localDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
+        } catch {
+            logger.error(
+                "❌ RemoteControl outbound identity unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            await handleConnectionClosed(
+                peer: peer,
+                error: RemoteControlError.handshakeInitializationFailed(
+                    "local identity authority unavailable"
+                )
+            )
+            return false
+        }
         guard let soaBinding = Self.remoteControlSOABinding(
             localDeviceId: localDeviceId,
             remoteDeviceId: handshakePeer.deviceId
@@ -2960,6 +2977,11 @@ public final class RemoteControlManager: BaseManager {
         for peer: PeerConnection,
         messageA: HandshakeMessageA
     ) async throws -> HandshakeDriver {
+        guard messageA.hasNegotiableOfferShape else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "inbound remote control MessageA contains a non-negotiable offer"
+            )
+        }
         let trustedPeerId: String
         switch RemoteControlInboundTrustResolver.resolve(
             remoteSOAPeerId: messageA.soaExtension?.initiatorPeerId,
@@ -2978,7 +3000,8 @@ public final class RemoteControlManager: BaseManager {
                 "ambiguous trusted inbound remote-control identity: \(summary)"
             )
         }
-        let localDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let localDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         guard let soaBinding = Self.remoteControlSOABinding(
             localDeviceId: localDeviceId,
             remoteDeviceId: trustedPeerId
@@ -2996,8 +3019,8 @@ public final class RemoteControlManager: BaseManager {
         await releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)
         peer.handshakePeer = PeerIdentifier(deviceId: trustedPeerId, displayName: nil, address: nil)
         let trustProvider = try await makeRemoteControlTrustProvider(for: trustedPeerId)
-        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
-        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let capability = CryptoProviderFactory.detectCapability()
@@ -3006,7 +3029,9 @@ public final class RemoteControlManager: BaseManager {
         var effectivePolicy = requestedPolicy
         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter {
+            !$0.isPQCGroup && $0.isNegotiable
+        }
 
         if let rejection = StrictPQCAdmissionGate.inboundRejection(
             policy: requestedPolicy,
@@ -3045,7 +3070,9 @@ public final class RemoteControlManager: BaseManager {
                 }
                 cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                 sigAAlgorithm = .ed25519
-                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                offeredSuites = cryptoProvider.supportedSuites.filter {
+                    !$0.isPQCGroup && $0.isNegotiable
+                }
                 effectivePolicy = HandshakePolicy(
                     requirePQC: false,
                     allowClassicFallback: false,
@@ -3065,7 +3092,9 @@ public final class RemoteControlManager: BaseManager {
             }
             cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
             sigAAlgorithm = .ed25519
-            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+            offeredSuites = cryptoProvider.supportedSuites.filter {
+                !$0.isPQCGroup && $0.isNegotiable
+            }
             effectivePolicy = HandshakePolicy(
                 requirePQC: false,
                 allowClassicFallback: false,

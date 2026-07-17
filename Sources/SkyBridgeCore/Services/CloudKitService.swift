@@ -98,10 +98,10 @@ public final class CloudKitService: CloudDeviceService {
         stopHeartbeat()
     }
 
- // 当前设备 ID (懒加载)
-    public lazy var currentDeviceId: String = {
-        return KeychainManager.shared.getOrGenerateDeviceId()
-    }()
+    /// Presentation cache of the canonical identity used by the latest successful
+    /// CloudKit operation. `nil` means authority has not been resolved; it is never
+    /// populated from the historical standalone device-ID keychain item.
+    @Published public private(set) var currentDeviceId: String?
 
  // MARK: - 初始化
 
@@ -179,7 +179,18 @@ public final class CloudKitService: CloudDeviceService {
         await subscribeToZoneChanges()
 
  // 3. 注册当前设备
-        await registerCurrentDevice()
+        do {
+            try await registerCurrentDevice()
+        } catch {
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "注册当前设备", error: error)
+            } else {
+                logger.error(
+                    "当前设备 CloudKit 注册已阻止: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
 
  // 4. 初次同步
         await fetchZoneChanges()
@@ -208,48 +219,39 @@ public final class CloudKitService: CloudDeviceService {
  // MARK: - 核心逻辑：设备注册与心跳
 
  /// 注册/更新当前设备
-    private func registerCurrentDevice() async {
+    private func registerCurrentDevice() async throws {
         guard isAvailable, let privateDB = privateDB else { return }
-        let deviceId = currentDeviceId
+        let identity = try await authoritativeCurrentIdentity(allowCreate: true)
+        let deviceId = identity.deviceId
         logger.info("正在注册当前设备: \(deviceId)")
 
         let recordID = CKRecord.ID(recordName: deviceId, zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName))
 
-        do {
  // 尝试获取现有记录以保留其他字段
-            let record: CKRecord
-            do {
-                record = try await privateDB.record(for: recordID)
-            } catch {
-                record = CKRecord(recordType: recordType, recordID: recordID)
-            }
+        let record: CKRecord
+        do {
+            record = try await privateDB.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            record = CKRecord(recordType: recordType, recordID: recordID)
+        }
 
  // 更新设备信息
-            await updateRecordFields(record)
+        updateRecordFields(record, identity: identity)
 
-            _ = try await privateDB.save(record)
-            logger.info("当前设备注册/更新成功")
-        } catch {
-            if Self.isPersistentServerRejection(error) {
-                handlePersistentServerRejection(context: "注册当前设备", error: error)
-            } else {
-                logger.error("注册当前设备失败: \(error.localizedDescription)")
-            }
-        }
+        _ = try await privateDB.save(record)
+        logger.info("当前设备注册/更新成功")
     }
 
-    private func updateRecordFields(_ record: CKRecord) async {
+    private func updateRecordFields(
+        _ record: CKRecord,
+        identity: SelfIdentitySnapshot
+    ) {
         let localPresentation = LocalDevicePresentation.current()
-        record["deviceId"] = currentDeviceId
+        record["deviceId"] = identity.deviceId
+        record["identityAuthorityVersion"] = 1
         record["deviceName"] = localPresentation.deviceName ?? localPresentation.modelName ?? "Unknown Device"
         record["deviceModel"] = getDeviceModel()
- // 写入真实公钥指纹（若可用）
-        let selfId = await SelfIdentityProvider.shared.snapshot()
-        if !selfId.pubKeyFP.isEmpty {
-            record["publicKeyFingerprint"] = selfId.pubKeyFP
-        } else {
-            logger.warning("⚠️ 本机公钥指纹为空，publicKeyFingerprint 未写入")
-        }
+        record["publicKeyFingerprint"] = identity.pubKeyFP
         record["lastSeenAt"] = Date()
         record["capabilities"] = ["remoteDesktop", "fileTransfer"]
  // record["lastKnownEndpoint"] = ...
@@ -258,7 +260,17 @@ public final class CloudKitService: CloudDeviceService {
  /// 更新心跳（轻量级更新）
     private func updateHeartbeatAsync() async {
         guard isAvailable, accountStatus == .available, !serverSchemaUnavailable, let privateDB = privateDB else { return }
-        let recordID = CKRecord.ID(recordName: currentDeviceId, zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName))
+        let identity: SelfIdentitySnapshot
+        do {
+            identity = try await authoritativeCurrentIdentity(allowCreate: false)
+        } catch {
+            logger.error(
+                "CloudKit 心跳已阻止：本机身份 authority 不可用: \(error.localizedDescription, privacy: .public)"
+            )
+            stopHeartbeat()
+            return
+        }
+        let recordID = CKRecord.ID(recordName: identity.deviceId, zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName))
 
         do {
             let record = try await privateDB.record(for: recordID)
@@ -368,6 +380,15 @@ public final class CloudKitService: CloudDeviceService {
     }
 
  // MARK: - 辅助方法
+
+    private func authoritativeCurrentIdentity(
+        allowCreate: Bool
+    ) async throws -> SelfIdentitySnapshot {
+        let identity = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: allowCreate)
+        currentDeviceId = identity.deviceId
+        return identity
+    }
 
     private func startHeartbeat() {
         stopHeartbeat()

@@ -502,6 +502,35 @@ public struct HandshakeMessageA: Sendable {
         self.initiatorContribution = initiatorContribution
     }
 
+    /// Structural admission check for a newly negotiated handshake. Legacy
+    /// suites remain wire-decodable, but must fail here before any established
+    /// session state is paused or replaced.
+    public var hasNegotiableOfferShape: Bool {
+        guard !supportedSuites.isEmpty,
+              !keyShares.isEmpty,
+              supportedSuites.allSatisfy(\.isNegotiable) else {
+            return false
+        }
+
+        let supportedWireIds = supportedSuites.map(\.wireId)
+        guard Set(supportedWireIds).count == supportedWireIds.count else {
+            return false
+        }
+
+        var seenKeyShareWireIds = Set<UInt16>()
+        var lastSupportedIndex = -1
+        for keyShare in keyShares {
+            guard keyShare.suite.isNegotiable,
+                  seenKeyShareWireIds.insert(keyShare.suite.wireId).inserted,
+                  let supportedIndex = supportedWireIds.firstIndex(of: keyShare.suite.wireId),
+                  supportedIndex > lastSupportedIndex else {
+                return false
+            }
+            lastSupportedIndex = supportedIndex
+        }
+        return true
+    }
+
  // MARK: - Encoding
 
  /// 编码为二进制格式
@@ -561,6 +590,9 @@ public struct HandshakeMessageA: Sendable {
             }
             supportedSuites.append(suite)
         }
+        guard Set(supportedSuites.map(\.wireId)).count == supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Duplicate supported suite"))
+        }
 
  // keyShares
         let keyShareCount = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
@@ -598,7 +630,7 @@ public struct HandshakeMessageA: Sendable {
             guard let index = supportedSuites.firstIndex(where: { $0.wireId == share.suite.wireId }) else {
                 throw HandshakeError.failed(.invalidMessageFormat("keyShare suite not in supportedSuites"))
             }
-            guard index >= lastIndex else {
+            guard index > lastIndex else {
                 throw HandshakeError.failed(.invalidMessageFormat("keyShares out of order"))
             }
             lastIndex = index

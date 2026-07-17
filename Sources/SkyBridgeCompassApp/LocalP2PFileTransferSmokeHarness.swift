@@ -68,7 +68,8 @@ final class LocalP2PFileTransferSmokeHarness {
 
         reporter.append("identity start storage=signed-app-keychain")
         _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
-        let protocolDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let protocolDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         reporter.append("identity ready device=\(Self.sanitize(protocolDeviceId))")
 
         reporter.append("services start")
@@ -224,7 +225,7 @@ final class LocalP2PFileTransferSmokeHarness {
         guard let reportURL = pqcReportURL() else { return }
 
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let deviceId = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let deviceId = try await DeviceIdentityKeyManager.shared.getDeviceId()
         let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
             using: provider
         )

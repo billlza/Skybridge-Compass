@@ -163,7 +163,16 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         discoveryStatus = .discovering
 
  // 2. 注册当前设备
-        await refreshCurrentDeviceIdentityHints()
+        do {
+            try await refreshCurrentDeviceIdentityHints()
+        } catch {
+            logger.error(
+                "❌ iCloud device discovery identity unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            discoveryStatus = .error("本机身份不可用")
+            isStarted = false
+            return
+        }
         registerCurrentDevice()
 
  // 3. 同步并获取设备列表
@@ -244,7 +253,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
     private func setupCurrentDevice() {
         let localPresentation = LocalDevicePresentation.current()
         let device = iCloudDevice(
-            id: getDeviceIdentifier(),
+            id: getCompatibilityRouteIdentifier(),
             name: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
             model: getDeviceModel(),
             osVersion: getOSVersion(),
@@ -340,16 +349,25 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         device.lastSeen = Date()
         device.ipAddress = getLocalIPAddress()
         currentDevice = device
-        await refreshCurrentDeviceIdentityHints()
+        do {
+            try await refreshCurrentDeviceIdentityHints()
+        } catch {
+            logger.error(
+                "❌ iCloud heartbeat identity unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
 
         registerCurrentDevice()
     }
 
-    private func refreshCurrentDeviceIdentityHints() async {
+    private func refreshCurrentDeviceIdentityHints() async throws {
         guard var device = currentDevice else { return }
-        let snapshot = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+        let snapshot = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: false)
         let stableIdentity = normalizeIdentityHint(snapshot.deviceId)
-        let generatedFingerprint = await SelfIdentityProvider.shared.generateRegistrationFingerprint()
+        let generatedFingerprint = try await SelfIdentityProvider.shared
+            .generateRegistrationFingerprint(allowCreate: false)
         let registrationFingerprint = normalizeIdentityHint(generatedFingerprint)
 
         var changed = false
@@ -368,9 +386,12 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  // MARK: - 工具方法
 
- /// 获取设备唯一标识符
-    private func getDeviceIdentifier() -> String {
- // 使用硬件UUID作为设备标识
+    /// Return the legacy KVS routing key used to locate a presence record.
+    ///
+    /// This value is compatibility metadata only. It must never be promoted to
+    /// protocol identity, trust scoring or authenticated peer binding.
+    private func getCompatibilityRouteIdentifier() -> String {
+ // 使用硬件UUID作为兼容路由键
         if let uuid = getMacSerialNumber() {
             return "mac-\(uuid)"
         }

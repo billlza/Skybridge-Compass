@@ -172,7 +172,7 @@ public class DeviceDiscoveryManager: BaseManager {
  // 扫描结束后清洗缓存，确保本机唯一性
         Task { [weak self] in
             guard let self = self else { return }
-            let selfId = await SelfIdentityProvider.shared.snapshot()
+            let selfId = await SelfIdentityProvider.shared.presentationSnapshot()
             await self.sanitizeCache(selfId)
         }
     }
@@ -379,7 +379,8 @@ public class DeviceDiscoveryManager: BaseManager {
                 return
             }
             do {
-                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
+                let snap = try await SelfIdentityProvider.shared
+                    .snapshotEnsuringProtocolDeviceId(allowCreate: true)
                 var txt = NWTXTRecord()
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
@@ -520,8 +521,17 @@ public class DeviceDiscoveryManager: BaseManager {
                 deviceId: bonjourInfo?.deviceId,
                 pubKeyFP: pubKeyFingerprint
             )
- // 获取本机身份快照
-            let selfId = await SelfIdentityProvider.shared.snapshot()
+ // 本机判定必须来自完整 authority tuple；身份不可用时不发布该发现结果。
+            let selfId: SelfIdentitySnapshot
+            do {
+                selfId = try await SelfIdentityProvider.shared
+                    .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            } catch {
+                self.logger.error(
+                    "❌ Discovery result blocked because local identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
 
  // 应用本机标志（统一写入点）
             await self.applyLocalFlag(&device, selfId: selfId)
@@ -751,16 +761,6 @@ public class DeviceDiscoveryManager: BaseManager {
         return Data(SHA256.hash(data: Data(canonical.utf8)))
     }
 
-    nonisolated private static func localSOAPeerIdBytes() async -> Data {
-        if #available(macOS 14.0, iOS 17.0, *) {
-            let deviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
-            if !deviceId.isEmpty {
-                return soaPeerIdBytes(from: deviceId)
-            }
-        }
-        return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
-    }
-
     nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "InboundHandshake")
 
@@ -811,7 +811,18 @@ public class DeviceDiscoveryManager: BaseManager {
         }()
         let classicTransferSessionId = "discovery-inbound:\(UUID().uuidString)"
         let presencePeerId = peerDeviceId
-        let localSOAPeerId = await localSOAPeerIdBytes()
+        let localIdentityDeviceId: String
+        do {
+            localIdentityDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
+        } catch {
+            logger.error(
+                "❌ inbound handshake local identity unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            connection.cancel()
+            return
+        }
+        let localSOAPeerId = soaPeerIdBytes(from: localIdentityDeviceId)
         var expectedRemoteSOAPeerId: Data?
         var inboundPairKey: Data?
         var latestPeerCapabilities: [String] = []
@@ -843,6 +854,7 @@ public class DeviceDiscoveryManager: BaseManager {
         var driver: HandshakeDriver?
         var sessionKeys: SessionKeys?
         var previousSessionKeysBeforeRekey: SessionKeys?
+        var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority?
         var declaredDeviceIdForVerification: String?
         var lastPairingIdentityExchangeReplyAt: Date?
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
@@ -1117,39 +1129,24 @@ public class DeviceDiscoveryManager: BaseManager {
                 }
 
                 if let messageA = try? HandshakeMessageA.decode(from: frame),
+                   !messageA.hasNegotiableOfferShape {
+                    logger.error(
+                        "⛔️ Rejected non-negotiable inbound MessageA before rekey state mutation. peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId), privacy: .public)"
+                    )
+                    continue
+                }
+
+                if let messageA = try? HandshakeMessageA.decode(from: frame),
                    sessionKeys != nil,
-                   previousSessionKeysBeforeRekey == nil {
+                    previousSessionKeysBeforeRekey == nil {
                     let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
                     let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
-                    if let inboundPairKey {
-                        logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peer.deviceId, privacy: .public)")
-                        await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
-                        await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
-                    }
                     logger.info(
-                        "🔁 入站 rekey：\(fromSuite, privacy: .public) -> \(toSuite, privacy: .public) peer=\(peer.deviceId, privacy: .public)"
+                        "🔁 入站 transactional rekey candidate：\(fromSuite, privacy: .public) -> \(toSuite, privacy: .public) peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId), privacy: .public)"
                     )
-                    let fromKind = sessionKeys.map {
-                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.negotiatedSuite.rawValue)
-                            ?? $0.negotiatedSuite.rawValue
-                    } ?? fromSuite
-                    let toKind = messageA.supportedSuites.first.flatMap {
-                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.rawValue)
-                    } ?? toSuite
-                    await MainActor.run {
-                        ConnectionPresenceService.shared.markRekeying(.init(
-                            peerId: presencePeerId,
-                            fromKind: fromKind,
-                            fromSuite: fromSuite,
-                            toKind: toKind,
-                            toSuite: toSuite
-                        ))
-                    }
                     previousSessionKeysBeforeRekey = sessionKeys
-                    authenticatedRemoteAuthority = nil
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
                     driver = nil
-                    sessionKeys = nil
-                    await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
                 }
 
                 // 如果已建立会话密钥且不是握手控制包，则作为业务消息处理
@@ -1246,7 +1243,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
                                     break
                                 }
-                                let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+                                let localIdRaw = localIdentityDeviceId
                                 let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !localId.isEmpty else {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
@@ -1309,8 +1306,8 @@ public class DeviceDiscoveryManager: BaseManager {
                         if soaBinding.usedAuthenticatedInitiator {
                             logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
                         }
-                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
-                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
+                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
                         // This pre-selection gate only evaluates the peer offer shape.
@@ -1332,7 +1329,7 @@ public class DeviceDiscoveryManager: BaseManager {
                         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
                         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
 
                         if peerHasPQCGroup {
                             selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
@@ -1358,7 +1355,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                     selection = .classicOnly
                                     cryptoProvider = CryptoProviderFactory.make(policy: selection)
                                     sigAAlgorithm = .ed25519
-                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
                                     SecurityEventEmitter.emitDetached(SecurityEvent(
                                         type: .cryptoDowngrade,
                                         severity: .warning,
@@ -1392,7 +1389,7 @@ public class DeviceDiscoveryManager: BaseManager {
                             selection = .classicOnly
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
                             sigAAlgorithm = .ed25519
-                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
                         }
 
                         let identityProvider = DeviceIdentityHandshakeProvider(
@@ -1433,7 +1430,10 @@ public class DeviceDiscoveryManager: BaseManager {
                                 cryptoPolicy: cryptoPolicy,
                                 trustProvider: trustProvider,
                                 localSOAPeerId: localSOAPeerId,
-                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+                                authenticatedIncomingEstablishedPolicy: previousSessionKeysBeforeRekey == nil
+                                    ? .rejectDuplicate
+                                    : .replaceAuthenticated
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                             RemoteControlSmokeStatusWriter.append(
@@ -1444,6 +1444,12 @@ public class DeviceDiscoveryManager: BaseManager {
                             RemoteControlSmokeStatusWriter.append(
                                 "mac-control-inbound handshake-driver failed endpoint=\(endpointDescription) error=\(error.localizedDescription)"
                             )
+                            if previousSessionKeysBeforeRekey != nil {
+                                previousSessionKeysBeforeRekey = nil
+                                previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                                driver = nil
+                                continue
+                            }
                             return
                         }
                     } else {
@@ -1457,10 +1463,10 @@ public class DeviceDiscoveryManager: BaseManager {
                     }
                 }
 
-                guard let driver else { continue }
+                guard let activeDriver = driver else { continue }
                 RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-handle begin endpoint=\(endpointDescription)")
-                await driver.handleMessage(frame, from: peer)
-                let st = await driver.getCurrentState()
+                await activeDriver.handleMessage(frame, from: peer)
+                let st = await activeDriver.getCurrentState()
                 logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
                 RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-state \(String(describing: st)) endpoint=\(endpointDescription)")
 
@@ -1475,9 +1481,10 @@ public class DeviceDiscoveryManager: BaseManager {
                         }
                     }
                 case .established(let keys):
-                    authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
+                    authenticatedRemoteAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
                     sessionKeys = keys
                     previousSessionKeysBeforeRekey = nil
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                     await publishClassicTransferSessionSnapshot(keys: keys)
                     await publishPresence(keys: keys)
                     if let declaredDeviceIdForVerification {
@@ -1491,7 +1498,13 @@ public class DeviceDiscoveryManager: BaseManager {
                 case .failed(let reason):
                     if let previousKeys = previousSessionKeysBeforeRekey {
                         sessionKeys = previousKeys
+                        authenticatedRemoteAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
                         previousSessionKeysBeforeRekey = nil
+                        previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                        driver = nil
+                        if let inboundPairKey {
+                            await PeerSessionArbiter.shared.markEstablished(pairKey: inboundPairKey)
+                        }
                         await publishClassicTransferSessionSnapshot(keys: previousKeys)
                         await publishPresence(keys: previousKeys)
                         logger.warning(

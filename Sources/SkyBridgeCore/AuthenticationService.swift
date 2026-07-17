@@ -63,6 +63,7 @@ import Combine
         case localOnly
         case revokedRemotely
         case localOnlyAfterRemoteFailure(String)
+        case localCleanupFailed(String)
     }
 
     public static let shared = AuthenticationService()
@@ -85,10 +86,12 @@ import Combine
         guard let currentSession = sessionSubject.value else {
             return nil
         }
+#if DEBUG || SKYBRIDGE_TESTING
         if Self.shouldSkipAuthRefreshForSmoke(),
            !currentSession.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return currentSession.accessToken
         }
+#endif
         guard let refreshToken = currentSession.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !refreshToken.isEmpty else {
             if forceRefresh || shouldRefreshAccessToken(currentSession.accessToken) {
@@ -151,7 +154,6 @@ import Combine
     private var isSupabaseMode: Bool = false
     private var accessTokenRefreshTask: Task<AuthSession, Error>?
     private var persistedSessionLoadTask: Task<Void, Never>?
-    private var authSessionDeletionTask: Task<Void, Never>?
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -372,30 +374,37 @@ import Combine
  /// 主动注销并清除钥匙串中的会话信息。
     public func signOut() {
         Task { @MainActor in
-            _ = await self.signOutAndWait()
+            let outcome = await self.signOutAndWait()
+            if case .localCleanupFailed(let message) = outcome {
+                self.logger.error(
+                    "AuthenticationService local sign-out cleanup failed: \(message, privacy: .private)"
+                )
+            }
         }
     }
 
     @discardableResult
     public func signOutAndWait() async -> SignOutOutcome {
         let currentSession = sessionSubject.value
-        guard let currentSession else {
-            await clearLocalSessionState()
-            return .localOnly
+        do {
+            try await clearLocalSessionState()
+        } catch {
+            logger.error(
+                "AuthenticationService Keychain session cleanup failed: \(error.localizedDescription, privacy: .private)"
+            )
+            return .localCleanupFailed(error.localizedDescription)
         }
 
-        guard shouldAttemptRemoteSessionRevocation(currentSession) else {
-            await clearLocalSessionState()
+        guard let currentSession,
+              shouldAttemptRemoteSessionRevocation(currentSession) else {
             return .localOnly
         }
 
         do {
             try await revokeRemoteSession(currentSession)
-            await clearLocalSessionState()
             return .revokedRemotely
         } catch {
             logger.warning("AuthenticationService 远端会话撤销失败: \(error.localizedDescription, privacy: .private)")
-            await clearLocalSessionState()
             return .localOnlyAfterRemoteFailure(error.localizedDescription)
         }
     }
@@ -407,7 +416,7 @@ import Combine
     }
 
     /// 进入游客模式时，仅广播内存态 session，不写入钥匙串，避免根认证状态与局部 UI 分叉。
-    public func activateGuestSession(displayName: String = "游客用户") {
+    public func activateGuestSession(displayName: String = "游客用户") async throws {
         let guestSession = AuthSession(
             accessToken: "guest_token",
             refreshToken: nil,
@@ -416,11 +425,8 @@ import Combine
             issuedAt: Date()
         )
 
-        schedulePersistedSessionDeletion(reason: "activateGuestSession")
+        try await clearLocalSessionState()
         sessionSubject.send(guestSession)
-        Task {
-            await TenantAccessController.shared.clearAuthentication()
-        }
     }
 
     /// 在启动阶段交互式解锁 Keychain 后补读一次持久化 session，避免首次静默读取失败后永久丢失登录态。
@@ -510,7 +516,6 @@ import Combine
     private func store(session: AuthSession) async throws {
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
-        await cancelAndAwaitPendingSessionDeletion()
         do {
             try await KeychainManager.shared.storeAuthSession(session)
         } catch let error as NSError {
@@ -626,12 +631,14 @@ import Combine
         return sanitized
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private static func shouldSkipAuthRefreshForSmoke() -> Bool {
         let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SKIP_AUTH_REFRESH"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
         return raw == "1" || raw == "true" || raw == "yes"
     }
+#endif
 
     nonisolated static func decodeAppleIdentityToken(_ data: Data) -> String? {
         guard let token = String(data: data, encoding: .utf8)?
@@ -669,42 +676,12 @@ import Combine
         )
     }
 
-    private func clearLocalSessionState() async {
+    private func clearLocalSessionState() async throws {
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
+        try await KeychainManager.shared.deleteAuthSession()
         sessionSubject.send(nil)
-        await cancelAndAwaitPendingSessionDeletion()
-        do {
-            try await KeychainManager.shared.deleteAuthSession()
-        } catch {
-            logger.error("AuthenticationService Keychain 会话清理失败 [clearLocalSessionState]: \(error.localizedDescription, privacy: .private)")
-        }
         await TenantAccessController.shared.clearAuthentication()
-    }
-
-    private func schedulePersistedSessionDeletion(reason: String) {
-        let previousTask = authSessionDeletionTask
-        previousTask?.cancel()
-        authSessionDeletionTask = Task(priority: .utility) {
-            if let previousTask {
-                await previousTask.value
-            }
-            guard !Task.isCancelled else { return }
-            do {
-                try await KeychainManager.shared.deleteAuthSession()
-            } catch {
-                self.logger.error("AuthenticationService Keychain 会话清理失败 [\(reason, privacy: .public)]: \(error.localizedDescription, privacy: .private)")
-            }
-        }
-    }
-
-    private func cancelAndAwaitPendingSessionDeletion() async {
-        guard let deletionTask = authSessionDeletionTask else { return }
-        deletionTask.cancel()
-        await deletionTask.value
-        if authSessionDeletionTask == deletionTask {
-            authSessionDeletionTask = nil
-        }
     }
 }
 

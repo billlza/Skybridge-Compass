@@ -49,7 +49,9 @@ internal enum WebRTCPQCHandshakePolicy {
     static func peerKEMCanonicalWireIds(_ peerKEMPublicKeys: [UInt16: Data]) -> Set<UInt16> {
         Set(peerKEMPublicKeys.compactMap { wireId, publicKey in
             guard !publicKey.isEmpty else { return nil }
-            return CryptoSuite(wireId: wireId).canonicalKEMSuite.wireId
+            let suite = CryptoSuite(wireId: wireId)
+            guard suite.isNegotiable, suite.isPQCGroup else { return nil }
+            return suite.canonicalKEMSuite.wireId
         })
     }
 
@@ -61,7 +63,7 @@ internal enum WebRTCPQCHandshakePolicy {
         var seenWireIds = Set<UInt16>()
         var shared: [CryptoSuite] = []
 
-        for suite in localPQCSuites where suite.isPQCGroup {
+        for suite in localPQCSuites where suite.isPQCGroup && suite.isNegotiable {
             guard peerCanonicalWireIds.contains(suite.canonicalKEMSuite.wireId) else { continue }
             guard seenWireIds.insert(suite.wireId).inserted else { continue }
             shared.append(suite)

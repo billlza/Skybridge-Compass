@@ -176,30 +176,22 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
 
     private static func isConcreteQuantumSafeSuiteForNotice(_ value: String?) -> Bool {
         guard isPresentForNotice(value) else { return false }
-        let normalized = value?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: "_", with: " ") ?? ""
-        let genericValues: Set<String> = [
-            "pqc",
-            "pqc secure channel",
-            "quantum safe",
-            "quantum-safe",
-            "post quantum",
-            "post-quantum"
-        ]
-        guard !genericValues.contains(normalized) else { return false }
-        return normalized.contains("x-wing")
-            || normalized.contains("xwing")
-            || normalized.contains("ml-kem")
-            || normalized.contains("mlkem")
-            || normalized.contains("q-periapt")
-            || normalized.contains("q periapt")
-            || normalized.contains("qperiapt")
-            || normalized.contains("0x0001")
-            || normalized.contains("0x0011")
-            || normalized.contains("0x0101")
-            || normalized.contains("0x0102")
+        let rendered = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let pqcSuffix = " PQC"
+        let suiteToken = rendered.hasSuffix(pqcSuffix)
+            ? String(rendered.dropLast(pqcSuffix.count))
+            : rendered
+
+        let suite: CryptoSuite?
+        if suiteToken.hasPrefix("0x"), suiteToken.count == 6,
+           let wireID = UInt16(suiteToken.dropFirst(2), radix: 16) {
+            suite = CryptoSuite(wireId: wireID)
+        } else {
+            suite = CryptoSuite(rawValue: suiteToken)
+        }
+        return suite?.isKnown == true
+            && suite?.isPQCGroup == true
+            && suite?.isNegotiable == true
     }
 }
 

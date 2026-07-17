@@ -183,7 +183,7 @@ public actor TURNCredentialService {
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
-        let deviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let deviceID = try await DeviceIdentityKeyManager.shared.getDeviceId()
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !deviceID.isEmpty {
             request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")

@@ -519,7 +519,7 @@ struct MessageSizeBenchRunner {
         offeredSuites: [CryptoSuite],
         provider: any CryptoProvider
     ) async throws -> [CryptoSuite: Data] {
-        let pqcSuites = offeredSuites.filter { $0.isPQC }
+        let pqcSuites = offeredSuites.filter { $0.isPQC && $0.isNegotiable }
         guard !pqcSuites.isEmpty else {
             return [:]
         }

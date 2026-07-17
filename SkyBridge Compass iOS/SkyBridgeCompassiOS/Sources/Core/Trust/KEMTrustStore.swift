@@ -10,6 +10,7 @@ public actor KEMTrustStore {
     public enum SignedRefreshImportError: Error, LocalizedError, Sendable, Equatable {
         case signatureVerificationFailed
         case signatureVerificationError(String)
+        case qPeriaptPlatformMetadataUnavailable
 
         public var errorDescription: String? {
             switch self {
@@ -17,6 +18,8 @@ public actor KEMTrustStore {
                 return "SKR-1 signature verification failed at KEM trust store import"
             case .signatureVerificationError(let detail):
                 return "SKR-1 signature verification error at KEM trust store import: \(detail)"
+            case .qPeriaptPlatformMetadataUnavailable:
+                return "SKR-1 cannot import Q-Periapt until peer platform metadata is signature-bound"
             }
         }
     }
@@ -24,6 +27,8 @@ public actor KEMTrustStore {
     private struct StoredPeer: Codable, Sendable {
         var keys: [UInt16: Data] // suiteWireId -> publicKey
         var updatedAt: Date
+        var platform: String? = nil
+        var osVersion: String? = nil
         var source: String? = nil
         var keyId: String? = nil
         var generation: UInt64? = nil
@@ -69,10 +74,21 @@ public actor KEMTrustStore {
         cache = Self.loadCache(storageKey: storageKey, userDefaults: userDefaults)
     }
 
-    public func upsert(deviceId: String, kemPublicKeys: [KEMPublicKeyInfo]) {
+    public func upsert(
+        deviceId: String,
+        kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String? = nil,
+        osVersion: String? = nil
+    ) {
         let candidates = Self.trustMaterialCandidates(forAny: [deviceId])
         guard !candidates.isEmpty else { return }
-        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(kemPublicKeys)
+        let incomingPlatform = Self.normalizedPeerMetadata(platform)
+        let incomingOSVersion = Self.normalizedPeerMetadata(osVersion)
+        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(
+            kemPublicKeys,
+            platform: incomingPlatform,
+            osVersion: incomingOSVersion
+        )
         guard !validKeys.isEmpty else { return }
 
         let observedAt = Date()
@@ -94,9 +110,28 @@ public actor KEMTrustStore {
             for keyInfo in validKeys {
                 dict[keyInfo.suiteWireId] = keyInfo.publicKey
             }
+            let qPeriaptWireID = CryptoSuite.qperiaptABI2PolicyBound.wireId
+            let incomingContainsQPeriapt = validKeys.contains {
+                $0.suiteWireId == qPeriaptWireID
+            }
+            let retainedExistingQPeriapt = existingKeys[qPeriaptWireID] != nil
+            let storedPlatform: String?
+            let storedOSVersion: String?
+            if incomingContainsQPeriapt {
+                storedPlatform = incomingPlatform
+                storedOSVersion = incomingOSVersion
+            } else if retainedExistingQPeriapt {
+                storedPlatform = existing?.platform
+                storedOSVersion = existing?.osVersion
+            } else {
+                storedPlatform = nil
+                storedOSVersion = nil
+            }
             cache[candidate] = StoredPeer(
                 keys: dict,
                 updatedAt: observedAt,
+                platform: storedPlatform,
+                osVersion: storedOSVersion,
                 source: "pairing_identity_exchange"
             )
         }
@@ -115,6 +150,11 @@ public actor KEMTrustStore {
             pinnedProtocolFingerprints: pinnedProtocolFingerprints,
             minimumGeneration: minimumGeneration
         )
+        guard !validPayload.kemPublicKeys.contains(where: {
+            $0.suiteWireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+        }) else {
+            throw SignedRefreshImportError.qPeriaptPlatformMetadataUnavailable
+        }
         guard let algorithm = ProtocolSigningAlgorithm(rawValue: validPayload.protocolSigningAlgorithm) else {
             throw AppMessage.KEMRefreshValidationError.invalidSignatureAlgorithm
         }
@@ -147,6 +187,8 @@ public actor KEMTrustStore {
             cache[candidate] = StoredPeer(
                 keys: keyDict,
                 updatedAt: observedAt,
+                platform: nil,
+                osVersion: nil,
                 source: "signed_lan_kem_refresh",
                 keyId: validPayload.keyId,
                 generation: validPayload.generation,
@@ -192,7 +234,11 @@ public actor KEMTrustStore {
             }
             if let expiresAt = peer.expiresAt, expiresAt <= Date() { continue }
             let signedSuiteWireIds = Set(peer.signedSuiteWireIds ?? peer.keys.keys.sorted())
-            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(peer.keys)
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(
+                peer.keys,
+                platform: peer.platform,
+                osVersion: peer.osVersion
+            )
             where signedSuiteWireIds.contains(suiteWireId) {
                 let suite = CryptoSuite(wireId: suiteWireId)
                 let candidateKey = SelectedKey(
@@ -221,7 +267,11 @@ public actor KEMTrustStore {
             if let expiresAt = stored.expiresAt, expiresAt <= Date() { continue }
             let isCanonical = canonicalCandidates.contains(candidate)
             let signedSuiteWireIds = Set(stored.signedSuiteWireIds ?? (stored.source == "signed_lan_kem_refresh" ? Array(stored.keys.keys) : []))
-            for (wireId, pk) in Self.sanitizedKEMMap(stored.keys) {
+            for (wireId, pk) in Self.sanitizedKEMMap(
+                stored.keys,
+                platform: stored.platform,
+                osVersion: stored.osVersion
+            ) {
                 let suite = CryptoSuite(wireId: wireId)
                 let candidateKey = SelectedKey(
                     publicKey: pk,
@@ -292,12 +342,25 @@ public actor KEMTrustStore {
             legacyIdentifiers: legacyIdentifiers
         )
 
-        var mergedKeys: [UInt16: (publicKey: Data, updatedAt: Date, isCanonical: Bool, isSignedRefresh: Bool)] = [:]
+        var mergedKeys: [
+            UInt16: (
+                publicKey: Data,
+                updatedAt: Date,
+                isCanonical: Bool,
+                isSignedRefresh: Bool,
+                platform: String?,
+                osVersion: String?
+            )
+        ] = [:]
         var selectedSignedEvidence: StoredPeer?
         for candidate in migrationCandidates {
             guard let stored = cache[candidate] else { continue }
             let isCanonicalCandidate = canonicalCandidates.contains(candidate)
-            let sanitizedKeys = Self.sanitizedKEMMap(stored.keys)
+            let sanitizedKeys = Self.sanitizedKEMMap(
+                stored.keys,
+                platform: stored.platform,
+                osVersion: stored.osVersion
+            )
             let signedSuiteWireIds = Set(stored.signedSuiteWireIds ?? (stored.source == "signed_lan_kem_refresh" ? Array(sanitizedKeys.keys) : []))
             if stored.source == "signed_lan_kem_refresh",
                stored.expiresAt.map({ $0 > Date() }) ?? true,
@@ -310,16 +373,37 @@ public actor KEMTrustStore {
                 if let existing = mergedKeys[wireId] {
                     if isSignedRefresh != existing.isSignedRefresh {
                         if isSignedRefresh {
-                            mergedKeys[wireId] = (publicKey, stored.updatedAt, isCanonicalCandidate, isSignedRefresh)
+                            mergedKeys[wireId] = (
+                                publicKey,
+                                stored.updatedAt,
+                                isCanonicalCandidate,
+                                isSignedRefresh,
+                                stored.platform,
+                                stored.osVersion
+                            )
                         }
                     } else if stored.updatedAt > existing.updatedAt
                         || (stored.updatedAt == existing.updatedAt
                             && isCanonicalCandidate
                             && !existing.isCanonical) {
-                        mergedKeys[wireId] = (publicKey, stored.updatedAt, isCanonicalCandidate, isSignedRefresh)
+                        mergedKeys[wireId] = (
+                            publicKey,
+                            stored.updatedAt,
+                            isCanonicalCandidate,
+                            isSignedRefresh,
+                            stored.platform,
+                            stored.osVersion
+                        )
                     }
                 } else {
-                    mergedKeys[wireId] = (publicKey, stored.updatedAt, isCanonicalCandidate, isSignedRefresh)
+                    mergedKeys[wireId] = (
+                        publicKey,
+                        stored.updatedAt,
+                        isCanonicalCandidate,
+                        isSignedRefresh,
+                        stored.platform,
+                        stored.osVersion
+                    )
                 }
             }
         }
@@ -327,13 +411,23 @@ public actor KEMTrustStore {
 
         let reboundSignedSuiteWireIds = selectedSignedEvidence
             .map { evidence in
-                Set(evidence.signedSuiteWireIds ?? Self.sanitizedKEMMap(evidence.keys).keys.sorted())
+                Set(
+                    evidence.signedSuiteWireIds
+                        ?? Self.sanitizedKEMMap(
+                            evidence.keys,
+                            platform: evidence.platform,
+                            osVersion: evidence.osVersion
+                        ).keys.sorted()
+                )
                     .filter { mergedKeys[$0] != nil }
                     .sorted()
             }
+        let qPeriaptMetadata = mergedKeys[CryptoSuite.qperiaptABI2PolicyBound.wireId]
         let rebound = StoredPeer(
             keys: Dictionary(uniqueKeysWithValues: mergedKeys.map { ($0.key, $0.value.publicKey) }),
             updatedAt: mergedKeys.values.map(\.updatedAt).max() ?? Date(),
+            platform: qPeriaptMetadata?.platform,
+            osVersion: qPeriaptMetadata?.osVersion,
             source: selectedSignedEvidence?.source,
             keyId: selectedSignedEvidence?.keyId,
             generation: selectedSignedEvidence?.generation,
@@ -362,13 +456,29 @@ public actor KEMTrustStore {
 
     private static func loadCache(storageKey: String, userDefaults: UserDefaults) -> [String: StoredPeer] {
         guard let data = userDefaults.data(forKey: storageKey) else { return [:] }
-        let decoded = (try? JSONDecoder().decode([String: StoredPeer].self, from: data)) ?? [:]
-        return decoded.compactMapValues(Self.sanitizedPeer)
+        let decoded: [String: StoredPeer]
+        do {
+            decoded = try JSONDecoder().decode([String: StoredPeer].self, from: data)
+        } catch {
+            SkyBridgeLogger.shared.error("KEM trust store snapshot decode failed; refusing unverified persisted keys")
+            return [:]
+        }
+        let sanitized = decoded.compactMapValues(Self.sanitizedPeer)
+        do {
+            userDefaults.set(try JSONEncoder().encode(sanitized), forKey: storageKey)
+        } catch {
+            SkyBridgeLogger.shared.error("KEM trust store sanitized snapshot could not be persisted")
+        }
+        return sanitized
     }
 
     private static func sanitizedPeer(_ peer: StoredPeer) -> StoredPeer? {
         var sanitized = peer
-        sanitized.keys = sanitizedKEMMap(peer.keys)
+        sanitized.keys = sanitizedKEMMap(
+            peer.keys,
+            platform: peer.platform,
+            osVersion: peer.osVersion
+        )
         guard !sanitized.keys.isEmpty else { return nil }
         if let signedSuiteWireIds = sanitized.signedSuiteWireIds {
             sanitized.signedSuiteWireIds = signedSuiteWireIds
@@ -378,13 +488,34 @@ public actor KEMTrustStore {
         return sanitized
     }
 
-    private static func sanitizedKEMMap(_ keys: [UInt16: Data]) -> [UInt16: Data] {
+    private static func sanitizedKEMMap(
+        _ keys: [UInt16: Data],
+        platform: String?,
+        osVersion: String?
+    ) -> [UInt16: Data] {
         let keyInfos = keys.map { KEMPublicKeyInfo(suiteWireId: $0.key, publicKey: $0.value) }
         return Dictionary(
-            uniqueKeysWithValues: KEMPublicKeyInfo.normalizedValidKeys(keyInfos).map {
+            uniqueKeysWithValues: KEMPublicKeyInfo.normalizedValidKeys(
+                keyInfos,
+                platform: platform,
+                osVersion: osVersion
+            ).map {
                 ($0.suiteWireId, $0.publicKey)
             }
         )
+    }
+
+    private static func normalizedPeerMetadata(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.utf8.count <= 128,
+              !value.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return value
     }
 
     private static func migrationCandidates(for identifier: String) -> [String] {
@@ -490,8 +621,11 @@ public actor KEMTrustStore {
     }
 
     private func save() {
-        let data = (try? JSONEncoder().encode(cache)) ?? Data()
-        userDefaults.set(data, forKey: storageKey)
+        do {
+            userDefaults.set(try JSONEncoder().encode(cache), forKey: storageKey)
+        } catch {
+            SkyBridgeLogger.shared.error("KEM trust store snapshot could not be persisted")
+        }
     }
 
     private static func sha256Hex(_ data: Data) -> String {

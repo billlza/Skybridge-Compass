@@ -1527,6 +1527,31 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
         XCTAssertEqual(provider.tier, .liboqsPQC)
         XCTAssertEqual(provider.providerName, "liboqs")
     }
+
+    func testPeerAwareProviderSelectionRejectsEmptyAndLegacySuiteContracts() {
+        let env = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
+        let invalidOffers: [[CryptoSuite]] = [
+            [],
+            [.qperiaptContextBound],
+            [.qperiaptContextBound, .mlkem768MLDSA65]
+        ]
+
+        for suites in invalidOffers {
+            let inbound = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                policy: .requirePQC,
+                peerSupportedSuites: suites,
+                environment: env
+            )
+            let outbound = CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+                policy: .requirePQC,
+                peerAdvertisedSuites: suites,
+                environment: env
+            )
+
+            XCTAssertEqual(inbound.providerName, "Unavailable", "inbound suites: \(suites)")
+            XCTAssertEqual(outbound.providerName, "Unavailable", "outbound suites: \(suites)")
+        }
+    }
     
  /// Test provider selection event emission
  /// **Validates: Requirements 4.4**

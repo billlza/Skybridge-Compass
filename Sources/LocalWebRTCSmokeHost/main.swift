@@ -49,7 +49,7 @@ struct LocalWebRTCSmokeHost {
             reporter.append("auth-start")
             try await configureAuthContext(reporter: reporter)
             reporter.append("auth-configured")
-            await SelfIdentityProvider.shared.loadOrCreate()
+            try await SelfIdentityProvider.shared.loadOrCreate()
             reporter.append("self-identity-ready")
             try await exportLocalPQCIdentityIfRequested(reporter: reporter)
             try await preseedPeerKEMTrustIfRequested(reporter: reporter)
@@ -771,7 +771,7 @@ struct LocalWebRTCSmokeHost {
         guard let reportURL = pqcReportURL() else { return }
 
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let deviceId = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let deviceId = try await DeviceIdentityKeyManager.shared.getDeviceId()
         let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
             using: provider
         )

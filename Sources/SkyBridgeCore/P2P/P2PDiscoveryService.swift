@@ -812,7 +812,7 @@ public class P2PDiscoveryService: BaseManager {
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let requestedSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
         let prefersPQC = await Self.cryptoProviderSupportedSuites(policy: requestedSelection)
-            .contains(where: { $0.isPQCGroup })
+            .contains(where: { $0.isNegotiable && $0.isPQCGroup })
         let effectiveTimeoutSeconds: TimeInterval
         if requestedPolicy.requirePQC {
             effectiveTimeoutSeconds = max(timeoutSeconds, 90)
@@ -1457,7 +1457,9 @@ public class P2PDiscoveryService: BaseManager {
         pinnedProtocolFingerprints: Set<String>,
         preferredTargetSuite: CryptoSuite?
     ) async throws {
-        let requestedSuites = await Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
+        let requestedSuites = try await Self.signedLANRefreshRequestedSuites(
+            preferredTargetSuite: preferredTargetSuite
+        )
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
         let requesterFingerprint = requesterProof.fingerprint
@@ -1698,7 +1700,8 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func localOutboundProtocolIdentityDeviceId() async throws -> String {
-        let raw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let raw = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw Self.protocolIdentityBindingFailure("local device id unavailable")
@@ -1716,24 +1719,41 @@ public class P2PDiscoveryService: BaseManager {
 
     private static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
         await cryptoProviderSupportedSuites(policy: .requirePQC)
-            .first(where: { $0.isPQCGroup })?
+            .first(where: { $0.isNegotiable && $0.isPQCGroup })?
             .canonicalKEMSuite
     }
 
-    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+    private static func signedLANRefreshRequestedSuites(
+        preferredTargetSuite: CryptoSuite?
+    ) async throws -> [CryptoSuite] {
         let providerSuites = await cryptoProviderSupportedSuites(policy: .requirePQC)
-            .filter(\.isPQCGroup)
+            .filter {
+                $0.isNegotiable
+                    && $0.isPQCGroup
+                    && $0 != .qperiaptABI2PolicyBound
+            }
             .map(\.canonicalKEMSuite)
         var suites = providerSuites
-        if let preferred = preferredTargetSuite?.canonicalKEMSuite, preferred.isKnown, preferred.isPQCGroup {
+        if let preferred = preferredTargetSuite?.canonicalKEMSuite,
+           preferred.isNegotiable,
+           preferred.isPQCGroup,
+           preferred != .qperiaptABI2PolicyBound,
+           providerSuites.contains(preferred) {
             suites.insert(preferred, at: 0)
         }
         var seen = Set<UInt16>()
         let unique = suites.filter { suite in
-            guard suite.isKnown, suite.isPQCGroup else { return false }
+            guard suite.isNegotiable,
+                  suite.isPQCGroup,
+                  suite != .qperiaptABI2PolicyBound else {
+                return false
+            }
             return seen.insert(suite.wireId).inserted
         }
-        return unique.isEmpty ? [.mlkem768MLDSA65] : unique
+        guard !unique.isEmpty else {
+            throw signedLANRefreshFailure("no SKR-1-eligible suite from the active PQC provider")
+        }
+        return unique
     }
 
     private static func strictPQCOutboundPreflightAction(
@@ -1764,7 +1784,7 @@ public class P2PDiscoveryService: BaseManager {
         return .attemptSignedLANRefresh
     }
 
-    private static func canSatisfyStrictPQCWithTrustedKEM(
+    static func canSatisfyStrictPQCWithTrustedKEM(
         trustedPeerKEMSuites: Set<CryptoSuite>,
         preferredTargetSuite: CryptoSuite?
     ) -> Bool {
@@ -1773,15 +1793,18 @@ public class P2PDiscoveryService: BaseManager {
                 suiteSupportsTargetKEM($0, target: preferredTargetSuite)
             }
         }
-        return trustedPeerKEMSuites.contains(where: { $0.isPQCGroup })
+        return trustedPeerKEMSuites.contains(where: { $0.isNegotiable && $0.isPQCGroup })
     }
 
-    private static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
-        if availableSuite == target { return true }
-        if availableSuite.canonicalKEMSuite == target.canonicalKEMSuite { return true }
-        if target.isHybrid { return availableSuite.isHybrid }
-        if availableSuite.isHybrid { return target.isHybrid }
-        return false
+    static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
+        guard availableSuite.isNegotiable,
+              availableSuite.isPQCGroup,
+              target.isNegotiable,
+              target.isPQCGroup else {
+            return false
+        }
+        return availableSuite == target
+            || availableSuite.canonicalKEMSuite == target.canonicalKEMSuite
     }
 
     private static func signedRefreshEvidenceSatisfiesStrictPQC(
@@ -2973,14 +2996,11 @@ public class P2PDiscoveryService: BaseManager {
         return Data(SHA256.hash(data: Data(canonical.utf8)))
     }
 
-    private nonisolated static func localSOAPeerIdBytes() async -> Data {
-        if #available(macOS 14.0, iOS 17.0, *) {
-            let deviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
-            if !deviceId.isEmpty {
-                return soaPeerIdBytes(from: deviceId)
-            }
-        }
-        return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
+    @available(macOS 14.0, iOS 17.0, *)
+    private nonisolated static func localSOAPeerIdBytes() async throws -> Data {
+        let deviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
+        return soaPeerIdBytes(from: deviceId)
     }
 
     /// 入站控制通道处理（回退 HandshakeDriver，与 iOS 互通）
@@ -3060,7 +3080,16 @@ public class P2PDiscoveryService: BaseManager {
         let resolvedPeerId = await MainActor.run { [weak self] in
             self?.resolveInboundPeerIdentifier(for: connection.endpoint) ?? Self.fallbackPeerIdentifier(for: connection.endpoint)
         }
-        let localSOAPeerId = await Self.localSOAPeerIdBytes()
+        let localSOAPeerId: Data
+        do {
+            localSOAPeerId = try await Self.localSOAPeerIdBytes()
+        } catch {
+            logger.error(
+                "❌ inbound control channel local identity unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            connection.cancel()
+            return
+        }
         var expectedRemoteSOAPeerId: Data?
         var inboundPairKey: Data?
         // Protocol-grade gate:
@@ -3131,26 +3160,10 @@ public class P2PDiscoveryService: BaseManager {
             _ payload: AppMessage.PairingIdentityExchangePayload
         ) -> Bool {
             guard let authority = authenticatedRemoteAuthority else { return false }
-            let expectedAlgorithm = authority.protocolSigningAlgorithm.rawValue
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .uppercased()
-            let expectedFingerprint = authority.protocolPublicKeyFingerprint
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard !expectedAlgorithm.isEmpty, !expectedFingerprint.isEmpty else {
-                return false
-            }
-
-            let protocolKeys =
-                AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(payload.protocolIdentityPublicKeys) ?? []
-            return protocolKeys.contains { key in
-                key.protocolSigningAlgorithm
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .uppercased() == expectedAlgorithm
-                    && key.authoritativeFingerprint?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .lowercased() == expectedFingerprint
-            }
+            return AuthenticatedProtocolIdentityBinding.matchingPublicKey(
+                in: payload,
+                authority: authority
+            ) != nil
         }
 
         func cryptoKind(for suite: CryptoSuite) -> String {
@@ -3207,6 +3220,15 @@ public class P2PDiscoveryService: BaseManager {
             appendKnownDeviceId(peer.deviceId)
             appendKnownDeviceId(peerIdForPresence)
 
+            let authenticatedAlgorithm = authority.protocolSigningAlgorithm.rawValue.uppercased()
+            let authenticatedFingerprint = authority.protocolPublicKeyFingerprint.lowercased()
+            let authenticatedProtocolPublicKey = (
+                AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(payload.protocolIdentityPublicKeys) ?? []
+            ).first { key in
+                key.protocolSigningAlgorithm.uppercased() == authenticatedAlgorithm
+                    && key.authoritativeFingerprint?.lowercased() == authenticatedFingerprint
+            }?.publicKey
+
             do {
                 let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
                     deviceId: payload.deviceId,
@@ -3214,7 +3236,8 @@ public class P2PDiscoveryService: BaseManager {
                     preferredCurrentDeviceId: payload.deviceId,
                     knownDeviceIds: knownDeviceIds,
                     protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
-                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint,
+                    authenticatedProtocolPublicKey: authenticatedProtocolPublicKey
                 )
                 guard persisted else {
                     logger.warning(
@@ -3434,7 +3457,16 @@ public class P2PDiscoveryService: BaseManager {
                 return nil
             }
 
-            let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+            let localIdRaw: String
+            do {
+                localIdRaw = try await SelfIdentityProvider.shared
+                    .protocolIdentityDeviceId(allowCreate: true)
+            } catch {
+                logger.error(
+                    "❌ pairing identity exchange local authority unavailable (\(reason, privacy: .public)): \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
+                return nil
+            }
             let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !localId.isEmpty else {
                 logger.warning("⚠️ 跳过 pairingIdentityExchange \(reason, privacy: .public)：本机 deviceId 为空")
@@ -3594,6 +3626,14 @@ public class P2PDiscoveryService: BaseManager {
                     return
                 }
 
+                if let messageA = try? HandshakeMessageA.decode(from: frame),
+                   !messageA.hasNegotiableOfferShape {
+                    logger.error(
+                        "⛔️ Rejected non-negotiable inbound MessageA before rekey state mutation. peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public)"
+                    )
+                    continue
+                }
+
                 if let currentDriver = driver,
                    let messageA = try? HandshakeMessageA.decode(from: frame) {
                     let driverState = await currentDriver.getCurrentState()
@@ -3602,27 +3642,9 @@ public class P2PDiscoveryService: BaseManager {
                         let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
                         let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
                         let toKind = messageA.supportedSuites.first.map { cryptoKind(for: $0) } ?? "?"
-                        let rekeyPeerId = peerIdForPresence
-
-                        if let inboundPairKey {
-                            logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peerIdForPresence, privacy: .public)")
-                            await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
-                            await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
-                        }
-
-                        Task { @MainActor in
-                            ConnectionPresenceService.shared.markRekeying(.init(
-                                peerId: rekeyPeerId,
-                                fromKind: fromKind,
-                                fromSuite: fromSuite,
-                                toKind: toKind,
-                                toSuite: toSuite
-                            ))
-                        }
-                        logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
+                        logger.info("🔁 入站 transactional rekey candidate：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public)")
                         previousSessionKeysBeforeRekey = sessionKeys
                         driver = nil
-                        sessionKeys = nil
                     }
                 }
 
@@ -3797,6 +3819,7 @@ public class P2PDiscoveryService: BaseManager {
                                 // 设备间文本消息：按发送者稳定公钥指纹归档（此入站会话路径同样可能收到）。
                                 let senderDeviceId = declaredDeviceIdForVerification ?? peer.deviceId
                                 if let record = await TrustSyncService.shared.getTrustRecord(deviceId: senderDeviceId),
+                                   record.isAuthenticationEligible,
                                    !record.pubKeyFP.isEmpty {
                                     await DeviceMessagingService.shared.handleIncoming(payload, fingerprint: record.pubKeyFP)
                                 }
@@ -3824,8 +3847,8 @@ public class P2PDiscoveryService: BaseManager {
                         if soaBinding.usedAuthenticatedInitiator {
                             logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peerDiagnosticLabel, privacy: .public))")
                         }
-                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
-                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
+                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
                         let capability = CryptoProviderFactory.detectCapability()
@@ -3845,7 +3868,9 @@ public class P2PDiscoveryService: BaseManager {
                         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
                         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter {
+                            !$0.isPQCGroup && $0.isNegotiable
+                        }
                         var effectivePolicy = policy
 
                         if peerHasPQCGroup {
@@ -3872,7 +3897,9 @@ public class P2PDiscoveryService: BaseManager {
                                     selection = .classicOnly
                                     cryptoProvider = CryptoProviderFactory.make(policy: selection)
                                     sigAAlgorithm = .ed25519
-                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    offeredSuites = cryptoProvider.supportedSuites.filter {
+                                        !$0.isPQCGroup && $0.isNegotiable
+                                    }
                                     effectivePolicy = HandshakePolicy(
                                         requirePQC: false,
                                         allowClassicFallback: false,
@@ -3914,7 +3941,9 @@ public class P2PDiscoveryService: BaseManager {
                             selection = .classicOnly
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
                             sigAAlgorithm = .ed25519
-                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                            offeredSuites = cryptoProvider.supportedSuites.filter {
+                                !$0.isPQCGroup && $0.isNegotiable
+                            }
                         }
 
                         let identityProvider = DeviceIdentityHandshakeProvider(
@@ -3935,13 +3964,18 @@ public class P2PDiscoveryService: BaseManager {
                                 cryptoPolicy: cryptoPolicy,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
-                                authenticatedIncomingEstablishedPolicy: effectivePolicy.requirePQC
+                                authenticatedIncomingEstablishedPolicy: previousSessionKeysBeforeRekey != nil
                                     ? .replaceAuthenticated
-                                    : .rejectDuplicate
+                                    : (effectivePolicy.requirePQC ? .replaceAuthenticated : .rejectDuplicate)
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                         } catch {
                             logger.error("❌ 入站 HandshakeDriver 初始化失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+                            if previousSessionKeysBeforeRekey != nil {
+                                previousSessionKeysBeforeRekey = nil
+                                driver = nil
+                                continue
+                            }
                             return
                         }
                     } else {
@@ -3959,6 +3993,9 @@ public class P2PDiscoveryService: BaseManager {
                     if let previousKeys = previousSessionKeysBeforeRekey {
                         previousSessionKeysBeforeRekey = nil
                         sessionKeys = previousKeys
+                        if let inboundPairKey {
+                            await PeerSessionArbiter.shared.markEstablished(pairKey: inboundPairKey)
+                        }
                         let restoredPeerId = peerIdForPresence
                         Task { @MainActor in
                             ConnectionPresenceService.shared.clearRekeying(peerId: restoredPeerId)

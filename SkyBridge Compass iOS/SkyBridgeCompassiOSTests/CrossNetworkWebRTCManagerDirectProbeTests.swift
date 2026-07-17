@@ -530,8 +530,9 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     }
 
     @MainActor
-    func testViewerStreamConfigurationDisablesCrossNetworkFallbackScreenChannel() throws {
-        let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
+    func testViewerStreamConfigurationDisablesCrossNetworkFallbackScreenChannel() async throws {
+        try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
+        let payload = try RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
 
         XCTAssertEqual(payload.screenDataChannelEnabled, true)
 

@@ -69,6 +69,23 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(manager.contains("stage: \"outbound-rekey\""))
   }
 
+  func testWebRTCPQCReadinessRequiresNegotiableSuite() throws {
+    let manager = try crossNetworkWebRTCManagerSource()
+
+    XCTAssertTrue(manager.contains("private static func isNegotiablePQCSuite("))
+    XCTAssertTrue(manager.contains("suite.isNegotiable && suite.isPQCGroup"))
+    XCTAssertTrue(manager.contains("private static func hasNegotiablePQCSession("))
+    XCTAssertTrue(manager.contains("let completedWithNegotiablePQC ="))
+    XCTAssertTrue(manager.contains("Self.isNegotiablePQCSuite(keys.negotiatedSuite)"))
+    XCTAssertTrue(manager.contains("Self.isNegotiablePQCSuite(rekeyed.negotiatedSuite)"))
+    XCTAssertTrue(manager.contains("!Self.hasNegotiablePQCSession(sessionKeys)"))
+    XCTAssertFalse(manager.contains("sessionKeys?.negotiatedSuite.isPQCGroup != true"))
+    XCTAssertFalse(manager.contains("!keys.negotiatedSuite.isPQCGroup"))
+    XCTAssertFalse(manager.contains("guard !establishedKeys.negotiatedSuite.isPQCGroup"))
+    XCTAssertFalse(manager.contains("let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup"))
+    XCTAssertFalse(manager.contains("let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup"))
+  }
+
   func testInboundFileTransferSupportStaysOutsideManager() throws {
     let manager = try crossNetworkWebRTCManagerSource()
     let fileTransfer = try crossNetworkWebRTCFileTransferSource()
@@ -4435,8 +4452,9 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testViewerStreamConfigurationRespectsAudioRedirectionPreference() {
+  func testViewerStreamConfigurationRespectsAudioRedirectionPreference() async throws {
     let manager = RemoteDesktopManager.instance
+    try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
     let originalSettings = manager.viewerSettings
     defer { manager.viewerSettings = originalSettings }
 
@@ -4444,7 +4462,7 @@ final class RegressionHardeningTests: XCTestCase {
     disabledSettings.audioRedirectionEnabled = false
     manager.viewerSettings = disabledSettings
 
-    XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
+    XCTAssertEqual(try manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
 
     var enabledSettings = originalSettings
     enabledSettings.audioRedirectionEnabled = true
@@ -4454,7 +4472,7 @@ final class RegressionHardeningTests: XCTestCase {
     // 偏好开启但无可用媒体音频端点/原生音频时，payload 仍然必须广告为关闭。
     // 端点就绪时广告为开启的路径由 RemoteDesktopViewerStreamConfigurationFactoryTests
     // .testCrossNetworkAudioEndpointProducesPQCRealtimeAudioPayload 锁定。
-    XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
+    XCTAssertEqual(try manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
   }
 
   func testLegacyViewerSettingsDecodeDefaultsAudioRedirectionToEnabled() throws {
@@ -4536,11 +4554,12 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testViewerStreamConfigurationKeepsAudioOnStableFallbackPath() {
+  func testViewerStreamConfigurationKeepsAudioOnStableFallbackPath() async throws {
     // 无媒体音频绑定时（测试环境默认态），音频字段必须显式广告为关闭，
     // 不得提前广告 pqc-media-v1 或采样率（媒体就绪门控语义；端点就绪路径由
     // RemoteDesktopViewerStreamConfigurationFactoryTests 锁定）。
-    let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
+    try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
+    let payload = try RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
 
     XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
     XCTAssertEqual(payload.audioRedirectionEnabled, false)
@@ -5986,6 +6005,19 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
+  func testSettingsPQCPolicyStatusRejectsDecodeOnlyABI1EvenWhenTierIsPQC() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .nativePQC,
+      currentSuite: .qperiaptContextBound,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "PQC 不可用")
+    XCTAssertEqual(status.tone, .unavailable)
+  }
+
+  @MainActor
   func testDashboardViewModelPreservesClassicPresentationWhenActiveConnectionsTemporarilyClear()
     async
   {
@@ -6529,24 +6561,6 @@ final class RegressionHardeningTests: XCTestCase {
       ),
       .decrementTo(0)
     )
-  }
-
-  func testClassicTransferSenderDeviceIdPrefersStableKeychainIdentity() {
-    let resolved = FileTransferClassicPeerResolutionPolicy.preferredSenderDeviceId(
-      stableDeviceId: "keychain-device-id",
-      vendorDeviceId: "vendor-id"
-    )
-
-    XCTAssertEqual(resolved, "keychain-device-id")
-  }
-
-  func testClassicTransferSenderDeviceIdFallsBackToVendorWhenStableIdentityMissing() {
-    let resolved = FileTransferClassicPeerResolutionPolicy.preferredSenderDeviceId(
-      stableDeviceId: "   ",
-      vendorDeviceId: "vendor-id"
-    )
-
-    XCTAssertEqual(resolved, "vendor-id")
   }
 
   func testSinglePeerTransferSecurityFallbackFailsClosedWhenNoHintsExist() {
@@ -8697,6 +8711,20 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       manager.testOnlyStrictPQCRejectsInboundHandshake(
         supportedSuites: [.x25519Ed25519]
+      )
+    )
+  }
+
+  @MainActor
+  func testP2PConnectionManagerStrictInboundRejectsDecodeOnlyQABI1() {
+    let manager = P2PConnectionManager.instance
+    let original = PQCCryptoManager.instance.enforcePQCHandshake
+    defer { PQCCryptoManager.instance.enforcePQCHandshake = original }
+    PQCCryptoManager.instance.enforcePQCHandshake = true
+
+    XCTAssertTrue(
+      manager.testOnlyStrictPQCRejectsInboundHandshake(
+        supportedSuites: [.qperiaptContextBound]
       )
     )
   }

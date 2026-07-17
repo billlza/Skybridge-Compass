@@ -217,7 +217,6 @@
 "settings.general.exportSettings" = "导出设置";
 "settings.general.importSettings" = "导入设置";
 "settings.general.resetSettings" = "恢复默认设置";
-"settings.general.deduplicateKeychain" = "清理重复的钥匙串项";
 
 /* Units */
 "unit.seconds.15" = "15 秒";
@@ -534,9 +533,7 @@
 "settings.advanced.pqc.preferXWing.help" = "启动时会同时声明 ML-KEM-768 与 X-Wing；此开关仅调整套件优先级。";
 "settings.advanced.pqc.preferXWing.caption" = "启用后优先协商 X-Wing；关闭则优先 ML-KEM-768（两者能力仍会一并声明）。";
 "settings.advanced.pqc.signatureAlgorithm" = "签名算法:";
-"settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSA 使用 Secure Enclave";
-"settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEM 使用 Secure Enclave";
-"settings.advanced.pqc.note" = "X-Wing（混合）与 ML-KEM-768（纯 PQC）在 macOS 26+（CryptoKit）可用；Secure Enclave PQC 也仅在该条件下生效。macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
+"settings.advanced.pqc.note" = "当前运行时的 X-Wing 与 ML-DSA-65 均使用软件密钥，不宣称 Secure Enclave 保护；可用性以实际选中的运行时提供者为准。";
 
 "settings.advanced.smoothing.title" = "设备强度平滑";
 "settings.advanced.smoothing.alpha" = "强度平滑系数 (EMA)";

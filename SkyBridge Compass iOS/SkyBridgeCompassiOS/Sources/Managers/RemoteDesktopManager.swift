@@ -2036,11 +2036,19 @@ public class RemoteDesktopManager: ObservableObject {
             realtimeMediaAudioReceiverStartTask = nil
             stopRealtimeMediaAudioReceiver(reason: "stream-config-plan-stop-audio")
         }
-        let payload = makeViewerStreamConfigurationPayload(
-            refreshStream: refreshStream,
-            mediaAudioEndpoint: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil,
-            mediaSessionId: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil
-        )
+        let payload: RemoteDesktopStreamConfigurationPayload
+        do {
+            payload = try makeViewerStreamConfigurationPayload(
+                refreshStream: refreshStream,
+                mediaAudioEndpoint: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil,
+                mediaSessionId: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil
+            )
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "⛔️ 远控流配置缺少本机协议 identity snapshot，拒绝发送: \(error.localizedDescription)"
+            )
+            return
+        }
         guard validateViewerStreamConfigurationNoticeIdentity(payload) else { return }
         guard RemoteDesktopViewerStreamConfigurationPushPolicy.shouldSendPayload(
             force: force,
@@ -2223,15 +2231,15 @@ public class RemoteDesktopManager: ObservableObject {
         RemoteDesktopViewerStreamConfigurationFactory.stopPayload()
     }
 
-    func makeViewerStreamConfigurationPayload() -> RemoteDesktopStreamConfigurationPayload {
-        makeViewerStreamConfigurationPayload(refreshStream: false)
+    func makeViewerStreamConfigurationPayload() throws -> RemoteDesktopStreamConfigurationPayload {
+        try makeViewerStreamConfigurationPayload(refreshStream: false)
     }
 
     func makeViewerStreamConfigurationPayload(
         refreshStream: Bool,
         mediaAudioEndpoint: SkyBridgeMediaEndpoint? = nil,
         mediaSessionId: String? = nil
-    ) -> RemoteDesktopStreamConfigurationPayload {
+    ) throws -> RemoteDesktopStreamConfigurationPayload {
         let now = Date()
         let strictMediaValidationEnabled = Self.shouldRequestExtremeMediaValidation(
             activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
@@ -2249,11 +2257,12 @@ public class RemoteDesktopManager: ObservableObject {
         let realtimeMediaAudioMode = preferredRealtimeMediaAudioMode()
         let streamRefreshToken = refreshStream ? nextStreamRefreshToken() : nil
         let localDeviceSnapshot = AppleMobileDeviceIdentity.currentSnapshot()
+        let protocolIdentity = try skyBridgeCore.requireCurrentProtocolIdentitySnapshot()
         let securityIdentityMetadata = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
         let securityIdentity = RemoteDesktopSecurityIdentityPayload(
             accountDisplayName: securityIdentityMetadata.accountDisplayName,
             nebulaId: securityIdentityMetadata.nebulaId,
-            deviceId: localDeviceSnapshot.stableDeviceId,
+            deviceId: protocolIdentity.deviceId,
             deviceName: localDeviceSnapshot.deviceName
         )
 
@@ -2694,12 +2703,12 @@ public class RemoteDesktopManager: ObservableObject {
             await relayTransport.stop()
             return
         }
-        let payload = makeViewerStreamConfigurationPayload(
-            refreshStream: false,
-            mediaAudioEndpoint: relayEndpoint,
-            mediaSessionId: sessionId
-        )
         do {
+            let payload = try makeViewerStreamConfigurationPayload(
+                refreshStream: false,
+                mediaAudioEndpoint: relayEndpoint,
+                mediaSessionId: sessionId
+            )
             try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil)
             lastSentStreamConfiguration = payload
             SkyBridgeLogger.shared.info(
@@ -3501,7 +3510,11 @@ public class RemoteDesktopManager: ObservableObject {
         lanSecureSendCounter = 0
         lanHandshakeDriver = nil
 
-        let localDeviceId = resolvedLocalRemoteControlDeviceId()
+        let authorityDeviceId = try skyBridgeCore
+            .requireCurrentProtocolIdentitySnapshot().deviceId
+        let localDeviceId = PeerIdentityAliasResolver.persistentDeviceId(
+            from: authorityDeviceId
+        ) ?? authorityDeviceId
         guard let localSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: localDeviceId),
               let expectedRemoteSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: trustedPeerId),
               let soaMetadata = try? HandshakeSOAMetadata(
@@ -3541,7 +3554,12 @@ public class RemoteDesktopManager: ObservableObject {
         )
 
         try ensureLANBootstrapStillActive(for: connection)
-        try installLANSecureSessionKeys(keys, peerId: trustedPeerId, source: "performHandshake-return")
+        try installLANSecureSessionKeys(
+            keys,
+            peerId: trustedPeerId,
+            source: "performHandshake-return",
+            requiresPQC: true
+        )
     }
 
     private func installLANHandshakeDriver(
@@ -3560,8 +3578,20 @@ public class RemoteDesktopManager: ObservableObject {
     private func installLANSecureSessionKeys(
         _ keys: SessionKeys,
         peerId: String,
-        source: String
+        source: String,
+        requiresPQC: Bool
     ) throws {
+        guard keys.negotiatedSuite.isNegotiable else {
+            let reason = "LAN 远控安全通道拒绝不可协商 suite: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
+            SkyBridgeLogger.shared.error("⛔️ \(reason)")
+            throw RemoteDesktopError.connectionFailed(reason)
+        }
+        if requiresPQC, !keys.negotiatedSuite.isPQCGroup {
+            let reason = "LAN 远控严格 PQC 通道拒绝 Classic suite: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
+            SkyBridgeLogger.shared.error("⛔️ \(reason)")
+            throw RemoteDesktopError.connectionFailed(reason)
+        }
+
         if let existing = lanSessionKeys {
             if Self.isSameLANSecureSession(existing, keys) {
                 lanHandshakeDriver = nil
@@ -3633,7 +3663,8 @@ public class RemoteDesktopManager: ObservableObject {
             try installLANSecureSessionKeys(
                 keys,
                 peerId: lanHandshakePeerId ?? "-",
-                source: "handshake-driver-established"
+                source: "handshake-driver-established",
+                requiresPQC: true
             )
         case .failed(let reason):
             throw RemoteDesktopError.connectionFailed("LAN 远控握手失败: \(String(describing: reason))")
@@ -3689,10 +3720,6 @@ public class RemoteDesktopManager: ObservableObject {
         )
         try lanSecureReplayWindow.validateAndRecord(openedPayload)
         return openedPayload.payload
-    }
-
-    private func resolvedLocalRemoteControlDeviceId() -> String {
-        ProtocolDeviceIdentity.stablePersistentDeviceId()
     }
 
     // MARK: - Private Methods - Connection

@@ -2,12 +2,14 @@ import Foundation
 import Security
 import CryptoKit
 import LocalAuthentication
+import os
 import OSLog
 
 public enum KeychainError: Error, LocalizedError, Sendable {
     case itemNotFound
     case unexpectedError(OSStatus)
     case decodingError
+    case itemChangedDuringReconciliation
 
     public var errorDescription: String? {
         switch self {
@@ -17,8 +19,28 @@ public enum KeychainError: Error, LocalizedError, Sendable {
             return "Keychain error: \(status)"
         case .decodingError:
             return "Keychain item could not be decoded"
+        case .itemChangedDuringReconciliation:
+            return "Keychain item changed during legacy reconciliation"
         }
     }
+}
+
+public enum KeychainInsertResult: Sendable, Equatable {
+    case inserted
+    case alreadyExists
+}
+
+struct LegacyGenericPasswordCandidate: Equatable, Sendable {
+    let service: String
+    let account: String
+    var data: Data
+    let location: LegacySecItemLocation
+}
+
+struct LegacyGenericPasswordMetadataCandidate: Equatable, Sendable {
+    let service: String
+    let account: String
+    let location: LegacySecItemLocation
 }
 
 /// KeychainManager - 安全的密钥存储管理器
@@ -40,13 +62,165 @@ public actor KeychainManager {
     private init() {}
 
     private nonisolated static var useInMemoryKeychain: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = ProcessInfo.processInfo.environment
         if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
         if env["XCTestConfigurationFilePath"] != nil { return true }
         return NSClassFromString("XCTestCase") != nil
+        #else
+        return false
+        #endif
     }
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
+
+    private struct ScopedInMemoryKey: Hashable, Sendable {
+        let service: String
+        let account: String
+        let accessGroup: String
+        let usesDataProtectionKeychain: Bool
+    }
+
+    private nonisolated static let inMemoryDefaultAccessGroup =
+        "__skybridge_test_default_access_group__"
+
+    private nonisolated static let scopedInMemoryStore = OSAllocatedUnfairLock(
+        initialState: [ScopedInMemoryKey: Data]()
+    )
+
+    private nonisolated static func wipeSensitiveData(_ data: inout Data) {
+        data.withUnsafeMutableBytes { buffer in
+            _ = buffer.initializeMemory(as: UInt8.self, repeating: 0)
+        }
+        data.removeAll(keepingCapacity: false)
+    }
+
+    private struct LegacyGenericPasswordDiscovery {
+        let service: String
+        let account: String
+        var data: Data?
+        let location: LegacySecItemLocation
+    }
+
+    private enum InMemoryExactDeleteResult: Equatable {
+        case deleted
+        case missing
+        case changed
+    }
+
+    private nonisolated static func inMemoryPersistentReference(
+        service: String,
+        account: String,
+        accessGroup: String?,
+        usesDataProtectionKeychain: Bool
+    ) -> Data {
+        let location = [
+            service,
+            account,
+            accessGroup ?? "<legacy-no-group>",
+            usesDataProtectionKeychain ? "data-protection" : "legacy"
+        ].joined(separator: "\u{1f}")
+        return Data(SHA256.hash(data: Data(location.utf8)))
+    }
+
+    private nonisolated static func scopedInMemoryValue(
+        service: String,
+        account: String,
+        accessGroup: String?,
+        usesDataProtectionKeychain: Bool
+    ) -> Data? {
+        return scopedInMemoryStore.withLock { storage in
+            if let accessGroup {
+                return storage[
+                    ScopedInMemoryKey(
+                        service: service,
+                        account: account,
+                        accessGroup: accessGroup,
+                        usesDataProtectionKeychain: usesDataProtectionKeychain
+                    )
+                ]
+            }
+            return storage
+                .filter { key, _ in
+                    key.service == service
+                        && key.account == account
+                        && key.usesDataProtectionKeychain
+                            == usesDataProtectionKeychain
+                }
+                .sorted { lhs, rhs in
+                    lhs.key.accessGroup < rhs.key.accessGroup
+                }
+                .first?
+                .value
+        }
+    }
+
+    private nonisolated static func insertScopedInMemoryValueIfAbsent(
+        _ data: Data,
+        service: String,
+        account: String,
+        accessGroup: String?,
+        usesDataProtectionKeychain: Bool
+    ) -> KeychainInsertResult {
+        let key = ScopedInMemoryKey(
+            service: service,
+            account: account,
+            accessGroup: accessGroup ?? inMemoryDefaultAccessGroup,
+            usesDataProtectionKeychain: usesDataProtectionKeychain
+        )
+        return scopedInMemoryStore.withLock { storage in
+            guard storage[key] == nil else { return .alreadyExists }
+            storage[key] = data
+            return .inserted
+        }
+    }
+
+    private nonisolated static func removeScopedInMemoryValue(
+        service: String,
+        account: String,
+        accessGroup: String?,
+        usesDataProtectionKeychain: Bool
+    ) {
+        scopedInMemoryStore.withLock { storage in
+            if let accessGroup {
+                _ = storage.removeValue(
+                    forKey: ScopedInMemoryKey(
+                        service: service,
+                        account: account,
+                        accessGroup: accessGroup,
+                        usesDataProtectionKeychain: usesDataProtectionKeychain
+                    )
+                )
+            } else {
+                storage = storage.filter { key, _ in
+                    key.service != service
+                        || key.account != account
+                        || key.usesDataProtectionKeychain
+                            != usesDataProtectionKeychain
+                }
+            }
+        }
+    }
+
+    private nonisolated static func scopedInMemoryAccounts(
+        service: String,
+        accessGroup: String?,
+        usesDataProtectionKeychain: Bool
+    ) -> Set<String> {
+        return scopedInMemoryStore.withLock { storage in
+            Set(
+                storage.keys.compactMap { key in
+                    guard key.service == service,
+                          key.usesDataProtectionKeychain
+                              == usesDataProtectionKeychain,
+                          accessGroup == nil || key.accessGroup == accessGroup else {
+                        return nil
+                    }
+                    return key.account
+                }
+            )
+        }
+    }
 
     private nonisolated func makeNonInteractiveAuthContext() -> LAContext {
         let context = LAContext()
@@ -56,6 +230,60 @@ public actor KeychainManager {
 
     private nonisolated func forbidKeychainAuthenticationUI(_ query: inout [String: Any]) {
         query[kSecUseAuthenticationContext as String] = makeNonInteractiveAuthContext()
+    }
+
+    private nonisolated func accessibility(
+        for value: KeychainGenericPasswordAccessibility
+    ) -> CFString {
+        switch value {
+        case .afterFirstUnlockThisDeviceOnly:
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        }
+    }
+
+    private nonisolated func applyAccessGroup(
+        _ accessGroup: String?,
+        to query: inout [String: Any]
+    ) {
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        } else {
+            query.removeValue(forKey: kSecAttrAccessGroup as String)
+        }
+    }
+
+    private nonisolated func applyDataProtectionKeychain(
+        _ enabled: Bool,
+        to query: inout [String: Any]
+    ) {
+        #if os(macOS)
+        // A missing selector can prefer a same-name Data Protection item and
+        // hide the historical file-Keychain item from migration discovery.
+        // Security.framework accepts the explicit false value as the legacy
+        // domain selector; the signed integration probe protects this rule.
+        query[kSecUseDataProtectionKeychain as String] = enabled
+        #else
+        _ = enabled
+        #endif
+    }
+
+    private nonisolated func keychainSearchModes(
+        scope: KeychainGenericPasswordScope,
+        includeLegacyKeychain: Bool
+    ) -> [Bool] {
+        guard scope.usesDataProtectionKeychain else { return [false] }
+        return includeLegacyKeychain ? [true, false] : [true]
+    }
+
+    private nonisolated func legacyDiscoverySearchModes(
+        includeLegacyKeychain: Bool
+    ) -> [Bool] {
+        #if os(macOS)
+        includeLegacyKeychain ? [true, false] : [true]
+        #else
+        _ = includeLegacyKeychain
+        return [true]
+        #endif
     }
 
     private nonisolated static func performInteractiveUnlockProbe() -> OSStatus {
@@ -147,6 +375,81 @@ public actor KeychainManager {
         return status == errSecSuccess
     }
 
+    /// Atomically creates one generic-password item without replacing an
+    /// existing value. Callers implementing immutable identity records must
+    /// reload the winner after `.alreadyExists`; update-or-add is unsafe for
+    /// concurrent first creation across app and extension processes.
+    public nonisolated func insertKeyIfAbsent(
+        data: Data,
+        service: String,
+        account: String,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) throws -> KeychainInsertResult {
+        if Self.useInMemoryKeychain {
+            let key = service + "|" + account
+            return Self.inMemoryLock.withLock {
+                guard Self.inMemoryStore[key] == nil else { return .alreadyExists }
+                Self.inMemoryStore[key] = data
+                return .inserted
+            }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility
+        ]
+        let status = SecItemAdd(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .alreadyExists
+        default:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    /// Scoped variant used by app/extension-shared immutable identities.
+    nonisolated func insertKeyIfAbsent(
+        data: Data,
+        service: String,
+        account: String,
+        scope: KeychainGenericPasswordScope
+    ) throws -> KeychainInsertResult {
+        if Self.useInMemoryKeychain {
+            return Self.insertScopedInMemoryValueIfAbsent(
+                data,
+                service: service,
+                account: account,
+                accessGroup: scope.writeAccessGroup,
+                usesDataProtectionKeychain: scope.usesDataProtectionKeychain
+            )
+        }
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility(for: scope.accessibility),
+            kSecAttrSynchronizable as String: scope.synchronizable
+        ]
+        applyAccessGroup(scope.writeAccessGroup, to: &query)
+        applyDataProtectionKeychain(scope.usesDataProtectionKeychain, to: &query)
+
+        switch SecItemAdd(query as CFDictionary, nil) {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .alreadyExists
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
     public nonisolated func exportKey(service: String, account: String) -> Data? {
         do {
             return try exportKeyStrict(service: service, account: account)
@@ -158,6 +461,474 @@ public actor KeychainManager {
 
     public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data? {
         try loadKeyDataStrict(service: service, account: account)
+    }
+
+    /// Strictly reads a generic-password item through an ordered set of access
+    /// groups and, when requested, the historical non-data-protection keychain.
+    nonisolated func exportKeyStrict(
+        service: String,
+        account: String,
+        scope: KeychainGenericPasswordScope,
+        includeLegacyKeychain: Bool = false
+    ) throws -> Data? {
+        if Self.useInMemoryKeychain {
+            for accessGroup in scope.readAccessGroups {
+                if let data = Self.scopedInMemoryValue(
+                    service: service,
+                    account: account,
+                    accessGroup: accessGroup,
+                    usesDataProtectionKeychain: scope.usesDataProtectionKeychain
+                ) {
+                    return data
+                }
+            }
+            return nil
+        }
+
+        for usesDataProtection in keychainSearchModes(
+            scope: scope,
+            includeLegacyKeychain: includeLegacyKeychain
+        ) {
+            for accessGroup in scope.readAccessGroups {
+                var query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account,
+                    kSecReturnData as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
+                ]
+                applyAccessGroup(accessGroup, to: &query)
+                applyDataProtectionKeychain(usesDataProtection, to: &query)
+                forbidKeychainAuthenticationUI(&query)
+
+                var item: CFTypeRef?
+                switch SecItemCopyMatching(query as CFDictionary, &item) {
+                case errSecSuccess:
+                    guard let data = item as? Data else {
+                        throw KeychainError.decodingError
+                    }
+                    return data
+                case errSecItemNotFound:
+                    continue
+                case let status:
+                    throw KeychainError.unexpectedError(status)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Enumerates every visible non-synchronizable legacy item and records the
+    /// exact Security location returned by the system. The missing access-group
+    /// constraint is intentional only for discovery; callers must reconcile
+    /// every candidate and mutate it through `deleteLegacyGenericPasswordCandidate`.
+    nonisolated func legacyGenericPasswordCandidatesStrict(
+        service: String,
+        account: String,
+        includeLegacyKeychain: Bool = true
+    ) throws -> [LegacyGenericPasswordCandidate] {
+        var discoveries = try legacyGenericPasswordDiscoveriesStrict(
+            service: service,
+            account: account,
+            includeLegacyKeychain: includeLegacyKeychain,
+            returnData: true
+        )
+        defer {
+            for index in discoveries.indices {
+                if var data = discoveries[index].data {
+                    discoveries[index].data = nil
+                    Self.wipeSensitiveData(&data)
+                }
+            }
+        }
+        var candidates: [LegacyGenericPasswordCandidate] = []
+        candidates.reserveCapacity(discoveries.count)
+        for index in discoveries.indices {
+            guard let data = discoveries[index].data else {
+                throw KeychainError.decodingError
+            }
+            discoveries[index].data = nil
+            candidates.append(
+                LegacyGenericPasswordCandidate(
+                    service: discoveries[index].service,
+                    account: discoveries[index].account,
+                    data: data,
+                    location: discoveries[index].location
+                )
+            )
+        }
+        return candidates
+    }
+
+    /// Enumerates only namespace metadata. Backend evidence uses this path so
+    /// classification never imports legacy private-key bytes into the process.
+    nonisolated func legacyGenericPasswordMetadataCandidatesStrict(
+        service: String,
+        account: String,
+        includeLegacyKeychain: Bool = true
+    ) throws -> [LegacyGenericPasswordMetadataCandidate] {
+        try legacyGenericPasswordDiscoveriesStrict(
+            service: service,
+            account: account,
+            includeLegacyKeychain: includeLegacyKeychain,
+            returnData: false
+        ).map {
+            LegacyGenericPasswordMetadataCandidate(
+                service: $0.service,
+                account: $0.account,
+                location: $0.location
+            )
+        }
+    }
+
+    private nonisolated func legacyGenericPasswordDiscoveriesStrict(
+        service: String,
+        account: String,
+        includeLegacyKeychain: Bool,
+        returnData: Bool
+    ) throws -> [LegacyGenericPasswordDiscovery] {
+        guard !service.isEmpty, !account.isEmpty else {
+            throw KeychainError.decodingError
+        }
+        if Self.useInMemoryKeychain {
+            var discoveries = Self.scopedInMemoryStore.withLock { storage in
+                storage.compactMap { key, data -> LegacyGenericPasswordDiscovery? in
+                    guard key.service == service,
+                          key.account == account,
+                          includeLegacyKeychain
+                            || key.usesDataProtectionKeychain else {
+                        return nil
+                    }
+                    let persistentReference = Self.inMemoryPersistentReference(
+                        service: service,
+                        account: account,
+                        accessGroup: key.accessGroup,
+                        usesDataProtectionKeychain: key.usesDataProtectionKeychain
+                    )
+                    return LegacyGenericPasswordDiscovery(
+                        service: service,
+                        account: account,
+                        data: returnData ? data : nil,
+                        location: LegacySecItemLocation(
+                            actualAccessGroup: key.accessGroup,
+                            usesDataProtectionKeychain: key.usesDataProtectionKeychain,
+                            persistentReference: persistentReference
+                        )
+                    )
+                }
+            }
+            let legacy = Self.inMemoryLock.withLock {
+                let data = Self.inMemoryStore[service + "|" + account]
+                return (exists: data != nil, data: returnData ? data : nil)
+            }
+            if includeLegacyKeychain, legacy.exists {
+                discoveries.append(
+                    LegacyGenericPasswordDiscovery(
+                        service: service,
+                        account: account,
+                        data: legacy.data,
+                        location: LegacySecItemLocation(
+                            actualAccessGroup: nil,
+                            usesDataProtectionKeychain: false,
+                            persistentReference: Self.inMemoryPersistentReference(
+                                service: service,
+                                account: account,
+                                accessGroup: nil,
+                                usesDataProtectionKeychain: false
+                            )
+                        )
+                    )
+                )
+            }
+            return discoveries.sorted { lhs, rhs in
+                lhs.location.persistentReference.lexicographicallyPrecedes(
+                    rhs.location.persistentReference
+                )
+            }
+        }
+
+        var discoveries: [LegacyGenericPasswordDiscovery] = []
+        var seenLocations = Set<LegacySecItemLocation>()
+        for usesDataProtection in legacyDiscoverySearchModes(
+            includeLegacyKeychain: includeLegacyKeychain
+        ) {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecAttrSynchronizable as String: false,
+                kSecReturnAttributes as String: true,
+                kSecReturnPersistentRef as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+            if returnData {
+                query[kSecReturnData as String] = true
+            }
+            applyDataProtectionKeychain(usesDataProtection, to: &query)
+            forbidKeychainAuthenticationUI(&query)
+
+            var item: CFTypeRef?
+            switch SecItemCopyMatching(query as CFDictionary, &item) {
+            case errSecItemNotFound:
+                continue
+            case errSecSuccess:
+                break
+            case let status:
+                throw KeychainError.unexpectedError(status)
+            }
+            let rows: [[String: Any]]
+            if let values = item as? [[String: Any]] {
+                rows = values
+            } else if let value = item as? [String: Any] {
+                rows = [value]
+            } else {
+                throw KeychainError.decodingError
+            }
+            for row in rows {
+                let data: Data?
+                if returnData {
+                    guard let returnedData = row[kSecValueData as String] as? Data else {
+                        throw KeychainError.decodingError
+                    }
+                    data = returnedData
+                } else {
+                    data = nil
+                }
+                guard let persistentReference = row[
+                          kSecValuePersistentRef as String
+                      ] as? Data,
+                      !persistentReference.isEmpty else {
+                    throw KeychainError.decodingError
+                }
+                let actualAccessGroup = row[kSecAttrAccessGroup as String] as? String
+                if usesDataProtection {
+                    guard let actualAccessGroup,
+                          !actualAccessGroup.trimmingCharacters(
+                              in: .whitespacesAndNewlines
+                          ).isEmpty else {
+                        throw KeychainError.decodingError
+                    }
+                }
+                let location = LegacySecItemLocation(
+                    actualAccessGroup: actualAccessGroup,
+                    usesDataProtectionKeychain: usesDataProtection,
+                    persistentReference: persistentReference
+                )
+                guard seenLocations.insert(location).inserted else {
+                    continue
+                }
+                discoveries.append(
+                    LegacyGenericPasswordDiscovery(
+                        service: service,
+                        account: account,
+                        data: data,
+                        location: location
+                    )
+                )
+            }
+        }
+        return discoveries
+    }
+
+    /// Deletes exactly one item discovered above. Persistent references are the
+    /// mutation authority; actualAccessGroup is retained for reconciliation and
+    /// diagnostics, never translated into a nil-group delete query.
+    nonisolated func deleteLegacyGenericPasswordCandidate(
+        _ candidate: LegacyGenericPasswordCandidate
+    ) throws {
+        if Self.useInMemoryKeychain {
+            let expectedReference = Self.inMemoryPersistentReference(
+                service: candidate.service,
+                account: candidate.account,
+                accessGroup: candidate.location.actualAccessGroup,
+                usesDataProtectionKeychain: candidate.location
+                    .usesDataProtectionKeychain
+            )
+            guard expectedReference == candidate.location.persistentReference else {
+                throw KeychainError.decodingError
+            }
+            if candidate.location.usesDataProtectionKeychain
+                || candidate.location.actualAccessGroup != nil {
+                guard let accessGroup = candidate.location.actualAccessGroup else {
+                    throw KeychainError.decodingError
+                }
+                let key = ScopedInMemoryKey(
+                    service: candidate.service,
+                    account: candidate.account,
+                    accessGroup: accessGroup,
+                    usesDataProtectionKeychain: candidate.location
+                        .usesDataProtectionKeychain
+                )
+                let result = Self.scopedInMemoryStore.withLock { storage in
+                    guard let current = storage[key] else {
+                        return InMemoryExactDeleteResult.missing
+                    }
+                    guard current == candidate.data else {
+                        return InMemoryExactDeleteResult.changed
+                    }
+                    storage.removeValue(forKey: key)
+                    return InMemoryExactDeleteResult.deleted
+                }
+                if result == .changed {
+                    throw KeychainError.itemChangedDuringReconciliation
+                }
+            } else {
+                let key = candidate.service + "|" + candidate.account
+                let result = Self.inMemoryLock.withLock {
+                    guard let current = Self.inMemoryStore[key] else {
+                        return InMemoryExactDeleteResult.missing
+                    }
+                    guard current == candidate.data else {
+                        return InMemoryExactDeleteResult.changed
+                    }
+                    Self.inMemoryStore.removeValue(forKey: key)
+                    return InMemoryExactDeleteResult.deleted
+                }
+                if result == .changed {
+                    throw KeychainError.itemChangedDuringReconciliation
+                }
+            }
+            return
+        }
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        candidate.location.applyPersistentReferenceMatch(to: &query)
+        applyDataProtectionKeychain(
+            candidate.location.usesDataProtectionKeychain,
+            to: &query
+        )
+        forbidKeychainAuthenticationUI(&query)
+        var currentItem: CFTypeRef?
+        switch SecItemCopyMatching(query as CFDictionary, &currentItem) {
+        case errSecItemNotFound:
+            return
+        case errSecSuccess:
+            guard let current = currentItem as? Data else {
+                throw KeychainError.decodingError
+            }
+            guard current == candidate.data else {
+                throw KeychainError.itemChangedDuringReconciliation
+            }
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+        query.removeValue(forKey: kSecReturnData as String)
+        query.removeValue(forKey: kSecMatchLimit as String)
+        switch SecItemDelete(query as CFDictionary) {
+        case errSecSuccess, errSecItemNotFound:
+            return
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    /// Returns the accounts stored under one generic-password service.
+    ///
+    /// This strict variant is used only for deterministic legacy-key discovery:
+    /// Keychain access and malformed attribute results are surfaced to callers
+    /// instead of being interpreted as an empty service.
+    nonisolated func genericPasswordAccountsStrict(service: String) throws -> Set<String> {
+        guard !service.isEmpty else { throw KeychainError.decodingError }
+        if Self.useInMemoryKeychain {
+            let prefix = service + "|"
+            return Self.inMemoryLock.withLock {
+                Set(
+                    Self.inMemoryStore.keys.compactMap { key in
+                        guard key.hasPrefix(prefix) else { return nil }
+                        return String(key.dropFirst(prefix.count))
+                    }
+                )
+            }
+        }
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        forbidKeychainAuthenticationUI(&query)
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound {
+            return []
+        }
+        guard status == errSecSuccess else {
+            throw KeychainError.unexpectedError(status)
+        }
+        guard let attributes = item as? [[String: Any]] else {
+            throw KeychainError.decodingError
+        }
+        var accounts = Set<String>()
+        for attribute in attributes {
+            guard let account = attribute[kSecAttrAccount as String] as? String else {
+                throw KeychainError.decodingError
+            }
+            accounts.insert(account)
+        }
+        return accounts
+    }
+
+    nonisolated func genericPasswordAccountsStrict(
+        service: String,
+        scope: KeychainGenericPasswordScope,
+        includeLegacyKeychain: Bool = false
+    ) throws -> Set<String> {
+        guard !service.isEmpty else { throw KeychainError.decodingError }
+        if Self.useInMemoryKeychain {
+            var accounts = Set<String>()
+            for accessGroup in scope.readAccessGroups {
+                accounts.formUnion(
+                    Self.scopedInMemoryAccounts(
+                        service: service,
+                        accessGroup: accessGroup,
+                        usesDataProtectionKeychain: scope.usesDataProtectionKeychain
+                    )
+                )
+            }
+            return accounts
+        }
+
+        var accounts = Set<String>()
+        for usesDataProtection in keychainSearchModes(
+            scope: scope,
+            includeLegacyKeychain: includeLegacyKeychain
+        ) {
+            for accessGroup in scope.readAccessGroups {
+                var query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitAll
+                ]
+                applyAccessGroup(accessGroup, to: &query)
+                applyDataProtectionKeychain(usesDataProtection, to: &query)
+                forbidKeychainAuthenticationUI(&query)
+
+                var item: CFTypeRef?
+                switch SecItemCopyMatching(query as CFDictionary, &item) {
+                case errSecSuccess:
+                    guard let attributes = item as? [[String: Any]] else {
+                        throw KeychainError.decodingError
+                    }
+                    for attribute in attributes {
+                        guard let account = attribute[kSecAttrAccount as String] as? String else {
+                            throw KeychainError.decodingError
+                        }
+                        accounts.insert(account)
+                    }
+                case errSecItemNotFound:
+                    continue
+                case let status:
+                    throw KeychainError.unexpectedError(status)
+                }
+            }
+        }
+        return accounts
     }
 
  // MARK: - 对称密钥存取（AES-GCM等）
@@ -373,49 +1144,6 @@ public actor KeychainManager {
         return data
     }
 
- // MARK: - Keychain 去重与清理
-
- /// 根据 service 前缀扫描并清理重复项（同一 account 下保留最新一条）
- ///
- /// nonisolated - Keychain 扫描和删除操作是系统级线程安全的
-    public nonisolated func deduplicate(servicePrefix: String) {
-        guard !servicePrefix.isEmpty else { return }
-        if Self.useInMemoryKeychain { return }
-
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-            kSecReturnPersistentRef as String: true,
-        ]
-        forbidKeychainAuthenticationUI(&query)
-        var itemsRef: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &itemsRef)
-        guard status == errSecSuccess, let items = itemsRef as? [[String: Any]] else { return }
- // 分组并清理
-        var grouped: [String: [[String: Any]]] = [:]
-        for it in items {
-            guard let svc = it[kSecAttrService as String] as? String, svc.hasPrefix(servicePrefix),
-                  let acc = it[kSecAttrAccount as String] as? String else { continue }
-            grouped[svc + "|" + acc, default: []].append(it)
-        }
-        for (_, arr) in grouped where arr.count > 1 {
- // 保留最近修改的一条，删除其余重复项（按 persistent ref 精确删除，避免误删全部）
-            let sorted = arr.sorted { lhs, rhs in
-                let lhsDate = (lhs[kSecAttrModificationDate as String] as? Date) ?? (lhs[kSecAttrCreationDate as String] as? Date) ?? .distantPast
-                let rhsDate = (rhs[kSecAttrModificationDate as String] as? Date) ?? (rhs[kSecAttrCreationDate as String] as? Date) ?? .distantPast
-                return lhsDate > rhsDate
-            }
-            for dup in sorted.dropFirst() {
-                guard let persistentRef = dup[kSecValuePersistentRef as String] as? Data else { continue }
-                var del: [String: Any] = [kSecValuePersistentRef as String: persistentRef]
-                forbidKeychainAuthenticationUI(&del)
-                SecItemDelete(del as CFDictionary)
-            }
-        }
- // 注意：nonisolated 方法不能访问 actor-isolated 的 logger
- // 日志已移除以符合 Swift 6.2.1 严格并发
-    }
 }
 
 // ML-DSA/ML-KEM Keychain存取接口将在升级到最新SDK后补充具体类型
@@ -611,6 +1339,56 @@ extension KeychainManager {
         if status != errSecSuccess && status != errSecItemNotFound { throw NSError(domain: "Keychain", code: Int(status)) }
     }
 
+    nonisolated func deleteAPIKey(
+        service: String,
+        account: String,
+        scope: KeychainGenericPasswordScope,
+        includeLegacyKeychain: Bool = true
+    ) throws {
+        if scope.readAccessGroups.contains(where: { $0 == nil }) {
+            let candidates = try legacyGenericPasswordCandidatesStrict(
+                service: service,
+                account: account,
+                includeLegacyKeychain: includeLegacyKeychain
+            )
+            for candidate in candidates {
+                try deleteLegacyGenericPasswordCandidate(candidate)
+            }
+            return
+        }
+        if Self.useInMemoryKeychain {
+            for accessGroup in scope.readAccessGroups {
+                Self.removeScopedInMemoryValue(
+                    service: service,
+                    account: account,
+                    accessGroup: accessGroup,
+                    usesDataProtectionKeychain: scope.usesDataProtectionKeychain
+                )
+            }
+            return
+        }
+
+        for usesDataProtection in keychainSearchModes(
+            scope: scope,
+            includeLegacyKeychain: includeLegacyKeychain
+        ) {
+            for accessGroup in scope.readAccessGroups {
+                var query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account
+                ]
+                applyAccessGroup(accessGroup, to: &query)
+                applyDataProtectionKeychain(usesDataProtection, to: &query)
+                forbidKeychainAuthenticationUI(&query)
+                let status = SecItemDelete(query as CFDictionary)
+                guard status == errSecSuccess || status == errSecItemNotFound else {
+                    throw KeychainError.unexpectedError(status)
+                }
+            }
+        }
+    }
+
     private nonisolated func purgeLegacySupabaseServiceRoleKey() throws {
         try deleteAPIKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
@@ -686,44 +1464,4 @@ extension KeychainManager {
         return loadKeyData(service: "SkyBridge.PeerSigningPub", account: peerId)
     }
 
- // MARK: - 设备标识管理
-
- /// 获取或生成持久化设备 ID (UUID)
- /// 优先从 Keychain 读取，不存在则生成并保存
-    public nonisolated func getOrGenerateDeviceId() -> String {
-        do {
-            return try getOrGenerateDeviceIdStrict()
-        } catch {
-            logger.error("设备 ID Keychain 加载失败，拒绝静默重建: \(error.localizedDescription)")
-            return ""
-        }
-    }
-
-    public nonisolated func getOrGenerateDeviceIdStrict() throws -> String {
-        let service = "SkyBridge.Identity"
-        let account = "DeviceUUID"
-
-        if let data = try loadKeyDataStrict(service: service, account: account) {
-            guard let uuidString = String(data: data, encoding: .utf8),
-                  !uuidString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw KeychainError.decodingError
-            }
-            return uuidString
-        }
-
-        let newUUID = UUID().uuidString
-        guard let data = newUUID.data(using: .utf8) else {
-            throw KeychainError.decodingError
-        }
-        let status = upsertGenericPassword(
-            service: service,
-            account: account,
-            data: data,
-            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        )
-        guard status == errSecSuccess else {
-            throw KeychainError.unexpectedError(status)
-        }
-        return newUUID
-    }
 }

@@ -72,8 +72,8 @@ public struct SettingsExportData: Codable {
 
 public enum SettingsStorageKeys {
     public static let preferXWingHybrid = "Settings.PreferXWingHybrid"
-    /// Experimental (beta): prefer the Q-Periapt ContextBound hybrid suite. Only takes effect
-    /// in a q-periapt-enabled core build, and only negotiates when the peer also supports it.
+    /// Experimental (beta): prefer the Q-Periapt ABI2 PolicyBound hybrid suite. The persisted
+    /// request remains dormant until an authenticated signed-policy runtime session is installed.
     public static let preferQPeriaptBeta = "Settings.PreferQPeriaptBeta"
 }
 
@@ -233,20 +233,26 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var onlyNotifyVerifiedDevices: Bool = false
  /// 隐私诊断开关：是否采集TLS握手诊断数据（ALPN/SNI等），默认关闭以保护隐私
     @Published public var enableHandshakeDiagnostics: Bool = false
- /// Secure Enclave 支持（仅在 macOS 26+ 且 CryptoKit PQC 可用时生效）
-    @Published public var useSecureEnclaveMLDSA: Bool = true
- /// Secure Enclave 支持（仅在 macOS 26+ 且 CryptoKit PQC 可用时生效）
-    @Published public var useSecureEnclaveMLKEM: Bool = true
  /// 量子安全：启用后量子密码（应用层）尝试；真实 PQC 状态仍以协商套件和 runtime proof 为准
  /// 🔧 优化：默认开启 PQC-capable 路径，但不得把开关本身当成量子安全证明
     @Published public var enablePQC: Bool = true
- /// 量子安全：优先签名算法（当前运行时支持 ML-DSA-65/ML-DSA-87）
-    @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65"
+ /// 量子安全：生产协议身份签名算法。当前信任记录与握手只绑定 ML-DSA-65。
+    @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65" {
+        didSet {
+            let normalized = Self.normalizedPQCSignatureAlgorithm(pqcSignatureAlgorithm)
+            guard normalized != pqcSignatureAlgorithm else { return }
+            logger.notice(
+                "Rejected unsupported production PQC signature setting; enforcing protocol-bound ML-DSA-65"
+            )
+            pqcSignatureAlgorithm = normalized
+        }
+    }
  /// 量子安全：是否启用TLS混合协商（视系统支持而定）
     @Published public var enablePQCHybridTLS: Bool = false
  /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
     @Published public var preferXWingHybrid: Bool = false
- /// 量子安全（beta）：是否优先协商 Q-Periapt ContextBound 混合套件；仅在启用 q-periapt 的核心构建中生效。
+ /// 量子安全（beta）：是否优先协商 Q-Periapt ABI2 PolicyBound 混合套件；
+ /// 未安装并验证签名策略与信任根时保持关闭。
     @Published public var preferQPeriaptBeta: Bool = false
 
  // MARK: - 系统监控设置
@@ -406,8 +412,6 @@ public class SettingsManager: ObservableObject, Sendable {
         enableCompatibilityMode = false
         enableCompanionLink = false
         enableHandshakeDiagnostics = false
-        useSecureEnclaveMLDSA = true
-        useSecureEnclaveMLKEM = true
         // 默认启用应用层 PQC（与属性默认值/注释保持一致）
         enablePQC = true
         pqcSignatureAlgorithm = "ML-DSA-65"
@@ -609,8 +613,6 @@ public class SettingsManager: ObservableObject, Sendable {
         switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
             return "ML-DSA-65"
-        case "ML-DSA-87", "MLDSA-87":
-            return "ML-DSA-87"
         default:
             return "ML-DSA-65"
         }
@@ -736,8 +738,6 @@ public class SettingsManager: ObservableObject, Sendable {
             "pqcSignatureAlgorithm": pqcSignatureAlgorithm,
             "enablePQCHybridTLS": enablePQCHybridTLS,
             "preferXWingHybrid": preferXWingHybrid,
-            "useSecureEnclaveMLDSA": useSecureEnclaveMLDSA,
-            "useSecureEnclaveMLKEM": useSecureEnclaveMLKEM,
 
  // 系统监控设置
             "systemMonitorRefreshInterval": systemMonitorRefreshInterval,
@@ -989,8 +989,6 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["pqcSignatureAlgorithm"] as? String { pqcSignatureAlgorithm = value }
         if let value = settings["enablePQCHybridTLS"] as? Bool { enablePQCHybridTLS = value }
         if let value = settings["preferXWingHybrid"] as? Bool { preferXWingHybrid = value }
-        if let value = settings["useSecureEnclaveMLDSA"] as? Bool { useSecureEnclaveMLDSA = value }
-        if let value = settings["useSecureEnclaveMLKEM"] as? Bool { useSecureEnclaveMLKEM = value }
 
  // 系统监控设置
         if let value = settings["systemMonitorRefreshInterval"] as? Double { systemMonitorRefreshInterval = value }
@@ -1541,9 +1539,15 @@ public class SettingsManager: ObservableObject, Sendable {
         // PQC settings (previously not persisted)
         enablePQC = true
         userDefaults.set(true, forKey: "Settings.EnablePQC")
-        pqcSignatureAlgorithm = Self.normalizedPQCSignatureAlgorithm(
-            userDefaults.string(forKey: "Settings.PQCSignatureAlgorithm") ?? "ML-DSA-65"
-        )
+        let storedPQCSignatureAlgorithm = userDefaults.string(forKey: "Settings.PQCSignatureAlgorithm")
+            ?? "ML-DSA-65"
+        pqcSignatureAlgorithm = Self.normalizedPQCSignatureAlgorithm(storedPQCSignatureAlgorithm)
+        if pqcSignatureAlgorithm != storedPQCSignatureAlgorithm {
+            logger.notice(
+                "Migrated unsupported production PQC signature setting to the protocol-bound ML-DSA-65 algorithm"
+            )
+            userDefaults.set(pqcSignatureAlgorithm, forKey: "Settings.PQCSignatureAlgorithm")
+        }
         enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
         preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
         preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
@@ -1552,8 +1556,6 @@ public class SettingsManager: ObservableObject, Sendable {
             userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
         }
         Self.applyQPeriaptEnvironmentPreference(preferQPeriaptBeta)
-        useSecureEnclaveMLDSA = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLDSA", defaultValue: true)
-        useSecureEnclaveMLKEM = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLKEM", defaultValue: true)
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
         aqiThresholdCautionUrban = userDefaults.integer(forKey: "Settings.AQIThresholdCautionUrban", defaultValue: 100)
         aqiThresholdSensitiveUrban = userDefaults.integer(forKey: "Settings.AQIThresholdSensitiveUrban", defaultValue: 150)
@@ -1998,12 +2000,7 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
         $pqcSignatureAlgorithm.sink { [weak self] value in
             guard let self else { return }
-            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
-            guard normalized == value else {
-                self.pqcSignatureAlgorithm = normalized
-                return
-            }
-            self.userDefaults.set(normalized, forKey: "Settings.PQCSignatureAlgorithm")
+            self.userDefaults.set(value, forKey: "Settings.PQCSignatureAlgorithm")
             self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $enablePQCHybridTLS.sink { [weak self] value in
@@ -2029,15 +2026,6 @@ public class SettingsManager: ObservableObject, Sendable {
             Self.applyQPeriaptEnvironmentPreference(value)
             self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
-        $useSecureEnclaveMLDSA.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.UseSecureEnclaveMLDSA")
-            self?.clearCryptoProviderCacheForSettingsChange()
-        }.store(in: &settingsCancellables)
-        $useSecureEnclaveMLKEM.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.UseSecureEnclaveMLKEM")
-            self?.clearCryptoProviderCacheForSettingsChange()
-        }.store(in: &settingsCancellables)
-
  // 系统监控设置观察者
         $systemMonitorRefreshInterval.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")

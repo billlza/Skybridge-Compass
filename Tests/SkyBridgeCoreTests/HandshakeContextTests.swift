@@ -25,6 +25,31 @@ private actor IdentityCapture {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
+private actor MessageBAdmissionProbe: ProtocolSignatureProvider {
+    nonisolated let signatureAlgorithm: ProtocolSigningAlgorithm = .ed25519
+
+    private var verificationCount = 0
+    private var callbackCount = 0
+
+    func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
+        Data(repeating: 0x5A, count: 64)
+    }
+
+    func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        verificationCount += 1
+        return true
+    }
+
+    func recordCallback() {
+        callbackCount += 1
+    }
+
+    func counts() -> (verifications: Int, callbacks: Int) {
+        (verificationCount, callbackCount)
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 final class HandshakeContextTests: XCTestCase {
     
  // MARK: - Property 5: Handshake Context Isolation
@@ -182,6 +207,18 @@ final class HandshakeContextTests: XCTestCase {
                 XCTFail("Expected replayDetected, got \(error)")
             }
         }
+    }
+
+    func testMessageBAdmissionRejectsLegacyABI1BeforeCryptoOrTrustCallback() async throws {
+        try await assertMessageBRejectedBeforeCryptoOrTrustCallback(
+            selectedSuite: .qperiaptContextBound
+        )
+    }
+
+    func testMessageBAdmissionRejectsUnofferedSuiteBeforeCryptoOrTrustCallback() async throws {
+        try await assertMessageBRejectedBeforeCryptoOrTrustCallback(
+            selectedSuite: .p256ECDSA
+        )
     }
 
     func testSuiteDowngradeEmitsSecurityEvent() async throws {
@@ -374,6 +411,59 @@ final class HandshakeContextTests: XCTestCase {
         
  // Clean up
         await context.zeroize()
+    }
+
+    private func assertMessageBRejectedBeforeCryptoOrTrustCallback(
+        selectedSuite: CryptoSuite,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let provider = ClassicCryptoProvider()
+        let probe = MessageBAdmissionProbe()
+        let context = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider,
+            protocolSignatureProvider: probe
+        )
+
+        _ = try await context.buildMessageA(
+            identityKeyHandle: .softwareKey(Data(repeating: 0x11, count: 32)),
+            identityPublicKey: encodeIdentityPublicKey(Data(repeating: 0x22, count: 32)),
+            offeredSuites: [.x25519Ed25519]
+        )
+
+        let messageB = HandshakeMessageB(
+            selectedSuite: selectedSuite,
+            responderShare: Data(repeating: 0x33, count: 32),
+            serverNonce: Data(repeating: 0x44, count: 32),
+            encryptedPayload: HPKESealedBox(
+                encapsulatedKey: Data(),
+                nonce: Data(),
+                ciphertext: Data(),
+                tag: Data()
+            ),
+            signature: Data(repeating: 0x55, count: 64),
+            identityPublicKey: Data()
+        )
+
+        do {
+            _ = try await context.processMessageB(
+                messageB,
+                postSignatureValidation: { _ in
+                    await probe.recordCallback()
+                }
+            )
+            XCTFail("Expected MessageB admission to reject \(selectedSuite.rawValue)", file: file, line: line)
+        } catch let error as HandshakeError {
+            guard case .failed(.suiteNegotiationFailed) = error else {
+                XCTFail("Expected suiteNegotiationFailed, got \(error)", file: file, line: line)
+                return
+            }
+        }
+
+        let counts = await probe.counts()
+        XCTAssertEqual(counts.verifications, 0, file: file, line: line)
+        XCTAssertEqual(counts.callbacks, 0, file: file, line: line)
     }
 
  /// MessageB MUST commit to transcriptA; mismatch should fail

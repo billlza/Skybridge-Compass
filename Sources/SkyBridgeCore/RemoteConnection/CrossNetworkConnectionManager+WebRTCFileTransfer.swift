@@ -140,6 +140,14 @@ extension CrossNetworkConnectionManager {
             throw WebRTCFileTransferWaitError.failed("文件大小无效")
         }
 
+        let senderDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: false)
+        guard senderDeviceId == session.localDeviceId else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "WebRTC file-transfer session is not bound to the current local authority"
+            )
+        }
+
         let transferId = UUID().uuidString
         let remoteId = webrtcRemoteIdBySessionId[sessionID] ?? "webrtc-peer"
         let remoteName = conn.deviceName
@@ -162,11 +170,10 @@ extension CrossNetworkConnectionManager {
                 throw WebRTCFileTransferWaitError.failed("文件分块规划失败")
             }
 
-            let snap = await SelfIdentityProvider.shared.snapshot()
             let meta = CrossNetworkFileTransferMessage(
                 op: .metadata,
                 transferId: transferId,
-                senderDeviceId: snap.deviceId.isEmpty ? deviceFingerprint : snap.deviceId,
+                senderDeviceId: senderDeviceId,
                 senderDeviceName: Host.current().localizedName,
                 fileName: url.lastPathComponent,
                 fileSize: fileSize,

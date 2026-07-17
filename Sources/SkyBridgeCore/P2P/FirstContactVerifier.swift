@@ -136,12 +136,11 @@ public struct FirstContactVerifier: Sendable {
  ///
  /// - Parameter offeredSuites: MessageA 中的 offeredSuites
  /// - Returns: 协议签名算法
+ /// - Throws: 如果 modern offer 为空、重复、包含不可协商套件或混合密码组
     public func selectModernAlgorithm(
         offeredSuites: [CryptoSuite]
-    ) -> ProtocolSigningAlgorithm {
- // 如果 offeredSuites 包含任何 isPQCGroup 的 suite → ML-DSA-65
-        let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
-        return hasPQCOrHybrid ? .mlDSA65 : .ed25519
+    ) throws -> ProtocolSigningAlgorithm {
+        try validatedModernAlgorithm(offeredSuites: offeredSuites)
     }
     
  // MARK: - Private Methods
@@ -185,8 +184,10 @@ public struct FirstContactVerifier: Sendable {
         publicKey: Data,
         offeredSuites: [CryptoSuite]
     ) async throws -> FirstContactVerificationResult {
- // 1. 根据 offeredSuites 选择算法
-        let algorithm = selectModernAlgorithm(offeredSuites: offeredSuites)
+        // Modern first contact is admitted structurally before selecting or
+        // invoking a cryptographic verifier. Legacy P-256 remains governed by
+        // its separate, explicit LegacyTrustPrecondition contract.
+        let algorithm = try selectModernAlgorithm(offeredSuites: offeredSuites)
         
  // 2. 选择对应的 Provider 验证
         let isValid: Bool
@@ -210,6 +211,32 @@ public struct FirstContactVerifier: Sendable {
         } else {
             return .failed(reason: "\(algorithm.rawValue) signature verification failed")
         }
+    }
+
+    private func validatedModernAlgorithm(
+        offeredSuites: [CryptoSuite]
+    ) throws -> ProtocolSigningAlgorithm {
+        guard !offeredSuites.isEmpty else {
+            throw HandshakeError.emptyOfferedSuites
+        }
+        guard offeredSuites.allSatisfy(\.isNegotiable) else {
+            throw HandshakeError.homogeneityViolation(
+                message: "Modern first-contact offer contains a non-negotiable suite"
+            )
+        }
+        guard Set(offeredSuites.map(\.wireId)).count == offeredSuites.count else {
+            throw HandshakeError.homogeneityViolation(
+                message: "Modern first-contact offer contains duplicate suites"
+            )
+        }
+
+        let expectsPQC = offeredSuites[0].isPQCGroup
+        guard offeredSuites.allSatisfy({ $0.isPQCGroup == expectsPQC }) else {
+            throw HandshakeError.homogeneityViolation(
+                message: "Modern first-contact offer mixes PQC and classic suites"
+            )
+        }
+        return expectsPQC ? .mlDSA65 : .ed25519
     }
 }
 

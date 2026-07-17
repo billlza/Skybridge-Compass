@@ -214,6 +214,36 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
  // TrustRecord 存在但无 legacy 公钥，不满足前置条件
         XCTAssertFalse(precondition.isSatisfied, "TrustRecord without legacy key should not satisfy precondition")
     }
+
+    func testNonActiveTrustRecordCannotAuthorizeLegacyFallback() throws {
+        let (publicKey, _) = try generateP256TestSignature(data: Data("legacy".utf8))
+
+        for lifecycleState in [
+            TrustLifecycleState.quarantined,
+            .reverificationRequired,
+            .revoked
+        ] {
+            let trustRecord = TrustRecord(
+                deviceId: "inactive-\(lifecycleState.rawValue)",
+                pubKeyFP: "inactive",
+                publicKey: Data(),
+                legacyP256PublicKey: publicKey,
+                signature: Data(),
+                lifecycleState: lifecycleState
+            )
+
+            let precondition = LegacyTrustPreconditionChecker.check(
+                deviceId: trustRecord.deviceId,
+                trustRecord: trustRecord,
+                pairingContext: nil
+            )
+            XCTAssertFalse(trustRecord.allowsLegacyFallback)
+            XCTAssertFalse(
+                precondition.isSatisfied,
+                "\(lifecycleState.rawValue) records must not authorize legacy fallback"
+            )
+        }
+    }
     
  /// Property 7.6: 网络发现通道不算认证通道
  ///
@@ -282,28 +312,60 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
             XCTFail("Expected modernVerified result")
         }
     }
+
+    func testModernPathRejectsMalformedOffersBeforeCryptography() async {
+        let verifier = FirstContactVerifier()
+        let invalidOffers: [(name: String, suites: [CryptoSuite], expectsEmpty: Bool)] = [
+            ("empty", [], true),
+            ("duplicate", [.x25519Ed25519, .x25519Ed25519], false),
+            ("legacy ABI1", [.qperiaptContextBound], false),
+            ("mixed", [.x25519Ed25519, .mlkem768MLDSA65], false),
+        ]
+
+        for invalidOffer in invalidOffers {
+            do {
+                _ = try await verifier.verify(
+                    data: Data(),
+                    signature: Data(),
+                    publicKey: Data(),
+                    encodingPath: .modern,
+                    offeredSuites: invalidOffer.suites,
+                    precondition: nil
+                )
+                XCTFail("Expected malformed modern offer to be rejected: \(invalidOffer.name)")
+            } catch let error as HandshakeError {
+                if invalidOffer.expectsEmpty {
+                    guard case .emptyOfferedSuites = error else {
+                        XCTFail("Expected emptyOfferedSuites for \(invalidOffer.name), got \(error)")
+                        continue
+                    }
+                } else {
+                    guard case .homogeneityViolation = error else {
+                        XCTFail("Expected homogeneityViolation for \(invalidOffer.name), got \(error)")
+                        continue
+                    }
+                }
+            } catch {
+                XCTFail("Expected structural admission error for \(invalidOffer.name), got \(error)")
+            }
+        }
+    }
     
  /// 测试 Modern 路径根据 offeredSuites 选择算法
     func testModernPathAlgorithmSelection() async throws {
         let verifier = FirstContactVerifier()
         
  // Classic suites → Ed25519
-        let classicAlgorithm = verifier.selectModernAlgorithm(
+        let classicAlgorithm = try verifier.selectModernAlgorithm(
             offeredSuites: [.x25519Ed25519]
         )
         XCTAssertEqual(classicAlgorithm, ProtocolSigningAlgorithm.ed25519)
         
  // PQC suites → ML-DSA-65
-        let pqcAlgorithm = verifier.selectModernAlgorithm(
+        let pqcAlgorithm = try verifier.selectModernAlgorithm(
             offeredSuites: [.mlkem768MLDSA65]
         )
         XCTAssertEqual(pqcAlgorithm, ProtocolSigningAlgorithm.mlDSA65)
-        
- // Mixed (has PQC) → ML-DSA-65
-        let mixedAlgorithm = verifier.selectModernAlgorithm(
-            offeredSuites: [.x25519Ed25519, .mlkem768MLDSA65]
-        )
-        XCTAssertEqual(mixedAlgorithm, ProtocolSigningAlgorithm.mlDSA65)
     }
     
  /// 测试编码路径判定

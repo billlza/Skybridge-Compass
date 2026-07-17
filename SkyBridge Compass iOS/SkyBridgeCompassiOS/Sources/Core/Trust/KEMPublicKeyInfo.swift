@@ -52,8 +52,8 @@ public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
         requireQPeriaptPeerPlatform: Bool
     ) -> Bool {
         let suite = CryptoSuite(wireId: suiteWireId)
-        guard suite.isKnown, suite.isPQCGroup else { return false }
-        if suite.canonicalKEMSuite.wireId == CryptoSuite.qperiaptContextBound.wireId,
+        guard suite.isNegotiable, suite.isPQCGroup else { return false }
+        if suite.canonicalKEMSuite.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId,
            requireQPeriaptPeerPlatform,
            !QPeriaptIOSPlatformPolicy.isPeerAppPlatformEligible(platform: platform, osVersion: osVersion) {
             return false
@@ -64,7 +64,7 @@ public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
     private static func expectedPublicKeyLength(for suite: CryptoSuite) -> Int {
         switch suite.canonicalKEMSuite.wireId {
         case CryptoSuite.xwing.wireId: return 1_216
-        case CryptoSuite.qperiaptContextBound.wireId: return 1_216
+        case CryptoSuite.qperiaptABI2PolicyBound.wireId: return 1_216
         case CryptoSuite.mlkem768.wireId,
              CryptoSuite.mlkem768fs.wireId: return 1_184
         default: return 0

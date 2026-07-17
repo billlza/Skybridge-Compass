@@ -84,10 +84,9 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
                 issuedAt: .distantPast
             )
         )
-        defer {
-            Task { @MainActor in
-                _ = await AuthenticationService.shared.signOutAndWait()
-            }
+        addTeardownBlock { @MainActor in
+            try await AuthenticationService.shared.activateGuestSession()
+            _ = await AuthenticationService.shared.signOutAndWait()
         }
 
         async let first = AuthenticationService.shared.validAccessToken()
@@ -102,7 +101,7 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
     func testGuestSessionDeletionCannotDeleteFollowingAuthenticatedSession() async throws {
         let service = AuthenticationService.shared
         _ = await service.signOutAndWait()
-        service.activateGuestSession()
+        try await service.activateGuestSession()
 
         let authenticatedSession = AuthSession(
             accessToken: "authenticated-access-token",
@@ -116,6 +115,10 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
         let persistedSession = try await KeychainManager.shared.loadAuthSessionStrict()
         XCTAssertEqual(persistedSession, authenticatedSession)
 
+        // Keep cleanup local. The synthetic token is intentionally not a real
+        // revocable server session, so this unit test must not contact a
+        // production revocation endpoint.
+        try await service.activateGuestSession()
         _ = await service.signOutAndWait()
         let sessionAfterSignOut = try await KeychainManager.shared.loadAuthSessionStrict()
         XCTAssertNil(sessionAfterSignOut)

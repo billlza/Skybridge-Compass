@@ -4,6 +4,97 @@ import Darwin
 
 @available(iOS 17.0, *)
 final class HandshakeCryptoPolicyParityTests: XCTestCase {
+    @MainActor
+    func testCorePolicySwitchPublishesAtomicallyAndRetriesAfterIdentityFailure() async throws {
+        let probe = InitializationIdentityResolverProbe()
+        let core = SkyBridgeiOSCore { algorithm, _ in
+            try await probe.resolve(algorithm: algorithm)
+        }
+
+        try await core.initialize(policy: .classicOnly)
+        XCTAssertTrue(core.isInitialized)
+        XCTAssertEqual(core.cryptoProvider?.tier, .classic)
+        XCTAssertEqual(core.signatureProvider?.signatureAlgorithm, .ed25519)
+        XCTAssertFalse(core.handshakePolicy.requirePQC)
+
+        do {
+            try await core.initialize(
+                policy: .requirePQC,
+                providerOverride: MockNativeHybridProvider()
+            )
+            XCTFail("The injected first PQC identity resolution must fail")
+        } catch is InjectedInitializationIdentityError {
+            // Expected. The prior complete classic configuration must remain.
+        }
+        XCTAssertTrue(core.isInitialized)
+        XCTAssertEqual(core.cryptoProvider?.tier, .classic)
+        XCTAssertEqual(core.signatureProvider?.signatureAlgorithm, .ed25519)
+        XCTAssertFalse(core.handshakePolicy.requirePQC)
+
+        try await core.initialize(
+            policy: .requirePQC,
+            providerOverride: MockNativeHybridProvider()
+        )
+        let pqcAttemptCount = await probe.pqcAttemptCount()
+        XCTAssertEqual(pqcAttemptCount, 2)
+        XCTAssertEqual(core.cryptoProvider?.tier, .nativePQC)
+        XCTAssertEqual(core.signatureProvider?.signatureAlgorithm, .mlDSA65)
+        XCTAssertTrue(core.handshakePolicy.requirePQC)
+    }
+
+    @MainActor
+    func testLatestInitializationRequestSupersedesSuspendedPolicyChange() async throws {
+        let gate = SupersedingInitializationIdentityResolver()
+        let core = SkyBridgeiOSCore { algorithm, _ in
+            try await gate.resolve(algorithm: algorithm)
+        }
+        try await core.initialize(
+            policy: .classicOnly,
+            providerOverride: ClassicCryptoProvider()
+        )
+
+        let suspendedPQCRequest = Task { @MainActor in
+            try await core.initialize(
+                policy: .requirePQC,
+                providerOverride: MockNativeHybridProvider()
+            )
+        }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await gate.waitUntilPQCResolutionStarted()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                throw InitializationResolutionTimeout()
+            }
+            _ = try await group.next()
+            group.cancelAll()
+        }
+
+        // This request matches the currently published classic state, but it
+        // is still the newest configuration request and must invalidate the
+        // suspended PQC attempt before returning a coherent classic snapshot.
+        try await core.initialize(policy: .classicOnly)
+        await gate.resumePQCResolution()
+
+        do {
+            try await suspendedPQCRequest.value
+            XCTFail("A superseded initialization attempt must not publish")
+        } catch {
+            guard case SkyBridgeError.handshakeFailed(let reason) = error else {
+                throw error
+            }
+            XCTAssertEqual(
+                reason,
+                "Core initialization was superseded by a newer configuration request"
+            )
+        }
+        XCTAssertTrue(core.isInitialized)
+        XCTAssertEqual(core.cryptoProvider?.tier, .classic)
+        XCTAssertEqual(core.signatureProvider?.signatureAlgorithm, .ed25519)
+        XCTAssertFalse(core.handshakePolicy.requirePQC)
+    }
+
     func testPrepareAttemptForXWingCarriesHybridCryptoPolicy() throws {
         #if HAS_APPLE_PQC_SDK
         guard #available(iOS 26.0, macOS 26.0, *) else {
@@ -258,6 +349,27 @@ final class HandshakeCryptoPolicyParityTests: XCTestCase {
         #endif
     }
 
+    func testMessageAOfferShapeRejectsLegacyAndDuplicateSuitesBeforeRekeyAdmission() {
+        let classic = makeMessageA(
+            supportedSuites: [.x25519Ed25519],
+            keyShareSuites: [.x25519Ed25519]
+        )
+        XCTAssertTrue(classic.hasNegotiableOfferShape)
+
+        let legacy = makeMessageA(
+            supportedSuites: [.qperiaptContextBound],
+            keyShareSuites: [.qperiaptContextBound]
+        )
+        XCTAssertFalse(legacy.hasNegotiableOfferShape)
+
+        let duplicate = makeMessageA(
+            supportedSuites: [.x25519Ed25519, .x25519Ed25519],
+            keyShareSuites: [.x25519Ed25519]
+        )
+        XCTAssertFalse(duplicate.hasNegotiableOfferShape)
+        XCTAssertThrowsError(try HandshakeMessageA.decode(from: duplicate.encoded))
+    }
+
     private func makeMessageA(
         supportedSuites: [CryptoSuite],
         keyShareSuites: [CryptoSuite]
@@ -287,6 +399,94 @@ final class HandshakeCryptoPolicyParityTests: XCTestCase {
             negotiatedSuite: suite,
             transcriptHash: Data(repeating: 0x33, count: 32)
         )
+    }
+}
+
+private struct InjectedInitializationIdentityError: Error {}
+private struct InitializationResolutionTimeout: Error {}
+
+@available(iOS 17.0, *)
+private actor InitializationIdentityResolverProbe {
+    private var pqcAttempts = 0
+
+    func resolve(
+        algorithm: ProtocolSigningAlgorithm
+    ) throws -> ResolvedProtocolSigningIdentity {
+        if algorithm == .mlDSA65 {
+            pqcAttempts += 1
+            if pqcAttempts == 1 {
+                throw InjectedInitializationIdentityError()
+            }
+        }
+        let publicKey = Data(
+            repeating: algorithm == .ed25519 ? 0x11 : 0x22,
+            count: algorithm == .ed25519 ? 32 : 1_952
+        )
+        let material = ProtocolSigningIdentityMaterial(
+            algorithm: algorithm,
+            privateKey: Data(repeating: 0x33, count: 64),
+            publicKey: publicKey
+        )
+        return ResolvedProtocolSigningIdentity(
+            snapshot: ProtocolIdentitySnapshot(
+                deviceId: "transactional-initialization-device",
+                signingAlgorithm: algorithm,
+                signingPublicKey: publicKey,
+                signingPublicKeyFingerprint: String(repeating: "a", count: 64)
+            ),
+            material: material
+        )
+    }
+
+    func pqcAttemptCount() -> Int {
+        pqcAttempts
+    }
+}
+
+@available(iOS 17.0, *)
+private actor SupersedingInitializationIdentityResolver {
+    private var pqcResolutionStarted = false
+    private var pqcContinuation: CheckedContinuation<Void, Never>?
+
+    func resolve(
+        algorithm: ProtocolSigningAlgorithm
+    ) async throws -> ResolvedProtocolSigningIdentity {
+        if algorithm == .mlDSA65 {
+            pqcResolutionStarted = true
+            await withCheckedContinuation { continuation in
+                pqcContinuation = continuation
+            }
+        }
+        try Task.checkCancellation()
+        let publicKey = Data(
+            repeating: algorithm == .ed25519 ? 0x44 : 0x55,
+            count: algorithm == .ed25519 ? 32 : 1_952
+        )
+        return ResolvedProtocolSigningIdentity(
+            snapshot: ProtocolIdentitySnapshot(
+                deviceId: "superseding-initialization-device",
+                signingAlgorithm: algorithm,
+                signingPublicKey: publicKey,
+                signingPublicKeyFingerprint: String(repeating: "b", count: 64)
+            ),
+            material: ProtocolSigningIdentityMaterial(
+                algorithm: algorithm,
+                privateKey: Data(repeating: 0x66, count: 64),
+                publicKey: publicKey
+            )
+        )
+    }
+
+    func waitUntilPQCResolutionStarted() async throws {
+        while !pqcResolutionStarted {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
+    }
+
+    func resumePQCResolution() {
+        pqcContinuation?.resume()
+        pqcContinuation = nil
     }
 }
 

@@ -186,6 +186,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case invalidRequestNonce
         case missingKEMPublicKey
         case unknownSuite(wireId: UInt16)
+        case legacySuiteRejected(wireId: UInt16)
+        case qPeriaptPlatformMetadataUnavailable(wireId: UInt16)
         case classicSuiteRejected(wireId: UInt16)
         case invalidKEMPublicKeyLength(wireId: UInt16, expected: Int, actual: Int)
         case invalidKeyId
@@ -217,6 +219,13 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .invalidRequestNonce: return "SKR-1 request nonce is missing or too short"
             case .missingKEMPublicKey: return "SKR-1 response does not contain a KEM public key"
             case .unknownSuite(let wireId): return String(format: "SKR-1 rejected unknown suite wireId=0x%04X", wireId)
+            case .legacySuiteRejected(let wireId):
+                return String(format: "SKR-1 rejected legacy suite wireId=0x%04X", wireId)
+            case .qPeriaptPlatformMetadataUnavailable(let wireId):
+                return String(
+                    format: "SKR-1 rejected Q-Periapt suite without signed platform metadata wireId=0x%04X",
+                    wireId
+                )
             case .classicSuiteRejected(let wireId): return String(format: "SKR-1 rejected classic suite wireId=0x%04X", wireId)
             case .invalidKEMPublicKeyLength(let wireId, let expected, let actual):
                 return String(format: "SKR-1 KEM key length mismatch wireId=0x%04X expected=%d actual=%d", wireId, expected, actual)
@@ -339,6 +348,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
             let suites = requestedSuiteWireIds.map(CryptoSuite.init(wireId:))
             for suite in suites {
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: suite.wireId) }
+                guard !suite.isLegacyOnly else {
+                    throw KEMRefreshValidationError.legacySuiteRejected(wireId: suite.wireId)
+                }
+                guard suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId else {
+                    throw KEMRefreshValidationError.qPeriaptPlatformMetadataUnavailable(
+                        wireId: suite.wireId
+                    )
+                }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: suite.wireId) }
             }
             return suites
@@ -926,6 +943,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
             for key in payload.kemPublicKeys {
                 let suite = CryptoSuite(wireId: key.suiteWireId)
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId) }
+                guard !suite.isLegacyOnly else {
+                    throw KEMRefreshValidationError.legacySuiteRejected(wireId: key.suiteWireId)
+                }
+                guard suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId else {
+                    throw KEMRefreshValidationError.qPeriaptPlatformMetadataUnavailable(
+                        wireId: key.suiteWireId
+                    )
+                }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: key.suiteWireId) }
                 guard let expected = KEMIdentityKeyLengthContract.publicKeyLength(suite: suite) else {
                     throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId)

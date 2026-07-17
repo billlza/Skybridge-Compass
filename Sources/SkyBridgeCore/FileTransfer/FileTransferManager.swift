@@ -1134,7 +1134,9 @@ public class FileTransferManager: BaseManager {
         #if os(macOS)
         if #available(macOS 14.0, *) {
             if let declaredId = metadata.senderDeviceId, !declaredId.isEmpty {
-                let alreadyTrusted = TrustSyncService.shared.activeTrustRecords.contains { $0.deviceId == declaredId && !$0.isTombstone }
+                let alreadyTrusted = TrustSyncService.shared.activeTrustRecords.contains {
+                    $0.deviceId == declaredId && $0.isAuthenticationEligible
+                }
                 if !alreadyTrusted {
                     let request = PairingTrustApprovalService.Request(
                         peerEndpoint: effectiveDeviceId,
@@ -1660,7 +1662,8 @@ public class FileTransferManager: BaseManager {
             networkService.disconnectFromDevice(transfer.deviceId)
         }
 
-        let localDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let localDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         // 发送断点续传请求（包含已传输字节数）
         try await sendResumeRequest(
             transferId: transfer.id,
@@ -1838,7 +1841,8 @@ public class FileTransferManager: BaseManager {
                 networkService.disconnectFromDevice(transfer.deviceId)
             }
 
-            let localDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+            let localDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
  // 发送断点续传请求
             try await sendResumeRequest(
                 transferId: transfer.id,
@@ -1984,7 +1988,8 @@ public class FileTransferManager: BaseManager {
         let senderChip: String? = nil
         #if os(macOS)
         if #available(macOS 14.0, *) {
-            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            let snap = try await SelfIdentityProvider.shared
+                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
             senderDeviceId = snap.deviceId
             senderDeviceName = Host.current().localizedName
             senderPlatform = "macOS"

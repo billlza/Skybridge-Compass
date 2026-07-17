@@ -51,6 +51,25 @@ final class BootstrapAssuranceTests: XCTestCase {
         XCTAssertEqual(assurance, .pqcStrict)
     }
 
+    func testAssuranceClassificationDoesNotMislabelOptionalOrLegacyPQCAsStrict() {
+        XCTAssertEqual(
+            P2PConnection.classifySessionAssurance(
+                policy: .default,
+                negotiatedSuite: .mlkem768MLDSA65,
+                bootstrapAssisted: false
+            ),
+            .pqcNegotiated
+        )
+        XCTAssertEqual(
+            P2PConnection.classifySessionAssurance(
+                policy: .strictPQC,
+                negotiatedSuite: .qperiaptContextBound,
+                bootstrapAssisted: false
+            ),
+            .unknown
+        )
+    }
+
     func testAssuranceClassificationBootstrapAssistedWins() {
         let assurance = P2PConnection.classifySessionAssurance(
             policy: .strictPQC,
@@ -72,31 +91,36 @@ final class BootstrapAssuranceTests: XCTestCase {
     }
 
     func testInboundRekeyRestartOnlyFromConnectedStates() {
-        let messageA = HandshakeMessageA(
-            supportedSuites: [.x25519Ed25519],
-            keyShares: [
-                HandshakeKeyShare(
-                    suite: .x25519Ed25519,
-                    shareBytes: Data(repeating: 0x11, count: 32)
+        func encodedMessageA(suite: CryptoSuite, keyShareLength: Int) -> Data {
+            HandshakeMessageA(
+                supportedSuites: [suite],
+                keyShares: [
+                    HandshakeKeyShare(
+                        suite: suite,
+                        shareBytes: Data(repeating: 0x11, count: keyShareLength)
+                    )
+                ],
+                clientNonce: Data(repeating: 0x22, count: 32),
+                policy: .default,
+                capabilities: CryptoCapabilities(
+                    supportedKEM: ["X25519"],
+                    supportedSignature: ["Ed25519"],
+                    supportedAuthProfiles: ["default"],
+                    supportedAEAD: ["AES.GCM"],
+                    pqcAvailable: false,
+                    platformVersion: "test",
+                    providerType: .classic
+                ),
+                signature: Data(repeating: 0x33, count: 64),
+                identityPublicKeys: IdentityPublicKeys(
+                    protocolPublicKey: Data(repeating: 0x44, count: 32),
+                    protocolAlgorithm: .ed25519
                 )
-            ],
-            clientNonce: Data(repeating: 0x22, count: 32),
-            policy: .default,
-            capabilities: CryptoCapabilities(
-                supportedKEM: ["X25519"],
-                supportedSignature: ["Ed25519"],
-                supportedAuthProfiles: ["default"],
-                supportedAEAD: ["AES.GCM"],
-                pqcAvailable: false,
-                platformVersion: "test",
-                providerType: .classic
-            ),
-            signature: Data(repeating: 0x33, count: 64),
-            identityPublicKeys: IdentityPublicKeys(
-                protocolPublicKey: Data(repeating: 0x44, count: 32),
-                protocolAlgorithm: .ed25519
-            )
-        ).encoded
+            ).encoded
+        }
+
+        let messageA = encodedMessageA(suite: .x25519Ed25519, keyShareLength: 32)
+        let legacyMessageA = encodedMessageA(suite: .qperiaptContextBound, keyShareLength: 1_120)
 
         let sessionKeys = SessionKeys(
             sendKey: Data(repeating: 0x01, count: 32),
@@ -127,6 +151,13 @@ final class BootstrapAssuranceTests: XCTestCase {
                 state: .waitingMessageB(deadline: ContinuousClock().now),
                 frame: messageA
             )
+        )
+        XCTAssertFalse(
+            P2PConnection.shouldRestartInboundHandshakeForRekey(
+                state: .established(sessionKeys: sessionKeys),
+                frame: legacyMessageA
+            ),
+            "Decode-only ABI1 must not replace an established P2P driver"
         )
     }
 

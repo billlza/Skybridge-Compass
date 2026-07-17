@@ -267,6 +267,9 @@ public class PQCCryptoManager: ObservableObject {
         guard let suite = P2PConnectionManager.instance.negotiatedSuiteByDeviceId[device.id] else {
             throw PQCError.verificationFailed
         }
+        guard suite.isNegotiable else {
+            throw PQCError.verificationFailed
+        }
 
         // 2) 严格模式：要求已切换到 PQC/Hybrid suite（论文 strictPQC）
         if enforcePQCHandshake, !suite.isPQCGroup {

@@ -951,6 +951,13 @@ private struct RootContainerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
+        .alert("无法退出登录", isPresented: $authModel.showSignOutError) {
+            Button("确定", role: .cancel) {
+                authModel.showSignOutError = false
+            }
+        } message: {
+            Text(authModel.errorMessage ?? "本地登录状态清理失败，请重试。")
+        }
         .overlay(alignment: .topTrailing) {
             if iconMissingHint {
                 MissingIconHintView()

@@ -985,6 +985,7 @@ keys = [
 
 env = {
     "SKYBRIDGE_SMOKE_ROLE": "ios-p2p-client",
+    "SKYBRIDGE_SMOKE_ALLOW_IDENTITY_OVERRIDE": "1",
     "SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER": "1",
 }
 if os.environ.get("SKYBRIDGE_SMOKE_USER_REALISTIC") != "1":

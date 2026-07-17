@@ -1,11 +1,62 @@
 import Foundation
 
-public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
-    case qPeriapt = "Q-Periapt-ContextBound"
-    case cryptoKitPQC = "CryptoKit-PQC"
-    case liboqs = "liboqs"
-    case swiftCrypto = "SwiftCrypto"
-    case classic = "CryptoKit-Classic"
+public enum CryptoProviderType: Codable, Sendable, CaseIterable, RawRepresentable {
+    case qPeriapt
+    case cryptoKitPQC
+    case liboqs
+    case swiftCrypto
+    case classic
+
+    private static let legacyQPeriaptRawValue = "Q-Periapt-ContextBound"
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "Q-Periapt-ABI2-PolicyBound", Self.legacyQPeriaptRawValue:
+            self = .qPeriapt
+        case "CryptoKit-PQC":
+            self = .cryptoKitPQC
+        case "liboqs":
+            self = .liboqs
+        case "SwiftCrypto":
+            self = .swiftCrypto
+        case "CryptoKit-Classic":
+            self = .classic
+        default:
+            return nil
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .qPeriapt:
+            return "Q-Periapt-ABI2-PolicyBound"
+        case .cryptoKitPQC:
+            return "CryptoKit-PQC"
+        case .liboqs:
+            return "liboqs"
+        case .swiftCrypto:
+            return "SwiftCrypto"
+        case .classic:
+            return "CryptoKit-Classic"
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        guard let value = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown crypto provider type: \(rawValue)"
+            )
+        }
+        self = value
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 
     public var supportsPQC: Bool {
         switch self {
@@ -18,7 +69,7 @@ public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .qPeriapt: return "Q-Periapt ContextBound (Beta)"
+        case .qPeriapt: return "Q-Periapt ABI2 PolicyBound (Beta)"
         case .cryptoKitPQC: return "CryptoKit PQC (iOS 26+)"
         case .liboqs: return "liboqs (Fallback)"
         case .swiftCrypto: return "Swift Crypto"
@@ -28,7 +79,7 @@ public enum CryptoProviderType: String, Codable, Sendable, CaseIterable {
 
     public var securityLevel: String {
         switch self {
-        case .qPeriapt: return "量子安全 (Q-Periapt beta)"
+        case .qPeriapt: return "量子安全 (Q-Periapt ABI2 PolicyBound beta)"
         case .cryptoKitPQC: return "量子安全 (原生)"
         case .liboqs: return "量子安全 (第三方)"
         case .swiftCrypto, .classic: return "经典安全"

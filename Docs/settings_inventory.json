@@ -885,20 +885,6 @@
     },
     {
       "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
-      "line": 1052,
-      "kind": "Toggle",
-      "bound": "settingsManager.useSecureEnclaveMLDSA",
-      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.useSecureEnclaveMLDSA\"), isOn: $settingsManager.useSecureEnclaveMLDSA)"
-    },
-    {
-      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
-      "line": 1053,
-      "kind": "Toggle",
-      "bound": "settingsManager.useSecureEnclaveMLKEM",
-      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.useSecureEnclaveMLKEM\"), isOn: $settingsManager.useSecureEnclaveMLKEM)"
-    },
-    {
-      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
       "line": 1070,
       "kind": "Slider",
       "bound": "settingsManager.signalStrengthAlpha",

@@ -25,7 +25,12 @@ final class OQSHpkeIntegrationTests: XCTestCase {
         let claims = ["peer": peer, "ts": String(Date().timeIntervalSince1970)]
         let payload = try JSONSerialization.data(withJSONObject: claims, options: [])
         let sig = try await fixture.sender.sign(data: payload, peerId: peer, algorithm: "ML-DSA-65")
-        let ok = await fixture.sender.verify(
+        _ = try await authenticateLocalSigningKeyForTesting(
+            signer: fixture.sender,
+            verifier: fixture.recipient,
+            peerId: peer
+        )
+        let ok = await fixture.recipient.verify(
             data: payload,
             signature: sig,
             peerId: peer,

@@ -22,7 +22,12 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         let provider = MockCryptoProvider(
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
-            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+            supportedSuites: [
+                .qperiaptContextBound,
+                .qperiaptABI2PolicyBound,
+                .mlkem768MLDSA65FS,
+                .mlkem768MLDSA65
+            ]
         )
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
@@ -52,7 +57,12 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         let provider = MockCryptoProvider(
             tier: .liboqsPQC,
             activeSuite: .mlkem768MLDSA65,
-            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+            supportedSuites: [
+                .qperiaptContextBound,
+                .qperiaptABI2PolicyBound,
+                .mlkem768MLDSA65FS,
+                .mlkem768MLDSA65
+            ]
         )
 
         let disabled = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
@@ -67,23 +77,27 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
             appleXWingAvailable: false,
             qPeriaptEnabled: true
         )
-        XCTAssertEqual(enabled.map(\.wireId), [0x0011, 0x0101, 0x0102])
+        XCTAssertEqual(enabled.map(\.wireId), [0x0012, 0x0101, 0x0102])
     }
 
-    func testKEMPublicKeyInfoAcceptsOnlyValidQPeriaptBootstrapKeyLength() {
+    func testKEMPublicKeyInfoAcceptsOnlyNegotiableABI2QPeriaptBootstrapKey() {
         let normalized = KEMPublicKeyInfo.normalizedValidKeys([
             KEMPublicKeyInfo(
-                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
                 publicKey: Data(repeating: 0x11, count: QPeriaptPlatformPolicy.publicKeyLength)
             ),
             KEMPublicKeyInfo(
-                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
                 publicKey: Data(repeating: 0x12, count: 1_184)
+            ),
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                publicKey: Data(repeating: 0x13, count: QPeriaptPlatformPolicy.publicKeyLength)
             )
         ])
 
         XCTAssertEqual(normalized.count, 1)
-        XCTAssertEqual(normalized.first?.suiteWireId, CryptoSuite.qperiaptContextBound.wireId)
+        XCTAssertEqual(normalized.first?.suiteWireId, CryptoSuite.qperiaptABI2PolicyBound.wireId)
         XCTAssertEqual(normalized.first?.publicKey.count, QPeriaptPlatformPolicy.publicKeyLength)
     }
 
@@ -123,10 +137,10 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Windows", osVersion: "Windows 26"))
     }
 
-    func testQPeriaptHandshakePeerPolicyRequiresQProviderAndAuthProfile() {
+    func testQPeriaptHandshakePeerPolicyFailsClosedWithoutAdmittedRuntimeSession() {
         let eligible = qPeriaptCapabilities()
-        XCTAssertTrue(QPeriaptPlatformPolicy.isHandshakePeerEligible(eligible))
-        XCTAssertTrue(QPeriaptPlatformPolicy.isHandshakePeerEligible(
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(eligible))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isHandshakePeerEligible(
             qPeriaptCapabilities(platformVersion: "iOS 26.0")
         ))
 
@@ -149,7 +163,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
     func testPairingIdentityNormalizationGatesQPeriaptByPeerPlatform() {
         let qKey = KEMPublicKeyInfo(
-            suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+            suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
             publicKey: Data(repeating: 0x51, count: QPeriaptPlatformPolicy.publicKeyLength)
         )
         let xWingKey = KEMPublicKeyInfo(
@@ -175,7 +189,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         XCTAssertEqual(eligible?.kemPublicKeys.map(\.suiteWireId), [
             CryptoSuite.xwingMLDSA.wireId,
-            CryptoSuite.qperiaptContextBound.wireId
+            CryptoSuite.qperiaptABI2PolicyBound.wireId
         ])
     }
 
@@ -208,7 +222,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         platformVersion: String = "Android 16 (API 36)"
     ) -> CryptoCapabilities {
         CryptoCapabilities(
-            supportedKEM: [P2PCryptoAlgorithm.qperiaptContextBound.rawValue],
+            supportedKEM: [P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue],
             supportedSignature: signatures,
             supportedAuthProfiles: authProfiles,
             supportedAEAD: [P2PCryptoAlgorithm.aes256GCM.rawValue],

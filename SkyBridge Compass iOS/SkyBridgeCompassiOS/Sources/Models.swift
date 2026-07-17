@@ -76,7 +76,6 @@ public enum DevicePlatform: String, Codable, Sendable, CaseIterable {
 
 enum AppleMobileDeviceIdentity {
     struct Snapshot: Sendable, Equatable {
-        let stableDeviceId: String
         let vendorDeviceId: String?
         let deviceName: String
         let platform: DevicePlatform
@@ -104,7 +103,6 @@ enum AppleMobileDeviceIdentity {
             modelName: presentation.modelName
         )
         return Snapshot(
-            stableDeviceId: ProtocolDeviceIdentity.stableDeviceId(),
             vendorDeviceId: values.vendorDeviceId,
             deviceName: deviceName,
             platform: platform,
@@ -116,7 +114,6 @@ enum AppleMobileDeviceIdentity {
         )
         #else
         return Snapshot(
-            stableDeviceId: "unknown-device",
             vendorDeviceId: nil,
             deviceName: "Unknown Device",
             platform: .unknown,

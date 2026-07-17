@@ -573,12 +573,13 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
 
     /// 本机稳定设备 ID（与 stableDeviceId 生成策略对齐）
+    private var localProtocolIdentitySnapshot: ProtocolIdentitySnapshot?
+
     private var localStableDeviceId: String? {
         #if canImport(UIKit)
-        let raw = AppleMobileDeviceIdentity.currentSnapshot().stableDeviceId
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !raw.isEmpty else { return nil }
+        guard let raw = localProtocolIdentitySnapshot?.deviceId.lowercased() else {
+            return nil
+        }
         return "id:\(raw)"
         #else
         return nil
@@ -781,7 +782,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         
         // 创建 TXT 记录。Bonjour `deviceId` must be the same protocol authority
         // identity used by MessageA/PIB; Apple mobile/vendor IDs are aliases only.
-        let txtRecord = await createTXTRecord(port: port)
+        let txtRecord = try await createTXTRecord(port: port)
         
         // 创建监听器参数
         let parameters = NWParameters.tcp
@@ -2058,7 +2059,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     // MARK: - Private Methods - TXT Record
     
     /// 创建 TXT 记录（用于广播）
-    private func createTXTRecord(port: UInt16) async -> NWTXTRecord {
+    private func createTXTRecord(port: UInt16) async throws -> NWTXTRecord {
         var record = NWTXTRecord()
         
         // 平台信息
@@ -2101,25 +2102,15 @@ public class DeviceDiscoveryManager: ObservableObject {
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)
         let mobileSnapshot = AppleMobileDeviceIdentity.currentSnapshot()
-        let protocolDeviceId = ProtocolDeviceIdentity.stableDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let mobileStableId = mobileSnapshot.stableDeviceId
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let advertisedDeviceId = protocolDeviceId.isEmpty ? mobileStableId : protocolDeviceId
-
-        if !advertisedDeviceId.isEmpty {
-            record["deviceId"] = advertisedDeviceId
-            record["uuid"] = advertisedDeviceId
-            record["uniqueId"] = advertisedDeviceId
-        }
-        if let protocolFingerprint = await localProtocolIdentityFingerprintForAdvertisement() {
-            record["pubKeyFP"] = protocolFingerprint
-            record["identityFingerprint"] = protocolFingerprint
-        }
-        if !mobileStableId.isEmpty, mobileStableId != advertisedDeviceId {
-            record["legacyDeviceId"] = mobileStableId
-            record["appleMobileStableId"] = mobileStableId
-        }
+        let protocolIdentity = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot()
+        localProtocolIdentitySnapshot = protocolIdentity
+        record["deviceId"] = protocolIdentity.deviceId
+        record["uuid"] = protocolIdentity.deviceId
+        record["uniqueId"] = protocolIdentity.deviceId
+        record["pubKeyFP"] = protocolIdentity.signingPublicKeyFingerprint
+        record["identityFingerprint"] = protocolIdentity.signingPublicKeyFingerprint
+        record["protocolSigningAlgorithm"] = protocolIdentity.signingAlgorithm.rawValue
         if let vendorDeviceId = mobileSnapshot.vendorDeviceId, !vendorDeviceId.isEmpty {
             record["vendorDeviceId"] = vendorDeviceId
         }
@@ -2303,32 +2294,6 @@ public class DeviceDiscoveryManager: ObservableObject {
         String(format: "%.3f", min(1.0, max(0.0, value)))
     }
 
-    private func localProtocolIdentityFingerprintForAdvertisement() async -> String? {
-        do {
-            try await SkyBridgeiOSCore.shared.initialize(policy: .requirePQC)
-            for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519] {
-                let publicKey = try await SkyBridgeiOSCore.shared.getProtocolSigningPublicKey(for: algorithm)
-                let keyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
-                    protocolSigningAlgorithm: algorithm.rawValue,
-                    publicKey: publicKey
-                )
-                if let fingerprint = keyInfo.authoritativeFingerprint?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased(),
-                   fingerprint.count == 64,
-                   fingerprint.allSatisfy(\.isHexDigit) {
-                    return fingerprint
-                }
-            }
-        } catch {
-            SkyBridgeLogger.shared.debug(
-                "ℹ️ Bonjour protocol identity fingerprint unavailable: \(error.localizedDescription)"
-            )
-        }
-
-        return nil
-    }
-    
     // MARK: - Private Methods - Cleanup
     
     /// 启动设备清理定时器

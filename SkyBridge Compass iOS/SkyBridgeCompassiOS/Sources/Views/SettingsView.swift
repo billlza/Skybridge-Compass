@@ -322,6 +322,7 @@ struct SettingsView: View {
         }
 
         guard currentTier == .nativePQC || currentTier == .liboqsPQC,
+              currentSuite.isNegotiable,
               currentSuite.isPQCGroup
         else {
             return PQCPolicyStatusPresentation(

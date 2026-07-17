@@ -156,7 +156,10 @@ extension P2PDiscoveryService {
     ) -> Bool {
         switch state {
         case .waitingFinished, .established:
-            return (try? HandshakeMessageA.decode(from: frame)) != nil
+            guard let messageA = try? HandshakeMessageA.decode(from: frame) else {
+                return false
+            }
+            return messageA.hasNegotiableOfferShape
         default:
             return false
         }
@@ -252,7 +255,8 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("no requested PQC KEM public key available")
         }
 
-        let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let localIdRaw = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !localId.isEmpty else {
             throw makeSKRFailure("local device id unavailable")
@@ -389,7 +393,8 @@ extension P2PDiscoveryService {
             throw makePIBFailure("local protocol identity unavailable")
         }
 
-        let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let localIdRaw = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !localId.isEmpty else {
             throw makePIBFailure("local device id unavailable")

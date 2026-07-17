@@ -147,10 +147,16 @@ extension CrossNetworkConnectionManager {
         policy: HandshakePolicy,
         environment: any CryptoEnvironment = SystemCryptoEnvironment.system
     ) -> WebRTCInboundResponderSelection? {
-        let peerHasPQCGroup = peerSupportedSuites.contains { $0.isPQCGroup }
-        let peerHasClassicGroup = peerSupportedSuites.contains { !$0.isPQCGroup }
+        guard !peerSupportedSuites.isEmpty,
+              peerSupportedSuites.allSatisfy(\.isNegotiable) else {
+            return nil
+        }
+        let peerHasPQCGroup = peerSupportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
+        let peerHasClassicGroup = peerSupportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
         let classicProvider = CryptoProviderFactory.make(policy: .classicOnly, environment: environment)
-        let classicSuites = classicProvider.supportedSuites.filter { !$0.isPQCGroup }
+        let classicSuites = classicProvider.supportedSuites.filter {
+            !$0.isPQCGroup && $0.isNegotiable
+        }
 
         guard peerHasPQCGroup else {
             guard !policy.requirePQC else {

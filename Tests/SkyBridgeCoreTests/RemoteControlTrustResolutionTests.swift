@@ -3,6 +3,64 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class RemoteControlTrustResolutionTests: XCTestCase {
+    func testQuarantinedAndReverificationRecordsCannotAuthorizeInboundOrHandshakeTrust() async {
+        let deviceId = "id:lifecycle-gated-peer"
+        let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
+        let quarantined = lifecycleRecord(
+            deviceId: deviceId,
+            fingerprint: String(repeating: "a", count: 64),
+            state: .quarantined
+        )
+        let reverification = lifecycleRecord(
+            deviceId: deviceId,
+            fingerprint: String(repeating: "b", count: 64),
+            state: .reverificationRequired
+        )
+
+        for record in [quarantined, reverification] {
+            XCTAssertEqual(
+                RemoteControlInboundTrustResolver.resolve(
+                    remoteSOAPeerId: remotePeerId,
+                    records: [record]
+                ),
+                .missing
+            )
+            let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: [record])
+            let fingerprints = await provider.trustedFingerprints(for: deviceId)
+            let kemKeys = await provider.trustedKEMPublicKeys(for: deviceId)
+            XCTAssertEqual(fingerprints, [])
+            XCTAssertEqual(kemKeys, [:])
+        }
+    }
+
+    func testActiveRecordAuthorizesWhenQuarantinedAliasAlsoExists() async {
+        let deviceId = "id:mixed-lifecycle-peer"
+        let activeFingerprint = String(repeating: "c", count: 64)
+        let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
+        let active = lifecycleRecord(
+            deviceId: deviceId,
+            fingerprint: activeFingerprint,
+            state: .active
+        )
+        let quarantined = lifecycleRecord(
+            deviceId: "shadow-mixed-lifecycle-peer",
+            fingerprint: String(repeating: "d", count: 64),
+            state: .quarantined,
+            currentDeviceId: deviceId
+        )
+
+        XCTAssertEqual(
+            RemoteControlInboundTrustResolver.resolve(
+                remoteSOAPeerId: remotePeerId,
+                records: [active, quarantined]
+            ),
+            .resolved(deviceId: deviceId, fingerprint: activeFingerprint)
+        )
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: [active, quarantined])
+        let trustedFingerprints = await provider.trustedFingerprints(for: deviceId)
+        XCTAssertEqual(trustedFingerprints, [activeFingerprint])
+    }
+
     func testEquivalentInboundTrustRecordsCollapseToSingleCanonicalDevice() {
         let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: "id:peer-mac")
 
@@ -416,6 +474,33 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
                 deviceId: "id:\(rawUUID.lowercased())",
                 fingerprint: String(repeating: "c", count: 64)
             )
+        )
+    }
+
+    private func lifecycleRecord(
+        deviceId: String,
+        fingerprint: String,
+        state: TrustLifecycleState,
+        currentDeviceId: String? = nil
+    ) -> TrustRecord {
+        let canonicalDeviceId = currentDeviceId ?? deviceId
+        return TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: fingerprint,
+            publicKey: Data([0x01]),
+            protocolPublicKey: Data([0x02]),
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0x44, count: 1_184)
+                )
+            ],
+            signature: Data([0x03]),
+            currentDeviceId: canonicalDeviceId,
+            knownDeviceIds: [canonicalDeviceId],
+            lifecycleState: state
         )
     }
 }

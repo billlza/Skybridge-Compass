@@ -4,7 +4,7 @@ import Network
 import Security
 import NoiseKit
 import Atomics
-import SkyBridgeBenchmarkSupport
+@testable import SkyBridgeBenchmarkSupport
 
 final class BaselineLoopbackBenchTests: XCTestCase {
     private struct BenchConfig {
@@ -74,6 +74,115 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         } catch let error as NetworkLoopbackLifecycleError {
             XCTAssertTrue(error.description.contains("task cancelled"), "Unexpected cancellation error: \(error)")
         }
+    }
+
+    func testLoopbackMailboxRejectsSurplusWithoutRevokingAdmittedConnection() async throws {
+        let queue = DispatchQueue(label: "skybridge.loopback.mailbox-tests")
+        let mailbox = AcceptedConnectionMailbox(protocolName: "mailbox-test")
+        let reservation = try mailbox.reserve(
+            iteration: 7,
+            queue: queue,
+            timeoutSeconds: 5
+        )
+        let admitted = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let surplus = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+
+        guard case .accepted = mailbox.offer(admitted) else {
+            return XCTFail("The reserved connection must be admitted")
+        }
+        let delivered = try await reservation.connection()
+        XCTAssertTrue(delivered === admitted)
+
+        guard case .rejected(let rejection) = mailbox.offer(surplus) else {
+            return XCTFail("A second connection must be rejected at capacity one")
+        }
+        XCTAssertTrue(rejection.description.contains("capacity 1 exceeded"))
+        XCTAssertNoThrow(try mailbox.release(admitted, iteration: 7))
+
+        let nextReservation = try mailbox.reserve(
+            iteration: 8,
+            queue: queue,
+            timeoutSeconds: 5
+        )
+        let next = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        guard case .accepted = mailbox.offer(next) else {
+            return XCTFail("A rejected surplus connection must not poison the next reservation")
+        }
+        let nextDelivered = try await nextReservation.connection()
+        XCTAssertTrue(nextDelivered === next)
+        XCTAssertNoThrow(try mailbox.release(next, iteration: 8))
+    }
+
+    func testLoopbackMailboxListenerFinishPreservesReleaseOwnership() async throws {
+        let queue = DispatchQueue(label: "skybridge.loopback.mailbox-finish-tests")
+        let mailbox = AcceptedConnectionMailbox(protocolName: "mailbox-finish-test")
+        let reservation = try mailbox.reserve(
+            iteration: 11,
+            queue: queue,
+            timeoutSeconds: 5
+        )
+        let admitted = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        guard case .accepted = mailbox.offer(admitted) else {
+            return XCTFail("The reserved connection must be admitted")
+        }
+        let delivered = try await reservation.connection()
+        XCTAssertTrue(delivered === admitted)
+
+        mailbox.finish(.listener(
+            protocolName: "mailbox-finish-test",
+            stage: "state",
+            detail: "test terminal state"
+        ))
+
+        XCTAssertNoThrow(try mailbox.release(admitted, iteration: 11))
+        XCTAssertThrowsError(try mailbox.reserve(
+            iteration: 12,
+            queue: queue,
+            timeoutSeconds: 5
+        ))
+    }
+
+    func testLoopbackMailboxRejectsUnreservedConnectionWithoutPoisoningNextReservation() async throws {
+        let queue = DispatchQueue(label: "skybridge.loopback.mailbox-late-tests")
+        let mailbox = AcceptedConnectionMailbox(protocolName: "mailbox-late-test")
+        let late = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        guard case .rejected(let rejection) = mailbox.offer(late) else {
+            return XCTFail("A connection without a reservation must be rejected")
+        }
+        XCTAssertTrue(rejection.description.contains("without an active reservation"))
+
+        let reservation = try mailbox.reserve(
+            iteration: 13,
+            queue: queue,
+            timeoutSeconds: 5
+        )
+        let admitted = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        guard case .accepted = mailbox.offer(admitted) else {
+            return XCTFail("A late rejected connection must not poison the next reservation")
+        }
+        let delivered = try await reservation.connection()
+        XCTAssertTrue(delivered === admitted)
+        XCTAssertNoThrow(try mailbox.release(admitted, iteration: 13))
+    }
+
+    func testLoopbackMailboxReleaseStillEnforcesOwnerIdentityAndIteration() async throws {
+        let queue = DispatchQueue(label: "skybridge.loopback.mailbox-owner-tests")
+        let mailbox = AcceptedConnectionMailbox(protocolName: "mailbox-owner-test")
+        let reservation = try mailbox.reserve(
+            iteration: 17,
+            queue: queue,
+            timeoutSeconds: 5
+        )
+        let admitted = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let stranger = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        guard case .accepted = mailbox.offer(admitted) else {
+            return XCTFail("The reserved connection must be admitted")
+        }
+        _ = try await reservation.connection()
+
+        XCTAssertThrowsError(try mailbox.release(stranger, iteration: 17))
+        XCTAssertThrowsError(try mailbox.release(admitted, iteration: 18))
+        XCTAssertNoThrow(try mailbox.release(admitted, iteration: 17))
     }
 
     func testLoopbackBaselines() async throws {
@@ -217,6 +326,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             protocolName: "WebRTC-DTLS",
             serverParameters: serverParams,
             clientParameters: clientParams,
+            listenerIsolation: .perHandshake,
             config: config
         )
     }
@@ -294,12 +404,14 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         protocolName: String,
         serverParameters: NWParameters,
         clientParameters: NWParameters,
+        listenerIsolation: NetworkLoopbackListenerIsolation = .sharedAcrossHandshakes,
         config: BenchConfig
     ) async throws -> [Double] {
         let lifecycleSamples = try await NetworkLoopbackLifecycle.measureHandshakes(
             protocolName: protocolName,
             serverParameters: serverParameters,
             clientParameters: clientParameters,
+            listenerIsolation: listenerIsolation,
             iterations: config.iterations,
             warmup: config.warmup,
             timeoutSeconds: config.timeoutSeconds,

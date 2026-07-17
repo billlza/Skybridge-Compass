@@ -52,10 +52,10 @@ pub struct CryptoSuite {
 
 impl CryptoSuite {
     pub const XWING_MLDSA: Self = Self { wire_id: 0x0001 };
-    /// EXPERIMENTAL, DEFAULT-OFF (built only with the `q-periapt` feature on
-    /// skybridge-core): Q-Periapt ContextBound `ML-KEM-768 + X25519` hybrid KEM
-    /// with ML-DSA-65 signatures. The constant itself is always defined (it is a
-    /// plain wire id); only the KEM dispatch is feature-gated.
+    /// Decode-only legacy Q-Periapt ContextBound suite. Wire id 0x0011 remains
+    /// recognizable for compatibility diagnostics, but is never negotiable or
+    /// operator-selectable; the authenticated ABI2 policy suite uses a distinct
+    /// contract in the Apple implementation.
     pub const QPERIAPT_CONTEXTBOUND_MLDSA65: Self = Self { wire_id: 0x0011 };
     pub const MLKEM768_MLDSA65: Self = Self { wire_id: 0x0101 };
     pub const MLKEM768_MLDSA65_FS: Self = Self { wire_id: 0x0102 };
@@ -70,11 +70,6 @@ impl CryptoSuite {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "x-wing" | "x-wing+mldsa65" | "x-wing+ml-dsa-65" | "xwing" => Some(Self::XWING_MLDSA),
-            "q-periapt"
-            | "qperiapt"
-            | "qperiapt-contextbound"
-            | "q-periapt-contextbound"
-            | "q-periapt+ml-dsa-65" => Some(Self::QPERIAPT_CONTEXTBOUND_MLDSA65),
             "ml-kem-768" | "ml-kem-768+mldsa65" | "ml-kem-768+ml-dsa-65" => {
                 Some(Self::MLKEM768_MLDSA65)
             }
@@ -101,6 +96,14 @@ impl CryptoSuite {
 
     pub fn is_known(self) -> bool {
         self.as_known_name().is_some()
+    }
+
+    pub fn is_legacy_only(self) -> bool {
+        self.wire_id == Self::QPERIAPT_CONTEXTBOUND_MLDSA65.wire_id
+    }
+
+    pub fn is_negotiable(self) -> bool {
+        self.is_known() && !self.is_legacy_only()
     }
 
     pub fn is_pqc(self) -> bool {
@@ -354,5 +357,17 @@ mod tests {
 
         assert_eq!(classic, CryptoSuite::X25519_ED25519);
         assert!(!classic.is_pqc());
+    }
+
+    #[test]
+    fn qperiapt_abi1_remains_wire_parseable_but_not_operator_selectable() {
+        let legacy = CryptoSuite::from_wire_id(0x0011);
+
+        assert!(legacy.is_known());
+        assert!(legacy.is_legacy_only());
+        assert!(!legacy.is_negotiable());
+        assert_eq!(legacy.as_known_name(), Some("Q-Periapt-ContextBound"));
+        assert_eq!(CryptoSuite::from_name("q-periapt"), None);
+        assert_eq!(CryptoSuite::from_name("q-periapt-contextbound"), None);
     }
 }

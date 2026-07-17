@@ -136,8 +136,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "X-Wing PQC"
         )
-        let concreteQPeriaptSuite = RemoteControlSecurityDescriptor(
-            sessionId: "session-qperiapt-suite",
+        let legacyQPeriaptSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-legacy-suite",
             transportKind: .webrtc,
             remoteIPAddress: "192.0.2.11",
             remoteDeviceId: "android-1",
@@ -148,8 +148,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "Q-Periapt-ContextBound PQC"
         )
-        let concreteQPeriaptWireSuite = RemoteControlSecurityDescriptor(
-            sessionId: "session-qperiapt-wire-suite",
+        let legacyQPeriaptWireSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-legacy-wire-suite",
             transportKind: .webrtc,
             remoteIPAddress: "192.0.2.12",
             remoteDeviceId: "android-2",
@@ -160,13 +160,52 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "0x0011 PQC"
         )
+        let concreteQPeriaptSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-abi2-suite",
+            transportKind: .webrtc,
+            remoteIPAddress: "192.0.2.13",
+            remoteDeviceId: "android-3",
+            remoteDeviceName: "Android",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "Q-Periapt-ABI2-PolicyBound PQC"
+        )
+        let concreteQPeriaptWireSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-qperiapt-abi2-wire-suite",
+            transportKind: .webrtc,
+            remoteIPAddress: "192.0.2.14",
+            remoteDeviceId: "android-4",
+            remoteDeviceName: "Android",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "0x0012 PQC"
+        )
+        let unknownHybridTierSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-unknown-hybrid-suite",
+            transportKind: .webrtc,
+            remoteIPAddress: "192.0.2.15",
+            remoteDeviceId: "android-5",
+            remoteDeviceName: "Android",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "0x00FF PQC"
+        )
 
         XCTAssertEqual(missingSuite.cryptoSuite, "missing")
         XCTAssertTrue(missingSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertTrue(genericSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertTrue(legacyQPeriaptSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertTrue(legacyQPeriaptWireSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteQPeriaptSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteQPeriaptWireSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertTrue(unknownHybridTierSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
     }
 
     func testPeerIdentityStoreResolvesRemoteIdentityByEndpointAlias() {
@@ -457,6 +496,26 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
                 source.contains("remoteControlStreamConfigDeferred session=\\(peer.id) transport=p2p reason=awaiting_security_notice"),
             "P2P streamConfiguration may be staged before approval, but must not be applied until the security notice is approved."
         )
+    }
+
+    func testInboundRemoteControlMessageAIsAdmittedBeforeTrustOrPeerMutation() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
+        guard let functionStart = source.range(of: "private func makeInboundHandshakeDriver("),
+              let functionEnd = source.range(
+                of: "private func handleControlMessagePayload(",
+                range: functionStart.upperBound..<source.endIndex
+              ) else {
+            return XCTFail("Unable to locate inbound remote-control handshake driver body")
+        }
+        let body = String(source[functionStart.lowerBound..<functionEnd.lowerBound])
+        guard let admission = body.range(of: "guard messageA.hasNegotiableOfferShape else"),
+              let soaMutation = body.range(of: "recordSOAState(soaPairKey, for: peer)"),
+              let peerMutation = body.range(of: "peer.handshakePeer = PeerIdentifier") else {
+            return XCTFail("Expected admission and mutation anchors are missing")
+        }
+
+        XCTAssertLessThan(admission.lowerBound, soaMutation.lowerBound)
+        XCTAssertLessThan(admission.lowerBound, peerMutation.lowerBound)
     }
 
     func testWebRTCClipboardSyncCannotBeSentBeforeApproval() throws {

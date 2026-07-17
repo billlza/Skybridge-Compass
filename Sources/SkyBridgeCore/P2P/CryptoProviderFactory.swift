@@ -209,6 +209,10 @@ public enum CryptoProviderFactory {
         peerSupportedSuites: [CryptoSuite],
         environment: any CryptoEnvironment = SystemCryptoEnvironment.system
     ) -> any CryptoProvider {
+        guard !peerSupportedSuites.isEmpty,
+              peerSupportedSuites.allSatisfy(\.isNegotiable) else {
+            return UnavailablePQCProvider()
+        }
         let baseProvider = make(policy: policy, environment: environment)
 
         #if HAS_APPLE_PQC_SDK
@@ -255,6 +259,10 @@ public enum CryptoProviderFactory {
         peerAdvertisedSuites: [CryptoSuite],
         environment: any CryptoEnvironment = SystemCryptoEnvironment.system
     ) -> any CryptoProvider {
+        guard !peerAdvertisedSuites.isEmpty,
+              peerAdvertisedSuites.allSatisfy(\.isNegotiable) else {
+            return UnavailablePQCProvider()
+        }
         let baseProvider = make(policy: policy, environment: environment)
 
         #if HAS_APPLE_PQC_SDK
@@ -284,7 +292,7 @@ public enum CryptoProviderFactory {
     }
 
     public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
-        provider.supportedSuites.filter { $0.isPQCGroup }
+        provider.supportedSuites.filter { $0.isPQCGroup && $0.isNegotiable }
     }
 
  /// 发射 Provider 选择事件

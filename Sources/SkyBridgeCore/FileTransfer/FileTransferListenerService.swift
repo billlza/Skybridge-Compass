@@ -48,12 +48,28 @@ public final class FileTransferListenerService: ObservableObject {
         guard listener == nil else { return }
         listenerHealthState = .starting
 
+        // Resolve the canonical authority before opening or advertising a listener.
+        // Publishing a host-name placeholder first lets peers cache a weak identity
+        // in the active Bonjour namespace and cannot be repaired reliably in place.
+        let identity: SelfIdentitySnapshot
+        do {
+            identity = try await SelfIdentityProvider.shared
+                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+        } catch {
+            listenerHealthState = .failed
+            bonjourPublished = false
+            log.error(
+                "File-transfer listener startup blocked because identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
+
         let parameters = makeListenerParameters()
         let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
         listener = boundListener
         activePort = boundPort
         ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
-        configureBonjour(on: boundListener, port: boundPort)
+        configureBonjour(on: boundListener, port: boundPort, identity: identity)
     }
 
     public func ensureHealthy() async throws {
@@ -167,47 +183,29 @@ public final class FileTransferListenerService: ObservableObject {
     
     /// Prefer advertising via `NWListener.service` (Network.framework) so iOS `NWBrowser` sees it reliably.
     /// We still keep a NetService fallback for older stacks / debugging.
-    private func configureBonjour(on listener: NWListener?, port: UInt16) {
-        guard let listener else { return }
-        
+    private func configureBonjour(
+        on listener: NWListener,
+        port: UInt16,
+        identity: SelfIdentitySnapshot
+    ) {
         let serviceName = Host.current().localizedName ?? "Mac"
         var txt = NWTXTRecord()
         txt["platform"] = "macos"
         txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         txt["name"] = serviceName
         txt["model"] = "Mac"
+        txt["deviceId"] = identity.deviceId
+        txt["uniqueId"] = identity.deviceId
+        txt["pubKeyFP"] = identity.pubKeyFP
         BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &txt, port: port)
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
-        // Mirror TXT for NetService fallback (Bonjour TXTRecord is [String: Data])
-        let txtData = makeNetServiceTXTData(serviceName: serviceName, deviceId: nil, pubKeyFP: nil, port: port)
-        
-        // Try to include stable identity if available (best-effort, non-blocking).
-        if #available(macOS 14.0, *) {
-            Task { [weak self] in
-                guard let self else { return }
-                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
-                var updated = txt
-                if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId }
-                if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP }
-                updated["uniqueId"] = (snap.deviceId.isEmpty ? serviceName : snap.deviceId)
-                LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &updated)
-                listener.service = NWListener.Service(name: serviceName, type: self.serviceType, domain: self.serviceDomain, txtRecord: updated)
-
-                // Keep NetService fallback TXT in sync (best-effort).
-                var updatedData = self.makeNetServiceTXTData(
-                    serviceName: serviceName,
-                    deviceId: snap.deviceId.isEmpty ? nil : snap.deviceId,
-                    pubKeyFP: snap.pubKeyFP.isEmpty ? nil : snap.pubKeyFP,
-                    port: port
-                )
-                // Ensure uniqueId aligns with deviceId when available.
-                if !snap.deviceId.isEmpty {
-                    updatedData["uniqueId"] = snap.deviceId.data(using: .utf8) ?? Data()
-                }
-                LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &updatedData)
-                self.netService?.setTXTRecord(NetService.data(fromTXTRecord: updatedData))
-            }
-        }
+        // Mirror the exact same authority tuple for the NetService compatibility publisher.
+        let txtData = makeNetServiceTXTData(
+            serviceName: serviceName,
+            deviceId: identity.deviceId,
+            pubKeyFP: identity.pubKeyFP,
+            port: port
+        )
         
         listener.service = NWListener.Service(name: serviceName, type: serviceType, domain: serviceDomain, txtRecord: txt)
         bonjourPublished = true
@@ -227,7 +225,12 @@ public final class FileTransferListenerService: ObservableObject {
         log.info("📡 NetService fallback published \(self.serviceType) port=\(port)")
     }
     
-    private func makeNetServiceTXTData(serviceName: String, deviceId: String?, pubKeyFP: String?, port: UInt16) -> [String: Data] {
+    private func makeNetServiceTXTData(
+        serviceName: String,
+        deviceId: String,
+        pubKeyFP: String,
+        port: UInt16
+    ) -> [String: Data] {
         var d: [String: Data] = [
             "platform": Data("macos".utf8),
             "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
@@ -235,14 +238,10 @@ public final class FileTransferListenerService: ObservableObject {
             "model": Data("Mac".utf8)
         ]
         BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &d, port: port)
-        // placeholder（启动后异步更新为强身份）；必须唯一，避免 iOS 端“合并错设备”
-        let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
-        d["deviceId"] = Data(stableId.utf8)
-        d["uniqueId"] = Data(stableId.utf8)
+        d["deviceId"] = Data(deviceId.utf8)
+        d["uniqueId"] = Data(deviceId.utf8)
+        d["pubKeyFP"] = Data(pubKeyFP.utf8)
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &d)
-        if let pubKeyFP, !pubKeyFP.isEmpty {
-            d["pubKeyFP"] = Data(pubKeyFP.utf8)
-        }
         return d
     }
 

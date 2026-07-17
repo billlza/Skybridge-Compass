@@ -553,7 +553,7 @@ enum CrossnetControlSettingsProjectionPolicy {
     }
 
     private static func isValidPQCSignatureAlgorithm(_ value: String) -> Bool {
-        value == "ML-DSA-65" || value == "ML-DSA-87"
+        value == "ML-DSA-65"
     }
 }
 

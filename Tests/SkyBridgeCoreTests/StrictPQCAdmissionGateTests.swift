@@ -12,6 +12,26 @@ final class StrictPQCAdmissionGateTests: XCTestCase {
         XCTAssertEqual(rejection, .peerOfferedClassicOnly)
     }
 
+    func testStrictPQCDoesNotTreatLegacyOrUnknownPQCWireIdsAsAnOffer() {
+        for suite in [
+            CryptoSuite.qperiaptContextBound,
+            CryptoSuite.unknown(0x00FF),
+            CryptoSuite.unknown(0xF001)
+        ] {
+            let rejection = StrictPQCAdmissionGate.inboundRejection(
+                policy: .strictPQC,
+                peerSupportedSuites: [suite],
+                localPQCSuitesAvailable: true
+            )
+
+            XCTAssertEqual(
+                rejection,
+                .peerOfferedClassicOnly,
+                "Non-negotiable suite \(suite.rawValue) must not satisfy strict PQC admission"
+            )
+        }
+    }
+
     func testStrictPQCHasNoClassicAuthorityBootstrapException() throws {
         let source = try String(
             contentsOf: repositoryRoot()

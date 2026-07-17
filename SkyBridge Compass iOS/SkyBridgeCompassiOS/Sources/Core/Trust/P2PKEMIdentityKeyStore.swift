@@ -61,7 +61,7 @@ public actor P2PKEMIdentityKeyStore {
         var bySuiteWireId: [UInt16: Data] = [:]
 
         let provider = CryptoProviderFactory.make(policy: .requirePQC)
-        for suite in provider.supportedSuites where suite.isPQCGroup {
+        for suite in provider.supportedSuites where suite.isPQCGroup && suite.isNegotiable {
             let (publicKey, _) = try await getOrCreateIdentityKey(for: suite, provider: provider)
             bySuiteWireId[suite.wireId] = publicKey
         }
@@ -73,7 +73,7 @@ public actor P2PKEMIdentityKeyStore {
                 nativeProviders.append(AppleXWingCryptoProvider())
             }
             for nativeProvider in nativeProviders {
-                for suite in nativeProvider.supportedSuites where suite.isPQCGroup {
+                for suite in nativeProvider.supportedSuites where suite.isPQCGroup && suite.isNegotiable {
                     let (publicKey, _) = try await getOrCreateIdentityKey(for: suite, provider: nativeProvider)
                     bySuiteWireId[suite.wireId] = publicKey
                 }

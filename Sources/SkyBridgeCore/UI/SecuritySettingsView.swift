@@ -226,13 +226,26 @@ public struct SecuritySettingsView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
-            let password = p12Password
-            let deviceId = certDeviceId
-            // 重导入移出主线程（避免卡死/沙滩球）：await 期间主线程不被阻塞，仅 Bool 结果回主线程更新 UI。
-            Task { @MainActor in
-                let ok = await TLSSecurityManager().importIdentityFromPKCS12OffMain(data, password: password, for: deviceId)
-                certStatusMessage = ok ? "✅ PKCS#12 身份已导入" : "❌ PKCS#12 导入失败"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            certStatusMessage = "❌ 无法读取 PKCS#12：\(error.localizedDescription)"
+            return
+        }
+        let password = p12Password
+        let deviceId = certDeviceId
+        Task { @MainActor in
+            do {
+                try await TLSSecurityManager().importIdentityFromPKCS12OffMain(
+                    data,
+                    password: password,
+                    for: deviceId
+                )
+                certStatusMessage = "✅ PKCS#12 身份已导入"
+            } catch {
+                certStatusMessage = "❌ PKCS#12 导入失败：\(error.localizedDescription)"
             }
         }
     }
@@ -247,12 +260,19 @@ public struct SecuritySettingsView: View {
         let org = csrO.isEmpty ? nil : csrO
         let ou = csrOU.isEmpty ? nil : csrOU
         Task { @MainActor in
-            let pem = await TLSSecurityManager().generateCSRPEMOffMain(for: deviceId, commonName: cn, organization: org, organizationalUnit: ou, sanDNS: dns, sanIP: ip)
-            if let pem {
+            do {
+                let pem = try await TLSSecurityManager().generateCSRPEMOffMain(
+                    for: deviceId,
+                    commonName: cn,
+                    organization: org,
+                    organizationalUnit: ou,
+                    sanDNS: dns,
+                    sanIP: ip
+                )
                 csrPEM = pem
                 certStatusMessage = "✅ CSR 已生成"
-            } else {
-                certStatusMessage = "❌ CSR 生成失败（请先导入身份或生成自签证书）"
+            } catch {
+                certStatusMessage = "❌ CSR 生成失败：\(error.localizedDescription)"
             }
         }
     }
@@ -294,8 +314,15 @@ public struct SecuritySettingsView: View {
     private func importIssuedCertificate() {
         Task { @MainActor in
             guard !issuedCertPEM.isEmpty else { certStatusMessage = "❌ PEM 内容为空"; return }
-            let ok = CAServiceManager().importIssuedCertificate(issuedCertPEM, for: certDeviceId)
-            certStatusMessage = ok ? "✅ 已导入证书" : "❌ 导入失败"
+            do {
+                try CAServiceManager().importIssuedCertificate(
+                    issuedCertPEM,
+                    for: certDeviceId
+                )
+                certStatusMessage = "✅ 已导入证书"
+            } catch {
+                certStatusMessage = "❌ 导入失败：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -303,9 +330,14 @@ public struct SecuritySettingsView: View {
     private func generateSelfSigned() {
         let deviceId = certDeviceId
         Task { @MainActor in
-            // await 期间主线程不阻塞；仅回传 Bool（SecCertificate 非 Sendable）。
-            let ok = await TLSSecurityManager().generateSelfSignedCertificateSucceedsOffMain(for: deviceId)
-            certStatusMessage = ok ? "✅ 自签证书已生成" : "❌ 自签生成失败"
+            do {
+                try await TLSSecurityManager().ensureSelfSignedCertificateOffMain(
+                    for: deviceId
+                )
+                certStatusMessage = "✅ 自签证书已生成或已存在"
+            } catch {
+                certStatusMessage = "❌ 自签生成失败：\(error.localizedDescription)"
+            }
         }
     }
     
@@ -950,11 +982,8 @@ struct PostQuantumCryptoSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
-                    Text("ML-DSA-65 (推荐)").tag("ML-DSA-65")
-                    Text("ML-DSA-87 (高安全)").tag("ML-DSA-87")
-                }
-                .pickerStyle(.segmented)
+                Text("ML-DSA-65 · 协议身份绑定")
+                    .font(.callout.weight(.semibold))
 
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle.fill")
@@ -989,11 +1018,9 @@ struct PostQuantumCryptoSettingsView: View {
     private var algorithmDescription: String {
         switch settingsManager.pqcSignatureAlgorithm {
         case "ML-DSA", "ML-DSA-65":
-            return "NIST Level 2 安全级别，签名约3.3KB，适合大多数场景"
-        case "ML-DSA-87":
-            return "NIST Level 4 安全级别，签名约4.6KB，提供更高安全性"
+            return "NIST Level 2；与当前握手身份和 TrustRecord 公钥绑定"
         default:
-            return "选择合适的后量子签名算法"
+            return "当前配置不受生产协议身份信任链支持"
         }
     }
     
@@ -1059,7 +1086,7 @@ struct PQCInfoView: View {
                         title: "支持的算法",
                         icon: "cpu",
                         color: .green,
-                        content: "• ML-DSA-65: NIST Level 2，平衡安全性和性能\n• ML-DSA-87: NIST Level 4，提供更高安全级别\n• ML-KEM: 用于密钥封装机制"
+                        content: "• ML-DSA-65: 当前生产协议身份签名，绑定握手与 TrustRecord\n• ML-DSA-87: 仅保留底层互操作测试，尚未接入生产身份信任链\n• ML-KEM: 用于密钥封装机制"
                     )
                     
                     InfoSection(

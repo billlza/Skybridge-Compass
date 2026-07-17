@@ -365,14 +365,16 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Platform identity loading must not collapse Keychain failures into missing identity material."
         )
         XCTAssertTrue(
-            platformSource.contains("throw SkyBridgeError.keychainError(status: status)") &&
-            platformSource.contains("Stored identity key failed self-test"),
-            "Platform identity storage must propagate Keychain failures and fail closed on corrupt stored signing keys."
+            platformSource.contains("ProtocolDeviceIdentityAuthority.shared.resolveSigningIdentity") &&
+            platformSource.contains("Stored identity key failed self-test") &&
+            !platformSource.contains("SecItemUpdate"),
+            "Platform signing identity must use the immutable authority transaction and fail closed on corrupt stored keys."
         )
         XCTAssertTrue(
-            platformSource.contains("SKYBRIDGE_KEYCHAIN_IN_MEMORY") &&
-            platformSource.contains("inMemoryIdentityKeys[tag] = keyData"),
-            "Simulator smoke identity storage must honor the same in-memory keychain gate as KeychainManager."
+            protocolDeviceIdentitySource.contains("configureExplicitSmokeOverrideIfPresent") &&
+            protocolDeviceIdentitySource.contains("if smokeDeviceId != nil") &&
+            protocolDeviceIdentitySource.contains("Once started, convergence is intentionally cancellation-independent"),
+            "Smoke identities must be explicitly injected, memory-only, and cancellation-safe."
         )
         XCTAssertFalse(
             kemStoreSource.contains("try? keychain.loadPrivateKey") ||
@@ -394,8 +396,10 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "PQC key loading must not use try? to convert Keychain errors into missing keys."
         )
         XCTAssertTrue(
-            protocolDeviceIdentitySource.contains("try KeychainManager.shared.getOrGenerateDeviceIdStrict()"),
-            "Protocol device identity must use the strict Keychain device ID path so storage failures do not rotate device IDs."
+            protocolDeviceIdentitySource.contains("insertDeviceAuthorityIfAbsent") &&
+            protocolDeviceIdentitySource.contains("authorityWinnerMissing") &&
+            protocolDeviceIdentitySource.contains("conflictingLegacyDeviceIds"),
+            "Protocol device identity must use add-only authority CAS, reload its winner, and reject conflicting legacy inputs."
         )
     }
 

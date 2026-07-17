@@ -50,6 +50,16 @@ public struct NetworkLoopbackHandshakeSample: Sendable {
     }
 }
 
+public enum NetworkLoopbackListenerIsolation: Sendable {
+    /// Reuses one listener when the transport gives each accepted connection an
+    /// unambiguous lifetime across sequential handshakes.
+    case sharedAcrossHandshakes
+
+    /// Rebuilds the listener outside the timed interval for datagram-backed
+    /// transports whose late packets could otherwise cross iteration boundaries.
+    case perHandshake
+}
+
 /// Owns a complete Network.framework loopback lifecycle for benchmark-only transports.
 ///
 /// Each iteration admits exactly one accepted server connection, waits for both peers to
@@ -65,6 +75,7 @@ public enum NetworkLoopbackLifecycle {
         serverParameters: NWParameters,
         clientParameters: NWParameters,
         listenerPort: NWEndpoint.Port? = nil,
+        listenerIsolation: NetworkLoopbackListenerIsolation = .sharedAcrossHandshakes,
         iterations: Int,
         warmup: Int,
         timeoutSeconds: Double,
@@ -106,6 +117,59 @@ public enum NetworkLoopbackLifecycle {
             label: "skybridge.loopback.\(queueLabel)",
             qos: .userInitiated
         )
+        let rawSamples: [NetworkLoopbackHandshakeSample]
+        switch listenerIsolation {
+        case .sharedAcrossHandshakes:
+            rawSamples = try await runListenerSession(
+                protocolName: protocolName,
+                iterations: 0..<totalHandshakes,
+                serverParameters: serverParameters,
+                clientParameters: clientParameters,
+                listenerPort: listenerPort,
+                queue: queue,
+                timeoutSeconds: timeoutSeconds,
+                kickoffBytes: kickoffBytes
+            )
+        case .perHandshake:
+            var isolatedSamples: [NetworkLoopbackHandshakeSample] = []
+            isolatedSamples.reserveCapacity(totalHandshakes)
+            for rawIteration in 0..<totalHandshakes {
+                let sessionSamples = try await runListenerSession(
+                    protocolName: protocolName,
+                    iterations: rawIteration..<(rawIteration + 1),
+                    serverParameters: serverParameters,
+                    clientParameters: clientParameters,
+                    listenerPort: listenerPort,
+                    queue: queue,
+                    timeoutSeconds: timeoutSeconds,
+                    kickoffBytes: kickoffBytes
+                )
+                isolatedSamples.append(contentsOf: sessionSamples)
+            }
+            rawSamples = isolatedSamples
+        }
+
+        return rawSamples.compactMap { sample in
+            guard sample.iteration >= warmup else { return nil }
+            return NetworkLoopbackHandshakeSample(
+                iteration: sample.iteration - warmup,
+                startEpoch: sample.startEpoch,
+                endEpoch: sample.endEpoch,
+                readyDuration: sample.readyDuration
+            )
+        }
+    }
+
+    private static func runListenerSession(
+        protocolName: String,
+        iterations: Range<Int>,
+        serverParameters: NWParameters,
+        clientParameters: NWParameters,
+        listenerPort: NWEndpoint.Port?,
+        queue: DispatchQueue,
+        timeoutSeconds: Double,
+        kickoffBytes: Int
+    ) async throws -> [NetworkLoopbackHandshakeSample] {
         let listener: NWListener
         if let listenerPort {
             listener = try NWListener(using: serverParameters, on: listenerPort)
@@ -120,7 +184,6 @@ public enum NetworkLoopbackLifecycle {
             mailbox: mailbox,
             queue: queue
         )
-
         let operationResult: Result<[NetworkLoopbackHandshakeSample], NetworkLoopbackLifecycleError>
         do {
             let port = try await listenerLifecycle.startAndWaitUntilReady(
@@ -128,27 +191,18 @@ public enum NetworkLoopbackLifecycle {
             )
             let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
             var samples: [NetworkLoopbackHandshakeSample] = []
-            samples.reserveCapacity(iterations)
-
-            for rawIteration in 0..<totalHandshakes {
-                let sample = try await runIteration(
+            samples.reserveCapacity(iterations.count)
+            for iteration in iterations {
+                samples.append(try await runIteration(
                     protocolName: protocolName,
-                    iteration: rawIteration,
+                    iteration: iteration,
                     endpoint: endpoint,
                     clientParameters: clientParameters,
                     mailbox: mailbox,
                     queue: queue,
                     timeoutSeconds: timeoutSeconds,
                     kickoffBytes: kickoffBytes
-                )
-                if rawIteration >= warmup {
-                    samples.append(NetworkLoopbackHandshakeSample(
-                        iteration: rawIteration - warmup,
-                        startEpoch: sample.startEpoch,
-                        endEpoch: sample.endEpoch,
-                        readyDuration: sample.readyDuration
-                    ))
-                }
+                ))
             }
             operationResult = .success(samples)
         } catch let error as NetworkLoopbackLifecycleError {
@@ -177,20 +231,32 @@ public enum NetworkLoopbackLifecycle {
             ))
         }
 
-        let finalOperationResult: Result<[NetworkLoopbackHandshakeSample], NetworkLoopbackLifecycleError>
-        if Task.isCancelled, case .success = operationResult {
-            finalOperationResult = .failure(.listener(
+        return try resolveSessionResults(
+            protocolName: protocolName,
+            operation: operationResult,
+            cleanup: cleanupResult
+        )
+    }
+
+    private static func resolveSessionResults<Value>(
+        protocolName: String,
+        operation: Result<Value, NetworkLoopbackLifecycleError>,
+        cleanup: Result<Void, NetworkLoopbackLifecycleError>
+    ) throws -> Value {
+        let finalOperation: Result<Value, NetworkLoopbackLifecycleError>
+        if Task.isCancelled, case .success = operation {
+            finalOperation = .failure(.listener(
                 protocolName: protocolName,
                 stage: "operation",
                 detail: "task cancelled"
             ))
         } else {
-            finalOperationResult = operationResult
+            finalOperation = operation
         }
 
-        switch (finalOperationResult, cleanupResult) {
-        case (.success(let samples), .success):
-            return samples
+        switch (finalOperation, cleanup) {
+        case (.success(let value), .success):
+            return value
         case (.failure(let operationError), .success):
             throw operationError
         case (.success, .failure(let cleanupError)):

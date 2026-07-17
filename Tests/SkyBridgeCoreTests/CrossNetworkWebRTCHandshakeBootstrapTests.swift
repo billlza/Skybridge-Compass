@@ -412,6 +412,32 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertNil(selection)
     }
 
+    func testWebRTCInboundResponderRejectsLegacyUnknownAndMixedOffersBeforeProviderSelection() {
+        let policy = HandshakePolicy(
+            requirePQC: false,
+            allowClassicFallback: true,
+            minimumTier: .classic
+        )
+        let environment = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
+        let invalidOffers: [[CryptoSuite]] = [
+            [.qperiaptContextBound],
+            [.qperiaptContextBound, .x25519Ed25519],
+            [.qperiaptContextBound, .qperiaptABI2PolicyBound],
+            [.unknown(0x0002)]
+        ]
+
+        for offer in invalidOffers {
+            XCTAssertNil(
+                CrossNetworkConnectionManager.selectWebRTCInboundResponder(
+                    peerSupportedSuites: offer,
+                    policy: policy,
+                    environment: environment
+                ),
+                "Non-negotiable offer must fail as a whole: \(offer)"
+            )
+        }
+    }
+
     func testWebRTCInboundResponderRejectsClassicFallbackWhenStrictPQCRequiresLocalPQC() {
         let selection = CrossNetworkConnectionManager.selectWebRTCInboundResponder(
             peerSupportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],

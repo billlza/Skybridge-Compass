@@ -111,10 +111,10 @@ public protocol CryptoProvider: Sendable {
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair
 }
 
-/// Explicit extension point for KEMs whose security contract requires a
-/// protocol-derived application context. Callers must use these methods rather
-/// than the context-free `CryptoProvider` KEM surface.
-public protocol ApplicationContextBoundCryptoProvider: CryptoProvider {
+/// Explicit extension point for policy-bound KEMs whose authenticated contract
+/// requires a protocol-derived application context. Callers must use these
+/// methods rather than the context-free `CryptoProvider` KEM surface.
+public protocol ApplicationPolicyBoundCryptoProvider: CryptoProvider {
     func kemEncapsulate(
         recipientPublicKey: Data,
         applicationContext: Data

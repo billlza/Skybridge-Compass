@@ -197,6 +197,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     }
     @Published var isProcessing = false
     @Published var errorMessage: String?
+    @Published var showSignOutError = false
     @Published var selectedMethod: LoginMethod = AuthenticationViewModel.defaultLoginMethod
     @Published var isGuestMode = false
     @Published var supabaseNebulaId: String?
@@ -245,6 +246,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
     private struct RiskCheckOutcome {
         let auditTicket: String?
+        let deviceFingerprint: String
     }
 
     private static let localLoginThrottleWindow: TimeInterval = 10
@@ -256,6 +258,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let identifierType: RegistrationSecurityService.RegistrationContext.IdentifierType
         let attemptType: SupabaseService.RegistrationAttemptType
         let auditTicket: String?
+        let deviceFingerprint: String
     }
 
     private struct SupabaseAuthCallbackResolution {
@@ -340,15 +343,22 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 初始化设备指纹
         Task {
-            await loadDeviceFingerprint()
+            do {
+                try await loadDeviceFingerprint()
+            } catch {
+                SkyBridgeLogger.ui.error(
+                    "❌ 设备指纹预加载失败: \(error.localizedDescription, privacy: .private)"
+                )
+            }
         }
     }
 
  // MARK: - 安全检查方法
 
  /// 加载设备指纹
-    private func loadDeviceFingerprint() async {
-        let fingerprint = await SelfIdentityProvider.shared.generateRegistrationFingerprint()
+    private func loadDeviceFingerprint() async throws {
+        let fingerprint = try await SelfIdentityProvider.shared
+            .generateRegistrationFingerprint(allowCreate: true)
         self.deviceFingerprint = fingerprint
         SkyBridgeLogger.ui.debugOnly("🔐 设备指纹已加载: \(fingerprint.prefix(16))...")
     }
@@ -652,10 +662,14 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     }
 
     private static var allowsRemoteRiskDegrade: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
         let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ALLOW_AUTH_RISK_DEGRADE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
         return raw == "1" || raw == "true" || raw == "yes"
+        #else
+        return false
+        #endif
     }
 
     private func enforceLocalLoginThrottle(
@@ -693,9 +707,15 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private static let appleOAuthRedirectURL = URL(string: "skybridge://auth/apple-callback")!
     private static let appleBrowserAuditIdentifier = "apple_browser_oauth"
 
-    private func ensureDeviceFingerprint() async -> String? {
-        if deviceFingerprint == nil {
-            await loadDeviceFingerprint()
+    private func ensureDeviceFingerprint() async throws -> String {
+        if let deviceFingerprint {
+            return deviceFingerprint
+        }
+        try await loadDeviceFingerprint()
+        guard let deviceFingerprint else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Registration fingerprint was not published after authority resolution"
+            )
         }
         return deviceFingerprint
     }
@@ -718,7 +738,10 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             SkyBridgeLogger.ui.info("🔐 登录路径已通过本地短窗口软限流，继续执行服务端登录风控")
         }
 
-        guard let fingerprint = await ensureDeviceFingerprint() else {
+        let fingerprint: String
+        do {
+            fingerprint = try await ensureDeviceFingerprint()
+        } catch {
             SkyBridgeLogger.ui.error("❌ 设备指纹获取失败")
             errorMessage = t("auth.security.deviceVerificationFailed")
             return nil
@@ -786,12 +809,18 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 }
             }
 
-            return RiskCheckOutcome(auditTicket: remoteResult.auditTicket)
+            return RiskCheckOutcome(
+                auditTicket: remoteResult.auditTicket,
+                deviceFingerprint: fingerprint
+            )
         } catch {
             let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
             if attemptType != .login, Self.allowsRemoteRiskDegrade {
                 SkyBridgeLogger.ui.warning("⚠️ 服务端认证风控不可用，按配置回退本地防护: \(message)")
-                return RiskCheckOutcome(auditTicket: nil)
+                return RiskCheckOutcome(
+                    auditTicket: nil,
+                    deviceFingerprint: fingerprint
+                )
             }
 
             let userFacingMessage = t("auth.security.checkUnavailable")
@@ -813,6 +842,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private func recordRegistrationAttempt(
         identifier: String,
         identifierType: RegistrationSecurityService.RegistrationContext.IdentifierType,
+        deviceFingerprint fingerprint: String,
         attemptType: SupabaseService.RegistrationAttemptType = .register,
         success: Bool,
         failureReason: String? = nil,
@@ -820,8 +850,6 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         captchaPassed: Bool = false,
         auditTicket: String? = nil
     ) async {
-        guard let fingerprint = await ensureDeviceFingerprint() else { return }
-
         let context = RegistrationSecurityService.RegistrationContext(
             ip: "client",
             deviceFingerprint: fingerprint,
@@ -915,7 +943,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             identifier: Self.appleBrowserAuditIdentifier,
             identifierType: .username,
             attemptType: .login,
-            auditTicket: riskOutcome.auditTicket
+            auditTicket: riskOutcome.auditTicket,
+            deviceFingerprint: riskOutcome.deviceFingerprint
         )
 
         await performAuthenticationTask(riskContext: riskContext) {
@@ -977,7 +1006,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             identifier: auditIdentifier,
             identifierType: .username,
             attemptType: .login,
-            auditTicket: riskOutcome.auditTicket
+            auditTicket: riskOutcome.auditTicket,
+            deviceFingerprint: riskOutcome.deviceFingerprint
         )
 
         await performAuthenticationTask(riskContext: riskContext) {
@@ -1259,7 +1289,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 identifier: sanitizedPhone,
                 identifierType: .phone,
                 attemptType: .login,
-                auditTicket: riskOutcome.auditTicket
+                auditTicket: riskOutcome.auditTicket,
+                deviceFingerprint: riskOutcome.deviceFingerprint
             )
         ) {
             try await self.authService.loginPhone(
@@ -1310,6 +1341,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizePhoneNumber(phoneNumber),
                 identifierType: .phone,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: .verifyCode,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
@@ -1325,6 +1357,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizePhoneNumber(phoneNumber),
                 identifierType: .phone,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: .verifyCode,
                 success: false,
                 failureReason: error.localizedDescription,
@@ -1687,7 +1720,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                     "display_name": emailDisplayNameFallback(from: emailAddress),
                     "registration_source": "SkyBridge Compass Pro",
                     "nebula_id": nebulaId,  // 🔥 添加 nebulaid 到元数据
-                    "device_fingerprint": await ensureDeviceFingerprint() ?? ""
+                    "device_fingerprint": riskOutcome.deviceFingerprint
                 ],
                 redirectTo: Self.emailConfirmationRedirectURL,
                 captchaToken: captchaToken
@@ -1720,6 +1753,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: emailAddress,
                 identifierType: .email,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
             )
@@ -1763,6 +1797,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: emailAddress,
                 identifierType: .email,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 success: false,
                 failureReason: error.localizedDescription,
                 auditTicket: riskOutcome.auditTicket
@@ -1884,6 +1919,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizedPhone,
                 identifierType: .phone,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: completedAttemptType,
                 success: true,
                 captchaRequired: requiresCaptcha,
@@ -1956,6 +1992,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizedPhone,
                 identifierType: .phone,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: .register,
                 success: false,
                 failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
@@ -2000,7 +2037,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 identifier: sanitizedEmail,
                 identifierType: .email,
                 attemptType: .login,
-                auditTicket: riskOutcome.auditTicket
+                auditTicket: riskOutcome.auditTicket,
+                deviceFingerprint: riskOutcome.deviceFingerprint
             )
         ) {
             let shouldRememberCredentials = self.rememberCredentials
@@ -2054,6 +2092,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizedEmail,
                 identifierType: .email,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: .verifyCode,
                 success: true,
                 auditTicket: riskOutcome.auditTicket
@@ -2067,6 +2106,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await recordRegistrationAttempt(
                 identifier: sanitizedEmail,
                 identifierType: .email,
+                deviceFingerprint: riskOutcome.deviceFingerprint,
                 attemptType: .verifyCode,
                 success: false,
                 failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
@@ -2266,28 +2306,57 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  /// 进入游客模式
     func enterGuestMode() {
-        isGuestMode = true
-        supabaseNebulaId = nil
-        authService.activateGuestSession(displayName: t("auth.displayName.default.guest"))
+        guard !isProcessing else { return }
+        isProcessing = true
+        errorMessage = nil
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isProcessing = false }
+            do {
+                try await self.authService.activateGuestSession(
+                    displayName: self.t("auth.displayName.default.guest")
+                )
+                self.isGuestMode = true
+                self.supabaseNebulaId = nil
+            } catch {
+                self.errorMessage = error.localizedDescription
+                SkyBridgeLogger.ui.error(
+                    "❌ [AuthenticationViewModel] 游客模式本地会话清理失败: \(error.localizedDescription, privacy: .private)"
+                )
+            }
+        }
     }
 
  // MARK: - 登出
 
  /// 登出当前用户
     func signOut() {
-        currentSession = nil
-        supabaseNebulaId = nil
-        isGuestMode = false
-        clearAllFields()
-        let shouldRememberCredentials = rememberCredentials
-        if shouldRememberCredentials {
-            purgeLegacySavedPassword()
-        } else {
-            clearSavedCredentials()
-        }
+        guard !isProcessing else { return }
+        isProcessing = true
+        errorMessage = nil
+        showSignOutError = false
+
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.isProcessing = false }
             let outcome = await self.authService.signOutAndWait()
+            if case .localCleanupFailed(let message) = outcome {
+                self.errorMessage = "无法清理本地登录状态：\(message)"
+                self.showSignOutError = true
+                return
+            }
+
+            self.currentSession = nil
+            self.supabaseNebulaId = nil
+            self.isGuestMode = false
+            self.clearAllFields()
+            if self.rememberCredentials {
+                self.purgeLegacySavedPassword()
+            } else {
+                self.clearSavedCredentials()
+            }
+
             if case .localOnlyAfterRemoteFailure(let message) = outcome {
                 SkyBridgeLogger.ui.warning("⚠️ [AuthenticationViewModel] 远端会话撤销失败，本地已退出: \(message)")
             }
@@ -2332,6 +2401,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 await recordRegistrationAttempt(
                     identifier: riskContext.identifier,
                     identifierType: riskContext.identifierType,
+                    deviceFingerprint: riskContext.deviceFingerprint,
                     attemptType: riskContext.attemptType,
                     success: true,
                     captchaRequired: requiresCaptcha,
@@ -2372,6 +2442,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 await recordRegistrationAttempt(
                     identifier: riskContext.identifier,
                     identifierType: riskContext.identifierType,
+                    deviceFingerprint: riskContext.deviceFingerprint,
                     attemptType: riskContext.attemptType,
                     success: false,
                     failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
@@ -2390,6 +2461,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 await recordRegistrationAttempt(
                     identifier: riskContext.identifier,
                     identifierType: riskContext.identifierType,
+                    deviceFingerprint: riskContext.deviceFingerprint,
                     attemptType: riskContext.attemptType,
                     success: false,
                     failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,

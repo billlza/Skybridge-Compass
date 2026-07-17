@@ -113,6 +113,10 @@ public struct PreNegotiationSignatureSelector: Sendable {
         selectedSuite: CryptoSuite,
         sigAAlgorithm: SignatureAlgorithm
     ) -> Bool {
+        guard selectedSuite.isNegotiable else {
+            return false
+        }
+
  // isPQC 涵盖 PQC + Hybrid，或者显式检查两者
         let isPQCOrHybrid = selectedSuite.isPQC || selectedSuite.isHybrid
         
@@ -242,8 +246,8 @@ public struct HandshakeOfferedSuites: Sendable {
  /// 不使用静态的 CryptoSuite.allPQCSuites（会 offer 本地不支持的 suite）
  ///
  /// **规则**:
- /// - pqcOnly：只取 `isPQCGroup == true`
- /// - classicOnly：只取 `isPQCGroup == false`
+ /// - pqcOnly：只取可协商且 `isPQCGroup == true` 的套件
+ /// - classicOnly：只取可协商且 `isPQCGroup == false` 的套件
  /// - 过滤后为空：返回 `.empty(strategy)`（不偷偷变成其他算法）
  ///
  /// **Requirements: 9.1**
@@ -291,7 +295,7 @@ public struct HandshakeOfferedSuites: Sendable {
         
         switch strategy {
         case .pqcOnly:
-            let pqcSuites = availableSuites.filter { $0.isPQCGroup }
+            let pqcSuites = availableSuites.filter { $0.isNegotiable && $0.isPQCGroup }
             guard !pqcSuites.isEmpty else {
                 return .empty(strategy)
             }
@@ -316,7 +320,7 @@ public struct HandshakeOfferedSuites: Sendable {
                 }
             }
         case .classicOnly:
-            filtered = availableSuites.filter { !$0.isPQCGroup }
+            filtered = availableSuites.filter { $0.isNegotiable && !$0.isPQCGroup }
         }
         
         guard !filtered.isEmpty else {

@@ -212,9 +212,8 @@ private actor CrossNetworkTURNCredentialService {
            !turnAdmissionToken.isEmpty {
             req.setValue(turnAdmissionToken, forHTTPHeaderField: "X-SkyBridge-Turn-Admission")
         }
-        if let deviceId = resolvedDeviceIdentifier() {
-            req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        }
+        let deviceId = try await resolvedDeviceIdentifier()
+        req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         req.timeoutInterval = 10
 
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -285,8 +284,7 @@ private actor CrossNetworkTURNCredentialService {
         )
     }
 
-    private func resolvedDeviceIdentifier() -> String? {
-        let deviceID = ProtocolDeviceIdentity.stableDeviceId()
-        return deviceID.isEmpty ? nil : deviceID
+    private func resolvedDeviceIdentifier() async throws -> String {
+        try await SkyBridgeiOSCore.shared.currentProtocolIdentitySnapshot().deviceId
     }
 }

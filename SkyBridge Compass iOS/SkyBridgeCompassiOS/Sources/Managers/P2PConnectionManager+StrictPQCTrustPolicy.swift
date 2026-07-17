@@ -16,10 +16,13 @@ extension P2PConnectionManager {
                 suiteSupportsTargetKEM($0, target: preferredTargetSuite)
             }
         }
-        return trustedPeerKEMSuites.contains(where: { $0.isPQCGroup })
+        return trustedPeerKEMSuites.contains(where: { $0.isNegotiable && $0.isPQCGroup })
     }
 
     static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
+        guard availableSuite.isNegotiable, target.isNegotiable else {
+            return false
+        }
         if availableSuite == target {
             return true
         }
@@ -29,21 +32,16 @@ extension P2PConnectionManager {
         if availableCanonical == targetCanonical {
             return true
         }
-
-        if target.isHybrid {
-            return availableSuite.isHybrid
-        }
-
-        if availableSuite.isHybrid {
-            return target.isHybrid
-        }
-
         return false
     }
 
     static func signedRefreshEvidenceSuites(_ evidence: KEMTrustStore.SignedRefreshEvidence?) -> Set<CryptoSuite> {
         guard let evidence else { return [] }
-        return Set(evidence.suiteWireIds.map { CryptoSuite(wireId: $0) })
+        return Set(
+            evidence.suiteWireIds
+                .map { CryptoSuite(wireId: $0) }
+                .filter(\.isNegotiable)
+        )
     }
 
     static func signedRefreshEvidenceSatisfiesStrictPQC(
@@ -205,16 +203,20 @@ extension P2PConnectionManager {
             cryptoProvider: cryptoProvider,
             pqcOfferMode: .preferredSingle
         ) {
-            if let preferredPQC = preparation.offeredSuites.first(where: { $0.isPQCGroup }) {
+            if let preferredPQC = preparation.offeredSuites.first(where: {
+                $0.isNegotiable && $0.isPQCGroup
+            }) {
                 return preferredPQC
             }
-            return preparation.offeredSuites.first
+            return preparation.offeredSuites.first(where: \.isNegotiable)
         }
 
-        if let fallbackPQC = cryptoProvider.supportedSuites.first(where: { $0.isPQCGroup }) {
+        if let fallbackPQC = cryptoProvider.supportedSuites.first(where: {
+            $0.isNegotiable && $0.isPQCGroup
+        }) {
             return fallbackPQC
         }
-        return cryptoProvider.supportedSuites.first
+        return cryptoProvider.supportedSuites.first(where: \.isNegotiable)
     }
 
     private static func shouldAttemptOOBProtocolIdentityBinding(afterSKRFailure reason: String?) -> Bool {

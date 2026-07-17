@@ -83,6 +83,20 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
             revokedAt: Date(timeIntervalSinceNow: -31 * 24 * 60 * 60),
             knownDeviceIds: [matchingAlias]
         )
+        let quarantinedRecord = trustRecord(
+            deviceId: "id:quarantined-kem",
+            deviceName: "Other Device",
+            kemPublicKeys: [validXWingKey()],
+            knownDeviceIds: [matchingAlias],
+            lifecycleState: .quarantined
+        )
+        let reverificationRecord = trustRecord(
+            deviceId: "id:reverification-kem",
+            deviceName: "Other Device",
+            kemPublicKeys: [validXWingKey()],
+            knownDeviceIds: [matchingAlias],
+            lifecycleState: .reverificationRequired
+        )
         let activeValidRecord = trustRecord(
             deviceId: "id:active-valid-kem",
             deviceName: "Other Device",
@@ -99,6 +113,8 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
                 classicKEMRecord,
                 tombstoneRecord,
                 expiredRecord,
+                quarantinedRecord,
+                reverificationRecord,
                 activeValidRecord
             ]
         )
@@ -165,7 +181,8 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
         kemPublicKeys: [KEMPublicKeyInfo]?,
         recordType: TrustRecordType = .add,
         revokedAt: Date? = nil,
-        knownDeviceIds: [String]? = nil
+        knownDeviceIds: [String]? = nil,
+        lifecycleState: TrustLifecycleState = .active
     ) -> TrustRecord {
         TrustRecord(
             deviceId: deviceId,
@@ -177,7 +194,8 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
             revokedAt: revokedAt,
             deviceName: deviceName,
             currentDeviceId: deviceId,
-            knownDeviceIds: knownDeviceIds
+            knownDeviceIds: knownDeviceIds,
+            lifecycleState: lifecycleState
         )
     }
 

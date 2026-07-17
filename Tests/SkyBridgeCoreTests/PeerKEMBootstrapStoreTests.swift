@@ -175,7 +175,7 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         let qKey = Data(repeating: 0x51, count: QPeriaptPlatformPolicy.publicKeyLength)
         let xWingKey = Data(repeating: 0x52, count: 1_216)
         let qInfo = KEMPublicKeyInfo(
-            suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+            suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
             publicKey: qKey
         )
         let xWingInfo = KEMPublicKeyInfo(
@@ -191,7 +191,7 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         )
 
         var stored = await store.mergedKEMPublicKeys(forCandidates: ["peer-q"])
-        XCTAssertNil(stored[CryptoSuite.qperiaptContextBound.wireId])
+        XCTAssertNil(stored[CryptoSuite.qperiaptABI2PolicyBound.wireId])
         XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], xWingKey)
 
         await store.upsert(
@@ -202,7 +202,7 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         )
 
         stored = await store.mergedKEMPublicKeys(forCandidates: ["peer-q"])
-        XCTAssertEqual(stored[CryptoSuite.qperiaptContextBound.wireId], qKey)
+        XCTAssertEqual(stored[CryptoSuite.qperiaptABI2PolicyBound.wireId], qKey)
         XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], xWingKey)
 
         guard let readerDefaults = UserDefaults(suiteName: suiteName) else {
@@ -211,12 +211,12 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         }
         let reloaded = PeerKEMBootstrapStore(defaults: readerDefaults)
         let loaded = await reloaded.mergedKEMPublicKeys(forCandidates: ["peer-q"])
-        XCTAssertEqual(loaded[CryptoSuite.qperiaptContextBound.wireId], qKey)
+        XCTAssertEqual(loaded[CryptoSuite.qperiaptABI2PolicyBound.wireId], qKey)
         XCTAssertEqual(loaded[CryptoSuite.xwingMLDSA.wireId], xWingKey)
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
     }
 
-    func testLoadPurgesLegacyQPeriaptKEMWithoutPeerPlatformMetadata() async throws {
+    func testLoadPurgesLegacyABI1AndMetadataFreeABI2QPeriaptKEM() async throws {
         let suiteName = "PeerKEMBootstrapStoreLegacyQGateTests.\(UUID().uuidString)"
         guard let seedDefaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Unable to create isolated UserDefaults suite")
@@ -230,6 +230,10 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
                 kemPublicKeys: [
                     CryptoSuite.qperiaptContextBound.wireId: Data(
                         repeating: 0x51,
+                        count: QPeriaptPlatformPolicy.publicKeyLength
+                    ),
+                    CryptoSuite.qperiaptABI2PolicyBound.wireId: Data(
+                        repeating: 0x52,
                         count: QPeriaptPlatformPolicy.publicKeyLength
                     ),
                     CryptoSuite.mlkem768MLDSA65.wireId: validMLKEM

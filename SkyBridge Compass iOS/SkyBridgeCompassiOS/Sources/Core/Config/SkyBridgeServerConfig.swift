@@ -312,9 +312,8 @@ public actor TURNCredentialService {
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(SkyBridgeServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
-        if let deviceId = resolvedDeviceIdentifier() {
-            request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        }
+        let deviceId = try await resolvedDeviceIdentifier()
+        request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         request.timeoutInterval = 10
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -383,8 +382,7 @@ public actor TURNCredentialService {
         )
     }
 
-    private func resolvedDeviceIdentifier() -> String? {
-        let deviceID = ProtocolDeviceIdentity.stableDeviceId()
-        return deviceID.isEmpty ? nil : deviceID
+    private func resolvedDeviceIdentifier() async throws -> String {
+        try await SkyBridgeiOSCore.shared.currentProtocolIdentitySnapshot().deviceId
     }
 }

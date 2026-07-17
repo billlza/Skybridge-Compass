@@ -25,6 +25,8 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+/.build-*/
+/.test-home-*/
 .swiftpm/
 .swiftpm_build/
 .swiftpm_cache/

@@ -18,7 +18,12 @@ import OQSRAII
 /// SkyBridge iOS 核心
 /// 提供统一的 PQC 安全通信接口
 @available(iOS 17.0, *)
-public final class SkyBridgeiOSCore: @unchecked Sendable {
+@MainActor
+public final class SkyBridgeiOSCore {
+    typealias ProtocolIdentityResolver = @Sendable (
+        ProtocolSigningAlgorithm,
+        (any CryptoProvider)?
+    ) async throws -> ResolvedProtocolSigningIdentity
     
     // MARK: - Singleton
     
@@ -35,6 +40,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     /// 身份密钥
     private var identityKeyHandle: SigningKeyHandle?
     private var identityPublicKey: Data?
+    private var identitySnapshot: ProtocolIdentitySnapshot?
     
     /// 握手策略
     public var handshakePolicy: HandshakePolicy = .default
@@ -45,13 +51,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     /// The last selection policy used to initialize the core.
     /// We must support re-initialization when the user toggles "enforce PQC" / compatibility settings.
     private var currentSelectionPolicy: CryptoProviderFactory.SelectionPolicy?
-    private static var useInMemoryIdentityKeyStore: Bool {
-        ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
-    }
-    private static let inMemoryIdentityKeyLock = NSLock()
-    private nonisolated(unsafe) static var inMemoryIdentityKeys: [String: Data] = [:]
-
-    private static func randomAttemptIdBytes() -> Data {
+    private var activeInitializationToken: UUID?
+    private let protocolIdentityResolver: ProtocolIdentityResolver
+    nonisolated private static func randomAttemptIdBytes() -> Data {
         var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
         for index in bytes.indices {
             bytes[index] = UInt8.random(in: UInt8.min...UInt8.max)
@@ -61,69 +63,126 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     
     // MARK: - Initialization
     
-    private init() {}
+    private init() {
+        protocolIdentityResolver = { algorithm, provider in
+            try await Self.resolveAuthoritativeProtocolSigningIdentity(
+                for: algorithm,
+                provider: provider
+            )
+        }
+    }
+
+    init(protocolIdentityResolver: @escaping ProtocolIdentityResolver) {
+        self.protocolIdentityResolver = protocolIdentityResolver
+    }
     
     /// 初始化核心组件
     /// - Parameter policy: 加密策略
     public func initialize(policy: CryptoProviderFactory.SelectionPolicy = .preferPQC) async throws {
         // Idempotency by policy: callers may invoke initialize multiple times (app launch + connect + settings toggles).
         // If policy changed, we MUST reconfigure handshakePolicy/provider/signing keys to match paper semantics.
-        if isInitialized, currentSelectionPolicy == policy {
+        if activeInitializationToken == nil,
+           isInitialized,
+           currentSelectionPolicy == policy {
             return
         }
-        currentSelectionPolicy = policy
-
+        let token = UUID()
+        activeInitializationToken = token
         SkyBridgeLogger.shared.info("🧩 SkyBridgeiOSCore.initialize(policy=\(String(describing: policy)))")
-        
-        switch policy {
-        case .preferPQC:
-            handshakePolicy = .default
-        case .requirePQC:
-            handshakePolicy = .strictPQC
-        case .classicOnly:
-            handshakePolicy = HandshakePolicy(requirePQC: false, allowClassicFallback: false, minimumTier: .classic)
+        do {
+            try await resolveAndCommitInitialization(
+                token: token,
+                policy: policy,
+                handshakePolicy: Self.handshakePolicy(for: policy),
+                provider: CryptoProviderFactory.make(policy: policy)
+            )
+        } catch {
+            if activeInitializationToken == token {
+                activeInitializationToken = nil
+            }
+            throw error
         }
-        SkyBridgeLogger.shared.info("🧩 HandshakePolicy: requirePQC=\(handshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(handshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(handshakePolicy.minimumTier.rawValue)")
-        
-        // 创建加密 Provider
-        cryptoProvider = CryptoProviderFactory.make(policy: policy)
-        
-        // 创建签名 Provider
-        let sigAlgorithm: ProtocolSigningAlgorithm = cryptoProvider?.tier == .classic ? .ed25519 : .mlDSA65
-        signatureProvider = ProtocolSignatureProviderSelector.select(for: sigAlgorithm)
-        
-        // 生成或加载身份密钥
-        try await loadOrCreateIdentityKey(algorithm: sigAlgorithm)
-        
-        isInitialized = true
     }
 
     public func initialize(
         policy: CryptoProviderFactory.SelectionPolicy,
         providerOverride: any CryptoProvider
     ) async throws {
-        currentSelectionPolicy = policy
-
+        let token = UUID()
+        activeInitializationToken = token
         SkyBridgeLogger.shared.info("🧩 SkyBridgeiOSCore.initialize(policy=\(String(describing: policy)), providerOverride=\(providerOverride.providerName))")
+        do {
+            try await resolveAndCommitInitialization(
+                token: token,
+                policy: policy,
+                handshakePolicy: Self.handshakePolicy(for: policy),
+                provider: providerOverride
+            )
+        } catch {
+            if activeInitializationToken == token {
+                activeInitializationToken = nil
+            }
+            throw error
+        }
+    }
 
+    private static func handshakePolicy(
+        for policy: CryptoProviderFactory.SelectionPolicy
+    ) -> HandshakePolicy {
         switch policy {
         case .preferPQC:
-            handshakePolicy = .default
+            return .default
         case .requirePQC:
-            handshakePolicy = .strictPQC
+            return .strictPQC
         case .classicOnly:
-            handshakePolicy = HandshakePolicy(requirePQC: false, allowClassicFallback: false, minimumTier: .classic)
+            return HandshakePolicy(
+                requirePQC: false,
+                allowClassicFallback: false,
+                minimumTier: .classic
+            )
         }
-        SkyBridgeLogger.shared.info("🧩 HandshakePolicy: requirePQC=\(handshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(handshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(handshakePolicy.minimumTier.rawValue)")
+    }
 
-        cryptoProvider = providerOverride
+    private func resolveAndCommitInitialization(
+        token: UUID,
+        policy: CryptoProviderFactory.SelectionPolicy,
+        handshakePolicy candidateHandshakePolicy: HandshakePolicy,
+        provider candidateProvider: (any CryptoProvider)?
+    ) async throws {
+        let algorithm: ProtocolSigningAlgorithm = candidateProvider?.tier == .classic
+            ? .ed25519
+            : .mlDSA65
+        let candidateSignatureProvider = ProtocolSignatureProviderSelector.select(
+            for: algorithm
+        )
+        let identity = try await protocolIdentityResolver(algorithm, candidateProvider)
+        try Task.checkCancellation()
+        guard activeInitializationToken == token else {
+            throw SkyBridgeError.handshakeFailed(
+                reason: "Core initialization was superseded by a newer configuration request"
+            )
+        }
+        guard identity.snapshot.signingAlgorithm == algorithm,
+              identity.snapshot.signingPublicKey == identity.material.publicKey else {
+            throw SkyBridgeError.invalidKeyData(
+                reason: "Protocol identity resolver returned a mismatched initialization snapshot"
+            )
+        }
 
-        let sigAlgorithm: ProtocolSigningAlgorithm = providerOverride.tier == .classic ? .ed25519 : .mlDSA65
-        signatureProvider = ProtocolSignatureProviderSelector.select(for: sigAlgorithm)
-
-        try await loadOrCreateIdentityKey(algorithm: sigAlgorithm)
-
+        // Publish one complete configuration only after every fallible step has
+        // succeeded. Failed policy changes preserve the prior coherent state.
+        handshakePolicy = candidateHandshakePolicy
+        cryptoProvider = candidateProvider
+        signatureProvider = candidateSignatureProvider
+        identityKeyHandle = .softwareKey(identity.material.privateKey)
+        identityPublicKey = identity.material.publicKey
+        identitySnapshot = identity.snapshot
+        currentSelectionPolicy = policy
         isInitialized = true
+        activeInitializationToken = nil
+        SkyBridgeLogger.shared.info(
+            "🧩 HandshakePolicy: requirePQC=\(candidateHandshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(candidateHandshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(candidateHandshakePolicy.minimumTier.rawValue)"
+        )
     }
 
     public func getProtocolSigningKeyHandle(
@@ -138,6 +197,32 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     ) async throws -> Data {
         try await ensureInitializedForProtocolSigning(algorithm: algorithm)
         return try await getOrCreateProtocolSigningIdentity(for: algorithm).publicKey
+    }
+
+    func getProtocolIdentitySnapshot(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> ProtocolIdentitySnapshot {
+        try await ensureInitializedForProtocolSigning(algorithm: algorithm)
+        return try await resolveProtocolSigningIdentity(for: algorithm).snapshot
+    }
+
+    func currentProtocolIdentitySnapshot() async throws -> ProtocolIdentitySnapshot {
+        guard isInitialized,
+              let algorithm = signatureProvider?.signatureAlgorithm else {
+            throw SkyBridgeError.notInitialized
+        }
+        let resolved = try await resolveProtocolSigningIdentity(for: algorithm)
+        identitySnapshot = resolved.snapshot
+        return resolved.snapshot
+    }
+
+    func requireCurrentProtocolIdentitySnapshot() throws -> ProtocolIdentitySnapshot {
+        guard isInitialized,
+              let identitySnapshot,
+              signatureProvider?.signatureAlgorithm == identitySnapshot.signingAlgorithm else {
+            throw SkyBridgeError.notInitialized
+        }
+        return identitySnapshot
     }
 
     private func ensureInitializedForProtocolSigning(
@@ -166,56 +251,6 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     
     // MARK: - Identity Key Management
     
-    /// 加载或创建身份密钥
-    private func loadOrCreateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws {
-        // 尝试从 Keychain 加载
-        if let existingKey = try loadIdentityKeyFromKeychain(algorithm: algorithm) {
-            if await isSigningKeyUsable(
-                keyHandle: existingKey.keyHandle,
-                publicKey: existingKey.publicKey,
-                algorithm: algorithm
-            ) {
-                identityKeyHandle = existingKey.keyHandle
-                identityPublicKey = existingKey.publicKey
-                return
-            }
-
-            throw SkyBridgeError.invalidKeyData(
-                reason: "Stored identity key failed self-test for \(algorithm.rawValue)"
-            )
-        }
-
-        // 创建新密钥
-        let newKey = try await generateIdentityKey(algorithm: algorithm)
-        identityKeyHandle = newKey.keyHandle
-        identityPublicKey = newKey.publicKey
-
-        // 保存到 Keychain
-        try saveIdentityKeyToKeychain(keyHandle: newKey.keyHandle, publicKey: newKey.publicKey, algorithm: algorithm)
-    }
-
-    /// 生成身份密钥
-    private func generateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
-        switch algorithm {
-        case .ed25519:
-            let privateKey = Curve25519.Signing.PrivateKey()
-            let publicKey = privateKey.publicKey.rawRepresentation
-            return (.softwareKey(privateKey.rawRepresentation), publicKey)
-            
-        case .mlDSA65:
-            guard let provider = cryptoProvider, provider.tier != .classic else {
-                throw SkyBridgeError.handshakeFailed(
-                    reason: "ML-DSA identity key requested without PQC provider"
-                )
-            }
-            // 避免在主线程执行 PQC 身份密钥生成（冷启动/首次监听会明显卡顿）。
-            let keyPair = try await Task.detached(priority: .userInitiated) {
-                try await provider.generateKeyPair(for: .signing)
-            }.value
-            return (.softwareKey(keyPair.privateKey.bytes), keyPair.publicKey.bytes)
-        }
-    }
-
     private func getOrCreateProtocolSigningIdentity(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
@@ -223,7 +258,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
            currentSignatureProvider.signatureAlgorithm == algorithm,
            let keyHandle = identityKeyHandle,
            let publicKey = identityPublicKey,
-           await isSigningKeyUsable(
+           await Self.isSigningKeyUsable(
                 keyHandle: keyHandle,
                 publicKey: publicKey,
                 algorithm: algorithm
@@ -231,70 +266,16 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             return (keyHandle, publicKey)
         }
 
-        if let existingKey = try loadIdentityKeyFromKeychain(algorithm: algorithm) {
-            if await isSigningKeyUsable(
-                keyHandle: existingKey.keyHandle,
-                publicKey: existingKey.publicKey,
-                algorithm: algorithm
-            ) {
-                return existingKey
-            }
-
-            throw SkyBridgeError.invalidKeyData(
-                reason: "Stored identity key failed self-test for \(algorithm.rawValue)"
-            )
-        }
-
-        let newKey = try await generateIdentityKey(algorithm: algorithm)
-        try saveIdentityKeyToKeychain(
-            keyHandle: newKey.keyHandle,
-            publicKey: newKey.publicKey,
-            algorithm: algorithm
-        )
-        return newKey
+        let resolved = try await resolveProtocolSigningIdentity(for: algorithm)
+        return (.softwareKey(resolved.material.privateKey), resolved.material.publicKey)
     }
     
     // MARK: - Keychain Helpers
     
-    private func loadIdentityKeyFromKeychain(algorithm: ProtocolSigningAlgorithm) throws -> (keyHandle: SigningKeyHandle, publicKey: Data)? {
-        let tag = "com.skybridge.identity.\(algorithm.rawValue)"
-
-        if Self.useInMemoryIdentityKeyStore {
-            Self.inMemoryIdentityKeyLock.lock()
-            let storedKeyData = Self.inMemoryIdentityKeys[tag]
-            Self.inMemoryIdentityKeyLock.unlock()
-            guard let keyData = storedKeyData else {
-                return nil
-            }
-            return try decodeIdentityKeyData(keyData, algorithm: algorithm)
-        }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
-            kSecReturnData as String: true
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess else {
-            throw SkyBridgeError.keychainError(status: status)
-        }
-        guard let keyData = result as? Data else {
-            throw SkyBridgeError.keychainError(status: errSecDecode)
-        }
-
-        return try decodeIdentityKeyData(keyData, algorithm: algorithm)
-    }
-
-    private func decodeIdentityKeyData(
+    nonisolated private static func decodeLegacyIdentityKeyData(
         _ keyData: Data,
         algorithm: ProtocolSigningAlgorithm
-    ) throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
+    ) throws -> ProtocolSigningIdentityMaterial {
         // 解析存储的数据（格式: privateKey || publicKey）
         switch algorithm {
         case .ed25519:
@@ -303,7 +284,11 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             }
             let privateKeyData = keyData.prefix(32)
             let publicKeyData = keyData.suffix(32)
-            return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
+            return ProtocolSigningIdentityMaterial(
+                algorithm: algorithm,
+                privateKey: Data(privateKeyData),
+                publicKey: Data(publicKeyData)
+            )
             
         case .mlDSA65:
             let publicKeyLength = mldsaPublicKeyLength()
@@ -312,11 +297,15 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             }
             let privateKeyData = keyData.prefix(keyData.count - publicKeyLength)
             let publicKeyData = keyData.suffix(publicKeyLength)
-            return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
+            return ProtocolSigningIdentityMaterial(
+                algorithm: algorithm,
+                privateKey: Data(privateKeyData),
+                publicKey: Data(publicKeyData)
+            )
         }
     }
 
-    private func mldsaPublicKeyLength() -> Int {
+    nonisolated private static func mldsaPublicKeyLength() -> Int {
         #if canImport(OQSRAII)
         let oqsLength = oqs_raii_mldsa65_public_key_length()
         if oqsLength > 0 {
@@ -333,7 +322,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         return 1952
     }
 
-    private func isSigningKeyUsable(
+    nonisolated private static func isSigningKeyUsable(
         keyHandle: SigningKeyHandle,
         publicKey: Data,
         algorithm: ProtocolSigningAlgorithm
@@ -351,68 +340,81 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             return false
         }
     }
-    
-    private func saveIdentityKeyToKeychain(keyHandle: SigningKeyHandle, publicKey: Data, algorithm: ProtocolSigningAlgorithm) throws {
-        let tag = "com.skybridge.identity.\(algorithm.rawValue)"
-        
-        guard case .softwareKey(let privateKeyData) = keyHandle else {
-            return
-        }
-        
-        // 存储格式: privateKey || publicKey
-        var keyData = privateKeyData
-        keyData.append(publicKey)
 
-        if Self.useInMemoryIdentityKeyStore {
-            Self.inMemoryIdentityKeyLock.lock()
-            Self.inMemoryIdentityKeys[tag] = keyData
-            Self.inMemoryIdentityKeyLock.unlock()
-            return
-        }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.data(using: .utf8)!
-        ]
+    private func resolveProtocolSigningIdentity(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> ResolvedProtocolSigningIdentity {
+        try await protocolIdentityResolver(algorithm, cryptoProvider)
+    }
 
-        let updateAttributes: [String: Any] = [
-            kSecValueData as String: keyData,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
-        if updateStatus == errSecSuccess {
-            return
-        }
-        guard updateStatus == errSecItemNotFound else {
-            throw SkyBridgeError.keychainError(status: updateStatus)
-        }
-
-        var addQuery = query
-        addQuery[kSecValueData as String] = keyData
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status == errSecSuccess {
-            return
-        }
-        if status == errSecDuplicateItem {
-            let retryStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
-            guard retryStatus == errSecSuccess else {
-                throw SkyBridgeError.keychainError(status: retryStatus)
+    nonisolated private static func resolveAuthoritativeProtocolSigningIdentity(
+        for algorithm: ProtocolSigningAlgorithm,
+        provider: (any CryptoProvider)?
+    ) async throws -> ResolvedProtocolSigningIdentity {
+        try await ProtocolDeviceIdentityAuthority.shared.resolveSigningIdentity(
+            for: algorithm,
+            generate: {
+                try await Self.generateIdentityKeyMaterial(
+                    algorithm: algorithm,
+                    provider: provider
+                )
+            },
+            validate: { material in
+                let usable = await Self.isSigningKeyUsable(
+                    keyHandle: .softwareKey(material.privateKey),
+                    publicKey: material.publicKey,
+                    algorithm: algorithm
+                )
+                guard usable else {
+                    throw SkyBridgeError.invalidKeyData(
+                        reason: "Stored identity key failed self-test for \(algorithm.rawValue)"
+                    )
+                }
+            },
+            decodeLegacy: { data in
+                try Self.decodeLegacyIdentityKeyData(data, algorithm: algorithm)
             }
-            return
+        )
+    }
+
+    nonisolated private static func generateIdentityKeyMaterial(
+        algorithm: ProtocolSigningAlgorithm,
+        provider: (any CryptoProvider)?
+    ) async throws -> ProtocolSigningIdentityMaterial {
+        switch algorithm {
+        case .ed25519:
+            let privateKey = Curve25519.Signing.PrivateKey()
+            return ProtocolSigningIdentityMaterial(
+                algorithm: algorithm,
+                privateKey: privateKey.rawRepresentation,
+                publicKey: privateKey.publicKey.rawRepresentation
+            )
+        case .mlDSA65:
+            guard let provider, provider.tier != .classic else {
+                throw SkyBridgeError.handshakeFailed(
+                    reason: "ML-DSA identity key requested without PQC provider"
+                )
+            }
+            let keyPair = try await provider.generateKeyPair(for: .signing)
+            return ProtocolSigningIdentityMaterial(
+                algorithm: algorithm,
+                privateKey: keyPair.privateKey.bytes,
+                publicKey: keyPair.publicKey.bytes
+            )
         }
-        throw SkyBridgeError.keychainError(status: status)
     }
 
     private func supportsHandshakeSuite(
         _ suite: CryptoSuite,
         with provider: any CryptoProvider
     ) -> Bool {
-        guard suite.isKnown else { return false }
+        guard suite.isNegotiable else { return false }
 
-        if suite.isHybrid {
-            guard provider.tier == .nativePQC else { return false }
+        if suite == .xwing {
+            guard provider.tier == .nativePQC,
+                  provider.supportsSuite(suite) else {
+                return false
+            }
             #if HAS_APPLE_PQC_SDK
             if #available(iOS 26.0, macOS 26.0, *) {
                 return AppleXWingCryptoProvider.quickRuntimeProbe()
@@ -421,8 +423,14 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             return false
         }
 
+        // The iOS provider layer has no authenticated Q-Periapt ABI2 runtime.
+        // A hybrid wire classification must never be treated as X-Wing support.
+        if suite.isHybrid {
+            return false
+        }
+
         if suite.isPQCGroup {
-            return provider.tier != .classic
+            return provider.tier != .classic && provider.supportsSuite(suite)
         }
 
         return provider.supportsSuite(suite)
@@ -432,19 +440,34 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         for provider: any CryptoProvider,
         offeredSuites: [CryptoSuite]? = nil,
         peerSupportedSuites: [CryptoSuite]? = nil
-    ) -> [CryptoSuite] {
-        if let offeredSuites, !offeredSuites.isEmpty {
-            return offeredSuites.filter { supportsHandshakeSuite($0, with: provider) }
-        }
-
-        if let peerSupportedSuites, !peerSupportedSuites.isEmpty {
-            let supported = peerSupportedSuites.filter { supportsHandshakeSuite($0, with: provider) }
-            if !supported.isEmpty {
-                return supported
+    ) throws -> [CryptoSuite] {
+        if let offeredSuites {
+            guard !offeredSuites.isEmpty,
+                  offeredSuites.allSatisfy(\.isNegotiable),
+                  Set(offeredSuites.map(\.wireId)).count == offeredSuites.count,
+                  offeredSuites.allSatisfy({ supportsHandshakeSuite($0, with: provider) }) else {
+                throw HandshakeError.failed(.suiteNotSupported)
             }
+            return offeredSuites
         }
 
-        return [provider.activeSuite].filter { supportsHandshakeSuite($0, with: provider) }
+        if let peerSupportedSuites {
+            guard !peerSupportedSuites.isEmpty,
+                  peerSupportedSuites.allSatisfy(\.isNegotiable),
+                  Set(peerSupportedSuites.map(\.wireId)).count == peerSupportedSuites.count else {
+                throw HandshakeError.failed(.suiteNotSupported)
+            }
+            let supported = peerSupportedSuites.filter { supportsHandshakeSuite($0, with: provider) }
+            guard !supported.isEmpty else {
+                throw HandshakeError.failed(.suiteNotSupported)
+            }
+            return supported
+        }
+
+        guard supportsHandshakeSuite(provider.activeSuite, with: provider) else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
+        return [provider.activeSuite]
     }
     
     // MARK: - Handshake API
@@ -464,11 +487,14 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
               let provider = cryptoProvider,
               let sigProvider = signatureProvider,
               let keyHandle = identityKeyHandle,
-              let publicKey = identityPublicKey else {
+              let publicKey = identityPublicKey,
+              let identitySnapshot,
+              identitySnapshot.signingAlgorithm == sigProvider.signatureAlgorithm,
+              identitySnapshot.signingPublicKey == publicKey else {
             throw SkyBridgeError.notInitialized
         }
 
-        let handshakeSuites = resolvedHandshakeSuites(
+        let handshakeSuites = try resolvedHandshakeSuites(
             for: provider,
             offeredSuites: offeredSuites,
             peerSupportedSuites: peerSupportedSuites
@@ -507,7 +533,11 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         guard isInitialized,
               let provider = cryptoProvider,
               let keyHandle = identityKeyHandle,
-              let publicKey = identityPublicKey else {
+              let publicKey = identityPublicKey,
+              let sigProvider = signatureProvider,
+              let identitySnapshot,
+              identitySnapshot.signingAlgorithm == sigProvider.signatureAlgorithm,
+              identitySnapshot.signingPublicKey == publicKey else {
             throw SkyBridgeError.notInitialized
         }
         
@@ -516,11 +546,12 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             "allowClassicFallback=\(handshakePolicy.allowClassicFallback ? "1" : "0"), " +
             "minimumTier=\(handshakePolicy.minimumTier.rawValue)"
         )
+        let activeHandshakePolicy = handshakePolicy
 
         return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
             deviceId: deviceId,
             preferPQC: preferPQC,
-            policy: handshakePolicy,
+            policy: activeHandshakePolicy,
             cryptoProvider: provider
         ) { preparation in
             SkyBridgeLogger.shared.info(
@@ -530,22 +561,22 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 // Paper terminology alignment:
                 "downgradeResistance=policy_gate+no_timeout_fallback+rate_limited, " +
                 "policyInTranscript=1, transcriptBinding=1, " +
-                "policyRequirePQC=\(self.handshakePolicy.requirePQC ? "1" : "0"), " +
-                "policyAllowClassicFallback=\(self.handshakePolicy.allowClassicFallback ? "1" : "0"), " +
-                "policyMinimumTier=\(self.handshakePolicy.minimumTier.rawValue), " +
-                "policyRequireSecureEnclavePoP=\(self.handshakePolicy.requireSecureEnclavePoP ? "1" : "0")"
+                "policyRequirePQC=\(activeHandshakePolicy.requirePQC ? "1" : "0"), " +
+                "policyAllowClassicFallback=\(activeHandshakePolicy.allowClassicFallback ? "1" : "0"), " +
+                "policyMinimumTier=\(activeHandshakePolicy.minimumTier.rawValue), " +
+                "policyRequireSecureEnclavePoP=\(activeHandshakePolicy.requireSecureEnclavePoP ? "1" : "0")"
             )
 
-            let attemptSOAMetadata: HandshakeSOAMetadata? = {
-                guard let localSOAPeerId, let expectedRemoteSOAPeerId else {
-                    return soaMetadata
-                }
-                return try? HandshakeSOAMetadata(
+            let attemptSOAMetadata: HandshakeSOAMetadata?
+            if let localSOAPeerId, let expectedRemoteSOAPeerId {
+                attemptSOAMetadata = try HandshakeSOAMetadata(
                     initiatorPeerId: localSOAPeerId,
                     targetPeerId: expectedRemoteSOAPeerId,
                     attemptId: Self.randomAttemptIdBytes()
                 )
-            }()
+            } else {
+                attemptSOAMetadata = soaMetadata
+            }
 
             let driver = HandshakeDriver(
                 transport: transport,
@@ -554,7 +585,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 identityKeyHandle: keyHandle,
                 sigAAlgorithm: preparation.sigAAlgorithm,
                 identityPublicKey: publicKey,
-                policy: self.handshakePolicy,
+                policy: activeHandshakePolicy,
                 cryptoPolicy: preparation.cryptoPolicy,
                 offeredSuites: preparation.offeredSuites,
                 trustProvider: trustProvider,

@@ -164,6 +164,13 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         lifecycleStateMetadata ?? (isTombstone ? .revoked : .active)
     }
 
+    /// A trust record may authorize a security decision only while it is live
+    /// and explicitly active. Quarantined and reverification-required records
+    /// remain visible to trust-management UI, but cannot authenticate peers.
+    public var isAuthenticationEligible: Bool {
+        !isTombstone && !isExpired && lifecycleState == .active
+    }
+
     public var currentPathAuthorityFingerprint: String? {
         protocolPublicKeyFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
@@ -183,18 +190,19 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     
  /// 是否允许 legacy P-256 fallback（ 7.2）
  ///
- /// 只有当 TrustRecord 明确记录了 legacy P-256 公钥时才允许 fallback。
- /// 首次连接（无 TrustRecord）不允许 fallback。
+ /// 只有仍可用于认证的 TrustRecord 明确记录了 legacy P-256 公钥时
+ /// 才允许 fallback。首次连接、撤销、隔离和待复验记录均不允许。
     public var allowsLegacyFallback: Bool {
-        legacyP256PublicKey != nil
+        isAuthenticationEligible && legacyP256PublicKey != nil
     }
     
  /// 获取用于验证的公钥（ 7.2）
  ///
- /// 根据预期算法返回对应的公钥。
+ /// 根据预期算法返回对应的公钥。不可用于认证的记录永远不返回密钥。
  /// - Parameter algorithm: 预期的签名算法
  /// - Returns: 用于验证的公钥，如果没有对应算法的公钥则返回 nil
     public func getVerificationPublicKey(for algorithm: SignatureAlgorithm) -> Data? {
+        guard isAuthenticationEligible else { return nil }
         switch algorithm {
         case .ed25519, .mlDSA65:
  // 优先使用新的协议公钥，回退到旧的 publicKey
@@ -646,15 +654,15 @@ public final class TrustSyncService: ObservableObject {
  /// - Returns: 是否受信任
     public func isTrusted(deviceId: String) -> Bool {
         guard let record = localCache[deviceId] else { return false }
-        return !record.isTombstone && !record.isExpired
+        return record.isAuthenticationEligible
     }
     
  /// 检查公钥指纹是否受信任
  /// - Parameter pubKeyFP: 公钥指纹
  /// - Returns: 是否受信任
     public func isTrusted(pubKeyFP: String) -> Bool {
-        return localCache.values.contains { 
-            $0.pubKeyFP == pubKeyFP && !$0.isTombstone && !$0.isExpired 
+        return localCache.values.contains {
+            $0.pubKeyFP == pubKeyFP && $0.isAuthenticationEligible
         }
     }
 
@@ -662,8 +670,7 @@ public final class TrustSyncService: ObservableObject {
         let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         return localCache.values.first { record in
-            guard !record.isTombstone, !record.isExpired else { return false }
-            guard record.lifecycleState == .active else { return false }
+            guard record.isAuthenticationEligible else { return false }
             return record.currentPathAuthorityFingerprints.contains(normalized)
         }
     }
@@ -675,8 +682,7 @@ public final class TrustSyncService: ObservableObject {
         let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         return localCache.values.first { record in
-            guard !record.isTombstone, !record.isExpired else { return false }
-            guard record.lifecycleState == .active else { return false }
+            guard record.isAuthenticationEligible else { return false }
             guard record.currentPathAuthorityFingerprints.contains(normalized) else { return false }
             return currentPathDeviceMatches(record, deviceId: deviceId)
         }
@@ -785,6 +791,7 @@ public final class TrustSyncService: ObservableObject {
         knownDeviceIds: [String] = [],
         protocolSigningAlgorithm: ProtocolSigningAlgorithm,
         protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data? = nil,
         pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
     ) -> TrustRecord? {
         let normalizedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -793,7 +800,32 @@ public final class TrustSyncService: ObservableObject {
         let normalizedFingerprint = protocolPublicKeyFingerprint
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard !normalizedFingerprint.isEmpty else { return nil }
+        guard normalizedFingerprint.count == 64,
+              normalizedFingerprint.allSatisfy(\.isHexDigit) else {
+            return nil
+        }
+
+        func validatedProtocolPublicKey(_ publicKey: Data?) -> Data? {
+            guard let publicKey else { return nil }
+            let expectedLength: Int
+            switch protocolSigningAlgorithm {
+            case .ed25519:
+                expectedLength = 32
+            case .mlDSA65:
+                expectedLength = 1_952
+            }
+            guard publicKey.count == expectedLength else { return nil }
+            let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+                algorithm: protocolSigningAlgorithm,
+                publicKeyBytes: publicKey
+            )
+            return fingerprint == normalizedFingerprint ? publicKey : nil
+        }
+
+        if authenticatedProtocolPublicKey != nil,
+           validatedProtocolPublicKey(authenticatedProtocolPublicKey) == nil {
+            return nil
+        }
 
         let normalizedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
         let stableCurrentDeviceId = PeerTrustLookup.persistentDeviceId(from: preferredCurrentDeviceId)
@@ -854,6 +886,8 @@ public final class TrustSyncService: ObservableObject {
 
         if let targetRecord {
             let canonicalDeviceId = stableCurrentDeviceId ?? targetRecord.deviceId
+            let protocolPublicKey = validatedProtocolPublicKey(authenticatedProtocolPublicKey)
+                ?? validatedProtocolPublicKey(targetRecord.protocolPublicKey)
             let updatedProtocolIdentityPins = TrustRecord.protocolIdentityPins(
                 existing: targetRecord.currentPathAuthorityPins,
                 legacyFingerprint: nil,
@@ -867,7 +901,7 @@ public final class TrustSyncService: ObservableObject {
                 pubKeyFP: targetRecord.pubKeyFP,
                 publicKey: targetRecord.publicKey,
                 secureEnclavePublicKey: targetRecord.secureEnclavePublicKey,
-                protocolPublicKey: targetRecord.protocolPublicKey,
+                protocolPublicKey: protocolPublicKey,
                 protocolSigningAlgorithm: protocolSigningAlgorithm,
                 protocolPublicKeyFingerprint: normalizedFingerprint,
                 protocolIdentityPins: updatedProtocolIdentityPins,
@@ -897,7 +931,7 @@ public final class TrustSyncService: ObservableObject {
             deviceId: stableCurrentDeviceId,
             pubKeyFP: "",
             publicKey: Data(),
-            protocolPublicKey: nil,
+            protocolPublicKey: validatedProtocolPublicKey(authenticatedProtocolPublicKey),
             protocolSigningAlgorithm: protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: normalizedFingerprint,
             protocolIdentityPins: TrustRecord.protocolIdentityPins(
@@ -924,6 +958,7 @@ public final class TrustSyncService: ObservableObject {
         knownDeviceIds: [String] = [],
         protocolSigningAlgorithm: ProtocolSigningAlgorithm,
         protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data? = nil,
         pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
     ) async throws -> Bool {
         guard let record = Self.resolvedAuthenticatedRemoteAuthorityRecord(
@@ -934,6 +969,7 @@ public final class TrustSyncService: ObservableObject {
             knownDeviceIds: knownDeviceIds,
             protocolSigningAlgorithm: protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+            authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
             pinSource: pinSource
         ) else {
             return false

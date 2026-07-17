@@ -1184,9 +1184,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         logger.debug("☁️ iCloud设备更新: \(devices.count) 台")
 
         for device in devices {
-            let cloudStableDeviceId = device.stableIdentityDeviceId ?? device.id
             let identifier = generateUniqueIdentifier(
-                stableDeviceId: cloudStableDeviceId,
+                stableDeviceId: device.stableIdentityDeviceId,
                 pubKeyFP: nil,
                 macAddress: nil,
                 serialNumber: nil,
@@ -1217,7 +1216,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeCloud,
                 signalStrength: nil,
                 isConnectable: false,
-                isAuthorized: true,
+                isAuthorized: false,
                 lastSeen: device.lastSeen,
                 initialConnectionStatus: device.isOnline ? .online : .offline
             )
@@ -2532,7 +2531,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         var parent = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.id) })
-        let trustAliasRecords = TrustSyncService.shared.activeTrustRecords.filter { !$0.isTombstone }
+        let trustAliasRecords = TrustSyncService.shared.activeTrustRecords.filter(\.isAuthenticationEligible)
         let trustAliasCandidateSets: [Set<String>] = trustAliasRecords.compactMap { record in
             let candidates = Set(
                 PeerTrustLookup.recordLookupCandidates(record).map {
@@ -2743,7 +2742,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard !groupCandidates.isEmpty else { return nil }
 
         let matchingRecords = TrustSyncService.shared.activeTrustRecords
-            .filter { !$0.isTombstone && !$0.isExpired }
+            .filter(\.isAuthenticationEligible)
             .filter { record in
                 let recordCandidates = Set(
                     PeerTrustLookup.recordLookupCandidates(record).map {
@@ -3457,7 +3456,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         var hasStrongIdentityMatch = false
 
         let cloudStableIDs = Set(
-            [cloudDevice.stableIdentityDeviceId, cloudDevice.id]
+            [cloudDevice.stableIdentityDeviceId]
                 .compactMap(Self.normalizeStableIdentifier)
         )
         let deviceStableIDs = Set(

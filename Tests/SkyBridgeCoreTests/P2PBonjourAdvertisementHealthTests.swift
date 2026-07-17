@@ -573,6 +573,21 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(optimized.contains("owner: Self.advertisementOwner\n            )"))
     }
 
+    func testDiscoveryAdvertisementExcludesDecodeOnlyCryptoSuites() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
+
+        XCTAssertTrue(
+            source.contains("provider.supportedSuites.filter(\\.isNegotiable).map(\\.wireId)")
+        )
+        XCTAssertTrue(
+            source.contains("classic.supportedSuites.filter(\\.isNegotiable).map(\\.wireId)")
+        )
+        XCTAssertTrue(
+            source.contains("return suite.isNegotiable && suite.isPQCGroup"),
+            "Both the suite list and KEM digest advertisement must exclude decode-only suites"
+        )
+    }
+
     func testInboundDiscoveryConnectionsDetachStateHandlers() throws {
         let sources = [
             try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift"),

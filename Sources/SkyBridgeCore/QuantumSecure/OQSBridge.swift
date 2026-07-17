@@ -1,9 +1,22 @@
 import Foundation
-import OSLog
+#if canImport(Darwin)
+import Darwin
+#endif
+
+public struct OQSSignatureResult: Sendable, Equatable {
+    public let signature: Data
+    public let publicKey: Data
+
+    public init(signature: Data, publicKey: Data) {
+        self.signature = signature
+        self.publicKey = publicKey
+    }
+}
+
 #if canImport(liboqs)
 import liboqs
 
-public enum OQSAlgorithm: String {
+public enum OQSAlgorithm: String, Sendable {
     case mldsa65
     case mldsa87
     case mlkem768
@@ -11,117 +24,342 @@ public enum OQSAlgorithm: String {
 }
 
 public final class OQSBridge {
-    private static let logger = Logger(subsystem: "com.skybridge.quantum", category: "OQSBridge")
-
-    private static func sigName(_ alg: OQSAlgorithm) -> String {
-        switch alg {
-        case .mldsa65: return "ML-DSA-65"
-        case .mldsa87: return "ML-DSA-87"
-        case .mlkem768: return "ML-KEM-768"
-        case .mlkem1024: return "ML-KEM-1024"
-        }
-    }
-    private static func kemName(_ alg: OQSAlgorithm) -> String {
-        switch alg {
-        case .mlkem768: return "ML-KEM-768"
-        case .mlkem1024: return "ML-KEM-1024"
-        case .mldsa65, .mldsa87: return ""
+    private static func signingParameters(
+        for algorithm: OQSAlgorithm
+    ) throws -> (name: String, keyVariant: String) {
+        switch algorithm {
+        case .mldsa65:
+            return ("ML-DSA-65", "65")
+        case .mldsa87:
+            return ("ML-DSA-87", "87")
+        case .mlkem768, .mlkem1024:
+            throw pqcError(code: -300, description: "签名操作收到非签名算法")
         }
     }
 
-    private static func persistKeyMaterial(
+    private static func kemParameters(
+        for algorithm: OQSAlgorithm
+    ) throws -> (name: String, keyVariant: String) {
+        switch algorithm {
+        case .mlkem768:
+            return ("ML-KEM-768", "768")
+        case .mlkem1024:
+            return ("ML-KEM-1024", "1024")
+        case .mldsa65, .mldsa87:
+            throw pqcError(code: -310, description: "KEM 操作收到非 KEM 算法")
+        }
+    }
+
+    private static func pqcError(code: Int, description: String) -> NSError {
+        NSError(
+            domain: "PQC",
+            code: code,
+            userInfo: [NSLocalizedDescriptionKey: description]
+        )
+    }
+
+    private static func requireExactLength(
         _ data: Data,
-        service: String,
-        account: String,
+        expected: Int,
         errorCode: Int,
-        failureDescription: String
+        description: String
     ) throws {
-        guard KeychainManager.shared.importKey(data: data, service: service, account: account) else {
-            throw NSError(
-                domain: "PQC",
+        guard data.count == expected else {
+            throw pqcError(
                 code: errorCode,
-                userInfo: [NSLocalizedDescriptionKey: "\(failureDescription) (keychain_write_failed)"]
+                description: "\(description) (expected=\(expected), actual=\(data.count))"
             )
         }
     }
 
-    public static func sign(_ data: Data, peerId: String, algorithm: OQSAlgorithm) async throws -> Data {
-        let name = sigName(algorithm)
+    private static func requirePositiveLengths(
+        _ lengths: [Int],
+        errorCode: Int,
+        description: String
+    ) throws {
+        guard lengths.allSatisfy({ $0 > 0 }) else {
+            throw pqcError(code: errorCode, description: description)
+        }
+    }
+
+    private static func descriptor(
+        peerId: String,
+        algorithm: String,
+        purpose: PQCKeyPairStorePurpose,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) -> PQCKeyPairStoreDescriptor {
+        PQCKeyPairStoreDescriptor(
+            backend: .liboqs,
+            purpose: purpose,
+            algorithm: algorithm,
+            identity: peerId,
+            authority: authority,
+            storageScope: PQCKeyPairStoreStorageScope(
+                canonicalLocation: nil,
+                keychainScopeSource: scopeSource,
+                includeLegacyKeychain: true
+            )
+        )
+    }
+
+    private static func validateSignatureKeyPair(
+        _ record: PQCKeyPairRecord,
+        signatureAlgorithm: UnsafeMutablePointer<OQS_SIG>
+    ) throws {
+        let challenge = Data("SkyBridge/PQCKeyPair/v3/signature-validation".utf8)
+        let signatureLength = Int(signatureAlgorithm.pointee.length_signature)
+        let signature = UnsafeMutablePointer<UInt8>.allocate(capacity: signatureLength)
+        defer { signature.deallocate() }
+        var actualSignatureLength = 0
+        let signStatus = challenge.withUnsafeBytes { messageRaw in
+            record.privateKey.withUnsafeBytes { privateRaw in
+                guard let message = messageRaw.bindMemory(to: UInt8.self).baseAddress,
+                      let privateKey = privateRaw.bindMemory(to: UInt8.self).baseAddress else {
+                    return OQS_ERROR
+                }
+                return OQS_SIG_sign(
+                    signatureAlgorithm,
+                    signature,
+                    &actualSignatureLength,
+                    message,
+                    challenge.count,
+                    privateKey
+                )
+            }
+        }
+        guard signStatus == OQS_SUCCESS,
+              actualSignatureLength == signatureLength else {
+            throw pqcError(code: -306, description: "OQS signature key-pair validation failed")
+        }
+        let verifyStatus = challenge.withUnsafeBytes { messageRaw in
+            record.publicKey.withUnsafeBytes { publicRaw in
+                guard let message = messageRaw.bindMemory(to: UInt8.self).baseAddress,
+                      let publicKey = publicRaw.bindMemory(to: UInt8.self).baseAddress else {
+                    return OQS_ERROR
+                }
+                return OQS_SIG_verify(
+                    signatureAlgorithm,
+                    message,
+                    challenge.count,
+                    signature,
+                    actualSignatureLength,
+                    publicKey
+                )
+            }
+        }
+        guard verifyStatus == OQS_SUCCESS else {
+            throw pqcError(code: -306, description: "OQS signature public/private keys do not match")
+        }
+    }
+
+    private static func validateKEMKeyPair(
+        _ record: PQCKeyPairRecord,
+        kem: UnsafeMutablePointer<OQS_KEM>
+    ) throws {
+        let ciphertextLength = Int(kem.pointee.length_ciphertext)
+        let sharedSecretLength = Int(kem.pointee.length_shared_secret)
+        let ciphertext = UnsafeMutablePointer<UInt8>.allocate(capacity: ciphertextLength)
+        let encapsulatedSecret = UnsafeMutablePointer<UInt8>.allocate(capacity: sharedSecretLength)
+        let decapsulatedSecret = UnsafeMutablePointer<UInt8>.allocate(capacity: sharedSecretLength)
+        defer {
+            ciphertext.deallocate()
+            wipeAndDeallocate(encapsulatedSecret, count: sharedSecretLength)
+            wipeAndDeallocate(decapsulatedSecret, count: sharedSecretLength)
+        }
+        let encapsulationStatus = record.publicKey.withUnsafeBytes { publicRaw in
+            guard let publicKey = publicRaw.bindMemory(to: UInt8.self).baseAddress else {
+                return OQS_ERROR
+            }
+            return OQS_KEM_encaps(kem, ciphertext, encapsulatedSecret, publicKey)
+        }
+        guard encapsulationStatus == OQS_SUCCESS else {
+            throw pqcError(code: -316, description: "OQS KEM key-pair validation encapsulation failed")
+        }
+        let decapsulationStatus = record.privateKey.withUnsafeBytes { privateRaw in
+            guard let privateKey = privateRaw.bindMemory(to: UInt8.self).baseAddress else {
+                return OQS_ERROR
+            }
+            return OQS_KEM_decaps(kem, decapsulatedSecret, ciphertext, privateKey)
+        }
+        guard decapsulationStatus == OQS_SUCCESS,
+              constantTimeEqual(
+                  encapsulatedSecret,
+                  decapsulatedSecret,
+                  count: sharedSecretLength
+              ) else {
+            throw pqcError(code: -316, description: "OQS KEM public/private keys do not match")
+        }
+    }
+
+    private static func constantTimeEqual(
+        _ lhs: UnsafePointer<UInt8>,
+        _ rhs: UnsafePointer<UInt8>,
+        count: Int
+    ) -> Bool {
+        var difference: UInt8 = 0
+        for index in 0..<count {
+            difference |= lhs[index] ^ rhs[index]
+        }
+        return difference == 0
+    }
+
+    private static func wipeAndDeallocate(
+        _ pointer: UnsafeMutablePointer<UInt8>,
+        count: Int
+    ) {
+        #if canImport(Darwin)
+        _ = memset_s(pointer, count, 0, count)
+        #else
+        UnsafeMutableRawPointer(pointer).initializeMemory(
+            as: UInt8.self,
+            repeating: 0,
+            count: count
+        )
+        #endif
+        pointer.deallocate()
+    }
+
+    public static func sign(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm
+    ) async throws -> OQSSignatureResult {
+        try await sign(
+            data,
+            peerId: peerId,
+            algorithm: algorithm,
+            authority: .active,
+            scopeSource: .requiredEntitlement
+        )
+    }
+
+    static func sign(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> OQSSignatureResult {
+        let parameters = try signingParameters(for: algorithm)
+        let name = parameters.name
         guard let sig = OQS_SIG_new(name) else {
-            throw NSError(domain: "PQC", code: -301, userInfo: [NSLocalizedDescriptionKey: "OQS_SIG_new 失败: \(name)"])
+            throw pqcError(code: -301, description: "OQS_SIG_new 失败: \(name)")
         }
         defer { OQS_SIG_free(sig) }
 
-        let privService = PQCKeyTags.service("MLDSA", algorithm == .mldsa65 ? "65" : "87", "Priv")
-        let pubService = PQCKeyTags.service("MLDSA", algorithm == .mldsa65 ? "65" : "87", "Pub")
+        let privService = PQCKeyTags.service("MLDSA", parameters.keyVariant, "Priv")
+        let pubService = PQCKeyTags.service("MLDSA", parameters.keyVariant, "Pub")
 
         let privLen = Int(sig.pointee.length_secret_key)
         let pubLen = Int(sig.pointee.length_public_key)
         let sigLen = Int(sig.pointee.length_signature)
+        try requirePositiveLengths(
+            [privLen, pubLen, sigLen],
+            errorCode: -301,
+            description: "OQS 签名算法返回无效的固定长度"
+        )
 
- // KeychainManager 方法是 nonisolated 的，可以同步调用
-        var secretKey: Data? = KeychainManager.shared.exportKey(service: privService, account: peerId)
-        if secretKey == nil {
+        let keyDescriptor = descriptor(
+            peerId: peerId,
+            algorithm: name,
+            purpose: .signature,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        var keyPair = try PQCKeyPairStore.loadOrCreate(
+            descriptor: keyDescriptor,
+            publicKeyLength: pubLen,
+            privateKeyLength: privLen,
+            legacyPublicService: pubService,
+            legacyPrivateService: privService,
+            validatePair: { record in
+                try validateSignatureKeyPair(record, signatureAlgorithm: sig)
+            },
+            generate: {
             let pub = UnsafeMutablePointer<UInt8>.allocate(capacity: pubLen)
             let sec = UnsafeMutablePointer<UInt8>.allocate(capacity: privLen)
-            defer { pub.deallocate(); sec.deallocate() }
+            defer {
+                pub.deallocate()
+                wipeAndDeallocate(sec, count: privLen)
+            }
             let status = OQS_SIG_keypair(sig, pub, sec)
             if status != OQS_SUCCESS {
-                throw NSError(domain: "PQC", code: -302, userInfo: [NSLocalizedDescriptionKey: "OQS_SIG_keypair 失败: \(name)"])
+                throw pqcError(code: -302, description: "OQS_SIG_keypair 失败: \(name)")
             }
             let pubData = Data(bytes: pub, count: pubLen)
             let secData = Data(bytes: sec, count: privLen)
-            try persistKeyMaterial(
+            try requireExactLength(
                 pubData,
-                service: pubService,
-                account: peerId,
-                errorCode: -330,
-                failureDescription: "无法持久化 OQS 签名公钥"
+                expected: pubLen,
+                errorCode: -303,
+                description: "OQS 签名生成公钥长度无效"
             )
-            try persistKeyMaterial(
+            try requireExactLength(
                 secData,
-                service: privService,
-                account: peerId,
-                errorCode: -331,
-                failureDescription: "无法持久化 OQS 签名私钥"
+                expected: privLen,
+                errorCode: -303,
+                description: "OQS 签名生成私钥长度无效"
             )
-            secretKey = secData
-        }
-
-        guard let sk = secretKey else {
-            throw NSError(domain: "PQC", code: -303, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS 签名私钥"])
-        }
+            return PQCKeyPairRecord(
+                algorithmIdentifier: keyDescriptor.algorithmIdentifier,
+                publicKey: pubData,
+                privateKey: secData
+            )
+        })
+        defer { PQCKeyPairRecordCodec.wipe(&keyPair.privateKey) }
 
         let sigBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: sigLen)
         defer { sigBuf.deallocate() }
         var outLen = Int(0)
+        let messageBacking = data.isEmpty ? Data([0]) : data
 
-        let ok = data.withUnsafeBytes { (msgPtr: UnsafeRawBufferPointer) -> OQS_STATUS in
+        let ok = messageBacking.withUnsafeBytes { (msgPtr: UnsafeRawBufferPointer) -> OQS_STATUS in
             guard let m = msgPtr.bindMemory(to: UInt8.self).baseAddress else {
                 return OQS_ERROR
             }
-            return sk.withUnsafeBytes { skPtr in
+            return keyPair.privateKey.withUnsafeBytes { skPtr in
                 guard let s = skPtr.bindMemory(to: UInt8.self).baseAddress else {
                     return OQS_ERROR
                 }
                 return OQS_SIG_sign(sig, sigBuf, &outLen, m, data.count, s)
             }
         }
-        if ok != OQS_SUCCESS { throw NSError(domain: "PQC", code: -304, userInfo: [NSLocalizedDescriptionKey: "OQS_SIG_sign 失败: \(name)"]) }
+        if ok != OQS_SUCCESS {
+            throw pqcError(code: -304, description: "OQS_SIG_sign 失败: \(name)")
+        }
+        guard outLen == sigLen else {
+            throw pqcError(
+                code: -305,
+                description: "OQS_SIG_sign 返回签名长度无效 (expected=\(sigLen), actual=\(outLen))"
+            )
+        }
         let sigData = Data(bytes: sigBuf, count: outLen)
-        return sigData
+        return OQSSignatureResult(signature: sigData, publicKey: keyPair.publicKey)
     }
 
-    public static func verify(_ data: Data, signature: Data, peerId: String, algorithm: OQSAlgorithm) async -> Bool {
-        let name = sigName(algorithm)
+    public static func verify(
+        _ data: Data,
+        signature: Data,
+        publicKey: Data,
+        algorithm: OQSAlgorithm
+    ) async -> Bool {
+        guard let parameters = try? signingParameters(for: algorithm) else { return false }
+        let name = parameters.name
         guard let sig = OQS_SIG_new(name) else { return false }
         defer { OQS_SIG_free(sig) }
-        let pubService = PQCKeyTags.service("MLDSA", algorithm == .mldsa65 ? "65" : "87", "Pub")
- // KeychainManager 方法是 nonisolated 的，可以同步调用
-        guard let pub = KeychainManager.shared.exportKey(service: pubService, account: peerId) else { return false }
-        let ok: OQS_STATUS = data.withUnsafeBytes { mPtr in
+        let publicKeyLength = Int(sig.pointee.length_public_key)
+        let signatureLength = Int(sig.pointee.length_signature)
+        guard publicKeyLength > 0,
+              signatureLength > 0,
+              publicKey.count == publicKeyLength,
+              signature.count == signatureLength else {
+            return false
+        }
+        let messageBacking = data.isEmpty ? Data([0]) : data
+        let ok: OQS_STATUS = messageBacking.withUnsafeBytes { mPtr in
             signature.withUnsafeBytes { sPtr in
-                pub.withUnsafeBytes { pPtr in
+                publicKey.withUnsafeBytes { pPtr in
                     guard let m = mPtr.bindMemory(to: UInt8.self).baseAddress,
                           let s = sPtr.bindMemory(to: UInt8.self).baseAddress,
                           let p = pPtr.bindMemory(to: UInt8.self).baseAddress else {
@@ -134,81 +372,193 @@ public final class OQSBridge {
         return ok == OQS_SUCCESS
     }
 
+    @available(*, deprecated, message: "Pass an authenticated public key explicitly.")
+    public static func verify(
+        _ data: Data,
+        signature: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm
+    ) async -> Bool {
+        false
+    }
+
     public static func kemEncapsulate(peerId: String, algorithm: OQSAlgorithm) async throws -> (shared: Data, encapsulated: Data) {
-        let name = kemName(algorithm)
-        guard !name.isEmpty, let kem = OQS_KEM_new(name) else {
-            throw NSError(domain: "PQC", code: -311, userInfo: [NSLocalizedDescriptionKey: "OQS_KEM_new 失败: \(name)"])
+        try await kemEncapsulate(
+            peerId: peerId,
+            algorithm: algorithm,
+            authority: .active,
+            scopeSource: .requiredEntitlement
+        )
+    }
+
+    static func kemEncapsulate(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> (shared: Data, encapsulated: Data) {
+        let parameters = try kemParameters(for: algorithm)
+        let name = parameters.name
+        guard let kem = OQS_KEM_new(name) else {
+            throw pqcError(code: -311, description: "OQS_KEM_new 失败: \(name)")
         }
         defer { OQS_KEM_free(kem) }
-        let pubService = PQCKeyTags.service("MLKEM", algorithm == .mlkem768 ? "768" : "1024", "Pub")
-        let privService = PQCKeyTags.service("MLKEM", algorithm == .mlkem768 ? "768" : "1024", "Priv")
+        let pubService = PQCKeyTags.service("MLKEM", parameters.keyVariant, "Pub")
+        let privService = PQCKeyTags.service("MLKEM", parameters.keyVariant, "Priv")
 
         let pubLen = Int(kem.pointee.length_public_key)
         let privLen = Int(kem.pointee.length_secret_key)
- // KeychainManager 方法是 nonisolated 的，可以同步调用
-        var pub = KeychainManager.shared.exportKey(service: pubService, account: peerId)
-        if pub == nil {
+        let ctLen = Int(kem.pointee.length_ciphertext)
+        let ssLen = Int(kem.pointee.length_shared_secret)
+        try requirePositiveLengths(
+            [pubLen, privLen, ctLen, ssLen],
+            errorCode: -311,
+            description: "OQS KEM 算法返回无效的固定长度"
+        )
+        let keyDescriptor = descriptor(
+            peerId: peerId,
+            algorithm: name,
+            purpose: .kem,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        var keyPair = try PQCKeyPairStore.loadOrCreate(
+            descriptor: keyDescriptor,
+            publicKeyLength: pubLen,
+            privateKeyLength: privLen,
+            legacyPublicService: pubService,
+            legacyPrivateService: privService,
+            validatePair: { record in
+                try validateKEMKeyPair(record, kem: kem)
+            },
+            generate: {
             let p = UnsafeMutablePointer<UInt8>.allocate(capacity: pubLen)
             let s = UnsafeMutablePointer<UInt8>.allocate(capacity: privLen)
-            defer { p.deallocate(); s.deallocate() }
+            defer {
+                p.deallocate()
+                wipeAndDeallocate(s, count: privLen)
+            }
             let status = OQS_KEM_keypair(kem, p, s)
             if status != OQS_SUCCESS {
-                throw NSError(domain: "PQC", code: -312, userInfo: [NSLocalizedDescriptionKey: "OQS_KEM_keypair 失败: \(name)"])
+                throw pqcError(code: -312, description: "OQS_KEM_keypair 失败: \(name)")
             }
             let pd = Data(bytes: p, count: pubLen)
             let sd = Data(bytes: s, count: privLen)
-            try persistKeyMaterial(
+            try requireExactLength(
                 pd,
-                service: pubService,
-                account: peerId,
-                errorCode: -332,
-                failureDescription: "无法持久化 OQS KEM 公钥"
+                expected: pubLen,
+                errorCode: -313,
+                description: "OQS KEM 生成公钥长度无效"
             )
-            try persistKeyMaterial(
+            try requireExactLength(
                 sd,
-                service: privService,
-                account: peerId,
-                errorCode: -333,
-                failureDescription: "无法持久化 OQS KEM 私钥"
+                expected: privLen,
+                errorCode: -313,
+                description: "OQS KEM 生成私钥长度无效"
             )
-            pub = pd
-        }
-        guard let pubKey = pub else {
-            throw NSError(domain: "PQC", code: -313, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS KEM 公钥"])
-        }
+            return PQCKeyPairRecord(
+                algorithmIdentifier: keyDescriptor.algorithmIdentifier,
+                publicKey: pd,
+                privateKey: sd
+            )
+        })
+        defer { PQCKeyPairRecordCodec.wipe(&keyPair.privateKey) }
 
-        let ctLen = Int(kem.pointee.length_ciphertext)
-        let ssLen = Int(kem.pointee.length_shared_secret)
         let ct = UnsafeMutablePointer<UInt8>.allocate(capacity: ctLen)
         let ss = UnsafeMutablePointer<UInt8>.allocate(capacity: ssLen)
-        defer { ct.deallocate(); ss.deallocate() }
-        let status = pubKey.withUnsafeBytes { pPtr -> OQS_STATUS in
+        defer {
+            ct.deallocate()
+            wipeAndDeallocate(ss, count: ssLen)
+        }
+        let status = keyPair.publicKey.withUnsafeBytes { pPtr -> OQS_STATUS in
             guard let p = pPtr.bindMemory(to: UInt8.self).baseAddress else {
                 return OQS_ERROR
             }
             return OQS_KEM_encaps(kem, ct, ss, p)
         }
-        if status != OQS_SUCCESS { throw NSError(domain: "PQC", code: -314, userInfo: [NSLocalizedDescriptionKey: "OQS_KEM_encaps 失败: \(name)"]) }
+        if status != OQS_SUCCESS {
+            throw pqcError(code: -314, description: "OQS_KEM_encaps 失败: \(name)")
+        }
         let ctData = Data(bytes: ct, count: ctLen)
         let ssData = Data(bytes: ss, count: ssLen)
+        try requireExactLength(
+            ctData,
+            expected: ctLen,
+            errorCode: -315,
+            description: "OQS KEM 封装密文长度无效"
+        )
+        try requireExactLength(
+            ssData,
+            expected: ssLen,
+            errorCode: -315,
+            description: "OQS KEM 共享密钥长度无效"
+        )
         return (ssData, ctData)
     }
 
     public static func kemDecapsulate(_ encapsulated: Data, peerId: String, algorithm: OQSAlgorithm) async throws -> Data {
-        let name = kemName(algorithm)
-        guard !name.isEmpty, let kem = OQS_KEM_new(name) else {
-            throw NSError(domain: "PQC", code: -321, userInfo: [NSLocalizedDescriptionKey: "OQS_KEM_new 失败: \(name)"])
+        try await kemDecapsulate(
+            encapsulated,
+            peerId: peerId,
+            algorithm: algorithm,
+            authority: .active,
+            scopeSource: .requiredEntitlement
+        )
+    }
+
+    static func kemDecapsulate(
+        _ encapsulated: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> Data {
+        let parameters = try kemParameters(for: algorithm)
+        let name = parameters.name
+        guard let kem = OQS_KEM_new(name) else {
+            throw pqcError(code: -321, description: "OQS_KEM_new 失败: \(name)")
         }
         defer { OQS_KEM_free(kem) }
-        let privService = PQCKeyTags.service("MLKEM", algorithm == .mlkem768 ? "768" : "1024", "Priv")
- // KeychainManager 方法是 nonisolated 的，可以同步调用
-        guard let sk = KeychainManager.shared.exportKey(service: privService, account: peerId) else {
-            throw NSError(domain: "PQC", code: -322, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS KEM 私钥"])
-        }
+        let pubService = PQCKeyTags.service("MLKEM", parameters.keyVariant, "Pub")
+        let privService = PQCKeyTags.service("MLKEM", parameters.keyVariant, "Priv")
+        let publicKeyLength = Int(kem.pointee.length_public_key)
+        let privateKeyLength = Int(kem.pointee.length_secret_key)
+        let ciphertextLength = Int(kem.pointee.length_ciphertext)
         let ssLen = Int(kem.pointee.length_shared_secret)
+        try requirePositiveLengths(
+            [publicKeyLength, privateKeyLength, ciphertextLength, ssLen],
+            errorCode: -321,
+            description: "OQS KEM 算法返回无效的固定长度"
+        )
+        guard encapsulated.count == ciphertextLength else {
+            throw pqcError(
+                code: -322,
+                description: "OQS KEM 封装密文长度无效 (expected=\(ciphertextLength), actual=\(encapsulated.count))"
+            )
+        }
+        let keyDescriptor = descriptor(
+            peerId: peerId,
+            algorithm: name,
+            purpose: .kem,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        guard var keyPair = try PQCKeyPairStore.loadOrMigrateLegacy(
+            descriptor: keyDescriptor,
+            publicKeyLength: publicKeyLength,
+            privateKeyLength: privateKeyLength,
+            legacyPublicService: pubService,
+            legacyPrivateService: privService,
+            validatePair: { record in
+                try validateKEMKeyPair(record, kem: kem)
+            }
+        ) else {
+            throw pqcError(code: -322, description: "未找到 OQS KEM 密钥对")
+        }
+        defer { PQCKeyPairRecordCodec.wipe(&keyPair.privateKey) }
         let ss = UnsafeMutablePointer<UInt8>.allocate(capacity: ssLen)
-        defer { ss.deallocate() }
-        let status = sk.withUnsafeBytes { sPtr in
+        defer { wipeAndDeallocate(ss, count: ssLen) }
+        let status = keyPair.privateKey.withUnsafeBytes { sPtr in
             encapsulated.withUnsafeBytes { cPtr in
                 guard let s = sPtr.bindMemory(to: UInt8.self).baseAddress,
                       let c = cPtr.bindMemory(to: UInt8.self).baseAddress else {
@@ -217,25 +567,83 @@ public final class OQSBridge {
                 return OQS_KEM_decaps(kem, ss, c, s)
             }
         }
-        if status != OQS_SUCCESS { throw NSError(domain: "PQC", code: -323, userInfo: [NSLocalizedDescriptionKey: "OQS_KEM_decaps 失败: \(name)"]) }
-        return Data(bytes: ss, count: ssLen)
+        if status != OQS_SUCCESS {
+            throw pqcError(code: -323, description: "OQS_KEM_decaps 失败: \(name)")
+        }
+        let sharedSecret = Data(bytes: ss, count: ssLen)
+        try requireExactLength(
+            sharedSecret,
+            expected: ssLen,
+            errorCode: -324,
+            description: "OQS KEM 解封装共享密钥长度无效"
+        )
+        return sharedSecret
     }
 }
 #else
-public enum OQSAlgorithm: String { case mldsa65, mldsa87, mlkem768, mlkem1024 }
+public enum OQSAlgorithm: String, Sendable { case mldsa65, mldsa87, mlkem768, mlkem1024 }
 public final class OQSBridge {
-    private static let logger = Logger(subsystem: "com.skybridge.quantum", category: "OQSBridge")
-    public static func sign(_ data: Data, peerId: String, algorithm: OQSAlgorithm) async throws -> Data {
+    public static func sign(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm
+    ) async throws -> OQSSignatureResult {
         throw NSError(domain: "PQC", code: -201, userInfo: [NSLocalizedDescriptionKey: "liboqs 未接入"])
     }
-    public static func verify(_ data: Data, signature: Data, peerId: String, algorithm: OQSAlgorithm) async -> Bool {
-        return false
+    static func sign(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> OQSSignatureResult {
+        _ = authority
+        _ = scopeSource
+        return try await sign(data, peerId: peerId, algorithm: algorithm)
+    }
+    public static func verify(
+        _ data: Data,
+        signature: Data,
+        publicKey: Data,
+        algorithm: OQSAlgorithm
+    ) async -> Bool {
+        false
+    }
+    @available(*, deprecated, message: "Pass an authenticated public key explicitly.")
+    public static func verify(
+        _ data: Data,
+        signature: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm
+    ) async -> Bool {
+        false
     }
     public static func kemEncapsulate(peerId: String, algorithm: OQSAlgorithm) async throws -> (shared: Data, encapsulated: Data) {
         throw NSError(domain: "PQC", code: -202, userInfo: [NSLocalizedDescriptionKey: "liboqs 未接入"])
     }
+    static func kemEncapsulate(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> (shared: Data, encapsulated: Data) {
+        _ = authority
+        _ = scopeSource
+        return try await kemEncapsulate(peerId: peerId, algorithm: algorithm)
+    }
     public static func kemDecapsulate(_ encapsulated: Data, peerId: String, algorithm: OQSAlgorithm) async throws -> Data {
         throw NSError(domain: "PQC", code: -203, userInfo: [NSLocalizedDescriptionKey: "liboqs 未接入"])
+    }
+    static func kemDecapsulate(
+        _ encapsulated: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> Data {
+        _ = authority
+        _ = scopeSource
+        return try await kemDecapsulate(encapsulated, peerId: peerId, algorithm: algorithm)
     }
 }
 #endif

@@ -583,9 +583,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 #if canImport(WebRTC)
     private var remoteVideoHeartbeatRenderer: RemoteVideoTrackHeartbeatRenderer?
 #endif
-    private let localDeviceId: String = {
-        ProtocolDeviceIdentity.stableDeviceId()
-    }()
+    private var localProtocolIdentitySnapshot: ProtocolIdentitySnapshot?
     private var currentPathExpectedRemoteAuthorityBySessionId: [String: CurrentPathRemoteAuthorityCompat] = [:]
     private var currentPathAdditionalProtocolFingerprintsBySessionId: [String: Set<String>] = [:]
     private var currentPathSignalingOriginBySessionId: [String: String] = [:]
@@ -887,7 +885,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                       self.currentSessionId == sessionId,
                       self.session === session,
                       self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionId),
-                      self.sessionKeys?.negotiatedSuite.isPQCGroup != true else {
+                      !Self.hasNegotiablePQCSession(self.sessionKeys) else {
                     self?.strictPQCClassicBootstrapTimeoutTasksBySessionId.removeValue(forKey: sessionId)
                     return
                 }
@@ -919,6 +917,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private func clearStrictPQCClassicBootstrapOnly(sessionId: String) {
         strictPQCClassicBootstrapOnlySessionIds.remove(sessionId)
         strictPQCClassicBootstrapTimeoutTasksBySessionId.removeValue(forKey: sessionId)?.cancel()
+    }
+
+    private static func isNegotiablePQCSuite(_ suite: CryptoSuite) -> Bool {
+        suite.isNegotiable && suite.isPQCGroup
+    }
+
+    private static func hasNegotiablePQCSession(_ keys: SessionKeys?) -> Bool {
+        guard let keys else { return false }
+        return isNegotiablePQCSuite(keys.negotiatedSuite)
     }
 
     private func localProtocolIdentityPublicKeysForPairing() async -> [AppMessage.ProtocolIdentityPublicKeyInfo] {
@@ -984,7 +991,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return
         }
         if strictPQCRequestedBySessionId[sessionId] == true,
-           !keys.negotiatedSuite.isPQCGroup {
+           !Self.isNegotiablePQCSuite(keys.negotiatedSuite) {
             appendSmokeTrace("authenticated-route-binding-send-skipped session=\(sessionId) stage=\(stage) reason=strict_pqc_rekey_pending")
             return
         }
@@ -1001,7 +1008,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
             let messages = try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedFileTransferRouteBindingMessages(
                 keys: keys,
-                localDeviceId: localDeviceId,
+                localDeviceId: try requiredLocalProtocolIdentity().deviceId,
                 remoteAuthority: remoteAuthority,
                 localRouteAuthorityProtocolPublicKeyFingerprint: localFingerprint
             )
@@ -1064,12 +1071,21 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func currentPathLocalBinding() async throws -> ProtocolIdentityBindingCompat {
         let algorithm = currentPathLocalProtocolSigningAlgorithm()
-        let publicKey = try await SkyBridgeiOSCore.shared.getProtocolSigningPublicKey(for: algorithm)
+        let identity = try await SkyBridgeiOSCore.shared
+            .getProtocolIdentitySnapshot(for: algorithm)
+        localProtocolIdentitySnapshot = identity
         return try ProtocolIdentityBindingCompat(
-            deviceId: localDeviceId,
+            deviceId: identity.deviceId,
             protocolSigningAlgorithm: algorithm,
-            protocolPublicKeyBytes: publicKey
+            protocolPublicKeyBytes: identity.signingPublicKey
         )
+    }
+
+    private func requiredLocalProtocolIdentity() throws -> ProtocolIdentitySnapshot {
+        guard let localProtocolIdentitySnapshot else {
+            throw SkyBridgeError.notInitialized
+        }
+        return localProtocolIdentitySnapshot
     }
 
     private func signCurrentPathPayload(
@@ -3097,9 +3113,18 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 let mediaDiagnostics = await self.smokeMediaHeartbeatDiagnosticsProvider?()
                 let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
 
+                guard let localIdentitySnapshot = self.localProtocolIdentitySnapshot else {
+                    self.appendSmokeTrace(
+                        "heartbeat-stopped session=\(sessionId) reason=missing_local_identity"
+                    )
+                    SkyBridgeLogger.shared.error(
+                        "⛔️ WebRTC heartbeat stopped: local protocol identity is unavailable"
+                    )
+                    break
+                }
                 let heartbeat = AppMessage.heartbeat(.init(
                     sentAt: Date(),
-                    deviceId: self.localDeviceId,
+                    deviceId: localIdentitySnapshot.deviceId,
                     deviceName: localName,
                     modelName: localModel,
                     platform: "iOS",
@@ -3446,6 +3471,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
         }
 
+        let localAlgorithm = currentPathLocalProtocolSigningAlgorithm()
+        try await SkyBridgeiOSCore.shared.initialize(
+            policy: localAlgorithm == .mlDSA65 ? .requirePQC : .classicOnly
+        )
+        localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot()
+
         currentSessionId = sessionId
         beginRemoteDesktopNotificationTracking(sessionId: sessionId)
         state = .connecting(sessionId: sessionId)
@@ -3496,7 +3528,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
 
         // 2) WebRTC session (offerer / answerer)
-        let localId = localDeviceId
+        let localId = try requiredLocalProtocolIdentity().deviceId
 
         // SECURITY: Never hardcode TURN credentials in the client app.
         // Use short-lived TURN REST credentials fetched from backend (with safe fallback).
@@ -3761,8 +3793,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func handleEnvelope(_ env: WebRTCSignalingEnvelope) {
         guard env.sessionId == currentSessionId else { return }
+        guard let localId = localProtocolIdentitySnapshot?.deviceId else {
+            let message = "local protocol identity unavailable while handling signaling"
+            lastError = message
+            state = .failed(message)
+            readiness = .idle
+            SkyBridgeLogger.shared.error("⛔️ \(message)")
+            return
+        }
         // Ignore self-echo
-        let localId = localDeviceId
         if env.from == localId { return }
         appendSmokeTrace("rx \(describeEnvelope(env))")
 
@@ -3787,7 +3826,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 }
                 session.setRemoteOffer(sdp)
             }
-            let localId = localDeviceId
             Task { @MainActor [weak self] in
                 await self?.resendCachedAnswerIfNeeded(sessionId: env.sessionId, localId: localId)
                 await self?.resendCachedLocalICECandidatesIfNeeded(sessionId: env.sessionId, localId: localId)
@@ -3802,7 +3840,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 }
                 session.setRemoteAnswer(sdp)
             }
-            let localId = localDeviceId
             Task { @MainActor [weak self] in
                 await self?.resendCachedLocalICECandidatesIfNeeded(sessionId: env.sessionId, localId: localId)
             }
@@ -3820,7 +3857,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case .join:
             appendSmokeTrace("remote-join session=\(env.sessionId) from=\(env.from)")
             if currentRole == .offerer, let sid = currentSessionId, sid == env.sessionId {
-                let localId = localDeviceId
                 Task { @MainActor [weak self] in
                     await self?.resendCachedOfferIfNeeded(sessionId: sid, localId: localId, reason: "remote-join")
                     await self?.resendCachedAnswerIfNeeded(sessionId: sid, localId: localId)
@@ -4018,6 +4054,8 @@ extension CrossNetworkWebRTCManager {
                 bootstrapMode: String
             ) async throws -> SessionKeys {
                 try await SkyBridgeiOSCore.shared.initialize(policy: selection)
+                self.localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+                    .currentProtocolIdentitySnapshot()
                 let driver = try SkyBridgeiOSCore.shared.createHandshakeDriver(
                     transport: transport,
                     trustProvider: currentPathTrustProvider
@@ -4284,12 +4322,12 @@ extension CrossNetworkWebRTCManager {
         guard handshakeDriver == nil else { return nil }
         guard sessionKeys != nil else { return nil }
         guard let messageA = try? HandshakeMessageA.decode(from: frame),
-              !messageA.supportedSuites.isEmpty else {
+              messageA.hasNegotiableOfferShape else {
             return nil
         }
         appendSmokeTrace("inbound-rekey messageA candidate session=\(sessionId) raw=\(frame.count)")
 
-        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         let localCapability = CryptoProviderFactory.detectCapability()
         let localPQCAvailable = localCapability.hasApplePQC || localCapability.hasLiboqs
         guard let selection = CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeySelectionPolicy(
@@ -4310,7 +4348,7 @@ extension CrossNetworkWebRTCManager {
                 "⛔️ \(message) hasApplePQC=\(localCapability.hasApplePQC), hasLiboqs=\(localCapability.hasLiboqs)"
             )
             if strictPQCRequested,
-               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+               !Self.hasNegotiablePQCSession(sessionKeys) {
                 await failStrictPQCBootstrapSession(
                     sessionId: sessionId,
                     message: message
@@ -4343,6 +4381,8 @@ extension CrossNetworkWebRTCManager {
                 : CryptoProviderFactory.make(policy: selection)
             appendSmokeTrace("inbound-rekey provider session=\(sessionId) provider=\(provider.providerName)")
             try await SkyBridgeiOSCore.shared.initialize(policy: selection, providerOverride: provider)
+            localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+                .currentProtocolIdentitySnapshot()
             appendSmokeTrace("inbound-rekey core-ready session=\(sessionId)")
             let trustProvider = CurrentPathHandshakeTrustProviderCompat(
                 expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionId],
@@ -4361,7 +4401,7 @@ extension CrossNetworkWebRTCManager {
                 "⚠️ inbound WebRTC rekey driver 初始化失败: session=\(sessionId), err=\(error.localizedDescription)"
             )
             if strictPQCRequested,
-               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+               !Self.hasNegotiablePQCSession(sessionKeys) {
                 await failStrictPQCBootstrapSession(
                     sessionId: sessionId,
                     message: "strictPQC WebRTC inbound rekey driver init failed: \(error.localizedDescription)"
@@ -4393,11 +4433,11 @@ extension CrossNetworkWebRTCManager {
         guard handshakeDriver == nil else { return nil }
         guard sessionKeys == nil else { return nil }
         guard let messageA = try? HandshakeMessageA.decode(from: frame),
-              !messageA.supportedSuites.isEmpty else {
+              messageA.hasNegotiableOfferShape else {
             return nil
         }
 
-        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         let localCapability = CryptoProviderFactory.detectCapability()
         let localPQCAvailable = localCapability.hasApplePQC || localCapability.hasLiboqs
         let expectedAuthorityAlgorithm = currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm
@@ -4449,6 +4489,8 @@ extension CrossNetworkWebRTCManager {
 
         do {
             try await SkyBridgeiOSCore.shared.initialize(policy: selection)
+            localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+                .currentProtocolIdentitySnapshot()
             let trustProvider = CurrentPathHandshakeTrustProviderCompat(
                 expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionId],
                 fallbackPeerIDs: fallbackPeerIDs,
@@ -4581,10 +4623,11 @@ extension CrossNetworkWebRTCManager {
                     stage: "inbound-rekey"
                 )
             }
-            let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup
+            let completedWithNegotiablePQC = Self.isNegotiablePQCSuite(keys.negotiatedSuite)
+            let rekeyCompletionEvent = completedWithNegotiablePQC
                 ? "pqcRekeyComplete"
                 : "classicRekeyComplete"
-            let rekeyCompletionLabel = keys.negotiatedSuite.isPQCGroup
+            let rekeyCompletionLabel = completedWithNegotiablePQC
                 ? "PQC"
                 : "classic compatibility"
             SkyBridgeLogger.shared.info(
@@ -4597,7 +4640,7 @@ extension CrossNetworkWebRTCManager {
             rekeyInProgressSessionIds.remove(sessionId)
             lastRekeyEvent = "failed reason=\(reason)"
             if strictPQCRequested,
-               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+               !Self.hasNegotiablePQCSession(sessionKeys) {
                 let message = "strictPQC WebRTC rekey failed after classic bootstrap: \(reason)"
                 SkyBridgeLogger.shared.error(
                     "⛔️ \(message) session=\(sessionId), event=pqcRekeyFailed"
@@ -4668,7 +4711,7 @@ extension CrossNetworkWebRTCManager {
             inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
             if strictPQCRequested,
                allowsClassicAuthorityBootstrap,
-               !keys.negotiatedSuite.isPQCGroup {
+               !Self.isNegotiablePQCSuite(keys.negotiatedSuite) {
                 lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
                 if let activeSession = self.session {
                     markStrictPQCClassicBootstrapOnly(sessionId: sessionId, session: activeSession)
@@ -4792,13 +4835,7 @@ extension CrossNetworkWebRTCManager {
             try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
         )
         guard !kemKeys.isEmpty else { return }
-        let localDeviceId = self.localDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !localDeviceId.isEmpty else {
-            SkyBridgeLogger.shared.warning(
-                "⚠️ WebRTC pairingIdentityExchange send skipped: empty localDeviceId session=\(sessionId)"
-            )
-            return
-        }
+        let localDeviceId = try requiredLocalProtocolIdentity().deviceId
         let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
         let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
 
@@ -4843,8 +4880,18 @@ extension CrossNetworkWebRTCManager {
                 return
             }
             noteRemoteAppActivity(sessionId: sessionId)
-            await KEMTrustStore.shared.upsert(deviceId: payload.deviceId, kemPublicKeys: payload.kemPublicKeys)
-            await KEMTrustStore.shared.upsert(deviceId: peerDeviceId, kemPublicKeys: payload.kemPublicKeys)
+            await KEMTrustStore.shared.upsert(
+                deviceId: payload.deviceId,
+                kemPublicKeys: payload.kemPublicKeys,
+                platform: payload.platform,
+                osVersion: payload.osVersion
+            )
+            await KEMTrustStore.shared.upsert(
+                deviceId: peerDeviceId,
+                kemPublicKeys: payload.kemPublicKeys,
+                platform: payload.platform,
+                osVersion: payload.osVersion
+            )
             recordCurrentPathProtocolFingerprints(
                 from: payload,
                 sessionId: sessionId,
@@ -4978,12 +5025,13 @@ extension CrossNetworkWebRTCManager {
         guard currentSessionId == sessionId else { return }
         guard strictPQCRequested else { return }
         guard let establishedKeys = sessionKeys else { return }
-        guard !establishedKeys.negotiatedSuite.isPQCGroup else { return }
+        guard !Self.isNegotiablePQCSuite(establishedKeys.negotiatedSuite) else { return }
         guard !rekeyInProgressSessionIds.contains(sessionId) else { return }
         guard !rekeyCompletedSessionIds.contains(sessionId) else { return }
 
         func failStrictClassicBootstrap(reason: String, diagnostic: String) async {
-            guard strictPQCRequested, sessionKeys?.negotiatedSuite.isPQCGroup != true else { return }
+            guard strictPQCRequested,
+                  !Self.hasNegotiablePQCSession(sessionKeys) else { return }
             let message = "strictPQC WebRTC rekey failed after classic bootstrap: \(diagnostic)"
             lastRekeyEvent = "failed strict reason=\(reason)"
             SkyBridgeLogger.shared.error(
@@ -5004,6 +5052,13 @@ extension CrossNetworkWebRTCManager {
             readiness = .idle
         }
         let hasPeerKEMEvidence = trigger != "post_bootstrap"
+        guard let localDeviceId = localProtocolIdentitySnapshot?.deviceId else {
+            await failStrictClassicBootstrap(
+                reason: "missing_local_identity",
+                diagnostic: "local protocol identity snapshot is unavailable"
+            )
+            return
+        }
 
         guard let electionRemoteDeviceId = resolvedPQCRekeyElectionRemoteDeviceId(
             sessionId: sessionId,
@@ -5201,6 +5256,8 @@ extension CrossNetworkWebRTCManager {
                 policy: selection,
                 providerOverride: selectedProvider
             )
+            localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+                .currentProtocolIdentitySnapshot()
             let transport = makeHandshakeTransport(over: session)
             let peer = PeerIdentifier(deviceId: selectedPeerId)
             let trustProvider = CurrentPathHandshakeTrustProviderCompat(
@@ -5255,10 +5312,11 @@ extension CrossNetworkWebRTCManager {
                 stage: "outbound-rekey"
             )
 
-            let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup
+            let completedWithNegotiablePQC = Self.isNegotiablePQCSuite(rekeyed.negotiatedSuite)
+            let rekeyCompletionEvent = completedWithNegotiablePQC
                 ? "pqcRekeyComplete"
                 : "classicRekeyComplete"
-            let rekeyCompletionLabel = rekeyed.negotiatedSuite.isPQCGroup
+            let rekeyCompletionLabel = completedWithNegotiablePQC
                 ? "PQC"
                 : "classic compatibility"
             SkyBridgeLogger.shared.info(
@@ -5267,7 +5325,7 @@ extension CrossNetworkWebRTCManager {
         } catch {
             lastRekeyEvent = "failed error=\(error.localizedDescription)"
             if strictPQCRequested,
-               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+               !Self.hasNegotiablePQCSession(sessionKeys) {
                 let message = "strictPQC WebRTC rekey failed after classic bootstrap: \(error.localizedDescription)"
                 SkyBridgeLogger.shared.error(
                     "⛔️ \(message) session=\(sessionId), event=pqcRekeyFailed trigger=\(trigger)"

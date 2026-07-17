@@ -12,7 +12,7 @@ import Security
 /// implementation. All Q-Periapt KEM operations reuse one native adapter; this
 /// avoids the former duplicated ABI1 implementation in two provider types.
 @available(macOS 14.0, iOS 17.0, *)
-public struct QPeriaptCryptoProvider: ApplicationContextBoundCryptoProvider, Sendable {
+public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Sendable {
     public let providerName = "QPeriaptABI2PolicyBound"
     public let tier: CryptoTier = .qperiaptPQC
     public let activeSuite: CryptoSuite = .qperiaptABI2PolicyBound
@@ -65,7 +65,7 @@ public struct QPeriaptCryptoProvider: ApplicationContextBoundCryptoProvider, Sen
         return decapsulatedData == encapsulatedData
     }
 
-    // MARK: - Context-bound KEM
+    // MARK: - Policy-bound application-context KEM
 
     public func kemEncapsulate(
         recipientPublicKey: Data,

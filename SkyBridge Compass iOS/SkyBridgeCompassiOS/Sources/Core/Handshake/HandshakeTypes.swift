@@ -358,7 +358,7 @@ public struct CryptoPolicy: Sendable, Equatable {
 /// the local admission layer.
 public enum HandshakeCryptoPolicyResolver {
     public static func policy(for offeredSuites: [CryptoSuite]) -> CryptoPolicy {
-        let pqcSuites = offeredSuites.filter(\.isPQCGroup)
+        let pqcSuites = offeredSuites.filter { $0.isPQCGroup && $0.isNegotiable }
         let hasHybridSuites = pqcSuites.contains(where: \.isHybrid)
 
         guard hasHybridSuites else {

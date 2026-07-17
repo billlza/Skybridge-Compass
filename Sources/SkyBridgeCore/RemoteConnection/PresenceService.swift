@@ -59,6 +59,7 @@ public final class PresenceService: ObservableObject {
         // 2) 查询本账号受信设备的在线子集。
         let trustedIds = Set(
             TrustSyncService.shared.activeTrustRecords
+                .filter(\.isAuthenticationEligible)
                 .map { $0.currentDeviceId }
                 .filter { !$0.isEmpty }
         )

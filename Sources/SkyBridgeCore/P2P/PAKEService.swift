@@ -240,6 +240,7 @@ public enum PAKEError: Error, LocalizedError, Sendable {
     case rateLimited(retryAfter: TimeInterval)
     case lockout(until: Date)
     case invalidState
+    case invalidLocalDeviceId
     case cryptoError(String)
     case randomGenerationFailed(OSStatus)
 
@@ -263,6 +264,8 @@ public enum PAKEError: Error, LocalizedError, Sendable {
             return "Locked out until \(formatter.string(from: until))"
         case .invalidState:
             return "Invalid PAKE state"
+        case .invalidLocalDeviceId:
+            return "PAKE requires a non-empty canonical local device ID"
         case .cryptoError(let message):
             return "Crypto error: \(message)"
         case .randomGenerationFailed(let status):
@@ -414,15 +417,19 @@ actor PAKERateLimiter {
 /// 使用方式：
 /// ```swift
 /// // Initiator
-/// let service = PAKEService()
-/// let messageA = try await service.initiateExchange(password: "123456", peerId: "device-123")
+/// let initiatorDeviceId = try await SelfIdentityProvider.shared
+///     .protocolIdentityDeviceId(allowCreate: true)
+/// let initiator = try PAKEService(localDeviceId: initiatorDeviceId)
+/// let messageA = try await initiator.initiateExchange(password: "123456", peerId: "device-123")
 /// // 发送 messageA 给 responder...
 /// // 收到 messageB 后
-/// let sharedSecret = try await service.completeExchange(messageB: messageB, peerId: "device-123")
+/// let sharedSecret = try await initiator.completeExchange(messageB: messageB, peerId: "device-123")
 ///
 /// // Responder
-/// let service = PAKEService()
-/// let (messageB, sharedSecret) = try await service.respondToExchange(
+/// let responderDeviceId = try await SelfIdentityProvider.shared
+///     .protocolIdentityDeviceId(allowCreate: true)
+/// let responder = try PAKEService(localDeviceId: responderDeviceId)
+/// let (messageB, sharedSecret) = try await responder.respondToExchange(
 /// messageA: messageA,
 /// password: "123456",
 /// peerId: "device-456"
@@ -448,8 +455,15 @@ public actor PAKEService {
 
  // MARK: - Initialization
 
-    public init(localDeviceId: String? = nil, limits: SecurityLimits = .default) {
-        self.localDeviceId = localDeviceId ?? UUID().uuidString
+    public init(localDeviceId: String, limits: SecurityLimits = .default) throws {
+        let normalizedDeviceId = localDeviceId.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedDeviceId.isEmpty,
+              normalizedDeviceId == localDeviceId else {
+            throw PAKEError.invalidLocalDeviceId
+        }
+        self.localDeviceId = normalizedDeviceId
         self.rateLimiter = PAKERateLimiterMemory(
             limits: limits,
             maxAttempts: P2PConstants.maxPairingAttempts,

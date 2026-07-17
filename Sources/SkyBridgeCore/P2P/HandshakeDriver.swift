@@ -193,6 +193,10 @@ public actor HandshakeDriver {
             throw HandshakeError.emptyOfferedSuites
         }
 
+        guard offeredSuites.allSatisfy(\.isNegotiable) else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
+
  // 2. offeredSuites 同质性验证
         try Self.validateSuiteHomogeneity(offeredSuites: offeredSuites, sigAAlgorithm: sigAAlgorithm)
 
@@ -1018,6 +1022,10 @@ public actor HandshakeDriver {
 
         do {
             let messageB = try HandshakeMessageB.decode(from: data)
+
+            // Reject legacy-only, unoffered, or share-less selections before
+            // consulting trust state or entering any signature verification.
+            try await ctx.validateMessageBAdmission(messageB)
 
  // 9.1: 验证 selectedSuite 与 sigA 算法的兼容性
  // Requirements: 1.1, 1.2

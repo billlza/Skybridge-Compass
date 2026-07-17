@@ -39,8 +39,11 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     /// X-Wing: X25519 + ML-KEM-768（混合）
     case xwing
 
-    /// Q-Periapt ContextBound（beta，X25519 + ML-KEM-768 混合）
+    /// Q-Periapt ABI 1 ContextBound（仅保留历史 wire 解析）
     case qperiaptContextBound
+
+    /// Q-Periapt ABI 2 authenticated-policy/application-context-bound hybrid KEM
+    case qperiaptABI2PolicyBound
     
     /// X25519 + Ed25519（经典）
     case x25519Ed25519
@@ -64,6 +67,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
             return "X-Wing"
         case .qperiaptContextBound:
             return "Q-Periapt-ContextBound"
+        case .qperiaptABI2PolicyBound:
+            return "Q-Periapt-ABI2-PolicyBound"
         case .x25519Ed25519:
             return "X25519-Ed25519"
         case .x25519:
@@ -85,6 +90,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
             self = .xwing
         case "Q-Periapt-ContextBound":
             self = .qperiaptContextBound
+        case "Q-Periapt-ABI2-PolicyBound":
+            self = .qperiaptABI2PolicyBound
         case "X25519-Ed25519":
             self = .x25519Ed25519
         case "X25519":
@@ -109,7 +116,8 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     public var wireId: UInt16 {
         switch self {
         case .xwing: return 0x0001      // Hybrid: X-Wing
-        case .qperiaptContextBound: return 0x0011 // Hybrid beta: Q-Periapt ContextBound
+        case .qperiaptContextBound: return 0x0011 // Legacy ABI 1; decode-only
+        case .qperiaptABI2PolicyBound: return 0x0012 // ABI 2 PolicyBound beta
         case .mlkem768: return 0x0101   // PQC: ML-KEM-768
         case .mlkem768fs: return 0x0102 // PQC: ML-KEM-768-FS
         case .x25519Ed25519: return 0x1001  // Classic: X25519+Ed25519
@@ -124,6 +132,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         switch wireId {
         case 0x0001: self = .xwing
         case 0x0011: self = .qperiaptContextBound
+        case 0x0012: self = .qperiaptABI2PolicyBound
         case 0x0101: self = .mlkem768
         case 0x0102: self = .mlkem768fs
         case 0x1001: self = .x25519Ed25519
@@ -138,6 +147,15 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         }
         return true
     }
+
+    /// Historical suites remain wire-decodable but cannot enter new negotiation.
+    public var isLegacyOnly: Bool {
+        self == .qperiaptContextBound
+    }
+
+    public var isNegotiable: Bool {
+        isKnown && !isLegacyOnly
+    }
     
     /// 是否是 PQC 套件
     public var isPQC: Bool {
@@ -146,6 +164,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         case .mlkem768fs: return true
         case .xwing: return true
         case .qperiaptContextBound: return true
+        case .qperiaptABI2PolicyBound: return true
         case .unknown(let wireId):
             let tier = wireId >> 8
             return tier == 0x00 || tier == 0x01
@@ -155,7 +174,7 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     
     /// 是否是混合套件
     public var isHybrid: Bool {
-        self == .xwing || self == .qperiaptContextBound
+        self == .xwing || self == .qperiaptContextBound || self == .qperiaptABI2PolicyBound
     }
     
     /// 是否属于 PQC 组（用于签名算法选择）
@@ -168,9 +187,9 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         [.mlkem768, .mlkem768fs, .xwing]
     }
 
-    /// 显式 beta PQC 套件。Q-Periapt 不进入默认 PQC 列表，避免旧 iOS 镜像路径默认通告。
+    /// 显式 beta PQC 套件。ABI 1 标识不进入任何可通告列表。
     public static var explicitBetaPQCSuites: [CryptoSuite] {
-        [.qperiaptContextBound]
+        [.qperiaptABI2PolicyBound]
     }
     
     /// 所有 Classic 套件
@@ -203,6 +222,8 @@ public extension CryptoSuite {
     static let xwingMLDSA: CryptoSuite = .xwing
     /// macOS Core naming: Q-Periapt ContextBound (beta)
     static let qperiaptContextBoundMLDSA: CryptoSuite = .qperiaptContextBound
+    /// macOS Core naming: Q-Periapt ABI 2 PolicyBound (beta)
+    static let qperiaptABI2PolicyBoundMLDSA: CryptoSuite = .qperiaptABI2PolicyBound
     /// macOS Core naming: ML-KEM-768 + ML-DSA-65
     static let mlkem768MLDSA65: CryptoSuite = .mlkem768
     /// macOS Core naming: ML-KEM-768-FS + ML-DSA-65
@@ -232,7 +253,12 @@ public extension CryptoSuite {
 
     /// KDF 组合标签（与 macOS SkyBridgeCore 对齐，用于防止跨版本 KDF 混淆）
     var kdfCompositionLabel: String {
-        requiresV2EphemeralContribution ? "v2-static+ephemeral" : "v1-single"
+        switch self {
+        case .qperiaptABI2PolicyBound:
+            return "qperiapt-abi2-policy-bound-v1"
+        default:
+            return requiresV2EphemeralContribution ? "v2-static+ephemeral" : "v1-single"
+        }
     }
 }
 

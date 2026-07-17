@@ -613,8 +613,8 @@ final class LocalP2PSmokeHarness {
             .appendingPathComponent(fileName)
     }
 
-    private func resolvedLocalDeviceID() -> String {
-        ProtocolDeviceIdentity.stableDeviceId()
+    private func resolvedLocalDeviceID() async throws -> String {
+        try await SkyBridgeiOSCore.shared.currentProtocolIdentitySnapshot().deviceId
     }
 
     private func resolveTargetDevice(from devices: [DiscoveredDevice]) -> DiscoveredDevice? {
@@ -965,7 +965,7 @@ final class LocalP2PSmokeHarness {
         do {
             let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
             let report = LocalPQCReport(
-                deviceId: resolvedLocalDeviceID(),
+                deviceId: try await resolvedLocalDeviceID(),
                 keys: keys.map { key in
                     LocalPQCReport.PublicKeyEntry(
                         suiteWireId: key.suiteWireId,

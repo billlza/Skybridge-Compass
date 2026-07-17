@@ -12,12 +12,6 @@ use super::AgentPaths;
 
 const ENV_PEER_MLKEM768_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64";
 const ENV_PEER_XWING_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64";
-/// EXPERIMENTAL, DEFAULT-OFF: peer public key for the Q-Periapt ContextBound
-/// suite. Only meaningful when skybridge-core is built with the `q-periapt`
-/// feature; otherwise the suite is offered but the core handshake will reject it
-/// as unsupported. Recognized so the agent can *select* the suite when a key is
-/// present and the operator sets `SKYBRIDGE_PQC_PREFERRED_SUITE=q-periapt`.
-const ENV_PEER_QPERIAPT_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_QPERIAPT_PUBLIC_KEY_BASE64";
 const ENV_PQC_PREFERRED_SUITE: &str = "SKYBRIDGE_PQC_PREFERRED_SUITE";
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
 
@@ -65,20 +59,6 @@ pub(super) async fn build_pqc_initiator_config_from_env(
                 .map_err(|error| anyhow!("invalid ML-KEM-768 peer public key: {error}"))?,
         );
     }
-    // EXPERIMENTAL, DEFAULT-OFF: register a Q-Periapt ContextBound peer key if the
-    // operator supplied one, so the suite is selectable when preferred.
-    if let Some(value) = std::env::var(ENV_PEER_QPERIAPT_PUBLIC_KEY_B64)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        peer_kem_public_keys.insert(
-            CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65,
-            STANDARD
-                .decode(value.trim().as_bytes())
-                .map_err(|error| anyhow!("invalid Q-Periapt peer public key: {error}"))?,
-        );
-    }
-
     let bridge_identity = pqc_bridge_identity_enabled();
 
     if peer_kem_public_keys.is_empty() {
@@ -130,18 +110,15 @@ pub(super) async fn build_pqc_initiator_config_from_env(
     };
     let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
         .ok()
-        .and_then(|value| CryptoSuite::from_name(&value));
+        .and_then(|value| CryptoSuite::from_name(&value))
+        .filter(|suite| suite.is_negotiable());
     let mut preferred_suites = Vec::new();
     if let Some(preferred_suite) = preferred_suite
         && peer_kem_public_keys.contains_key(&preferred_suite)
     {
         preferred_suites.push(preferred_suite);
     }
-    for candidate in [
-        CryptoSuite::XWING_MLDSA,
-        CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65,
-        CryptoSuite::MLKEM768_MLDSA65,
-    ] {
+    for candidate in [CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65] {
         if peer_kem_public_keys.contains_key(&candidate) && !preferred_suites.contains(&candidate) {
             preferred_suites.push(candidate);
         }
@@ -199,15 +176,7 @@ pub(super) async fn build_pqc_responder_config(
         local_binding: pqc_binding,
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
-        supported_suites: {
-            // The agent advertises the Q-Periapt ContextBound suite only when skybridge-core is
-            // built with the `q-periapt` feature; otherwise the shipping suite set is unchanged.
-            #[cfg_attr(not(feature = "q-periapt"), allow(unused_mut))]
-            let mut suites = vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65];
-            #[cfg(feature = "q-periapt")]
-            suites.push(CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65);
-            suites
-        },
+        supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
         policy: skybridge_core::DowngradePolicy::PreferPqc,
     }))
 }

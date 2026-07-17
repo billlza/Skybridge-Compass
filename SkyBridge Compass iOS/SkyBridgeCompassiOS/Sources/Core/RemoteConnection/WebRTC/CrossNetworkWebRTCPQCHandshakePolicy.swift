@@ -137,7 +137,9 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
     ) -> [CryptoSuite] {
         guard capability.hasApplePQC || capability.hasLiboqs else { return [] }
 
-        let selectedPQCSuites = selectedProviderSuites.filter(\.isPQCGroup)
+        let selectedPQCSuites = selectedProviderSuites.filter {
+            $0.isPQCGroup && $0.isNegotiable
+        }
         if capability.hasApplePQC || selectedProviderTier == .nativePQC {
             var suites: [CryptoSuite] = []
             let prefersXWing = selectedPQCSuites.contains { $0.isHybrid }
@@ -174,7 +176,11 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         strictPQCRequested: Bool,
         localPQCAvailable: Bool
     ) -> CryptoProviderFactory.SelectionPolicy? {
-        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup }
+        guard !supportedSuites.isEmpty,
+              supportedSuites.allSatisfy(\.isNegotiable) else {
+            return nil
+        }
+        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         guard !strictPQCRequested || hasPQCGroup else { return nil }
         guard !strictPQCRequested || localPQCAvailable else { return nil }
         return hasPQCGroup ? (strictPQCRequested ? .requirePQC : .preferPQC) : .classicOnly
@@ -186,7 +192,11 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         localPQCAvailable: Bool,
         expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
     ) -> CryptoProviderFactory.SelectionPolicy? {
-        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup }
+        guard !supportedSuites.isEmpty,
+              supportedSuites.allSatisfy(\.isNegotiable) else {
+            return nil
+        }
+        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
         if hasPQCGroup {
             guard !strictPQCRequested || localPQCAvailable else { return nil }
             return strictPQCRequested ? .requirePQC : .preferPQC
@@ -207,16 +217,20 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
     ) -> Bool {
         guard !strictPQCRequested else { return false }
+        guard !supportedSuites.isEmpty,
+              supportedSuites.allSatisfy(\.isNegotiable) else {
+            return false
+        }
         return expectedRemoteAuthorityAlgorithm == .ed25519
-            && !supportedSuites.contains(where: { $0.isPQCGroup })
-            && supportedSuites.contains(where: { !$0.isPQCGroup })
+            && !supportedSuites.contains(where: { $0.isPQCGroup && $0.isNegotiable })
+            && supportedSuites.contains(where: { !$0.isPQCGroup && $0.isNegotiable })
     }
 
     nonisolated static func inboundPQCRekeyNegotiatedSuiteAllowed(
         _ suite: CryptoSuite,
         strictPQCRequested: Bool
     ) -> Bool {
-        !strictPQCRequested || suite.isPQCGroup
+        suite.isNegotiable && (!strictPQCRequested || suite.isPQCGroup)
     }
 
     nonisolated static func inboundInitialHandshakeNegotiatedSuiteAllowed(
@@ -224,7 +238,7 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         strictPQCRequested: Bool,
         allowsClassicAuthorityBootstrap: Bool
     ) -> Bool {
-        !strictPQCRequested || suite.isPQCGroup
+        suite.isNegotiable && (!strictPQCRequested || suite.isPQCGroup)
     }
 
     nonisolated static func shouldInitiateInitialWebRTCHandshake(role: WebRTCSession.Role) -> Bool {
@@ -305,7 +319,7 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         var seen = Set<UInt16>()
         var result: [CryptoSuite] = []
         result.reserveCapacity(suites.count)
-        for suite in suites where suite.isKnown && seen.insert(suite.wireId).inserted {
+        for suite in suites where suite.isNegotiable && seen.insert(suite.wireId).inserted {
             result.append(suite)
         }
         return result

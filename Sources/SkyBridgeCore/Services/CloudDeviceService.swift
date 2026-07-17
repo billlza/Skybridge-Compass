@@ -19,7 +19,7 @@ public protocol CloudDeviceService: ObservableObject {
     var isSyncingPublisher: AnyPublisher<Bool, Never> { get }
     
  /// The ID of the current device.
-    var currentDeviceId: String { get }
+    var currentDeviceId: String? { get }
     
  /// Manually triggers a refresh of the device list.
     func refreshDevices() async

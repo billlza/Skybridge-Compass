@@ -1,3 +1,8 @@
+#[cfg(feature = "q-periapt")]
+compile_error!(
+    "Q_PERIAPT_ABI1_DISABLED: Rust wire 0x0011 is decode-only until the authenticated ABI2 policy contract is ported"
+);
+
 mod handshake_app_frame;
 mod handshake_wire;
 

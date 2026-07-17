@@ -115,7 +115,8 @@ public final class RemoteControlServer: ObservableObject {
         activePort = boundPort
         ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
         if #available(macOS 14.0, *) {
-            let identitySnapshot = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+            let identitySnapshot = try await SelfIdentityProvider.shared
+                .snapshotEnsuringProtocolDeviceId(allowCreate: false)
             guard listenerGeneration == generation else {
                 boundListener.cancel()
                 throw POSIXError(.ECANCELED)

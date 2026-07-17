@@ -291,7 +291,7 @@ struct WebRTCSignalingCurrentPathTests {
             protocolPublicKeyBytes: Data(repeating: 0x44, count: 1_952),
             kemPublicKeys: [
                 .init(
-                    suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                    suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
                     publicKey: Data(repeating: 0x55, count: QPeriaptPlatformPolicy.publicKeyLength)
                 )
             ],
@@ -307,7 +307,7 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(decoded.platform == "macOS")
         #expect(decoded.osVersion == "macOS 26.0")
         #expect(decoded.kemPublicKeys?.count == 1)
-        #expect(decoded.kemPublicKeys?.first?.suiteWireId == CryptoSuite.qperiaptContextBound.wireId)
+        #expect(decoded.kemPublicKeys?.first?.suiteWireId == CryptoSuite.qperiaptABI2PolicyBound.wireId)
         #expect(decoded.kemPublicKeys?.first?.publicKey.count == QPeriaptPlatformPolicy.publicKeyLength)
     }
 

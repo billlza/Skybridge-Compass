@@ -26,6 +26,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [features]
-# Experimental, default-off: advertise + negotiate the Q-Periapt ContextBound hybrid suite
-# (forwards to skybridge-core/q-periapt). Off by default, so the shipping build is unchanged.
+# Reserved and intentionally disabled: forwarding this feature reaches the
+# skybridge-core ABI1 compile-time release guard.
 q-periapt = ["skybridge-core/q-periapt"]

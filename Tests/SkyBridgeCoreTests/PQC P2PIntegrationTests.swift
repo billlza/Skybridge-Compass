@@ -11,6 +11,8 @@ final class PQCP2PIntegrationTests: XCTestCase {
 
     var crypto: EnhancedPostQuantumCrypto!
     var keyManager: EnhancedQuantumKeyManager!
+    private var installedTrustIds = Set<String>()
+    private var deviceIdentity: DeviceIdentityKeychainTestContext?
     
     let alice = "alice-peer"
     let bob = "bob-peer"
@@ -23,7 +25,11 @@ final class PQCP2PIntegrationTests: XCTestCase {
             )
         }
 
-        crypto = EnhancedPostQuantumCrypto()
+        let deviceIdentity = try DeviceIdentityKeychainTestContext()
+        self.deviceIdentity = deviceIdentity
+        crypto = EnhancedPostQuantumCrypto(
+            deviceIdentityKeyManager: deviceIdentity.manager
+        )
         keyManager = EnhancedQuantumKeyManager()
         
  // 启用PQC进行测试
@@ -31,11 +37,25 @@ final class PQCP2PIntegrationTests: XCTestCase {
             SettingsManager.shared.enablePQC = true
             SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
+        try await installProtocolIdentityTrust(for: alice)
     }
     
     override func tearDown() async throws {
         crypto = nil
         keyManager = nil
+        let deviceIdentity = self.deviceIdentity
+        self.deviceIdentity = nil
+
+        let trustIds = Array(installedTrustIds)
+        installedTrustIds.removeAll()
+        let cleanupTask = await MainActor.run {
+            let trust = TrustSyncService.shared
+            return Task { @MainActor in
+                await trust.removeRecordsForTesting(deviceIds: trustIds)
+                trust.setInMemoryPersistenceForTesting(false)
+            }
+        }
+        await cleanupTask.value
 
         let enablePQC = originalEnablePQC
         let signatureAlgorithm = originalPQCSignatureAlgorithm
@@ -43,6 +63,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
             SettingsManager.shared.enablePQC = enablePQC
             SettingsManager.shared.pqcSignatureAlgorithm = signatureAlgorithm
         }
+        try deviceIdentity?.reset()
     }
     
  // MARK: - 端到端通信测试
@@ -70,7 +91,10 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testEndToEndMessageEncryption() async throws {
         #if canImport(liboqs)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         
         let message = "这是一条需要加密的P2P消息 🔐".utf8Data
         
@@ -166,6 +190,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
         
  // 每个peer都签名消息
         for peer in peers {
+            try await installProtocolIdentityTrust(for: peer)
             let sig = try await crypto.hybridSign(message, for: peer)
             signatures.append(sig)
         }
@@ -190,7 +215,10 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testSessionKeyNegotiation() async throws {
         #if canImport(liboqs)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         
  // 模拟双向密钥协商（简化版）
         
@@ -261,7 +289,10 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testSecureFileTransfer() async throws {
         #if canImport(liboqs)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         
  // 模拟文件内容（1MB）
         let fileContent = Data(repeating: 0xAB, count: 1024 * 1024)
@@ -332,7 +363,10 @@ final class PQCP2PIntegrationTests: XCTestCase {
     
     func testKEMBasedEncryptionPerformance() async throws {
         #if canImport(liboqs)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         
         let message = Data(repeating: 0xAA, count: 1024 * 10) // 10KB
         let iterations = 10
@@ -394,7 +428,8 @@ final class PQCP2PIntegrationTests: XCTestCase {
 
         let message = "provider availability test".utf8Data
 
-        if PQCProviderFactory.makeProvider() != nil {
+        let keychain = PQCKeychainTestContext()
+        if PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource) != nil {
             let signature = try await crypto.hybridSign(message, for: alice)
             XCTAssertNotNil(signature.pqc)
         } else {
@@ -410,21 +445,35 @@ final class PQCP2PIntegrationTests: XCTestCase {
  // MARK: - 安全特性测试
     
     func testPQCAlgorithmSelection() async throws {
-        #if canImport(liboqs)
         let message = "算法选择测试".utf8Data
-        let algorithms = ["ML-DSA-65", "ML-DSA-87"]
-        
-        for algorithm in algorithms {
-            await MainActor.run {
-                SettingsManager.shared.pqcSignatureAlgorithm = algorithm
-            }
-            
-            let (_, pqcSig) = try await crypto.hybridSign(message, for: "\(alice)-\(algorithm)")
-            let signature = try XCTUnwrap(pqcSig, "算法 \(algorithm) 应该生成签名")
-            XCTAssertGreaterThan(signature.count, 3_000)
+        await MainActor.run {
+            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
         }
-        #else
-        throw XCTSkip("The liboqs algorithm matrix requires a liboqs-enabled build")
-        #endif
+
+        let (_, pqcSignature) = try await crypto.hybridSign(message, for: "\(alice)-ML-DSA-65")
+        XCTAssertGreaterThan(try XCTUnwrap(pqcSignature).count, 3_000)
+
+        let normalized = await MainActor.run { () -> [String] in
+            ["ML-DSA-87", "ML-DSA-unknown"].map { unsupported in
+                SettingsManager.shared.pqcSignatureAlgorithm = unsupported
+                return SettingsManager.shared.pqcSignatureAlgorithm
+            }
+        }
+        XCTAssertEqual(
+            normalized,
+            ["ML-DSA-65", "ML-DSA-65"],
+            "Production settings must never advertise an algorithm outside the handshake trust model"
+        )
+    }
+
+    private func installProtocolIdentityTrust(for peerId: String) async throws {
+        guard installedTrustIds.insert(peerId).inserted else { return }
+        let publicKey = try await XCTUnwrap(deviceIdentity).manager.getProtocolSigningPublicKey(
+            for: .mlDSA65
+        )
+        _ = try await installAuthenticatedMLDSATrustRecordForTesting(
+            peerId: peerId,
+            publicKey: publicKey
+        )
     }
 }

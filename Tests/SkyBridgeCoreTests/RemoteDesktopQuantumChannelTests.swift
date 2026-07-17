@@ -9,21 +9,34 @@ import CryptoKit
 final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     private var originalEnablePQC = false
     private var originalPQCSignatureAlgorithm = ""
+    private var deviceIdentity: DeviceIdentityKeychainTestContext?
+    private var installedTrustIds = Set<String>()
 
     var crypto: EnhancedPostQuantumCrypto!
     
     override func setUp() async throws {
         originalEnablePQC = SettingsManager.shared.enablePQC
         originalPQCSignatureAlgorithm = SettingsManager.shared.pqcSignatureAlgorithm
-        crypto = EnhancedPostQuantumCrypto()
+        let deviceIdentity = try DeviceIdentityKeychainTestContext()
+        self.deviceIdentity = deviceIdentity
+        crypto = EnhancedPostQuantumCrypto(
+            deviceIdentityKeyManager: deviceIdentity.manager
+        )
         SettingsManager.shared.enablePQC = true
         SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
     }
     
     override func tearDown() async throws {
         crypto = nil
+        let deviceIdentity = self.deviceIdentity
+        self.deviceIdentity = nil
+        let trust = TrustSyncService.shared
+        await trust.removeRecordsForTesting(deviceIds: Array(installedTrustIds))
+        trust.setInMemoryPersistenceForTesting(false)
+        installedTrustIds.removeAll()
         SettingsManager.shared.enablePQC = originalEnablePQC
         SettingsManager.shared.pqcSignatureAlgorithm = originalPQCSignatureAlgorithm
+        try deviceIdentity?.reset()
     }
     
  // MARK: - PQC adapter contract
@@ -41,7 +54,10 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     }
 
     func testPQCFrameKeyAgreementProviderIsAvailable() throws {
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         XCTAssertEqual(provider.suite, .pqcMlKemMlDsa)
         XCTAssertNotEqual(provider.backend, .none)
     }
@@ -49,6 +65,7 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
  // MARK: - 控制命令签名测试
     
     func testControlCommandSigning() async throws {
+        try await installLocalProtocolIdentityTrust(for: "remote-desktop-session")
         let testCommand = RemoteControlCommand(
             type: .mouseMove,
             x: 100,
@@ -79,6 +96,7 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     
     func testControlCommandTampering() async throws {
         #if canImport(OQSRAII)
+        try await installLocalProtocolIdentityTrust(for: "test-session")
         let originalCommand = RemoteControlCommand(
             type: .mouseMove,
             x: 100,
@@ -119,7 +137,10 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     
     func testFrameDataEncryption() async throws {
         #if canImport(OQSRAII)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
  // 模拟一帧数据（实际会更大）
         let frameData = Data(repeating: 0xAB, count: 1024 * 100) // 100KB
 
@@ -155,7 +176,10 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     
     func testSessionKeyRotation() async throws {
         #if canImport(OQSRAII)
-        let provider = try XCTUnwrap(PQCProviderFactory.makeProvider())
+        let keychain = PQCKeychainTestContext()
+        let provider = try XCTUnwrap(
+            PQCProviderFactory.makeProvider(scopeSource: keychain.scopeSource)
+        )
         var sessionKeys: [Data] = []
 
  // 模拟多次密钥轮换
@@ -199,6 +223,16 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
             )
             XCTAssertNotNil(signature.pqc)
         }
+    }
+
+    private func installLocalProtocolIdentityTrust(for peerId: String) async throws {
+        guard installedTrustIds.insert(peerId).inserted else { return }
+        let publicKey = try await XCTUnwrap(deviceIdentity).manager
+            .getProtocolSigningPublicKey(for: .mlDSA65)
+        _ = try await installAuthenticatedMLDSATrustRecordForTesting(
+            peerId: peerId,
+            publicKey: publicKey
+        )
     }
 }
 

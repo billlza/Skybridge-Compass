@@ -50,6 +50,12 @@ run_check_strict_no_warnings \
   bash "${ROOT_DIR}/Scripts/test_loopback_benchmark_fixture_policy.sh"
 
 run_check_strict_no_warnings \
+  "qperiapt-rust-abi1-feature-policy" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_qperiapt_rust_feature_policy.sh"
+
+run_check_strict_no_warnings \
   "ios-simulator-selection" \
   "code" \
   "source-quality" \
@@ -72,6 +78,12 @@ run_check_strict_no_warnings \
   "code" \
   "source-quality" \
   env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" '.*' --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
+
+run_check_strict_no_warnings \
+  "loopback-connection-teardown-stress" \
+  "code" \
+  "source-quality" \
+  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 BASELINE_RUN_BENCH=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" --require-no-skips SkyBridgeBenchTests.BaselineLoopbackBenchTests/testLoopbackConnectionTeardownStress --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
 
 run_check_strict_no_warnings \
   "ios-debug-build" \

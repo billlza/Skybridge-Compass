@@ -33,6 +33,11 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     }
 }
 
+enum IOSKeychainInsertResult: Sendable, Equatable {
+    case inserted
+    case alreadyExists
+}
+
 // MARK: - Keychain Manager
 
 /// 钥匙串管理器
@@ -130,6 +135,111 @@ public actor KeychainManager {
             throw KeychainError.decodingError
         }
         return data
+    }
+
+    /// Reads one exact, non-synchronizable generic-password item. This is the
+    /// authoritative primitive used by immutable identity records; callers
+    /// must provide the concrete shared access group resolved from the signed
+    /// app entitlement.
+    nonisolated func loadImmutableKeyStrict(
+        service: String,
+        account: String,
+        accessGroup: String
+    ) throws -> Data? {
+        let normalizedGroup = accessGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedGroup.isEmpty else {
+            throw KeychainError.encodingError
+        }
+
+        if Self.useInMemoryKeychain {
+            let key = Self.inMemoryScopedKey(
+                service: service,
+                account: account,
+                accessGroup: normalizedGroup
+            )
+            Self.inMemoryLock.lock()
+            let data = Self.inMemoryStore[key]
+            Self.inMemoryLock.unlock()
+            return data
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: normalizedGroup,
+            kSecAttrSynchronizable as String: false,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(query as CFDictionary, &item) {
+        case errSecItemNotFound:
+            return nil
+        case errSecSuccess:
+            guard let data = item as? Data else {
+                throw KeychainError.decodingError
+            }
+            return data
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    /// Add-only compare-and-set for immutable identity state. A duplicate is
+    /// never overwritten; the authority actor must reload and validate the
+    /// winning value.
+    nonisolated func insertImmutableKeyIfAbsent(
+        data: Data,
+        service: String,
+        account: String,
+        accessGroup: String
+    ) throws -> IOSKeychainInsertResult {
+        let normalizedGroup = accessGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !data.isEmpty, !normalizedGroup.isEmpty else {
+            throw KeychainError.encodingError
+        }
+
+        if Self.useInMemoryKeychain {
+            let key = Self.inMemoryScopedKey(
+                service: service,
+                account: account,
+                accessGroup: normalizedGroup
+            )
+            return Self.inMemoryLock.withLock {
+                guard Self.inMemoryStore[key] == nil else {
+                    return .alreadyExists
+                }
+                Self.inMemoryStore[key] = data
+                return .inserted
+            }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: normalizedGroup,
+            kSecAttrSynchronizable as String: false,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: data
+        ]
+        switch SecItemAdd(query as CFDictionary, nil) {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .alreadyExists
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    private nonisolated static func inMemoryScopedKey(
+        service: String,
+        account: String,
+        accessGroup: String
+    ) -> String {
+        "scoped|\(accessGroup)|\(service)|\(account)"
     }
     
     /// 删除密钥
@@ -372,40 +482,6 @@ public actor KeychainManager {
     /// 获取对端签名公钥
     public nonisolated func retrievePeerSigningPublicKey(_ peerId: String) -> Data? {
         exportKey(service: "SkyBridge.PeerSigningPub", account: peerId)
-    }
-    
-    // MARK: - Device Identity
-    
-    /// 获取或生成设备 ID
-    public nonisolated func getOrGenerateDeviceId() -> String {
-        do {
-            return try getOrGenerateDeviceIdStrict()
-        } catch {
-            return ""
-        }
-    }
-
-    /// 获取或生成设备 ID，保留 Keychain 错误语义。
-    public nonisolated func getOrGenerateDeviceIdStrict() throws -> String {
-        let service = "SkyBridge.Identity"
-        let account = "DeviceUUID"
-        
-        if let data = try exportKeyStrict(service: service, account: account) {
-            guard let uuidString = String(data: data, encoding: .utf8),
-                  !uuidString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw KeychainError.decodingError
-            }
-            return uuidString
-        }
-        
-        let newUUID = UUID().uuidString
-        guard let data = newUUID.data(using: .utf8) else {
-            throw KeychainError.encodingError
-        }
-        guard importKey(data: data, service: service, account: account) else {
-            throw KeychainError.unexpectedError(errSecIO)
-        }
-        return newUUID
     }
     
     // MARK: - Session Key Storage

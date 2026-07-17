@@ -432,15 +432,6 @@ public struct SettingsView: View {
                             Spacer()
                         }
 
-                        HStack {
-                            Button(localizationManager.localizedString("settings.general.deduplicateKeychain")) {
- // deduplicate 是 nonisolated 方法，可以直接同步调用
-                                KeychainManager.shared.deduplicate(servicePrefix: "SkyBridge.")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            
-                            Spacer()
-                        }
                     }
                 }
             }
@@ -1074,34 +1065,34 @@ public struct SettingsView: View {
                         Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Toggle("Q-Periapt ContextBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
+                        Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
                             .disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)
-                            .help("实验性：优先协商 Q-Periapt 的 ContextBound 组合器。仅在启用 q-periapt 的核心构建、macOS 26+/iOS 26+ 运行时、且对端也开启时才协商成功。")
-                        Text("Beta：与现有 X-Wing / ML-KEM 不互通，仅在双方都开启 Q-Periapt 时协商。")
+                            .help("仅当已安装并验证签名策略、信任根与 ABI2 运行时会话后才可启用；开关本身不会配置或信任策略。")
+                        Text(
+                            QPeriaptPlatformPolicy.isLocalRuntimeSupported
+                                ? "已验证签名策略运行时；仅在对端具备完全相同的策略身份时协商。"
+                                : "暂不可用：当前尚未安装并验证 Q-Periapt 签名策略与信任根，功能保持关闭。"
+                        )
                             .font(.caption)
                             .foregroundColor(.secondary)
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
-                            Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
-                                Text("ML-DSA-65").tag("ML-DSA-65")
-                                Text("ML-DSA-87").tag("ML-DSA-87")
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 120)
-                        }
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.useSecureEnclaveMLDSA"), isOn: $settingsManager.useSecureEnclaveMLDSA)
-                        // ML-KEM 密钥协商在本协议中走 X-Wing（ML-KEM-768 + X25519）混合方案，是每会话临时密钥、
-                        // 且 Apple 仅提供软件实现（无 SecureEnclave.XWing 类型）。Secure Enclave 的硬件隔离仅对持久
-                        // 身份密钥（ML-DSA，见上）有意义，故此处不再提供"使用 Secure Enclave ML-KEM"假开关，
-                        // 改为如实展示当前密钥协商方式。
-                        HStack {
-                            Text("ML-KEM 密钥协商")
                             Spacer()
-                            Text("X-Wing 混合 · 软件 · 临时会话密钥")
+                            Text("ML-DSA-65 · 协议身份绑定")
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.secondary)
                         }
-                        .help("密钥协商使用 X-Wing（ML-KEM-768 + X25519）混合方案。该密钥为每会话临时生成、用完即弃，且 Apple 只提供软件实现；因此 Secure Enclave 硬件隔离不适用于此处，仅适用于持久身份签名密钥（见上方 ML-DSA）。")
+                        // CryptoKit currently exposes ML-DSA and X-Wing here as
+                        // software keys. Do not present a Secure Enclave control
+                        // unless the runtime implementation actually consumes it.
+                        HStack {
+                            Text("PQC 密钥执行")
+                            Spacer()
+                            Text("ML-DSA-65 / X-Wing · 软件")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .help("当前 ML-DSA 与 X-Wing 路径均使用软件密钥；界面不会把未接入运行时的 Secure Enclave 能力显示为已启用。")
                         Text(localizationManager.localizedString("settings.advanced.pqc.note"))
                             .font(.caption)
                             .foregroundColor(.secondary)

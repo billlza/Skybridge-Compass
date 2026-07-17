@@ -23,7 +23,7 @@ final class P2PPAKEServiceTests: XCTestCase {
  /// and never directly as a symmetric key or PSK.
  /// **Validates: Requirements 2.3, 2.4**
     func testPAKECodeNonPSKUsageProperty() async throws {
-        let service = PAKEService(localDeviceId: "test-device-initiator")
+        let service = try PAKEService(localDeviceId: "test-device-initiator")
         let pairingCode = "123456"
         let peerId = "test-peer-device"
         
@@ -52,8 +52,8 @@ final class P2PPAKEServiceTests: XCTestCase {
     
  /// Test that different pairing codes produce different PAKE outputs
     func testDifferentCodesProduceDifferentOutputs() async throws {
-        let service1 = PAKEService(localDeviceId: "device-1")
-        let service2 = PAKEService(localDeviceId: "device-2")
+        let service1 = try PAKEService(localDeviceId: "device-1")
+        let service2 = try PAKEService(localDeviceId: "device-2")
         
         let code1 = "123456"
         let code2 = "654321"
@@ -70,8 +70,8 @@ final class P2PPAKEServiceTests: XCTestCase {
     
  /// Test PAKE exchange produces valid shared secret
     func testPAKEExchangeProducesValidSharedSecret() async throws {
-        let initiator = PAKEService(localDeviceId: "initiator-device")
-        let responder = PAKEService(localDeviceId: "responder-device")
+        let initiator = try PAKEService(localDeviceId: "initiator-device")
+        let responder = try PAKEService(localDeviceId: "responder-device")
         
         let pairingCode = "987654"
         let initiatorPeerId = "responder-device"
@@ -111,8 +111,8 @@ final class P2PPAKEServiceTests: XCTestCase {
     
  /// Test wrong pairing code fails verification
     func testWrongPairingCodeFailsVerification() async throws {
-        let initiator = PAKEService(localDeviceId: "initiator-device")
-        let responder = PAKEService(localDeviceId: "responder-device")
+        let initiator = try PAKEService(localDeviceId: "initiator-device")
+        let responder = try PAKEService(localDeviceId: "responder-device")
         
         let correctCode = "123456"
         let wrongCode = "654321"
@@ -150,8 +150,8 @@ final class P2PPAKEServiceTests: XCTestCase {
  /// further pairing attempts for at least 60 seconds.
  /// **Validates: Requirements 2.5**
     func testLockoutAfterFailedAttemptsProperty() async throws {
-        let initiator = PAKEService(localDeviceId: "initiator-device")
-        let responder = PAKEService(localDeviceId: "responder-device")
+        let initiator = try PAKEService(localDeviceId: "initiator-device")
+        let responder = try PAKEService(localDeviceId: "responder-device")
         
         let correctCode = "123456"
         let wrongCode = "000000"
@@ -295,10 +295,20 @@ final class P2PPAKEServiceTests: XCTestCase {
     }
     
  // MARK: - Additional PAKE Tests
+
+    func testInitializerRejectsMissingOrNonCanonicalLocalDeviceId() {
+        for invalidDeviceId in ["", "   ", " device-id", "device-id "] {
+            XCTAssertThrowsError(
+                try PAKEService(localDeviceId: invalidDeviceId)
+            ) { error in
+                XCTAssertEqual(error as? PAKEError, .invalidLocalDeviceId)
+            }
+        }
+    }
     
  /// Test invalid pairing code format is rejected
     func testInvalidPairingCodeRejected() async throws {
-        let service = PAKEService(localDeviceId: "test-device")
+        let service = try PAKEService(localDeviceId: "test-device")
         
  // Test various invalid formats
         let invalidCodes = [
@@ -323,7 +333,7 @@ final class P2PPAKEServiceTests: XCTestCase {
     
  /// Test valid pairing code formats are accepted
     func testValidPairingCodeAccepted() async throws {
-        let service = PAKEService(localDeviceId: "test-device")
+        let service = try PAKEService(localDeviceId: "test-device")
         
         let validCodes = [
             "000000",
@@ -348,7 +358,7 @@ final class P2PPAKEServiceTests: XCTestCase {
     
  /// Test PAKE messages are transcript-encodable
     func testPAKEMessagesTranscriptEncodable() async throws {
-        let service = PAKEService(localDeviceId: "test-device")
+        let service = try PAKEService(localDeviceId: "test-device")
         let messageA = try await service.initiateExchange(password: "123456", peerId: "peer")
         
  // Property: Message A should be deterministically encodable
@@ -372,7 +382,8 @@ extension PAKEError: Equatable {
              (.macVerificationFailed, .macVerificationFailed),
              (.sessionNotInitiated, .sessionNotInitiated),
              (.sessionAlreadyCompleted, .sessionAlreadyCompleted),
-             (.invalidState, .invalidState):
+             (.invalidState, .invalidState),
+             (.invalidLocalDeviceId, .invalidLocalDeviceId):
             return true
         case (.rateLimited(let a), .rateLimited(let b)):
             return abs(a - b) < 1.0

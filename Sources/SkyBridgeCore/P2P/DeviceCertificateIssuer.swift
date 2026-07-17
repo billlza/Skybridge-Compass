@@ -355,7 +355,8 @@ public actor P2PIdentityCertificateIssuer {
             guard let signerId = certificate.signerId else {
                 throw CertificateError.verificationFailed("Missing signer ID")
             }
-            guard let signerRecord = await TrustSyncService.shared.getTrustRecord(deviceId: signerId) else {
+            guard let signerRecord = await TrustSyncService.shared.getTrustRecord(deviceId: signerId),
+                  signerRecord.isAuthenticationEligible else {
                 throw CertificateError.untrusted
             }
             SkyBridgeLogger.p2p.debug("Verifying pairing-confirmed cert, signer: \(signerId)")

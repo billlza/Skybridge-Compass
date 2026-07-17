@@ -42,7 +42,8 @@ private final class LocalLanInteropHostCoordinator {
             reporter.append("failed stage=identity error=\(sanitize(error.localizedDescription))")
             throw error
         }
-        let protocolDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        let protocolDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
         configureRemoteControlNoticeIdentity(protocolDeviceId: protocolDeviceId)
         guard await discoveryManager.waitUntilInitialized(timeout: 5.0) else {
@@ -254,7 +255,7 @@ private final class LocalLanInteropHostCoordinator {
         guard let reportURL = pqcReportURL() else { return }
 
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let deviceId = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let deviceId = try await DeviceIdentityKeyManager.shared.getDeviceId()
         let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
             using: provider
         )

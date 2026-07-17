@@ -86,6 +86,19 @@ public actor HybridCryptoService {
     
  /// 降级警告回调
     public var onDegradationWarning: (@Sendable (String) -> Void)?
+
+    /// Installs a remote signing key only after the caller has authenticated it
+    /// through the canonical pairing/trust flow.
+    public func registerAuthenticatedRemoteSigningKey(
+        _ publicKey: Data,
+        peerId: String
+    ) async throws {
+        try await pqcAdapter.registerAuthenticatedSigningPublicKey(
+            publicKey,
+            peerId: peerId,
+            variant: .mldsa65
+        )
+    }
     
  // MARK: - Initialization
     

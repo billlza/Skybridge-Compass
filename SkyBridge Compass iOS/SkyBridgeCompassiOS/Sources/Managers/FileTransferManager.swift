@@ -162,7 +162,20 @@ public class FileTransferManager: ObservableObject {
         
         // 计算分块数
         let totalChunks = Int(ceil(Double(fileSize) / Double(effectiveChunkSize)))
-        
+
+        // Resolve the complete protocol identity before publishing any
+        // transfer state or "started" event. Cancellation or authority failure
+        // must leave activeTransfers and isTransferring untouched.
+        let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
+        let protocolIdentity = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot()
+        let senderDeviceId = protocolIdentity.deviceId
+        let senderDeviceName = localIdentity.deviceName
+        let senderPlatform = localIdentity.platformName
+        let senderOSVersion = localIdentity.osVersion
+        let senderModelName = SBFT_currentModelDisplayName()
+        let senderChip = SBFT_currentChipDisplayName()
+
         // 创建传输记录
         let transfer = FileTransfer(
             fileName: fileName,
@@ -181,16 +194,6 @@ public class FileTransferManager: ObservableObject {
         var state = TransferState(transferId: transfer.id)
         state.localURL = url
         state.startTime = Date()
-        let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
-        let senderDeviceId = FileTransferClassicPeerResolutionPolicy.preferredSenderDeviceId(
-            stableDeviceId: localIdentity.stableDeviceId,
-            vendorDeviceId: localIdentity.vendorDeviceId
-        )
-        let senderDeviceName = localIdentity.deviceName
-        let senderPlatform = localIdentity.platformName
-        let senderOSVersion = localIdentity.osVersion
-        let senderModelName = SBFT_currentModelDisplayName()
-        let senderChip = SBFT_currentChipDisplayName()
         state.metadata = FileMetadata(
             transferId: transfer.id,
             fileName: fileName,
@@ -793,9 +796,10 @@ public class FileTransferManager: ObservableObject {
         // Use a smaller chunk size for DataChannel to keep per-message size stable.
         let dcChunkSize = min(64 * 1024, max(8 * 1024, metadata.chunkSize))
         let totalChunks = Int(ceil(Double(metadata.fileSize) / Double(dcChunkSize)))
-        
+
         let senderIdentity = AppleMobileDeviceIdentity.currentSnapshot()
-        let senderDeviceId = senderIdentity.stableDeviceId
+        let senderDeviceId = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot().deviceId
         let senderDeviceName: String? = senderIdentity.deviceName
         
         let meta = CrossNetworkFileTransferMessage(

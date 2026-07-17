@@ -169,7 +169,9 @@ public struct LegacyTrustPreconditionChecker: Sendable {
         pairingContext: PairingContext?
     ) -> LegacyTrustPrecondition {
  // 1. 检查是否有已有 TrustRecord 且包含 legacy P-256 公钥
-        if let record = trustRecord, record.allowsLegacyFallback {
+        if let record = trustRecord,
+           record.isAuthenticationEligible,
+           record.allowsLegacyFallback {
             return .existingTrustRecord(
                 deviceId: deviceId,
                 hasLegacyKey: true

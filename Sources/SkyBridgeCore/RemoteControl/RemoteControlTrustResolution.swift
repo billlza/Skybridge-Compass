@@ -31,7 +31,7 @@ enum RemoteControlInboundTrustResolver {
         }
 
         let matches = records.filter { record in
-            guard !record.isTombstone, !record.isExpired else {
+            guard record.isAuthenticationEligible else {
                 return false
             }
             return PeerTrustLookup.recordLookupCandidates(record).contains { candidate in

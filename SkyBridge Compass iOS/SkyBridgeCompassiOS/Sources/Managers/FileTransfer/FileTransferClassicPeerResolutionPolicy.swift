@@ -89,18 +89,6 @@ enum FileTransferClassicPeerResolutionPolicy {
         return nil
     }
 
-    nonisolated static func preferredSenderDeviceId(
-        stableDeviceId: String,
-        vendorDeviceId: String?
-    ) -> String {
-        let normalizedStable = stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !normalizedStable.isEmpty {
-            return normalizedStable
-        }
-
-        return vendorDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
     nonisolated static func normalizedTransferSecurityCandidates(
         _ candidates: [String],
         excluding exactMatch: String? = nil

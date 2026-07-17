@@ -10,6 +10,10 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  /// 量子加密管理器
     private let quantumCryptoManager: QuantumCryptoManager
+
+    /// Production resolves the signed shared-group entitlement. Legacy DEBUG
+    /// handshake tests inject an isolated typed scope without process globals.
+    private let sharedIdentityScopeSource: SkyBridgeSharedIdentityScopeSource
     
  /// 设备密钥对
     private var deviceKeyPair: P256.KeyAgreement.PrivateKey
@@ -50,6 +54,7 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     public init(configuration: P2PSecurityConfiguration = .default) {
         self.configuration = configuration
         self.quantumCryptoManager = QuantumCryptoManager()
+        self.sharedIdentityScopeSource = .requiredEntitlement
         self.deviceKeyPair = P256.KeyAgreement.PrivateKey()
         self.permissionManager = P2PPermissionManager()
         
@@ -57,6 +62,22 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         loadTrustedDevices()
         setupPolicyObservers()
     }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    internal init(
+        configuration: P2PSecurityConfiguration = .default,
+        sharedIdentityScopeSource: SkyBridgeSharedIdentityScopeSource
+    ) {
+        self.configuration = configuration
+        self.quantumCryptoManager = QuantumCryptoManager()
+        self.sharedIdentityScopeSource = sharedIdentityScopeSource
+        self.deviceKeyPair = P256.KeyAgreement.PrivateKey()
+        self.permissionManager = P2PPermissionManager()
+
+        loadTrustedDevices()
+        setupPolicyObservers()
+    }
+    #endif
 
     deinit {
         if let policyObserver {
@@ -303,7 +324,9 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     @available(*, deprecated, message: "Legacy pre-paper handshake API. Use `HandshakeDriver` / `TwoAttemptHandshakeManager` to establish `SessionKeys` instead.")
     public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
         // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
-        if let provider = PQCProviderFactory.makeProvider() {
+        if let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) {
             // 使用 ML‑KEM‑768 完成共享密钥协商
             // 注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签
             let enc = try await provider.kemEncapsulate(peerId: deviceId, kemVariant: "ML-KEM-768")
@@ -329,13 +352,21 @@ public class P2PSecurityManager: ObservableObject, Sendable {
 
     @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemEncapsulate(deviceId: String, kemVariant: String = "ML-KEM-768") async throws -> (sharedSecret: Data, encapsulated: Data) {
-        guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
+        guard let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) else {
+            throw P2PSecurityError.authenticationFailed
+        }
         return try await provider.kemEncapsulate(peerId: deviceId, kemVariant: kemVariant)
     }
 
     @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemDecapsulate(deviceId: String, encapsulated: Data, kemVariant: String = "ML-KEM-768") async throws -> Data {
-        guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
+        guard let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) else {
+            throw P2PSecurityError.authenticationFailed
+        }
         return try await provider.kemDecapsulate(peerId: deviceId, encapsulated: encapsulated, kemVariant: kemVariant)
     }
 
@@ -1225,8 +1256,27 @@ public struct SessionTokenKit {
     public static func issueToken(provider: PQCProvider, payload: Data, peerId: String) async throws -> Data {
         return try await provider.sign(data: payload, peerId: peerId, algorithm: "ML-DSA-65")
     }
- /// 验证令牌签名（ML‑DSA‑65）
-    public static func verifyToken(provider: PQCProvider, payload: Data, signature: Data, peerId: String) async -> Bool {
-        return await provider.verify(data: payload, signature: signature, peerId: peerId, algorithm: "ML-DSA-65")
+ /// 验证令牌签名（ML‑DSA‑65）。远端公钥必须来自已认证的信任记录。
+    public static func verifyToken(
+        provider: PQCProvider,
+        payload: Data,
+        signature: Data,
+        peerId: String,
+        authenticatedPublicKey: Data
+    ) async throws -> Bool {
+        guard let consumer = provider as? any AuthenticatedPQCSigningKeyConsumer else {
+            throw PQCSigningTrustError.unsupportedSignatureAlgorithm("ML-DSA-65")
+        }
+        try await consumer.registerAuthenticatedSigningPublicKey(
+            authenticatedPublicKey,
+            peerId: peerId,
+            algorithm: "ML-DSA-65"
+        )
+        return await provider.verify(
+            data: payload,
+            signature: signature,
+            peerId: peerId,
+            algorithm: "ML-DSA-65"
+        )
     }
 }

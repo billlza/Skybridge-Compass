@@ -94,6 +94,28 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             XCTAssertEqual(error as? AppMessage.KEMRefreshValidationError, .classicSuiteRejected(wireId: CryptoSuite.x25519Ed25519.wireId))
         }
 
+        let legacy = validKEMRefreshRequest(
+            requestedSuiteWireIds: [CryptoSuite.qperiaptContextBound.wireId]
+        )
+        XCTAssertThrowsError(try legacy.validatedStrictResponderSuites(now: now)) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .legacySuiteRejected(wireId: CryptoSuite.qperiaptContextBound.wireId)
+            )
+        }
+
+        let qPeriaptABI2 = validKEMRefreshRequest(
+            requestedSuiteWireIds: [CryptoSuite.qperiaptABI2PolicyBound.wireId]
+        )
+        XCTAssertThrowsError(try qPeriaptABI2.validatedStrictResponderSuites(now: now)) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .qPeriaptPlatformMetadataUnavailable(
+                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
+                )
+            )
+        }
+
         for wireId in [UInt16(0x0000), UInt16(0xFFFF)] {
             let unknownSuite = validKEMRefreshRequest(requestedSuiteWireIds: [wireId])
             XCTAssertThrowsError(try unknownSuite.validatedStrictResponderSuites(now: now)) { error in
@@ -475,7 +497,51 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         }
     }
 
-    func testStrictImportRejectsClassicSuiteAndBadKEMLength() {
+    func testStrictImportRejectsLegacyQPeriaptUnsignedPlatformClassicAndBadKEMLength() {
+        let legacy = validPayload(kemPublicKeys: [
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                publicKey: Data(
+                    repeating: 0x54,
+                    count: QPeriaptPlatformPolicy.publicKeyLength
+                )
+            )
+        ])
+        XCTAssertThrowsError(
+            try legacy.validatedForStrictPQCImport(
+                now: now,
+                pinnedProtocolFingerprints: [fingerprint]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .legacySuiteRejected(wireId: CryptoSuite.qperiaptContextBound.wireId)
+            )
+        }
+
+        let qPeriaptABI2 = validPayload(kemPublicKeys: [
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
+                publicKey: Data(
+                    repeating: 0x56,
+                    count: QPeriaptPlatformPolicy.publicKeyLength
+                )
+            )
+        ])
+        XCTAssertThrowsError(
+            try qPeriaptABI2.validatedForStrictPQCImport(
+                now: now,
+                pinnedProtocolFingerprints: [fingerprint]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .qPeriaptPlatformMetadataUnavailable(
+                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
+                )
+            )
+        }
+
         let classic = validPayload(kemPublicKeys: [
             KEMPublicKeyInfo(suiteWireId: CryptoSuite.x25519Ed25519.wireId, publicKey: Data(repeating: 0x55, count: 32))
         ])

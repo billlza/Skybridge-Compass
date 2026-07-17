@@ -71,6 +71,12 @@ final class AcceptReservation: Sendable {
 }
 
 final class AcceptedConnectionMailbox: Sendable {
+    enum OfferDisposition: Sendable {
+        case accepted
+        case rejected(NetworkLoopbackLifecycleError)
+        case terminal(NetworkLoopbackLifecycleError)
+    }
+
     private struct InFlightConnection: Sendable {
         let connection: NWConnection
         let iteration: Int
@@ -86,7 +92,7 @@ final class AcceptedConnectionMailbox: Sendable {
         let waiter: AcceptReservation?
         let accepted: NWConnection?
         let connectionsToCancel: [NWConnection]
-        let error: NetworkLoopbackLifecycleError?
+        let disposition: OfferDisposition
     }
 
     private let protocolName: String
@@ -136,14 +142,14 @@ final class AcceptedConnectionMailbox: Sendable {
         }
     }
 
-    func offer(_ connection: NWConnection) -> NetworkLoopbackLifecycleError? {
+    func offer(_ connection: NWConnection) -> OfferDisposition {
         let action = state.withLock { state -> OfferAction in
             if let terminalError = state.terminalError {
                 return OfferAction(
                     waiter: nil,
                     accepted: nil,
                     connectionsToCancel: [connection],
-                    error: terminalError
+                    disposition: .terminal(terminalError)
                 )
             }
             if let inFlight = state.inFlight {
@@ -152,15 +158,11 @@ final class AcceptedConnectionMailbox: Sendable {
                     iteration: inFlight.iteration,
                     detail: "capacity 1 exceeded"
                 )
-                let waiter = state.waiter
-                state.waiter = nil
-                state.inFlight = nil
-                state.terminalError = error
                 return OfferAction(
-                    waiter: waiter,
+                    waiter: nil,
                     accepted: nil,
-                    connectionsToCancel: [connection, inFlight.connection],
-                    error: error
+                    connectionsToCancel: [connection],
+                    disposition: .rejected(error)
                 )
             }
             if let waiter = state.waiter {
@@ -173,7 +175,7 @@ final class AcceptedConnectionMailbox: Sendable {
                     waiter: waiter,
                     accepted: connection,
                     connectionsToCancel: [],
-                    error: nil
+                    disposition: .accepted
                 )
             }
 
@@ -182,23 +184,20 @@ final class AcceptedConnectionMailbox: Sendable {
                 iteration: nil,
                 detail: "received a connection without an active reservation"
             )
-            state.terminalError = error
             return OfferAction(
                 waiter: nil,
                 accepted: nil,
                 connectionsToCancel: [connection],
-                error: error
+                disposition: .rejected(error)
             )
         }
         action.connectionsToCancel.forEach { $0.cancel() }
         if let waiter = action.waiter {
             if let accepted = action.accepted {
                 waiter.finish(.success(accepted))
-            } else if let error = action.error {
-                waiter.finish(.failure(error))
             }
         }
-        return action.error
+        return action.disposition
     }
 
     func release(_ connection: NWConnection, iteration: Int) throws {
@@ -258,7 +257,6 @@ final class AcceptedConnectionMailbox: Sendable {
             if let inFlight = state.inFlight { connections.append(inFlight.connection) }
             let waiter = state.waiter
             state.waiter = nil
-            state.inFlight = nil
             state.terminalError = terminalError
             return (waiter, connections, terminalError)
         }

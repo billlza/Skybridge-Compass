@@ -142,6 +142,21 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
     func testInboundSelectionAndNegotiatedSuiteGatesRejectClassicAuthorityBootstrapInStrictPQC() {
         XCTAssertNil(
             CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeySelectionPolicy(
+                supportedSuites: [.qperiaptContextBound],
+                strictPQCRequested: false,
+                localPQCAvailable: true
+            )
+        )
+        XCTAssertNil(
+            CrossNetworkWebRTCPQCHandshakePolicy.inboundInitialHandshakeSelectionPolicy(
+                supportedSuites: [.qperiaptContextBound, .mlkem768],
+                strictPQCRequested: false,
+                localPQCAvailable: true,
+                expectedRemoteAuthorityAlgorithm: .mlDSA65
+            )
+        )
+        XCTAssertNil(
+            CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeySelectionPolicy(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
                 localPQCAvailable: true
@@ -201,6 +216,19 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
             )
         )
         XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeyNegotiatedSuiteAllowed(
+                .qperiaptContextBound,
+                strictPQCRequested: false
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.inboundInitialHandshakeNegotiatedSuiteAllowed(
+                .qperiaptContextBound,
+                strictPQCRequested: false,
+                allowsClassicAuthorityBootstrap: true
+            )
+        )
+        XCTAssertFalse(
             CrossNetworkWebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
@@ -210,6 +238,13 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
         XCTAssertTrue(
             CrossNetworkWebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: false,
+                expectedRemoteAuthorityAlgorithm: .ed25519
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.qperiaptContextBound],
                 strictPQCRequested: false,
                 expectedRemoteAuthorityAlgorithm: .ed25519
             )

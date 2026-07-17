@@ -1091,8 +1091,16 @@ struct AdvancedPreferencesView: View {
             Section("量子安全套件") {
                 Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
                     .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
-                Toggle("Q-Periapt ContextBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                    .help("实验性：偏好 Q-Periapt 的 ContextBound 组合器（仅在启用 q-periapt 的核心构建中生效，且仅当对端也支持时协商成功）。")
+                Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
+                    .disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)
+                    .help("仅当已安装并验证签名策略、信任根与 ABI2 运行时会话后才可启用；开关本身不会配置或信任策略。")
+                Text(
+                    QPeriaptPlatformPolicy.isLocalRuntimeSupported
+                        ? "已验证签名策略运行时；仅在对端具备完全相同的策略身份时协商。"
+                        : "暂不可用：当前尚未安装并验证 Q-Periapt 签名策略与信任根，功能保持关闭。"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
             }
 
             Section("性能优化") {

@@ -14,6 +14,15 @@ final class QPeriaptRoundTripTests: XCTestCase {
         case expectedFailure
     }
 
+    private enum ExpectedPolicyBoundaryFailure {
+        case emptyPolicy
+        case oversizedPolicy(actual: Int)
+        case signatureLength(actual: Int)
+        case verificationKeyLength(actual: Int)
+        case pinLength(actual: Int)
+        case trustedStateLength(actual: Int)
+    }
+
     private struct SignedPolicyVector: Decodable {
         let schemaVersion: Int
         let algorithm: String
@@ -145,6 +154,20 @@ final class QPeriaptRoundTripTests: XCTestCase {
 
         func snapshot() -> Int {
             count
+        }
+    }
+
+    private final class AdmissionManualClock: Sendable {
+        private let instant = OSAllocatedUnfairLock(initialState: ContinuousClock().now)
+
+        func now() -> ContinuousClock.Instant {
+            instant.withLock { $0 }
+        }
+
+        func advance(by duration: Duration) {
+            instant.withLock { value in
+                value = value.advanced(by: duration)
+            }
         }
     }
 
@@ -296,6 +319,51 @@ final class QPeriaptRoundTripTests: XCTestCase {
         XCTAssertEqual(replacementResult, 3)
     }
 
+    func testQPeriaptCryptoAdmissionClosesCancellationRaceBeforeWaiterAppend() async throws {
+        let ownerBarrier = AdmissionOperationBarrier()
+        let executionProbe = AdmissionExecutionProbe()
+        let gate = QPeriaptCryptoAdmissionGate(
+            maximumWaiters: 1,
+            beforeWaiterAppendForTesting: {
+                withUnsafeCurrentTask { task in
+                    task?.cancel()
+                }
+            }
+        )
+        let owner = Task {
+            try await gate.run {
+                await ownerBarrier.suspendUntilReleased()
+                return 1
+            }
+        }
+        defer {
+            owner.cancel()
+            Task { await ownerBarrier.release() }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let cancelledWaiter = Task {
+            try await gate.run {
+                await executionProbe.record()
+                return 2
+            }
+        }
+        do {
+            _ = try await cancelledWaiter.value
+            XCTFail("Cancellation before waiter append must reject admission")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let pendingWaiterCount = await gate.pendingWaiterCount
+        let executionCount = await executionProbe.snapshot()
+        XCTAssertEqual(pendingWaiterCount, 0)
+        XCTAssertEqual(executionCount, 0)
+        await ownerBarrier.release()
+        let ownerValue = try await owner.value
+        XCTAssertEqual(ownerValue, 1)
+    }
+
     func testQPeriaptCryptoAdmissionDefaultQueueRejectsNinthWaiter() async throws {
         let gate = QPeriaptCryptoAdmissionGate()
         let ownerBarrier = AdmissionOperationBarrier()
@@ -365,12 +433,14 @@ final class QPeriaptRoundTripTests: XCTestCase {
     func testQPeriaptCryptoAdmissionDeadlineRemovesWaiterAndRestoresCapacity() async throws {
         let deadlineBarrier = AdmissionOperationBarrier()
         let ownerBarrier = AdmissionOperationBarrier()
+        let clock = AdmissionManualClock()
         let gate = QPeriaptCryptoAdmissionGate(
             maximumWaiters: 1,
             maximumWaitDuration: .seconds(1),
             sleepUntilDeadline: { _ in
                 await deadlineBarrier.suspendUntilReleased()
-            }
+            },
+            now: { clock.now() }
         )
         let owner = Task {
             try await gate.run {
@@ -389,6 +459,7 @@ final class QPeriaptRoundTripTests: XCTestCase {
         }
         try await waitForAdmissionWaiterCount(1, on: gate)
         await deadlineBarrier.waitUntilEntered()
+        clock.advance(by: .seconds(1))
         await deadlineBarrier.release()
         do {
             _ = try await expiringWaiter.value
@@ -407,6 +478,167 @@ final class QPeriaptRoundTripTests: XCTestCase {
         let replacementValue = try await gate.run { 3 }
         XCTAssertEqual(ownerValue, 1)
         XCTAssertEqual(replacementValue, 3)
+    }
+
+    func testQPeriaptCryptoAdmissionReleaseRejectsAlreadyExpiredWaiterBeforeSleeperRuns() async throws {
+        let deadlineBarrier = AdmissionOperationBarrier()
+        let ownerBarrier = AdmissionOperationBarrier()
+        let executionProbe = AdmissionExecutionProbe()
+        let clock = AdmissionManualClock()
+        let gate = QPeriaptCryptoAdmissionGate(
+            maximumWaiters: 1,
+            maximumWaitDuration: .seconds(1),
+            sleepUntilDeadline: { _ in
+                await deadlineBarrier.suspendUntilReleased()
+            },
+            now: { clock.now() }
+        )
+        let owner = Task {
+            try await gate.run {
+                await ownerBarrier.suspendUntilReleased()
+                return 1
+            }
+        }
+        defer {
+            owner.cancel()
+            Task {
+                await ownerBarrier.release()
+                await deadlineBarrier.release()
+            }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let waiter = Task {
+            try await gate.run {
+                await executionProbe.record()
+                return 2
+            }
+        }
+        try await waitForAdmissionWaiterCount(1, on: gate)
+        await deadlineBarrier.waitUntilEntered()
+        clock.advance(by: .seconds(1))
+
+        // Deliberately release the owner before waking the sleeper. The gate
+        // itself must observe the absolute deadline and reject the waiter.
+        await ownerBarrier.release()
+        let ownerValue = try await owner.value
+        XCTAssertEqual(ownerValue, 1)
+        do {
+            _ = try await waiter.value
+            XCTFail("An expired waiter must not receive a permit when release wins actor scheduling")
+        } catch {
+            XCTAssertEqual(error as? QPeriaptCryptoAdmissionError, .waitDeadlineExceeded)
+        }
+        let expiredExecutionCount = await executionProbe.snapshot()
+        let expiredPendingCount = await gate.pendingWaiterCount
+        XCTAssertEqual(expiredExecutionCount, 0)
+        XCTAssertEqual(expiredPendingCount, 0)
+        await deadlineBarrier.release()
+    }
+
+    func testQPeriaptCryptoAdmissionPrunesExpiredWaiterBeforeCapacityCheck() async throws {
+        let ownerBarrier = AdmissionOperationBarrier()
+        let clock = AdmissionManualClock()
+        let gate = QPeriaptCryptoAdmissionGate(
+            maximumWaiters: 1,
+            maximumWaitDuration: .seconds(1),
+            sleepUntilDeadline: { _ in
+                try await Task.sleep(for: .seconds(60))
+            },
+            now: { clock.now() }
+        )
+        let owner = Task {
+            try await gate.run {
+                await ownerBarrier.suspendUntilReleased()
+                return 1
+            }
+        }
+        defer {
+            owner.cancel()
+            Task { await ownerBarrier.release() }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let expiredWaiter = Task {
+            try await gate.run { 2 }
+        }
+        try await waitForAdmissionWaiterCount(1, on: gate)
+        clock.advance(by: .seconds(1))
+
+        let replacement = Task {
+            try await gate.run { 3 }
+        }
+        let replacementDeadline = ContinuousClock().now.advanced(by: .seconds(2))
+        while await gate.hasElapsedPendingWaiterForTesting {
+            guard ContinuousClock().now < replacementDeadline else {
+                XCTFail("Replacement admission did not prune the expired waiter")
+                throw AdmissionTestError.timedOut
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let replacementWaiterCount = await gate.pendingWaiterCount
+        XCTAssertEqual(replacementWaiterCount, 1)
+        do {
+            _ = try await expiredWaiter.value
+            XCTFail("Expired waiters must be evicted before a new capacity decision")
+        } catch {
+            XCTAssertEqual(error as? QPeriaptCryptoAdmissionError, .waitDeadlineExceeded)
+        }
+
+        await ownerBarrier.release()
+        let ownerValue = try await owner.value
+        let replacementValue = try await replacement.value
+        XCTAssertEqual(ownerValue, 1)
+        XCTAssertEqual(replacementValue, 3)
+    }
+
+    func testQPeriaptCryptoAdmissionKeepsCancelledOwnerPermitUntilOperationReturns() async throws {
+        let gate = QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
+        let ownerBarrier = AdmissionOperationBarrier()
+        let secondExecution = AdmissionExecutionProbe()
+        let owner = Task {
+            try await gate.run {
+                await ownerBarrier.suspendUntilReleased()
+                return 1
+            }
+        }
+        defer {
+            owner.cancel()
+            Task { await ownerBarrier.release() }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let second = Task {
+            try await gate.run {
+                await secondExecution.record()
+                return 2
+            }
+        }
+        defer { second.cancel() }
+        try await waitForAdmissionWaiterCount(1, on: gate)
+
+        owner.cancel()
+        try await Task.sleep(for: .milliseconds(20))
+        let executionCountBeforeOwnerReturn = await secondExecution.snapshot()
+        XCTAssertEqual(
+            executionCountBeforeOwnerReturn,
+            0,
+            "Cancelling an active owner must not release admission while its operation is still running"
+        )
+
+        await ownerBarrier.release()
+        do {
+            _ = try await owner.value
+            XCTFail("The cancelled owner result must be rejected after its operation returns")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let secondValue = try await second.value
+        XCTAssertEqual(secondValue, 2)
+        let finalExecutionCount = await secondExecution.snapshot()
+        let finalPendingCount = await gate.pendingWaiterCount
+        XCTAssertEqual(finalExecutionCount, 1)
+        XCTAssertEqual(finalPendingCount, 0)
     }
 
     func testQPeriaptCryptoAdmissionReleasesPermitAfterOperationFailure() async throws {
@@ -706,6 +938,237 @@ final class QPeriaptRoundTripTests: XCTestCase {
         XCTAssertNotEqual(senderSecret, wrongContextData)
     }
 
+    func testQPeriaptABI2RejectsEveryMalformedKEMLengthBeforeAdmission() async throws {
+        let session = try await makeSession()
+        let adapter = QPeriaptNativeAdapter(session: session)
+        let ownerBarrier = AdmissionOperationBarrier()
+        let owner = Task {
+            try await QPeriaptCryptoAdmissionGate.shared.run {
+                await ownerBarrier.suspendUntilReleased()
+            }
+        }
+        defer {
+            owner.cancel()
+            Task { await ownerBarrier.release() }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let context = Data("skybridge/qperiapt/abi2/length-validation/v1".utf8)
+        for invalidPublicKeyLength in [
+            QPeriaptNativeAdapter.publicKeyLength - 1,
+            QPeriaptNativeAdapter.publicKeyLength + 1
+        ] {
+            do {
+                _ = try await requirePromptCompletion {
+                    try await adapter.encapsulate(
+                        recipientPublicKey: Data(repeating: 0xA5, count: invalidPublicKeyLength),
+                        applicationContext: context
+                    )
+                }
+                XCTFail("Malformed Q-Periapt public keys must fail before admission")
+            } catch CryptoProviderError.invalidKeyLength(
+                let expected,
+                let actual,
+                _,
+                .keyExchange
+            ) {
+                XCTAssertEqual(expected, QPeriaptNativeAdapter.publicKeyLength)
+                XCTAssertEqual(actual, invalidPublicKeyLength)
+            } catch {
+                XCTFail("Unexpected public-key length error: \(error)")
+            }
+            let publicKeyPendingWaiters = await QPeriaptCryptoAdmissionGate.shared.pendingWaiterCount
+            XCTAssertEqual(publicKeyPendingWaiters, 0)
+        }
+
+        for invalidPrivateKeyLength in [
+            QPeriaptNativeAdapter.privateKeyLength - 1,
+            QPeriaptNativeAdapter.privateKeyLength + 1
+        ] {
+            let privateKey = SecureBytes(count: invalidPrivateKeyLength)
+            defer { privateKey.zeroize() }
+            do {
+                _ = try await requirePromptCompletion {
+                    try await adapter.decapsulate(
+                        encapsulatedKey: Data(
+                            repeating: 0x5A,
+                            count: QPeriaptNativeAdapter.encapsulatedKeyLength
+                        ),
+                        privateKey: privateKey,
+                        applicationContext: context
+                    )
+                }
+                XCTFail("Malformed Q-Periapt private keys must fail before admission")
+            } catch CryptoProviderError.invalidKeyLength(
+                let expected,
+                let actual,
+                _,
+                .keyExchange
+            ) {
+                XCTAssertEqual(expected, QPeriaptNativeAdapter.privateKeyLength)
+                XCTAssertEqual(actual, invalidPrivateKeyLength)
+            } catch {
+                XCTFail("Unexpected private-key length error: \(error)")
+            }
+            let privateKeyPendingWaiters = await QPeriaptCryptoAdmissionGate.shared.pendingWaiterCount
+            XCTAssertEqual(privateKeyPendingWaiters, 0)
+        }
+
+        for invalidCiphertextLength in [
+            QPeriaptNativeAdapter.encapsulatedKeyLength - 1,
+            QPeriaptNativeAdapter.encapsulatedKeyLength + 1
+        ] {
+            let privateKey = SecureBytes(count: QPeriaptNativeAdapter.privateKeyLength)
+            defer { privateKey.zeroize() }
+            do {
+                _ = try await requirePromptCompletion {
+                    try await adapter.decapsulate(
+                        encapsulatedKey: Data(repeating: 0x3C, count: invalidCiphertextLength),
+                        privateKey: privateKey,
+                        applicationContext: context
+                    )
+                }
+                XCTFail("Malformed Q-Periapt ciphertexts must fail before admission")
+            } catch CryptoProviderError.operationFailed(let reason) {
+                XCTAssertTrue(reason.contains("ciphertext length"))
+            } catch {
+                XCTFail("Unexpected ciphertext length error: \(error)")
+            }
+            let ciphertextPendingWaiters = await QPeriaptCryptoAdmissionGate.shared.pendingWaiterCount
+            XCTAssertEqual(ciphertextPendingWaiters, 0)
+        }
+
+        let validPublicKey = Data(
+            repeating: 0x7E,
+            count: QPeriaptNativeAdapter.publicKeyLength
+        )
+        for invalidContext in [
+            Data(),
+            Data(
+                repeating: 0x01,
+                count: QPeriaptNativeAdapter.maximumApplicationContextLength + 1
+            )
+        ] {
+            do {
+                _ = try await requirePromptCompletion {
+                    try await adapter.encapsulate(
+                        recipientPublicKey: validPublicKey,
+                        applicationContext: invalidContext
+                    )
+                }
+                XCTFail("Malformed Q-Periapt application contexts must fail before admission")
+            } catch CryptoProviderError.operationFailed(let reason) {
+                XCTAssertTrue(reason.contains("application context"))
+            } catch CryptoProviderError.lengthExceeded(let field, let actual, let maximum) {
+                XCTAssertEqual(field, "Q-Periapt application context")
+                XCTAssertEqual(actual, invalidContext.count)
+                XCTAssertEqual(maximum, QPeriaptNativeAdapter.maximumApplicationContextLength)
+            } catch {
+                XCTFail("Unexpected application-context error: \(error)")
+            }
+            let contextPendingWaiters = await QPeriaptCryptoAdmissionGate.shared.pendingWaiterCount
+            XCTAssertEqual(contextPendingWaiters, 0)
+        }
+
+        await ownerBarrier.release()
+        try await owner.value
+    }
+
+    func testQPeriaptPolicyRejectsEveryFixedLengthBoundaryBeforeAdmission() async throws {
+        let validMaterial = try makeMaterial(vector: loadFixture())
+        let ownerBarrier = AdmissionOperationBarrier()
+        let owner = Task {
+            try await QPeriaptCryptoAdmissionGate.shared.run {
+                await ownerBarrier.suspendUntilReleased()
+            }
+        }
+        defer {
+            owner.cancel()
+            Task { await ownerBarrier.release() }
+        }
+        await ownerBarrier.waitUntilEntered()
+
+        let signatureLength = validMaterial.detachedSignature.count
+        let verificationKeyLength = validMaterial.verificationKey.count
+        let malformedMaterials: [(QPeriaptSignedPolicyMaterial, ExpectedPolicyBoundaryFailure)] = [
+            (
+                replacing(validMaterial, policyTOML: Data()),
+                .emptyPolicy
+            ),
+            (
+                replacing(
+                    validMaterial,
+                    policyTOML: Data(
+                        repeating: 0x20,
+                        count: Int(Q_PERIAPT_MAX_SIGNED_POLICY_BYTES) + 1
+                    )
+                ),
+                .oversizedPolicy(actual: Int(Q_PERIAPT_MAX_SIGNED_POLICY_BYTES) + 1)
+            ),
+            (
+                replacing(
+                    validMaterial,
+                    detachedSignature: Data(repeating: 0x11, count: signatureLength - 1)
+                ),
+                .signatureLength(actual: signatureLength - 1)
+            ),
+            (
+                replacing(
+                    validMaterial,
+                    detachedSignature: Data(repeating: 0x11, count: signatureLength + 1)
+                ),
+                .signatureLength(actual: signatureLength + 1)
+            ),
+            (
+                replacing(
+                    validMaterial,
+                    verificationKey: Data(repeating: 0x22, count: verificationKeyLength - 1)
+                ),
+                .verificationKeyLength(actual: verificationKeyLength - 1)
+            ),
+            (
+                replacing(
+                    validMaterial,
+                    verificationKey: Data(repeating: 0x22, count: verificationKeyLength + 1)
+                ),
+                .verificationKeyLength(actual: verificationKeyLength + 1)
+            ),
+            (
+                replacing(validMaterial, verificationKeySHA256Pin: Data(repeating: 0x33, count: 31)),
+                .pinLength(actual: 31)
+            ),
+            (
+                replacing(validMaterial, verificationKeySHA256Pin: Data(repeating: 0x33, count: 33)),
+                .pinLength(actual: 33)
+            )
+        ]
+
+        for (material, expectedFailure) in malformedMaterials {
+            await assertPolicyBoundaryFailure(
+                material: material,
+                store: InMemoryTrustedStateStore(),
+                expected: expectedFailure
+            )
+        }
+
+        for invalidTrustedStateLength in [
+            Int(Q_PERIAPT_TRUSTED_POLICY_STATE_LEN) - 1,
+            Int(Q_PERIAPT_TRUSTED_POLICY_STATE_LEN) + 1
+        ] {
+            await assertPolicyBoundaryFailure(
+                material: validMaterial,
+                store: InMemoryTrustedStateStore(
+                    initialState: Data(repeating: 0x44, count: invalidTrustedStateLength)
+                ),
+                expected: .trustedStateLength(actual: invalidTrustedStateLength),
+                enrollmentMode: .existingEnrollment
+            )
+        }
+
+        await ownerBarrier.release()
+        try await owner.value
+    }
+
     func testContextFreeKEMSurfacesFailClosed() async throws {
         let session = try await makeSession()
         let provider = QPeriaptCryptoProvider(session: session)
@@ -973,6 +1436,25 @@ final class QPeriaptRoundTripTests: XCTestCase {
         }
     }
 
+    private func requirePromptCompletion<T: Sendable>(
+        timeout: Duration = .milliseconds(250),
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let operationTask = Task {
+            try await operation()
+        }
+        let deadlineTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            operationTask.cancel()
+        }
+        defer { deadlineTask.cancel() }
+        return try await operationTask.value
+    }
+
     private static func waitForNativeWorkerEntry(
         _ probe: NativeWorkerProbe,
         timeout: Duration = .seconds(2)
@@ -986,6 +1468,73 @@ final class QPeriaptRoundTripTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(5))
         }
+    }
+
+    private func replacing(
+        _ material: QPeriaptSignedPolicyMaterial,
+        policyTOML: Data? = nil,
+        detachedSignature: Data? = nil,
+        verificationKey: Data? = nil,
+        verificationKeySHA256Pin: Data? = nil
+    ) -> QPeriaptSignedPolicyMaterial {
+        QPeriaptSignedPolicyMaterial(
+            policyTOML: policyTOML ?? material.policyTOML,
+            detachedSignature: detachedSignature ?? material.detachedSignature,
+            verificationKey: verificationKey ?? material.verificationKey,
+            verificationKeySHA256Pin: verificationKeySHA256Pin ?? material.verificationKeySHA256Pin,
+            trustRootIdentifier: material.trustRootIdentifier
+        )
+    }
+
+    private func assertPolicyBoundaryFailure(
+        material: QPeriaptSignedPolicyMaterial,
+        store: InMemoryTrustedStateStore,
+        expected: ExpectedPolicyBoundaryFailure,
+        enrollmentMode: QPeriaptEnrollmentMode = .explicitlyAuthorizedFirstEnrollment,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await requirePromptCompletion {
+                try await QPeriaptPolicyRuntime().resolveSession(
+                    material: material,
+                    enrollmentMode: enrollmentMode,
+                    trustedStateStore: store
+                )
+            }
+            XCTFail("Malformed Q-Periapt policy material must fail before admission", file: file, line: line)
+        } catch let error as QPeriaptPolicyRuntimeError {
+            switch (expected, error) {
+            case (.emptyPolicy, .emptyPolicy):
+                break
+            case let (.oversizedPolicy(actual), .policyTooLarge(errorActual, maximum)):
+                XCTAssertEqual(errorActual, actual, file: file, line: line)
+                XCTAssertEqual(maximum, Int(Q_PERIAPT_MAX_SIGNED_POLICY_BYTES), file: file, line: line)
+            case let (.signatureLength(actual), .invalidSignatureLength(errorActual, expectedLength)):
+                XCTAssertEqual(errorActual, actual, file: file, line: line)
+                XCTAssertEqual(expectedLength, 3_309, file: file, line: line)
+            case let (.verificationKeyLength(actual), .invalidVerificationKeyLength(errorActual, expectedLength)):
+                XCTAssertEqual(errorActual, actual, file: file, line: line)
+                XCTAssertEqual(expectedLength, 1_952, file: file, line: line)
+            case let (.pinLength(actual), .invalidVerificationKeyPinLength(errorActual, expectedLength)):
+                XCTAssertEqual(errorActual, actual, file: file, line: line)
+                XCTAssertEqual(expectedLength, SHA256.byteCount, file: file, line: line)
+            case let (.trustedStateLength(actual), .invalidTrustedStateLength(errorActual, expectedLength)):
+                XCTAssertEqual(errorActual, actual, file: file, line: line)
+                XCTAssertEqual(
+                    expectedLength,
+                    Int(Q_PERIAPT_TRUSTED_POLICY_STATE_LEN),
+                    file: file,
+                    line: line
+                )
+            default:
+                XCTFail("Unexpected Q-Periapt policy boundary error: \(error)", file: file, line: line)
+            }
+        } catch {
+            XCTFail("Unexpected Q-Periapt policy boundary error: \(error)", file: file, line: line)
+        }
+        let pendingWaiters = await QPeriaptCryptoAdmissionGate.shared.pendingWaiterCount
+        XCTAssertEqual(pendingWaiters, 0, file: file, line: line)
     }
 
     private func makeSession() async throws -> QPeriaptRuntimeSession {

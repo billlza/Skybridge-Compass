@@ -206,7 +206,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
         using cryptoProvider: any CryptoProvider,
         mode: PQCOfferMode
     ) -> [CryptoSuite] {
-        let pqcSuites = availableSuitesForNegotiation(using: cryptoProvider).filter(\.isPQCGroup)
+        let pqcSuites = availableSuitesForNegotiation(using: cryptoProvider).filter {
+            $0.isPQCGroup && $0.isNegotiable
+        }
         guard !pqcSuites.isEmpty else { return [] }
 
         switch mode {
@@ -223,7 +225,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
     private static func availableSuitesForNegotiation(
         using cryptoProvider: any CryptoProvider
     ) -> [CryptoSuite] {
-        var suites = cryptoProvider.supportedSuites
+        var suites = cryptoProvider.supportedSuites.filter(\.isNegotiable)
         let explicitXWingPreference = explicitlyPrefersXWingHybridSuite()
         guard cryptoProvider.tier == .nativePQC else {
             if explicitXWingPreference {

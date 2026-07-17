@@ -167,6 +167,10 @@ public enum CryptoProviderFactory {
         policy: SelectionPolicy,
         peerSupportedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
+        guard !peerSupportedSuites.isEmpty,
+              peerSupportedSuites.allSatisfy(\.isNegotiable) else {
+            return UnavailablePQCProvider()
+        }
         let baseProvider = make(policy: policy)
 
         #if HAS_APPLE_PQC_SDK
@@ -196,7 +200,7 @@ public enum CryptoProviderFactory {
     }
 
     public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
-        provider.supportedSuites.filter { $0.isPQCGroup }
+        provider.supportedSuites.filter { $0.isPQCGroup && $0.isNegotiable }
     }
     
     // MARK: - Private Methods

@@ -6,6 +6,10 @@ import CryptoKit
 /// 验证本机强身份生成、持久化和判定逻辑
 @available(macOS 14.0, *)
 final class SelfIdentityProviderTests: XCTestCase {
+    private enum FixtureError: Error {
+        case authorityUnavailable
+    }
+
     private static let deterministicIdentity = SelfIdentitySnapshot(
         deviceId: "11111111-1111-4111-8111-111111111111",
         pubKeyFP: String(repeating: "a", count: 64),
@@ -21,9 +25,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 测试：首次启动生成并持久化 deviceId
     func testDeviceIdGenerationAndPersistence() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let snapshot = await provider.snapshot()
+        let snapshot = await provider.presentationSnapshot()
         
  // 断言 deviceId 不为空且符合 UUID 格式
         XCTAssertFalse(snapshot.deviceId.isEmpty, "deviceId 不应为空")
@@ -31,8 +35,8 @@ final class SelfIdentityProviderTests: XCTestCase {
         
  // 重新加载，验证持久化
         let provider2 = SelfIdentityProvider.shared
-        await provider2.loadOrCreate()
-        let snapshot2 = await provider2.snapshot()
+        try await provider2.loadOrCreate()
+        let snapshot2 = await provider2.presentationSnapshot()
         
         XCTAssertEqual(snapshot.deviceId, snapshot2.deviceId, "deviceId 应保持一致")
     }
@@ -40,40 +44,45 @@ final class SelfIdentityProviderTests: XCTestCase {
     /// 测试：SelfIdentityProvider 与协议身份管理器使用同一份稳定 deviceId
     func testDeviceIdMatchesProtocolIdentitySource() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
 
-        let snapshot = await provider.snapshot()
-        let protocolIdentityDeviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let snapshot = await provider.presentationSnapshot()
+        let protocolIdentity = try await DeviceIdentityKeyManager.shared
+            .getOrCreateIdentityKey()
 
         XCTAssertEqual(
             snapshot.deviceId,
-            protocolIdentityDeviceID,
+            protocolIdentity.deviceId,
             "SelfIdentityProvider 应与 DeviceIdentityKeyManager 使用同一份稳定 deviceId"
+        )
+        XCTAssertEqual(
+            snapshot.pubKeyFP,
+            protocolIdentity.pubKeyFP,
+            "SelfIdentityProvider 的 deviceId 与 pubKeyFP 必须来自同一份 identity authority"
         )
     }
     
  /// 测试：公钥指纹生成
     func testPubKeyFingerprintGeneration() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let snapshot = await provider.snapshot()
+        let snapshot = await provider.presentationSnapshot()
         
- // 如果密钥存在，公钥指纹不应为空
-        if !snapshot.pubKeyFP.isEmpty {
- // 验证是 64 字符的 hex 字符串（SHA256 输出）
-            XCTAssertEqual(snapshot.pubKeyFP.count, 64, "SHA256 指纹应为 64 字符")
-            XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { $0.isHexDigit }, "指纹应为 hex 字符")
-            XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { !$0.isUppercase || !$0.isLetter }, "指纹应为小写")
-        }
+        let identity = try await DeviceIdentityKeyManager.shared
+            .getOrCreateIdentityKey()
+        XCTAssertEqual(snapshot.pubKeyFP, identity.pubKeyFP)
+        XCTAssertEqual(snapshot.pubKeyFP.count, 64, "SHA256 指纹应为 64 字符")
+        XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { $0.isHexDigit }, "指纹应为 hex 字符")
+        XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { !$0.isUppercase || !$0.isLetter }, "指纹应为小写")
     }
     
  /// 测试：MAC 地址获取
     func testMACAddressCollection() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let snapshot = await provider.snapshot()
+        let snapshot = await provider.presentationSnapshot()
         
  // MAC 地址集合可能为空（取决于环境），但不应为 nil
         XCTAssertNotNil(snapshot.macSet)
@@ -83,15 +92,157 @@ final class SelfIdentityProviderTests: XCTestCase {
             XCTAssertTrue(mac.matches(regex: "^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"), "MAC 地址格式应为 xx:xx:xx:xx:xx:xx (小写)")
         }
     }
+
+    func testStrictIdentitySnapshotPublishesOneAuthorityTuple() async throws {
+        let identity = makeIdentityInfo(
+            deviceID: "22222222-2222-4222-8222-222222222222"
+        )
+        let expectedMACs: Set<String> = ["02:aa:bb:cc:dd:ee"]
+        let provider = SelfIdentityProvider(
+            identityLoader: { allowCreate in
+                XCTAssertTrue(allowCreate)
+                return identity
+            },
+            deviceIDMirror: { _ in false },
+            macAddressLoader: { expectedMACs }
+        )
+
+        try await provider.loadOrCreate()
+        let snapshot = await provider.presentationSnapshot()
+
+        XCTAssertEqual(snapshot.deviceId, identity.deviceId)
+        XCTAssertEqual(snapshot.pubKeyFP, identity.pubKeyFP)
+        XCTAssertEqual(snapshot.macSet, expectedMACs)
+    }
+
+    func testExistingIdentityAbsenceThrowsInsteadOfReturningBlankIdentity() async {
+        let provider = SelfIdentityProvider(identityLoader: { allowCreate in
+            XCTAssertFalse(allowCreate)
+            return nil
+        })
+
+        do {
+            _ = try await provider.protocolIdentityDeviceId(allowCreate: false)
+            XCTFail("Missing authority must not become a blank device ID")
+        } catch DeviceIdentityKeyError.keyNotFound {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let snapshot = await provider.presentationSnapshot()
+        XCTAssertTrue(snapshot.deviceId.isEmpty)
+        XCTAssertTrue(snapshot.pubKeyFP.isEmpty)
+    }
+
+    func testSnapshotEnsuringIdentityPropagatesAuthorityFailure() async {
+        let provider = SelfIdentityProvider(identityLoader: { _ in
+            throw FixtureError.authorityUnavailable
+        })
+
+        do {
+            _ = try await provider.snapshotEnsuringProtocolDeviceId(
+                allowCreate: true
+            )
+            XCTFail("Authority storage failures must propagate")
+        } catch FixtureError.authorityUnavailable {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRegistrationFingerprintUsesOnlyCanonicalAuthorityTuple() async throws {
+        let identity = makeIdentityInfo(
+            deviceID: "44444444-4444-4444-8444-444444444444"
+        )
+        let first = SelfIdentityProvider(
+            identityLoader: { _ in identity },
+            macAddressLoader: { ["02:11:22:33:44:55"] }
+        )
+        let second = SelfIdentityProvider(
+            identityLoader: { _ in identity },
+            macAddressLoader: { ["02:aa:bb:cc:dd:ee"] }
+        )
+
+        try await first.loadOrCreate()
+        try await second.loadOrCreate()
+        let firstFingerprint = try await first.generateRegistrationFingerprint(
+            allowCreate: false
+        )
+        let secondFingerprint = try await second.generateRegistrationFingerprint(
+            allowCreate: false
+        )
+
+        XCTAssertEqual(firstFingerprint, secondFingerprint)
+        XCTAssertEqual(firstFingerprint.count, 64)
+        XCTAssertTrue(firstFingerprint.allSatisfy { $0.isHexDigit && !$0.isUppercase })
+    }
+
+    func testRegistrationFingerprintEncodingIsVersionedAndTupleUnambiguous() {
+        let first = SelfIdentityProvider.registrationFingerprint(
+            deviceId: "a",
+            publicKeyFingerprint: "bc"
+        )
+        let second = SelfIdentityProvider.registrationFingerprint(
+            deviceId: "ab",
+            publicKeyFingerprint: "c"
+        )
+
+        XCTAssertNotEqual(first, second)
+    }
+
+    func testRegistrationFingerprintPropagatesAuthorityFailure() async {
+        let provider = SelfIdentityProvider(identityLoader: { _ in
+            throw FixtureError.authorityUnavailable
+        })
+
+        do {
+            _ = try await provider.generateRegistrationFingerprint(allowCreate: true)
+            XCTFail("Registration policy must not hash an absent authority tuple")
+        } catch FixtureError.authorityUnavailable {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testMismatchedAuthorityFingerprintFailsBeforePublishingEitherField() async {
+        let validIdentity = makeIdentityInfo(
+            deviceID: "33333333-3333-4333-8333-333333333333"
+        )
+        let invalidIdentity = DeviceIdentityKeyInfo(
+            deviceId: validIdentity.deviceId,
+            pubKeyFP: String(repeating: "0", count: 64),
+            publicKey: validIdentity.publicKey,
+            keyType: validIdentity.keyType,
+            createdAt: validIdentity.createdAt,
+            isSecureEnclave: validIdentity.isSecureEnclave
+        )
+        let provider = SelfIdentityProvider(identityLoader: { _ in invalidIdentity })
+
+        do {
+            try await provider.loadOrCreate()
+            XCTFail("A mismatched authority tuple must fail closed")
+        } catch DeviceIdentityKeyError.corruptIdentityAuthority {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let snapshot = await provider.presentationSnapshot()
+        XCTAssertTrue(snapshot.deviceId.isEmpty)
+        XCTAssertTrue(snapshot.pubKeyFP.isEmpty)
+    }
     
  // MARK: - 本机判定测试
     
  /// 测试：强身份硬匹配 - deviceId 匹配
     func testIsLocalDetection_DeviceIdMatch() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
  // 构造与本机 deviceId 相同的设备
@@ -113,6 +264,19 @@ final class SelfIdentityProviderTests: XCTestCase {
         
         let isLocal = await resolver.resolveIsLocal(localDevice, selfId: selfId)
         XCTAssertTrue(isLocal, "deviceId 匹配应判定为本机")
+    }
+
+    private func makeIdentityInfo(deviceID: String) -> DeviceIdentityKeyInfo {
+        let privateKey = P256.Signing.PrivateKey()
+        let publicKey = privateKey.publicKey.x963Representation
+        return DeviceIdentityKeyInfo(
+            deviceId: deviceID,
+            pubKeyFP: DeviceIdentityAuthorityRecord.fingerprint(for: publicKey),
+            publicKey: publicKey,
+            keyType: .p256Signing,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            isSecureEnclave: false
+        )
     }
     
     /// 测试：强身份硬匹配 - pubKeyFP 匹配
@@ -206,9 +370,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 测试：弱特征不匹配 - 同名设备不应判定为本机
     func testIsLocalDetection_SameNameNotLocal() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
  // 构造同名但强身份不匹配的设备
@@ -235,9 +399,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 测试：缺少强身份字段不应判定为本机
     func testIsLocalDetection_NoStrongIdentity() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
  // 构造缺少所有强身份字段的设备
@@ -267,9 +431,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 补丁目的：禁止使用 IP 作为本机判定依据
     func testIsLocalDetection_SameIPButNoStrongIdentity() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
  // 构造一台设备：IP 与本机相同，但强身份不匹配
@@ -297,9 +461,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 补丁目的：禁止使用 subnet 作为本机判定依据
     func testIsLocalDetection_SameSubnetButNoStrongIdentity() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
  // 构造一台设备：与本机同网段（192.168.1.x），但强身份不匹配
@@ -327,9 +491,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  /// 补丁目的：综合测试多个弱特征碰撞时的防护
     func testIsLocalDetection_IPAndNameCollisionButNoStrongIdentity() async throws {
         let provider = SelfIdentityProvider.shared
-        await provider.loadOrCreate()
+        try await provider.loadOrCreate()
         
-        let selfId = await provider.snapshot()
+        let selfId = await provider.presentationSnapshot()
         let resolver = IdentityResolver()
         
         let deviceName = Self.localNameCollisionProbe

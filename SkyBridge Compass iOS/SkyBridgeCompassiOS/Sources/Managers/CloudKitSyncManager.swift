@@ -244,6 +244,7 @@ public final class ICloudDevicePresenceService: ObservableObject {
     private var didLogMissingReadinessProvider = false
     private var lastPublishedReadiness: ControlListenerReadiness?
     private var controlListenerReadinessProvider: (@MainActor () -> ControlListenerReadiness)?
+    private var localProtocolIdentitySnapshot: ProtocolIdentitySnapshot?
 
     private init() {}
 
@@ -254,7 +255,9 @@ public final class ICloudDevicePresenceService: ObservableObject {
         didLogMissingReadinessProvider = false
     }
 
-    public func start() {
+    public func start() async throws {
+        localProtocolIdentitySnapshot = try await SkyBridgeiOSCore.shared
+            .currentProtocolIdentitySnapshot()
         guard heartbeatTimer == nil else {
             refreshNow()
             return
@@ -306,10 +309,17 @@ public final class ICloudDevicePresenceService: ObservableObject {
             return
         }
 
+        guard let protocolIdentity = localProtocolIdentitySnapshot else {
+            SkyBridgeLogger.shared.error(
+                "⛔️ iCloud KVS presence 未发布：本机协议 identity snapshot 不可用"
+            )
+            return
+        }
+
         let identity = AppleMobileDeviceIdentity.currentSnapshot()
         let endpoint = Self.localNetworkEndpoint()
         let device = PresenceDevice(
-            id: identity.stableDeviceId,
+            id: protocolIdentity.deviceId,
             name: identity.deviceName,
             model: identity.modelName,
             osVersion: identity.osVersion,
@@ -321,7 +331,7 @@ public final class ICloudDevicePresenceService: ObservableObject {
             isOnline: readiness.isReady,
             networkType: endpoint.networkType,
             ipAddress: endpoint.ipAddress,
-            stableIdentityDeviceId: identity.stableDeviceId,
+            stableIdentityDeviceId: protocolIdentity.deviceId,
             vendorDeviceId: identity.vendorDeviceId,
             listenerReady: readiness.isReady,
             controlPort: readiness.controlPort

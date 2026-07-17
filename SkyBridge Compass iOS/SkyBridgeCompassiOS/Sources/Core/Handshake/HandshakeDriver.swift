@@ -1353,6 +1353,8 @@ public actor HandshakeContext {
     }
 
     private func provider(for suite: CryptoSuite) -> (any CryptoProvider)? {
+        guard suite.isNegotiable else { return nil }
+
         if let hybridProvider, hybridProvider.supportsSuite(suite) {
             return hybridProvider
         }
@@ -1429,7 +1431,8 @@ public actor HandshakeContext {
         peerPolicy: HandshakePolicy? = nil,
         forAdvertising: Bool = false
     ) -> Bool {
-        guard Self.suiteMeetsHandshakePolicy(suite, policy: policy),
+        guard suite.isNegotiable,
+              Self.suiteMeetsHandshakePolicy(suite, policy: policy),
               Self.suiteMeetsLocalCryptoPolicy(
                 suite,
                 cryptoPolicy: cryptoPolicy,
@@ -1456,11 +1459,15 @@ public actor HandshakeContext {
     private func selectInitiatorSuite() throws -> CryptoSuite {
         let candidates = (offeredSuites?.isEmpty == false ? offeredSuites : nil) ?? [cryptoProvider.activeSuite]
 
+        if let unknown = candidates.first(where: { !$0.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "buildMessageA.activeSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
+        }
+        guard candidates.allSatisfy(\.isNegotiable) else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
+
         for suite in candidates {
-            guard suite.isKnown else {
-                emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
-                throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
-            }
             guard provider(for: suite) != nil else { continue }
             guard suiteIsLocallyNegotiable(
                 suite,
@@ -1633,6 +1640,18 @@ public actor HandshakeContext {
                 remote: messageA.version
             ))
         }
+
+        if let unknown = messageA.supportedSuites.first(where: { !$0.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "processMessageA.supportedSuites")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
+        }
+        if let unknownKeyShare = messageA.keyShares.first(where: { !$0.suite.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
+        }
+        guard messageA.hasNegotiableOfferShape else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
         
         // 解析身份公钥
         let identityKeys = try messageA.decodedIdentityPublicKeys()
@@ -1653,14 +1672,6 @@ public actor HandshakeContext {
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         
         // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
-        if let unknown = messageA.supportedSuites.first(where: { !$0.isKnown }) {
-            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "processMessageA.supportedSuites")
-            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
-        }
-        if let unknownKeyShare = messageA.keyShares.first(where: { !$0.suite.isKnown }) {
-            emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
-            throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
-        }
         let suite = try selectResponderSuite(for: messageA)
         
         // Anti-Downgrade: selectedSuite 必须有对应 keyShare
@@ -1833,6 +1844,14 @@ public actor HandshakeContext {
                 remote: messageB.version
             ))
         }
+
+        guard messageB.selectedSuite.isKnown else {
+            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
+        }
+        guard messageB.selectedSuite.isNegotiable else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
         
         // 解析身份公钥
         let identityKeys = try messageB.decodedIdentityPublicKeys()
@@ -1853,10 +1872,6 @@ public actor HandshakeContext {
         authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
         
         // Anti-Downgrade: 必须是我们在 MessageA 里发过的 suite
-        guard messageB.selectedSuite.isKnown else {
-            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
-            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
-        }
         guard sentSupportedSuites.contains(where: { $0.wireId == messageB.selectedSuite.wireId }) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }

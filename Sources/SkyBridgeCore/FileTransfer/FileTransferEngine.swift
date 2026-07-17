@@ -601,7 +601,11 @@ public class FileTransferEngine: ObservableObject {
             "metalAvailable": self.metalAvailable
         ])
         let checksum = try await calculateFileChecksum(session.localURL)
-        let signerPeerId = securityManager.getDeviceId()
+        let signerPeerId = try await DeviceIdentityKeyManager.shared.getDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !signerPeerId.isEmpty else {
+            throw FileTransferEngineError.localIdentityUnavailable
+        }
         let requiredSignature = try await pqCrypto.signPQCRequiredWithAlgorithm(
             Data(checksum.utf8),
             for: signerPeerId
@@ -1893,6 +1897,7 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
     case compressionError(underlying: Error?)
     case connectionTimeout
     case connectionLost
+    case localIdentityUnavailable
     case retryLimitExceeded(attempts: Int)
     case insufficientPermissions
     case diskSpaceInsufficient(required: Int64, available: Int64)
@@ -1931,6 +1936,8 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
             return "连接超时"
         case .connectionLost:
             return "连接已断开"
+        case .localIdentityUnavailable:
+            return "本机协议身份不可用"
         case .retryLimitExceeded(let attempts):
             return "重试次数已达上限（\(attempts)次）"
         case .insufficientPermissions:
@@ -1947,7 +1954,8 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
         switch self {
         case .networkError, .connectionTimeout, .connectionLost:
             return true
-        case .retryLimitExceeded, .fileNotFound, .invalidDestination, .insufficientPermissions, .diskSpaceInsufficient:
+        case .retryLimitExceeded, .fileNotFound, .invalidDestination, .localIdentityUnavailable,
+             .insufficientPermissions, .diskSpaceInsufficient:
             return false
         default:
             return false
