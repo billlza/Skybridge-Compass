@@ -134,6 +134,7 @@ jobs:
       SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
       SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+      RUST_TOOLCHAIN_VERSION: "1.96.0"
 
     steps:
       - uses: actions/checkout@v6
@@ -157,6 +158,16 @@ jobs:
           fi
           ln -sfn "$PWD/External/pqt_hybrid_suite" "$sibling_path"
           [[ -f "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" ]] || { echo "::error::q-periapt sibling path dependency is not reachable"; exit 1; }
+
+      - name: Install Pinned Rust LLVM Inspection Tools
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN_VERSION" --profile minimal --component llvm-tools-preview
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN_VERSION" >> "$GITHUB_ENV"
+          rust_host="$(rustc +"$RUST_TOOLCHAIN_VERSION" -vV | awk '/^host:/ { print $2 }')"
+          rust_sysroot="$(rustc +"$RUST_TOOLCHAIN_VERSION" --print sysroot)"
+          llvm_nm="$rust_sysroot/lib/rustlib/$rust_host/bin/llvm-nm"
+          [[ -x "$llvm_nm" ]] || { echo "::error::Pinned Rust llvm-nm is missing at $llvm_nm"; exit 1; }
+          "$llvm_nm" --version
 
       - name: Verify Stable Xcode 26.6 Toolchain
         run: |

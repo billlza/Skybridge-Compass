@@ -243,6 +243,12 @@ grep -Fq "path: External/pqt_hybrid_suite" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must land in External/pqt_hybrid_suite"
 grep -Fq "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness must prove the q-periapt sibling path dependency is reachable"
+grep -Fq 'RUST_TOOLCHAIN_VERSION: "1.96.0"' "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness must pin the Rust toolchain used for Q-Periapt inspection"
+grep -Fq "rustup toolchain install \"\$RUST_TOOLCHAIN_VERSION\" --profile minimal --component llvm-tools-preview" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness must install the matching Rust llvm-tools component"
+grep -Fq "echo \"RUSTUP_TOOLCHAIN=\$RUST_TOOLCHAIN_VERSION\" >> \"\$GITHUB_ENV\"" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness must select the pinned Rust toolchain for source contracts"
 
 assert_no_modulemaps "Sources/Vendor/qperiapt.xcframework"
 assert_qperiapt_derivative_shape "Sources/Vendor/qperiapt.xcframework"
