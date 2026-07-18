@@ -827,6 +827,9 @@ trap cleanup EXIT
 # 否则 SwiftPM/Xcode 可能穿透到系统应用内的历史工程引用，产生无关 warning 并显著拖慢发布构建。
 rm -rf "$STAGE_DIR" "$TEMP_DMG"
 
+# 发布构建不允许编译器 warning；Xcode 入口由共享 helper 注入 Swift/Clang Werror。
+export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1
+
 log_info "检测 Apple PQC SDK 可用性（release DMG 必须启用 HAS_APPLE_PQC_SDK）..."
 skybridge_configure_apple_pqc_sdk_for_package_context "release_dmg" "Release DMG" || exit 1
 log_info "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
@@ -860,6 +863,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
         swift build \
             "${SWIFTPM_BUILD_ARGS[@]}" \
             --product "$XCODE_PACKAGE_SCHEME" \
+            -Xswiftc -warnings-as-errors \
             --disable-automatic-resolution
 
         verify_release_executable_runtime_inputs "$SWIFTPM_PACKAGE_EXECUTABLE"

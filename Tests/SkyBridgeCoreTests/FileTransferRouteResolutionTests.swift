@@ -567,7 +567,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("latestPeerFileTransferPort = payload.fileTransferPort"))
         XCTAssertTrue(source.contains("capabilities.append(\"fileTransferPort=\\(port)\")"))
         XCTAssertTrue(source.contains("await publishInboundClassicTransferSession(keys: keys)"))
-        XCTAssertTrue(source.contains("refreshed inbound file-transfer route from pairing identity"))
+        XCTAssertTrue(source.contains("capabilities: provisionalCapabilities"))
+        XCTAssertTrue(source.contains("PairingIdentityExchangeCommitCoordinator.isCurrent("))
     }
 
     func testMacBonjourIdentityBrowsersRequestTXTRecords() throws {
@@ -828,12 +829,12 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         )
 
         XCTAssertTrue(macSource.contains("let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock"))
-        XCTAssertTrue(macSource.contains("sendPairingIdentityExchange(force: shouldForceIdentityReply)"))
+        XCTAssertTrue(macSource.contains("force: shouldForceIdentityReply"))
         XCTAssertTrue(iOSSource.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
         XCTAssertTrue(iOSSource.contains("if !shouldForceIdentityReply,"))
     }
 
-    func testMacInboundPairingIdentityReplyPrecedesTrustPersistence() throws {
+    func testMacInboundPairingIdentityPersistsAuthorityBeforeReply() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -845,17 +846,23 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let handlerStart = try XCTUnwrap(source.range(of: "case .pairingIdentityExchange(let payload):"))
         let handlerEnd = try XCTUnwrap(source.range(of: "case .ping(let payload):", range: handlerStart.lowerBound..<source.endIndex))
         let handler = String(source[handlerStart.lowerBound..<handlerEnd.lowerBound])
-        let replyRange = try XCTUnwrap(handler.range(of: "已回传本机 KEM 公钥"))
-        let persistRange = try XCTUnwrap(handler.range(of: "await persistAuthenticatedRemoteAuthority"))
+        let commitRange = try XCTUnwrap(handler.range(of: ".commitAuthorityAndKEM("))
+        let replyRange = try XCTUnwrap(
+            handler.range(
+                of: "try await sendFramed(outPadded)",
+                range: commitRange.lowerBound..<handler.endIndex
+            )
+        )
 
-        XCTAssertLessThan(replyRange.lowerBound, persistRange.lowerBound)
-        XCTAssertTrue(handler.contains("isPairingIdentityBoundToAuthenticatedAuthority(payload)"))
-        XCTAssertTrue(handler.contains("persistedPolicyDecision(for: request)"))
-        XCTAssertTrue(handler.contains("pairingIdentityExchange accepted on authenticated protocol-identity channel"))
-        XCTAssertTrue(source.contains("protocolIdentityPublicKeys: await Self.localProtocolIdentityPublicKeysForPairing()"))
+        XCTAssertLessThan(commitRange.lowerBound, replyRange.lowerBound)
+        XCTAssertTrue(handler.contains("guard let pairingAuthorityLease = authenticatedRemoteAuthority"))
+        XCTAssertTrue(handler.contains("PairingTrustApprovalService.shared.decide(for: request)"))
+        XCTAssertTrue(handler.contains("PairingIdentityExchangeCommitCoordinator.isCurrent("))
+        XCTAssertTrue(handler.contains("recordRemoteControlSecurityIdentity(from: payload)"))
+        XCTAssertTrue(source.contains("Self.localProtocolIdentityPublicKeysForPairing()"))
     }
 
-    func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() throws {
+    func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() async throws {
         let service = PairingTrustApprovalService.shared
         let deviceId = "policy-reject-\(UUID().uuidString)"
         let fingerprint = String(repeating: "a", count: 64)
@@ -877,12 +884,21 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             kemKeyCount: 2
         )
 
-        service.clearPolicy(for: deviceId)
-        defer { service.clearPolicy(for: deviceId) }
+        try service.clearPolicy(for: deviceId)
+        defer { XCTAssertNoThrow(try service.clearPolicy(for: deviceId)) }
 
-        XCTAssertNil(service.persistedPolicyDecision(for: request))
+        XCTAssertNil(try service.persistedPolicyDecision(for: request))
+        let decisionTask = Task { @MainActor in
+            try await service.decide(for: request)
+        }
+        for _ in 0..<100 where service.pendingRequest?.id != request.id {
+            await Task.yield()
+        }
+        XCTAssertEqual(service.pendingRequest?.id, request.id)
         service.resolve(request, decision: .reject)
-        XCTAssertEqual(service.persistedPolicyDecision(for: request), .reject)
+        let decision = try await decisionTask.value
+        XCTAssertEqual(decision, .reject)
+        XCTAssertEqual(try service.persistedPolicyDecision(for: request), .reject)
     }
 
     func testTrustBridgeKeychainInteractionFailureUsesProtectedLocalMirror() throws {

@@ -1,5 +1,14 @@
 import Foundation
 import Combine
+import OSLog
+
+public enum TrustedAutoConnectStoreError: LocalizedError {
+    case persistenceUnavailable
+
+    public var errorDescription: String? {
+        "自动连接偏好存储不可用；为安全起见未应用更改"
+    }
+}
 
 /// 逐设备「允许随航自动连接」开关的持久化存储（opt-in，默认 false）。
 ///
@@ -16,36 +25,79 @@ public final class TrustedAutoConnectStore: ObservableObject {
     private let store = CodablePersistenceStore<[String: Bool]>(
         location: .protectedApplicationSupport(path: "P2P/trusted-auto-connect.json")
     )
+    private let logger = Logger(subsystem: "com.skybridge.compass", category: "TrustedAutoConnect")
+    private var loadFailed = false
 
     /// 当前已开启随航自动连接的设备公钥指纹集合（内存缓存，写入时持久化）。
     /// 以 `TrustRecord.pubKeyFP`（稳定的密码学公钥指纹）为键，避免设备 id 轮换导致开关失配。
     @Published public private(set) var enabledFingerprints: Set<String>
 
     private init() {
-        let map = store.load() ?? [:]
-        enabledFingerprints = Set(map.filter { $0.value }.keys)
+        do {
+            let map = try store.loadOrThrow() ?? [:]
+            enabledFingerprints = Set(map.filter { $0.value }.keys.map(Self.normalizedFingerprint))
+        } catch {
+            enabledFingerprints = []
+            loadFailed = true
+            logger.error(
+                "Trusted auto-connect preferences unavailable; defaults remain disabled: \(error.localizedDescription, privacy: .private)"
+            )
+        }
     }
 
     /// 该设备（按公钥指纹）是否允许随航自动连接（默认 false）。
     public func allowsAutoConnect(fingerprint: String) -> Bool {
-        !fingerprint.isEmpty && enabledFingerprints.contains(fingerprint)
+        let normalized = Self.normalizedFingerprint(fingerprint)
+        return !normalized.isEmpty && enabledFingerprints.contains(normalized)
     }
 
     /// 设置该设备（按公钥指纹）的随航自动连接开关并持久化。
-    public func setAllowAutoConnect(_ allow: Bool, fingerprint: String) {
+    public func setAllowAutoConnect(_ allow: Bool, fingerprint: String) throws {
+        let fingerprint = Self.normalizedFingerprint(fingerprint)
         guard !fingerprint.isEmpty else { return }
+        if allow, loadFailed {
+            throw TrustedAutoConnectStoreError.persistenceUnavailable
+        }
+        let previous = enabledFingerprints
         if allow {
             guard !enabledFingerprints.contains(fingerprint) else { return }
             enabledFingerprints.insert(fingerprint)
         } else {
-            guard enabledFingerprints.contains(fingerprint) else { return }
             enabledFingerprints.remove(fingerprint)
         }
-        persist()
+        do {
+            try persist()
+            loadFailed = false
+        } catch {
+            enabledFingerprints = previous
+            logger.error("Failed to persist trusted auto-connect preference: \(error.localizedDescription, privacy: .private)")
+            throw TrustedAutoConnectStoreError.persistenceUnavailable
+        }
     }
 
-    private func persist() {
+    /// Disables auto-connect for every forgotten cryptographic identity. This
+    /// is intentionally durable and rollback-safe before trust evidence is
+    /// removed by the higher-level forget transaction.
+    public func clearAutoConnect(fingerprints: [String]) throws {
+        let normalized = Set(fingerprints.map(Self.normalizedFingerprint).filter { !$0.isEmpty })
+        let previous = enabledFingerprints
+        enabledFingerprints.subtract(normalized)
+        do {
+            try persist()
+            loadFailed = false
+        } catch {
+            enabledFingerprints = previous
+            logger.error("Failed to clear trusted auto-connect preferences: \(error.localizedDescription, privacy: .private)")
+            throw TrustedAutoConnectStoreError.persistenceUnavailable
+        }
+    }
+
+    private func persist() throws {
         let map = Dictionary(uniqueKeysWithValues: enabledFingerprints.map { ($0, true) })
-        try? store.save(map)
+        try store.save(map)
+    }
+
+    private nonisolated static func normalizedFingerprint(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }

@@ -6,6 +6,57 @@ import SkyBridgeProtocolCore
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 final class CrossNetworkQRCodeSecurityTests: XCTestCase {
+    private func compactDynamicQRCodeJSON(
+        version: Int = 6,
+        expirationMilliseconds: Int64
+    ) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "v": version,
+            "s": "session-compact",
+            "q": "bootstrap-compact",
+            "r": "https://api.example.com",
+            "d": "12345678-1234-1234-1234-1234567890ab",
+            "n": "Compact QR",
+            "y": P2PDeviceType.macOS.rawValue,
+            "o": "macOS-test",
+            "c": ["cross-network"],
+            "a": ProtocolSigningAlgorithm.ed25519.rawValue,
+            "k": CrossNetworkConnectionManager.base64URLEncodedString(from: Data([0x01])),
+            "f": String(repeating: "0", count: 64),
+            "t": 1_800_000_000_000 as Int64,
+            "e": expirationMilliseconds,
+        ])
+    }
+
+    private func compactServerBackedInviteJSON(
+        version: Int,
+        expirationMilliseconds: Int64 = 1_800_000_000_000
+    ) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "v": version,
+            "s": "session-server-backed",
+            "q": "bootstrap-server-backed",
+            "r": "https://api.example.com",
+            "d": "12345678-1234-1234-1234-1234567890ab",
+            "n": "Server QR",
+            "y": P2PDeviceType.macOS.rawValue,
+            "o": "macOS-test",
+            "a": ProtocolSigningAlgorithm.ed25519.rawValue,
+            "f": String(repeating: "1", count: 64),
+            "e": expirationMilliseconds,
+        ])
+    }
+
+    private func verifyWithEmptyTrustStore(
+        _ qrData: DynamicQRCodeData
+    ) async -> (ok: Bool, reason: String?, source: QRCodeTrustSource) {
+        let trust = TrustSyncService(initialRecordsForTesting: [])
+        return await CrossNetworkConnectionManager.verifyDynamicQRCode(
+            qrData,
+            trustService: trust
+        )
+    }
+
     private func makeSignedQRCode(
         version: Int = 6,
         sessionID: String = "session-123",
@@ -13,7 +64,8 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         expiresAt: Date = Date().addingTimeInterval(300),
         signalingServerOrigin: String = "https://api.example.com",
         deviceId: String = "12345678-1234-1234-1234-1234567890ab",
-        kemPublicKeys: [KEMPublicKeyInfo] = []
+        kemPublicKeys: [KEMPublicKeyInfo] = [],
+        signatureTimestampMs: Int64? = nil
     ) async throws -> DynamicQRCodeData {
         let signingKey = Curve25519.Signing.PrivateKey()
         let publicKey = signingKey.publicKey.rawRepresentation
@@ -21,6 +73,12 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             algorithm: .ed25519,
             publicKeyBytes: publicKey
         )
+        let effectiveSignatureTimestampMs: Int64
+        if let signatureTimestampMs {
+            effectiveSignatureTimestampMs = signatureTimestampMs
+        } else {
+            effectiveSignatureTimestampMs = try CrossNetworkQREpochMilliseconds.milliseconds(from: Date())
+        }
         let unsigned = DynamicQRCodeData(
             version: version,
             sessionID: sessionID,
@@ -36,18 +94,18 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             protocolPublicKeyFingerprint: fingerprint,
             kemPublicKeys: kemPublicKeys,
             signature: nil,
-            signatureTimestampMs: Int64(Date().timeIntervalSince1970 * 1000),
+            signatureTimestampMs: effectiveSignatureTimestampMs,
             expiresAt: expiresAt
         )
         let signature = try signingKey.signature(
-            for: CrossNetworkConnectionManager.buildCanonicalQRCodePayload(for: unsigned)
+            for: try CrossNetworkConnectionManager.buildCanonicalQRCodePayload(for: unsigned)
         )
         return unsigned.withSignature(signature)
     }
 
     func testCrossNetworkQRCodeBindsSensitiveClaims() async throws {
         let qrData = try await makeSignedQRCode()
-        let baseline = await CrossNetworkConnectionManager.verifyDynamicQRCode(qrData)
+        let baseline = await verifyWithEmptyTrustStore(qrData)
         XCTAssertTrue(baseline.ok, baseline.reason ?? "")
 
         let tamperedSession = DynamicQRCodeData(
@@ -67,7 +125,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             signatureTimestampMs: qrData.signatureTimestampMs,
             expiresAt: qrData.expiresAt
         )
-        let tamperedSessionResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedSession)
+        let tamperedSessionResult = await verifyWithEmptyTrustStore(tamperedSession)
         XCTAssertFalse(tamperedSessionResult.ok)
 
         let tamperedToken = DynamicQRCodeData(
@@ -87,7 +145,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             signatureTimestampMs: qrData.signatureTimestampMs,
             expiresAt: qrData.expiresAt
         )
-        let tamperedTokenResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedToken)
+        let tamperedTokenResult = await verifyWithEmptyTrustStore(tamperedToken)
         XCTAssertFalse(tamperedTokenResult.ok)
 
         let tamperedExpiry = DynamicQRCodeData(
@@ -107,13 +165,13 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             signatureTimestampMs: qrData.signatureTimestampMs,
             expiresAt: qrData.expiresAt.addingTimeInterval(30)
         )
-        let tamperedExpiryResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedExpiry)
+        let tamperedExpiryResult = await verifyWithEmptyTrustStore(tamperedExpiry)
         XCTAssertFalse(tamperedExpiryResult.ok)
     }
 
     func testVersion7QRCodeRequiresSignedKEMPublicKey() async throws {
         let missingKEM = try await makeSignedQRCode(version: 7)
-        let missingResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(missingKEM)
+        let missingResult = await verifyWithEmptyTrustStore(missingKEM)
 
         XCTAssertFalse(missingResult.ok)
         XCTAssertEqual(missingResult.reason, "二维码缺少 PQC KEM 公钥")
@@ -127,7 +185,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
                 )
             ]
         )
-        let signedResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(signedKEM)
+        let signedResult = await verifyWithEmptyTrustStore(signedKEM)
 
         XCTAssertTrue(signedResult.ok, signedResult.reason ?? "")
 
@@ -154,7 +212,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             signatureTimestampMs: signedKEM.signatureTimestampMs,
             expiresAt: signedKEM.expiresAt
         )
-        let tamperedResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedKEM)
+        let tamperedResult = await verifyWithEmptyTrustStore(tamperedKEM)
 
         XCTAssertFalse(tamperedResult.ok)
         XCTAssertEqual(tamperedResult.reason, "二维码签名验证失败")
@@ -164,8 +222,8 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         let store = PeerKEMBootstrapStore.shared
         let deviceId = "id:\(UUID().uuidString.lowercased())"
         await store.clearForTesting()
-        defer {
-            Task { await store.clearForTesting() }
+        addTeardownBlock { [store] in
+            await store.clearForTesting()
         }
 
         let signedKEM = try await makeSignedQRCode(
@@ -178,7 +236,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
                 )
             ]
         )
-        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(signedKEM)
+        let result = await verifyWithEmptyTrustStore(signedKEM)
 
         XCTAssertTrue(result.ok, result.reason ?? "")
         let persisted = await store.mergedKEMPublicKeys(forCandidates: [deviceId])
@@ -199,7 +257,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             ]
         )
 
-        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(legacyWithKEM)
+        let result = await verifyWithEmptyTrustStore(legacyWithKEM)
 
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "二维码 KEM 公钥需要 v7 协议")
@@ -207,7 +265,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
 
     func testCrossNetworkQRCodeRejectsOriginMismatch() async throws {
         let qrData = try await makeSignedQRCode(signalingServerOrigin: "https://other.example.com")
-        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(qrData)
+        let result = await verifyWithEmptyTrustStore(qrData)
         XCTAssertTrue(result.ok, "signature verification is content-only; origin mismatch is enforced at scan time")
     }
 
@@ -233,7 +291,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             signatureTimestampMs: Int64(Date().timeIntervalSince1970 * 1000),
             expiresAt: Date().addingTimeInterval(300)
         )
-        let legacyResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(legacy)
+        let legacyResult = await verifyWithEmptyTrustStore(legacy)
         XCTAssertFalse(legacyResult.ok)
     }
 
@@ -267,18 +325,16 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         )
     }
 
-    func testCrossNetworkQRCodeAllowsAuthenticatedAuthorityRekeyForExistingDeviceId() async throws {
+    func testCrossNetworkQRCodeRejectsSelfSignedAuthorityRekeyForExistingDeviceId() async throws {
         let trust = TrustSyncService.shared
         let qrData = try await makeSignedQRCode()
         let deviceId = qrData.deviceID
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [deviceId])
-        defer {
-            trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [deviceId])
-            }
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: [deviceId])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(
@@ -298,8 +354,141 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
 
         let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(qrData)
 
-        XCTAssertTrue(result.ok, result.reason ?? "")
-        XCTAssertNil(result.reason)
+        XCTAssertFalse(result.ok)
+        XCTAssertTrue(result.reason?.contains("pinned authoritative key") == true)
+    }
+
+    func testCrossNetworkQRCodeRejectsEveryUnsupportedDynamicVersionWithoutTrapping() async throws {
+        let valid = try await makeSignedQRCode()
+        for invalidVersion in [5, 8, Int(UInt16.max), Int(UInt16.max) + 1, Int.max, -1] {
+            let invalid = DynamicQRCodeData(
+                version: invalidVersion,
+                sessionID: valid.sessionID,
+                qrBootstrapToken: valid.qrBootstrapToken,
+                signalingServerOrigin: valid.signalingServerOrigin,
+                deviceID: valid.deviceID,
+                deviceName: valid.deviceName,
+                deviceType: valid.deviceType,
+                osVersion: valid.osVersion,
+                capabilities: valid.capabilities,
+                protocolSigningAlgorithm: valid.protocolSigningAlgorithm,
+                protocolPublicKeyBytes: valid.protocolPublicKeyBytes,
+                protocolPublicKeyFingerprint: valid.protocolPublicKeyFingerprint,
+                kemPublicKeys: valid.kemPublicKeys,
+                signature: valid.signature,
+                signatureTimestampMs: valid.signatureTimestampMs,
+                expiresAt: valid.expiresAt
+            )
+
+            let result = await verifyWithEmptyTrustStore(invalid)
+
+            XCTAssertFalse(result.ok)
+            XCTAssertEqual(result.reason, "二维码协议版本无效")
+            XCTAssertThrowsError(try CrossNetworkConnectionManager.buildCanonicalQRCodePayload(for: invalid))
+            let compactPayload = try compactDynamicQRCodeJSON(
+                version: invalidVersion,
+                expirationMilliseconds: valid.signatureTimestampMs + 60_000
+            )
+            XCTAssertThrowsError(
+                try CrossNetworkConnectionManager.decodeDynamicQRCodePayload(from: compactPayload)
+            )
+        }
+    }
+
+    func testCompactDynamicQRCodeRejectsExtremeExpirationMillisecondsWithoutTrapping() throws {
+        for invalidExpiration in [Int64.min, Int64.max] {
+            let payload = try compactDynamicQRCodeJSON(expirationMilliseconds: invalidExpiration)
+            XCTAssertThrowsError(
+                try CrossNetworkConnectionManager.decodeDynamicQRCodePayload(from: payload)
+            )
+        }
+    }
+
+    func testCompactDynamicQRCodeAcceptsExactSupportedExpirationBoundary() throws {
+        let supportedBoundary = CrossNetworkQREpochMilliseconds.maximumSupportedValue
+        let payload = try compactDynamicQRCodeJSON(expirationMilliseconds: supportedBoundary)
+        let decoded = try CrossNetworkConnectionManager.decodeDynamicQRCodePayload(from: payload)
+
+        XCTAssertEqual(
+            try CrossNetworkQREpochMilliseconds.milliseconds(from: decoded.expiresAt),
+            supportedBoundary
+        )
+        XCTAssertThrowsError(
+            try CrossNetworkConnectionManager.decodeDynamicQRCodePayload(
+                from: compactDynamicQRCodeJSON(expirationMilliseconds: supportedBoundary + 1)
+            )
+        )
+    }
+
+    func testDynamicQRCodeValidityDurationHonorsProtocolBoundary() async throws {
+        let signatureTimestampMs = try CrossNetworkQREpochMilliseconds.milliseconds(from: Date())
+        let maximumDurationMs = Int64(P2PConstants.qrCodeExpirationSeconds * 1_000)
+        let atLimit = try await makeSignedQRCode(
+            expiresAt: CrossNetworkQREpochMilliseconds.date(
+                from: signatureTimestampMs + maximumDurationMs
+            ),
+            signatureTimestampMs: signatureTimestampMs
+        )
+        let atLimitResult = await verifyWithEmptyTrustStore(atLimit)
+        XCTAssertTrue(atLimitResult.ok, atLimitResult.reason ?? "")
+
+        let overLimit = try await makeSignedQRCode(
+            expiresAt: CrossNetworkQREpochMilliseconds.date(
+                from: signatureTimestampMs + maximumDurationMs + 1
+            ),
+            signatureTimestampMs: signatureTimestampMs
+        )
+        let overLimitResult = await verifyWithEmptyTrustStore(overLimit)
+        XCTAssertFalse(overLimitResult.ok)
+        XCTAssertEqual(overLimitResult.reason, "二维码有效期超出协议上限")
+    }
+
+    func testServerBackedQRCodeAcceptsOnlyExactVersionEight() throws {
+        let supported = try CrossNetworkConnectionManager.decodeServerBackedQRCodeInvite(
+            from: compactServerBackedInviteJSON(version: 8)
+        )
+        XCTAssertEqual(supported.version, 8)
+
+        for unsupportedVersion in [7, 9, Int.max] {
+            XCTAssertThrowsError(
+                try CrossNetworkConnectionManager.decodeServerBackedQRCodeInvite(
+                    from: compactServerBackedInviteJSON(version: unsupportedVersion)
+                )
+            )
+        }
+    }
+
+    func testServerBackedQRCodeEnforcesLocalTrustBeforeCommittingSessionState() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let functionStart = try XCTUnwrap(
+            source.range(of: "private func scanServerBackedQRCodeInvite(")
+        )
+        let functionEnd = try XCTUnwrap(
+            source.range(
+                of: "// MARK: - 私有方法 - P2P 连接建立",
+                range: functionStart.upperBound..<source.endIndex
+            )
+        )
+        let functionBody = String(source[functionStart.lowerBound..<functionEnd.lowerBound])
+        let localBindingCheck = try XCTUnwrap(
+            functionBody.range(of: "try await enforceCurrentPathTrustBinding(")
+        )
+        let stateCommit = try XCTUnwrap(
+            functionBody.range(of: "webrtcSignalingAuthTokenBySessionId[invite.sessionID]")
+        )
+
+        XCTAssertLessThan(localBindingCheck.lowerBound, stateCommit.lowerBound)
+        XCTAssertTrue(functionBody.contains("authenticatedConnectionCodeRebindAllowed: false"))
+        XCTAssertFalse(functionBody.contains("authenticatedConnectionCodeRebindSessionIds.insert"))
     }
 
     func testCrossNetworkQRCodeTreatsAliasMatchedPinnedAuthorityAsTrustedDevice() async throws {
@@ -309,13 +498,11 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         let stableId = "id:\(suffix)"
         let qrData = try await makeSignedQRCode(deviceId: stableId)
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-        defer {
-            trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-            }
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(
@@ -337,5 +524,21 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
 
         XCTAssertTrue(result.ok, result.reason ?? "")
         XCTAssertEqual(result.source, .trustedDevice)
+    }
+
+    func testCrossNetworkQRCodeFailsClosedWhenTrustStoreReadinessFails() async throws {
+        let qrData = try await makeSignedQRCode()
+        let unavailableTrust = TrustSyncService(initialLoadOperationForTesting: {
+            throw TrustSyncError.localTrustStoreUnavailable
+        })
+
+        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(
+            qrData,
+            trustService: unavailableTrust
+        )
+
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.reason, "本地信任存储不可用，无法安全验证二维码")
+        XCTAssertEqual(result.source, .selfAsserted)
     }
 }

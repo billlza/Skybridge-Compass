@@ -948,6 +948,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var lastScannerErrorAt: Date = .distantPast
     @State private var connectionCodeErrorMessage: String?
     @State private var onlineDeviceConnectionErrorMessage: String?
+    @State private var trustRemovalErrorMessage: String?
     @State private var extendedSearchCountdown: Int = 0
     @State private var extendedSearchTimer: DispatchSourceTimer?
     @State private var showManualConnectSheet: Bool = false
@@ -961,6 +962,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @StateObject private var trustedBonjourMetadata = TrustedBonjourMetadataStore()
     @State private var didAppendMacOnlineIPadSmokeBoot = false
     @State private var cachedTrustedRecordGroups: [TrustRecordDisplayGroup] = []
+    @State private var cachedTrustRepairGroups: [TrustRecordDisplayGroup] = []
     @State private var cachedPresentationSnapshot: DeviceDiscoveryPresentationSnapshot = .empty
     @State private var cachedTrustedBonjourRefreshKey = ""
     @State private var lastMacOnlineIPadSmokeDiscoveryDiagnosticKey = ""
@@ -1051,6 +1053,9 @@ public struct EnhancedDeviceDiscoveryView: View {
             let groups = Self.buildTrustedRecordGroups(from: records)
             cachedTrustedRecordGroups = groups
             refreshPresentationState(trustedGroups: groups)
+        }
+        .onReceive(trustSync.$trustRepairRecords) { records in
+            cachedTrustRepairGroups = TrustSyncService.buildTrustRepairDisplayGroups(from: records)
         }
         // 节流：发现扫描时 onlineDevices 会高频突发更新。主线程只采集事实快照，
         // O(n²) 去重/分组交给后台 projector，并用 generation 防止旧结果覆盖新 UI。
@@ -1152,17 +1157,14 @@ public struct EnhancedDeviceDiscoveryView: View {
                     onRemoveTrust: { idsToRevoke, declaredDeviceId in
                         Task { @MainActor in
                             let idsToForget = Array(Set(idsToRevoke + [declaredDeviceId].compactMap { $0 }))
-                            // Clear policy first so future requests prompt again.
-                            if let declaredDeviceId {
-                                PairingTrustApprovalService.shared.clearPolicy(for: declaredDeviceId)
+                            do {
+                                try await PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely(
+                                    deviceIds: idsToForget
+                                )
+                                selectedTrustedGroupSelection = nil
+                            } catch {
+                                trustRemovalErrorMessage = error.localizedDescription
                             }
-                            // Revoke all related ids (canonical + alias).
-                            for id in idsToForget {
-                                try? await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
-                            }
-                            await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: idsToForget)
-                            // Close sheet
-                            selectedTrustedGroupSelection = nil
                         }
                     }
                 )
@@ -1172,6 +1174,17 @@ public struct EnhancedDeviceDiscoveryView: View {
                 EmptyView()
                     .frame(width: 520, height: 420)
             }
+        }
+        .alert(
+            "移除信任失败",
+            isPresented: Binding(
+                get: { trustRemovalErrorMessage != nil },
+                set: { if !$0 { trustRemovalErrorMessage = nil } }
+            )
+        ) {
+            Button("好") { trustRemovalErrorMessage = nil }
+        } message: {
+            Text(trustRemovalErrorMessage ?? "")
         }
         .onDisappear {
  // 注意:统一设备管理器是单例,不应在这里停止
@@ -1433,6 +1446,29 @@ public struct EnhancedDeviceDiscoveryView: View {
                 )
             }
 
+            if !cachedTrustRepairGroups.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("需要修复的设备信任")
+                        .font(.headline)
+
+                    ForEach(cachedTrustRepairGroups) { group in
+                        TrustedDeviceCard(
+                            record: group.displayRecord,
+                            subtitle: "签名或生命周期状态异常，请检查后重新配对",
+                            status: .offline
+                        ) {
+                            selectedTrustedGroupSelection = TrustedGroupSelection(id: group.id)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.orange.opacity(0.6), lineWidth: 1)
+                )
+            }
+
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
             let recentlyConnected = groupedRecentlyConnectedDevices
             if !recentlyConnected.isEmpty {
@@ -1533,6 +1569,9 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     private func refreshTrustedRecordGroups() {
         cachedTrustedRecordGroups = Self.buildTrustedRecordGroups(from: trustSync.activeTrustRecords)
+        cachedTrustRepairGroups = TrustSyncService.buildTrustRepairDisplayGroups(
+            from: trustSync.trustRepairRecords
+        )
     }
 
     private func startDiscoveryForInitialPresentationIfNeeded() {
@@ -1644,6 +1683,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     private func trustedRecordGroup(for id: String) -> TrustRecordDisplayGroup? {
         trustedRecordsForUI.first { $0.id == id }
+            ?? cachedTrustRepairGroups.first { $0.id == id }
     }
 
     private func trustedRecordCaps(_ record: TrustRecord) -> [String: String] {

@@ -68,8 +68,8 @@ final class PeerTrustLookupTests: XCTestCase {
         let expectedKey = Data(repeating: 0xAB, count: 1_184)
         let bootstrapStore = PeerKEMBootstrapStore.shared
         await bootstrapStore.clearForTesting()
-        defer {
-            Task { await bootstrapStore.clearForTesting() }
+        addTeardownBlock { [bootstrapStore] in
+            await bootstrapStore.clearForTesting()
         }
 
         await bootstrapStore.upsert(
@@ -90,13 +90,11 @@ final class PeerTrustLookupTests: XCTestCase {
         let canonicalId = "id:\(UUID().uuidString)"
         let trust = TrustSyncService.shared
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [canonicalId])
-        defer {
-            trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [canonicalId])
-            }
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: [canonicalId])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(
@@ -127,18 +125,14 @@ final class PeerTrustLookupTests: XCTestCase {
         let bootstrapStore = PeerKEMBootstrapStore.shared
         let cleanupIds = ["id:conflict-a", "id:conflict-b"]
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: cleanupIds)
         await bootstrapStore.clearForTesting()
 
-        defer {
-            trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: cleanupIds)
-            }
-            Task {
-                await bootstrapStore.clearForTesting()
-            }
+        addTeardownBlock { @MainActor [bootstrapStore, trust] in
+            await trust.removeRecordsForTesting(deviceIds: cleanupIds)
+            trust.endInMemoryPersistenceForTesting()
+            await bootstrapStore.clearForTesting()
         }
 
         _ = try await trust.addTrustRecord(

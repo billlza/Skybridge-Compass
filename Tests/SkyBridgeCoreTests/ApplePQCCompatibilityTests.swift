@@ -1227,7 +1227,7 @@ final class ApplePQCCompatibilityTests: XCTestCase {
         )
         addTeardownBlock { @MainActor in
             await trust.removeRecordsForTesting(deviceIds: [testPeerId])
-            trust.setInMemoryPersistenceForTesting(false)
+            trust.endInMemoryPersistenceForTesting()
         }
         
  // 混合签名（P256 + ML-DSA）

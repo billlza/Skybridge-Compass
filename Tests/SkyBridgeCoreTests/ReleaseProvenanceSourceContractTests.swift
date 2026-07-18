@@ -2,6 +2,20 @@ import Foundation
 import XCTest
 
 final class ReleaseProvenanceSourceContractTests: XCTestCase {
+    func testReleasePackagingTreatsCompilerWarningsAsErrors() throws {
+        let buildDMG = try repositorySource("Scripts/build_dmg.sh")
+        let packageApp = try repositorySource("Scripts/package_app.sh")
+
+        XCTAssertTrue(buildDMG.contains("export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1"))
+        XCTAssertTrue(buildDMG.contains("-Xswiftc -warnings-as-errors"))
+        XCTAssertTrue(packageApp.contains("export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1"))
+        XCTAssertGreaterThanOrEqual(
+            packageApp.components(separatedBy: "-Xswiftc -warnings-as-errors").count - 1,
+            2,
+            "Both the release app and privileged helper SwiftPM builds must fail on warnings."
+        )
+    }
+
     func testHelperInstallerDoesNotEmbedSourceCheckoutPaths() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/Performance/HelperInstaller.swift")
 

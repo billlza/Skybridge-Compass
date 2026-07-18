@@ -53,7 +53,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         let response = await P2PDiscoveryService.makeBootstrapControlResponse(
             for: .kemRefreshRequest(request),
             makeSignedKEMRefreshPayload: { _ in
-                throw Self.testError("SKR-1 rejected unknown suite wireId=0x0000")
+                throw Self.testError("SKR-1 rejected unknown suite secret=/private/keychain/item")
             },
             makeSignedProtocolIdentityBindingPayload: { _ in
                 throw Self.testError("unexpected PIB-1 path")
@@ -69,6 +69,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
         XCTAssertEqual(failure.stage, "kem_refresh")
         XCTAssertEqual(failure.reasonCode, "unknown_suite")
+        XCTAssertEqual(failure.reason, "request rejected")
+        XCTAssertFalse(failure.reason.contains("/private/keychain/item"))
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"))
         XCTAssertTrue(controlResponse.statusLine.contains("responderLatencyMs="))
@@ -133,7 +135,16 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
-        await store.upsert(deviceIds: ["id:ios-1"], fingerprints: [fingerprint])
+        let trust = try await installAuthenticatedMLDSATrustRecordForTesting(
+            peerId: "id:ios-1",
+            publicKey: protocolPublicKey
+        )
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: ["id:ios-1"])
+            trust.endInMemoryPersistenceForTesting()
+            await PeerProtocolIdentityBootstrapStore.shared.clearForTesting()
+            await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
+        }
 
         let mismatchedTarget = String(repeating: "a", count: 64)
         let first = kemRefreshRequest(
@@ -215,7 +226,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
                 throw Self.testError("unexpected SKR-1 path")
             },
             makeSignedProtocolIdentityBindingPayload: { _ in
-                throw Self.testError("policy mismatch")
+                throw Self.testError("policy mismatch secret=/private/keychain/item")
             }
         )
 
@@ -228,6 +239,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
         XCTAssertEqual(failure.stage, "identity_binding")
         XCTAssertEqual(failure.reasonCode, "policy_mismatch")
+        XCTAssertEqual(failure.reason, "identity binding rejected")
+        XCTAssertFalse(failure.reason.contains("/private/keychain/item"))
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=identity-oob>rejected"))
         XCTAssertTrue(controlResponse.isFailure)

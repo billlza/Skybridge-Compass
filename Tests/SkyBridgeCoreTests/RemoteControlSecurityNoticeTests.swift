@@ -470,7 +470,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             "P2P notice identity lookup must include the peer account, NebulaID, and endpoint aliases used by the remote-control socket."
         )
         XCTAssertTrue(
-            source.contains("let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()") &&
+            source.contains("let localIdentity = RemoteControlSecurityNoticeCenter") &&
+                source.contains(".cachedLocalIdentitySnapshot()") &&
                 source.contains("accountDisplayName: localIdentity?.accountDisplayName") &&
                 source.contains("nebulaId: localIdentity?.nebulaId"),
             "Pairing identity replies must carry local account and Nebula metadata instead of leaving the peer to fail notice validation."

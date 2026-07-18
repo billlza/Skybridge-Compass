@@ -30,6 +30,9 @@ private final class PeerConnection {
     var lastViewerStreamRefreshAt: Date = .distantPast
     var securityNoticeId: UUID?
     var securityAdmissionApproved = false
+#if DEBUG
+    var trustInvalidationCancellationObservedForTesting = false
+#endif
     let clipboardSessionId: UUID
     let audioSessionId: UUID
     let outboundFramePump: RemoteControlOutboundFramePump
@@ -76,7 +79,25 @@ private final class PeerConnection {
             qos: .userInitiated
         )
     }
+
+    func cancelForTrustInvalidation() {
+        connection.cancel()
+#if DEBUG
+        trustInvalidationCancellationObservedForTesting = true
+#endif
+    }
 }
+
+#if DEBUG
+@MainActor
+struct RemoteControlTrustInvalidationProbe {
+    fileprivate let admissionApprovedSnapshot: () -> Bool
+    fileprivate let cancellationSnapshot: () -> Bool
+
+    var isSecurityAdmissionApproved: Bool { admissionApprovedSnapshot() }
+    var didCancelConnection: Bool { cancellationSnapshot() }
+}
+#endif
 
 @available(macOS 14.0, *)
 private final class RemoteControlHandshakeTransport: DiscoveryTransport, @unchecked Sendable {
@@ -208,6 +229,7 @@ public final class RemoteControlManager: BaseManager {
     private var beingControlledPeers: [String: PeerConnection] = [:]
     private var controllingDeviceIds: Set<String> = []
     private var beingControlledDeviceIds: Set<String> = []
+    private var trustInvalidationCancellables = Set<AnyCancellable>()
     private let maxFramedMessageBytes = 8_000_000
     private var interactionTelemetryTasksByPeerId: [String: Task<Void, Never>] = [:]
     private var activeClipboardPeerId: String?
@@ -242,6 +264,51 @@ public final class RemoteControlManager: BaseManager {
             Task { @MainActor in
                 self.currentRenderingMode = to
                 self.synchronizeRendererResources(for: to)
+            }
+        }
+
+        TrustSyncService.shared.trustInvalidationPublisher
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { [weak self] in
+                    self?.handleTrustInvalidation(event)
+                }
+            }
+            .store(in: &trustInvalidationCancellables)
+    }
+
+    private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        var seen = Set<ObjectIdentifier>()
+        let peers = Array(controllingPeers.values) + Array(beingControlledPeers.values)
+        for peer in peers where seen.insert(ObjectIdentifier(peer)).inserted {
+            let handshakeDeviceId: String?
+            if #available(macOS 14.0, *) {
+                handshakeDeviceId = peer.handshakePeer?.deviceId
+            } else {
+                handshakeDeviceId = nil
+            }
+            guard event.matches(deviceId: peer.id)
+                    || event.matches(deviceId: handshakeDeviceId) else {
+                continue
+            }
+            // Remove admission synchronously with the tombstone commit. Merely
+            // cancelling NWConnection is insufficient because already queued
+            // callbacks can otherwise still observe this peer as current.
+            peer.securityAdmissionApproved = false
+            notifyRemoteControlTerminalSessionIfNeeded(
+                peer: peer,
+                kind: .interrupted,
+                reason: "device trust invalidated"
+            )
+            guard removePeer(deviceId: peer.id, role: peer.role) === peer else {
+                continue
+            }
+            peer.cancelForTrustInvalidation()
+            Task { @MainActor [weak self] in
+                await self?.handleConnectionClosed(
+                    peer: peer,
+                    error: RemoteControlError.untrustedPeer(handshakeDeviceId ?? peer.id),
+                    peerAlreadyDetached: true
+                )
             }
         }
     }
@@ -294,6 +361,45 @@ public final class RemoteControlManager: BaseManager {
         }
         registerConnectedDevice(peer.id, for: peer.role)
     }
+
+#if DEBUG
+    @discardableResult
+    func testingRegisterPeerForTrustInvalidation(
+        deviceId: String,
+        role: RemoteControlSessionRole = .controlling
+    ) -> RemoteControlTrustInvalidationProbe {
+        let connection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: 9,
+            using: .tcp
+        )
+        let peer = PeerConnection(id: deviceId, role: role, connection: connection)
+        peer.securityAdmissionApproved = true
+        if #available(macOS 14.0, *) {
+            peer.handshakePeer = PeerIdentifier(deviceId: deviceId)
+        }
+        registerPeer(peer)
+        return RemoteControlTrustInvalidationProbe(
+            admissionApprovedSnapshot: { peer.securityAdmissionApproved },
+            cancellationSnapshot: { peer.trustInvalidationCancellationObservedForTesting }
+        )
+    }
+
+    func testingHasCurrentPeer(deviceId: String, role: RemoteControlSessionRole = .controlling) -> Bool {
+        currentPeer(for: role, deviceId: deviceId) != nil
+    }
+
+    func testingPeerSecurityAdmissionApproved(
+        deviceId: String,
+        role: RemoteControlSessionRole = .controlling
+    ) -> Bool? {
+        currentPeer(for: role, deviceId: deviceId)?.securityAdmissionApproved
+    }
+
+    func testingHandleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        handleTrustInvalidation(event)
+    }
+#endif
 
     @discardableResult
     private func removePeer(
@@ -2018,8 +2124,9 @@ public final class RemoteControlManager: BaseManager {
 
     @available(macOS 14.0, *)
     private func makeRemoteControlTrustProvider(for deviceId: String) async throws -> DefaultHandshakeTrustProvider {
+        let trustRecords = try await TrustSyncService.shared.trustedRecordsSnapshot()
         let trustProvider = DefaultHandshakeTrustProvider(
-            trustRecordsSnapshot: TrustSyncService.shared.activeTrustRecords
+            trustRecordsSnapshot: trustRecords
         )
         let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
         guard !trustedFingerprints.isEmpty else {
@@ -2982,10 +3089,11 @@ public final class RemoteControlManager: BaseManager {
                 "inbound remote control MessageA contains a non-negotiable offer"
             )
         }
+        let trustRecords = try await TrustSyncService.shared.trustedRecordsSnapshot()
         let trustedPeerId: String
         switch RemoteControlInboundTrustResolver.resolve(
             remoteSOAPeerId: messageA.soaExtension?.initiatorPeerId,
-            records: TrustSyncService.shared.activeTrustRecords
+            records: trustRecords
         ) {
         case .resolved(let deviceId, _):
             trustedPeerId = deviceId
@@ -3515,10 +3623,16 @@ public final class RemoteControlManager: BaseManager {
     }
 
  /// 统一处理连接关闭 / 错误
-    private func handleConnectionClosed(peer: PeerConnection, error: Error) async {
-        guard isCurrentPeer(peer) else {
-            logger.info("ℹ️ 忽略过期远控会话的关闭回调: \(peer.id, privacy: .public)")
-            return
+    private func handleConnectionClosed(
+        peer: PeerConnection,
+        error: Error,
+        peerAlreadyDetached: Bool = false
+    ) async {
+        if !peerAlreadyDetached {
+            guard isCurrentPeer(peer) else {
+                logger.info("ℹ️ 忽略过期远控会话的关闭回调: \(peer.id, privacy: .public)")
+                return
+            }
         }
 
         logger.error(
@@ -3537,7 +3651,9 @@ public final class RemoteControlManager: BaseManager {
                 transportKind: .p2p
             )
         }
-        _ = removePeer(deviceId: peer.id, role: peer.role)
+        if !peerAlreadyDetached {
+            _ = removePeer(deviceId: peer.id, role: peer.role)
+        }
         if #available(macOS 14.0, *) {
             releaseSOAStateIfUnretained(for: peer)
         }

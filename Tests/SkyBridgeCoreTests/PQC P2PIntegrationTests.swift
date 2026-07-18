@@ -52,7 +52,9 @@ final class PQCP2PIntegrationTests: XCTestCase {
             let trust = TrustSyncService.shared
             return Task { @MainActor in
                 await trust.removeRecordsForTesting(deviceIds: trustIds)
-                trust.setInMemoryPersistenceForTesting(false)
+                for _ in trustIds {
+                    trust.endInMemoryPersistenceForTesting()
+                }
             }
         }
         await cleanupTask.value
@@ -467,7 +469,7 @@ final class PQCP2PIntegrationTests: XCTestCase {
     }
 
     private func installProtocolIdentityTrust(for peerId: String) async throws {
-        guard installedTrustIds.insert(peerId).inserted else { return }
+        guard !installedTrustIds.contains(peerId) else { return }
         let publicKey = try await XCTUnwrap(deviceIdentity).manager.getProtocolSigningPublicKey(
             for: .mlDSA65
         )
@@ -475,5 +477,6 @@ final class PQCP2PIntegrationTests: XCTestCase {
             peerId: peerId,
             publicKey: publicKey
         )
+        installedTrustIds.insert(peerId)
     }
 }

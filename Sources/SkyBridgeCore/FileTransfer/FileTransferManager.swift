@@ -1134,7 +1134,13 @@ public class FileTransferManager: BaseManager {
         #if os(macOS)
         if #available(macOS 14.0, *) {
             if let declaredId = metadata.senderDeviceId, !declaredId.isEmpty {
-                let alreadyTrusted = TrustSyncService.shared.activeTrustRecords.contains {
+                let trustRecords: [TrustRecord]
+                do {
+                    trustRecords = try await TrustSyncService.shared.trustedRecordsSnapshot()
+                } catch {
+                    throw FileTransferError.secureSessionRequired
+                }
+                let alreadyTrusted = trustRecords.contains {
                     $0.deviceId == declaredId && $0.isAuthenticationEligible
                 }
                 if !alreadyTrusted {
@@ -1147,7 +1153,8 @@ public class FileTransferManager: BaseManager {
                         osVersion: metadata.senderOSVersion,
                         kemKeyCount: 0
                     )
-                    let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                    let decision = try await PairingTrustApprovalService.shared.decide(for: request)
+                    try Task.checkCancellation()
                     if decision == .reject {
                         let error = FileTransferError.transferCancelled
                         await sendFailureReceiptIfPossible(

@@ -80,6 +80,8 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
             deviceId: "id:expired-kem",
             deviceName: "Other Device",
             kemPublicKeys: [validXWingKey()],
+            recordType: .revoke,
+            updatedAt: Date(timeIntervalSinceNow: -31 * 24 * 60 * 60),
             revokedAt: Date(timeIntervalSinceNow: -31 * 24 * 60 * 60),
             knownDeviceIds: [matchingAlias]
         )
@@ -180,6 +182,7 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
         deviceName: String,
         kemPublicKeys: [KEMPublicKeyInfo]?,
         recordType: TrustRecordType = .add,
+        updatedAt: Date = Date(),
         revokedAt: Date? = nil,
         knownDeviceIds: [String]? = nil,
         lifecycleState: TrustLifecycleState = .active
@@ -189,6 +192,7 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
             pubKeyFP: String(repeating: "a", count: 64),
             publicKey: Data([0x01]),
             kemPublicKeys: kemPublicKeys,
+            updatedAt: updatedAt,
             signature: Data([0x02]),
             recordType: recordType,
             revokedAt: revokedAt,

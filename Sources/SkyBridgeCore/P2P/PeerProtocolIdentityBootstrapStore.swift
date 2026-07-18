@@ -32,9 +32,8 @@ public actor PeerProtocolIdentityBootstrapStore {
 
         for deviceId in normalizedIds {
             let existing = Set(entries[deviceId]?.fingerprints ?? [])
-            let merged = existing.union(incoming)
-            if merged != existing || entries[deviceId] == nil {
-                entries[deviceId] = Entry(fingerprints: Array(merged).sorted(), updatedAt: now)
+            if incoming != existing || entries[deviceId] == nil {
+                entries[deviceId] = Entry(fingerprints: Array(incoming).sorted(), updatedAt: now)
                 changed = true
             } else if var current = entries[deviceId] {
                 current.updatedAt = now
@@ -70,22 +69,30 @@ public actor PeerProtocolIdentityBootstrapStore {
     }
 
     public func clear(deviceIds: [String]) {
+        do {
+            try clearPersisting(deviceIds: deviceIds)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Failed to clear bootstrap protocol identity cache: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    public func clearPersisting(deviceIds: [String]) throws {
         let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
+        var updatedEntries = entries
         var changed = false
         for deviceId in normalizedIds {
-            if entries.removeValue(forKey: deviceId) != nil {
+            if updatedEntries.removeValue(forKey: deviceId) != nil {
                 changed = true
             }
         }
 
         guard changed else { return }
-        if entries.isEmpty {
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            persist()
-        }
+        try persist(updatedEntries)
+        entries = updatedEntries
     }
 
     func clearForTesting() {
@@ -123,14 +130,22 @@ public actor PeerProtocolIdentityBootstrapStore {
 
     private func persist() {
         do {
-            let snapshot = Snapshot(entries: entries)
-            let data = try JSONEncoder().encode(snapshot)
-            defaults.set(data, forKey: Self.defaultsKey)
+            try persist(entries)
         } catch {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ Failed to persist bootstrap protocol identity cache: \(error.localizedDescription, privacy: .public)"
             )
         }
+    }
+
+    private func persist(_ snapshotEntries: [String: Entry]) throws {
+        if snapshotEntries.isEmpty {
+            defaults.removeObject(forKey: Self.defaultsKey)
+            return
+        }
+        let snapshot = Snapshot(entries: snapshotEntries)
+        let data = try JSONEncoder().encode(snapshot)
+        defaults.set(data, forKey: Self.defaultsKey)
     }
 
     private static func loadEntries(from defaults: UserDefaults) -> [String: Entry] {

@@ -86,12 +86,16 @@ extension P2PDiscoveryService {
                 )
             } catch {
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
+                let reasonCode = Self.signedKEMRefreshFailureCode(for: error)
+                SkyBridgeLogger.p2p.error(
+                    "SKR-1 signed LAN KEM refresh rejected: code=\(reasonCode, privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+                )
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "kem_refresh",
-                    reasonCode: Self.signedKEMRefreshFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: "request rejected",
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let statusLine = String(
@@ -126,12 +130,16 @@ extension P2PDiscoveryService {
                     protocolIdentityBindingCode: code
                 )
             } catch {
+                let reasonCode = Self.protocolIdentityBindingFailureCode(for: error)
+                SkyBridgeLogger.p2p.error(
+                    "PIB-1 protocol identity binding rejected: code=\(reasonCode, privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+                )
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "identity_binding",
-                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: "identity binding rejected",
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let statusLine = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
@@ -185,8 +193,8 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("target protocol identity fingerprint invalid")
         }
 
-        let requesterPins = await PeerProtocolIdentityBootstrapStore.shared.trustedFingerprints(
-            forCandidates: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId)
+        let requesterPins = await DefaultHandshakeTrustProvider().trustedFingerprints(
+            for: request.requesterDeviceId
         )
         guard requesterPins.contains(requesterFingerprint) else {
             throw makeSKRFailure("requester protocol identity fingerprint not pinned")
@@ -439,7 +447,7 @@ extension P2PDiscoveryService {
             signature: signature
         )
         let code = signed.shortAuthenticationCode(request: request)
-        let approval = await PairingTrustApprovalService.shared.stageProtocolIdentityBindingRequesterApproval(
+        let approval = try await PairingTrustApprovalService.shared.stageProtocolIdentityBindingRequesterApproval(
             peerEndpoint: request.bonjourEndpointDigest ?? "lan",
             requesterDeviceIds: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId),
             displayName: request.requesterDeviceId,
@@ -450,6 +458,7 @@ extension P2PDiscoveryService {
             requesterProtocolSigningAlgorithm: requesterAlgorithm,
             requesterProtocolIdentityFingerprint: requesterFingerprint
         )
+        try Task.checkCancellation()
         guard approval != PairingTrustApprovalService.Decision.reject else {
             throw makePIBFailure("operator rejected requester protocol identity")
         }

@@ -987,7 +987,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 .snapshotEnsuringProtocolDeviceId(allowCreate: true)
         } catch {
             logger.error(
-                "❌ Discovery batch blocked because local identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+                "❌ Discovery batch blocked because local identity authority is unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
             )
             return
         }
@@ -2488,7 +2488,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     self.logger.info("📡 广播服务已启动（系统分配端口）")
                 }
             } catch {
-                self.logger.error("❌ 启动广播服务失败: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("❌ 启动广播服务失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
             }
         }
     }
@@ -2548,7 +2548,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 bgLogger.info("📡 广播服务已启动（系统分配端口）")
             }
         } catch {
-            bgLogger.error("❌ 启动广播服务失败: \(error.localizedDescription, privacy: .public)")
+            bgLogger.error("❌ 启动广播服务失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
         }
     }
 
@@ -2709,6 +2709,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
         let peer = PeerIdentifier(deviceId: peerDeviceId)
+        let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerDeviceId)
         
         // Precompute identity info for heartbeat without crossing actor boundaries inside GCD timer handlers.
         let localIdForHeartbeat = localIdentityDeviceId
@@ -2725,6 +2726,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority? = nil
         var didMarkConnected = false
         var latestPeerCapabilities: [String] = []
+        struct PairingOperationState {
+            var sessionKeys: SessionKeys?
+            var authority: AuthenticatedRemoteAuthority?
+            var isRekeying: Bool
+        }
+        let pairingOperationState = OSAllocatedUnfairLock(
+            initialState: PairingOperationState(
+                sessionKeys: nil,
+                authority: nil,
+                isRekeying: false
+            )
+        )
         
         // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
         // mutable locals like `sessionKeys` and non-Sendable types like `NWConnection`, causing build errors.
@@ -2744,6 +2757,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         let peerIdForPresence = peer.deviceId
         let endpointDescriptionForPresence = stableEndpointLabel(for: connection.endpoint)
+        let endpointDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
+            endpointDescriptionForPresence
+        )
 
         func trimmedIdentifier(_ raw: String?) -> String? {
             guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2758,7 +2774,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         ) -> AppMessage.PairingIdentityExchangePayload? {
             guard let normalized = payload.normalizedBootstrapPayload else {
                 logger.warning(
-                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peer.deviceId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
+                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peerDiagnosticLabel, privacy: .public) endpoint=\(endpointDiagnosticLabel, privacy: .public)"
                 )
                 return nil
             }
@@ -2782,8 +2798,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return normalized
         }
 
-        func publishClassicTransferSessionSnapshot(keys: SessionKeys) async {
-            let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+        func publishClassicTransferSessionSnapshot(
+            keys: SessionKeys,
+            remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+        ) async {
+            let effectiveDeclaredDeviceId = remoteIdentityPayload?.deviceId
+                ?? declaredDeviceIdForVerification
+            let effectiveCapabilities = remoteIdentityPayload?.capabilities
+                ?? latestPeerCapabilities
+            let declaredPeerId = trimmedIdentifier(effectiveDeclaredDeviceId)
             let fallbackPeerId = trimmedIdentifier(peerDeviceId)
                 ?? trimmedIdentifier(peerIdForPresence)
                 ?? endpointDescriptionForPresence
@@ -2792,7 +2815,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 ?? PeerTrustLookup.persistentDeviceId(from: fallbackPeerId)
                 ?? primaryPeerId
             let aliases = normalizedClassicTransferSessionAliases([
-                declaredDeviceIdForVerification,
+                effectiveDeclaredDeviceId,
                 primaryPeerId,
                 peerDeviceId,
                 endpointHostOrIP,
@@ -2804,7 +2827,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 resolvedPeerDeviceId: resolvedPeerDeviceId,
                 aliases: aliases,
                 endpointHostOrIP: endpointHostOrIP,
-                capabilities: latestPeerCapabilities,
+                capabilities: effectiveCapabilities,
                 sessionKeys: keys
             )
             await ClassicTransferSessionRegistry.shared.upsert(session: snapshot)
@@ -2838,55 +2861,38 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             ) ?? "P2P Peer"
         }
 
-        func persistAuthenticatedRemoteAuthority(
-            from payload: AppMessage.PairingIdentityExchangePayload,
-            displayName: String
-        ) async {
-            guard let authority = authenticatedRemoteAuthority else {
-                logger.warning(
-                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-                )
-                return
+        func isCurrentPairingOperation(
+            keys expectedKeys: SessionKeys,
+            authority expectedAuthority: AuthenticatedRemoteAuthority
+        ) -> Bool {
+            let current = pairingOperationState.withLock { $0 }
+            guard !Task.isCancelled,
+                  !current.isRekeying,
+                  let currentKeys = current.sessionKeys,
+                  currentKeys.sessionId == expectedKeys.sessionId,
+                  currentKeys.transcriptHash == expectedKeys.transcriptHash,
+                  current.authority == expectedAuthority else {
+                return false
             }
-
-            var knownDeviceIds: [String] = []
-            var seenKnownDeviceIds = Set<String>()
-
-            func appendKnownDeviceId(_ raw: String?) {
-                guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !raw.isEmpty,
-                      seenKnownDeviceIds.insert(raw).inserted else {
-                    return
-                }
-                knownDeviceIds.append(raw)
+            if case .ready = connection.state {
+                return true
             }
+            return false
+        }
 
-            appendKnownDeviceId(payload.deviceId)
-            appendKnownDeviceId(peer.deviceId)
-            appendKnownDeviceId(peerIdForPresence)
-
-            do {
-                let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-                    deviceId: payload.deviceId,
-                    displayName: displayName,
-                    preferredCurrentDeviceId: payload.deviceId,
-                    knownDeviceIds: knownDeviceIds,
-                    protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
-                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+        @discardableResult
+        func rollbackPairingCommit(
+            _ reservation: PairingIdentityExchangeCommitCoordinator.Reservation,
+            reason: String
+        ) async -> Bool {
+            switch await PairingIdentityExchangeCommitCoordinator.rollbackResult(reservation) {
+            case .completed:
+                return true
+            case .failed(let detail):
+                logger.error(
+                    "⛔️ exact pairing KEM rollback failed: reason=\(reason, privacy: .public) err=\(detail, privacy: .private)"
                 )
-                guard persisted else {
-                    logger.warning(
-                        "⚠️ inbound current-path trust bridge skipped: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-                    )
-                    return
-                }
-                logger.info(
-                    "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-                )
-            } catch {
-                logger.warning(
-                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .private)"
-                )
+                return false
             }
         }
 
@@ -3046,6 +3052,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         logger.info("🔁 入站 transactional rekey candidate：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public)")
                         previousSessionKeysBeforeRekey = sessionKeys
                         previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
+                        pairingOperationState.withLock { $0.isRekeying = true }
                         driver = nil
                     default:
                         break
@@ -3107,6 +3114,38 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 guard let payload = validatedPairingIdentityPayload(payload) else {
                                     break
                                 }
+                                guard let pairingAuthorityLease = authenticatedRemoteAuthority else {
+                                    logger.error("❌ pairing identity exchange has no authenticated authority; terminated connection")
+                                    connection.cancel()
+                                    return
+                                }
+                                let pairingKEMDeviceIds = [
+                                    payload.deviceId,
+                                    peer.deviceId,
+                                    peerIdForPresence
+                                ]
+                                let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                do {
+                                    pairingReservation = try await PairingIdentityExchangeCommitCoordinator.reserve(
+                                        deviceIds: pairingKEMDeviceIds
+                                    )
+                                } catch {
+                                    logger.error(
+                                        "❌ pairing KEM admission unavailable; terminated connection: \(error.localizedDescription, privacy: .private)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                guard isCurrentPairingOperation(
+                                    keys: keys,
+                                    authority: pairingAuthorityLease
+                                ) else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "reservation_stale"
+                                    )
+                                    return
+                                }
                                 let endpoint = stableEndpointLabel(for: connection.endpoint)
                                 let displayName: String = {
                                     resolvedDisplayName(
@@ -3117,22 +3156,28 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     )
                                 }()
 
-                                declaredDeviceIdForVerification = payload.deviceId
-                                latestPeerCapabilities = payload.capabilities ?? []
                                 await MainActor.run {
                                     PairingTrustApprovalService.shared.updateVerificationCode(
                                         declaredDeviceId: payload.deviceId,
                                         sessionKeys: keys
                                     )
                                 }
-
-                                let policyBindingKey = authenticatedRemoteAuthority.flatMap { authority in
-                                    PairingTrustApprovalService.policyBindingKey(
-                                        declaredDeviceId: payload.deviceId,
-                                        algorithmRawValue: authority.protocolSigningAlgorithm.rawValue,
-                                        protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                                guard isCurrentPairingOperation(
+                                    keys: keys,
+                                    authority: pairingAuthorityLease
+                                ) else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_before_approval"
                                     )
+                                    return
                                 }
+
+                                let policyBindingKey = PairingTrustApprovalService.policyBindingKey(
+                                    declaredDeviceId: payload.deviceId,
+                                    algorithmRawValue: pairingAuthorityLease.protocolSigningAlgorithm.rawValue,
+                                    protocolPublicKeyFingerprint: pairingAuthorityLease.protocolPublicKeyFingerprint
+                                )
 
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpoint,
@@ -3144,220 +3189,192 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     osVersion: payload.osVersion,
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
-                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                let decision: PairingTrustApprovalService.Decision
+                                do {
+                                    decision = try await PairingTrustApprovalService.shared.decide(for: request)
+                                    try Task.checkCancellation()
+                                } catch is CancellationError {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_cancelled"
+                                    )
+                                    return
+                                } catch {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_failed"
+                                    )
+                                    logger.error(
+                                        "❌ pairing trust approval unavailable; terminated connection: \(error.localizedDescription, privacy: .private)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
                                 guard decision != PairingTrustApprovalService.Decision.reject else {
-                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payload.deviceId, privacy: .public)")
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_rejected"
+                                    )
+                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(Self.protocolIdentityLogRedaction, privacy: .public)")
                                     break
                                 }
 
-                                // Persist peer KEM identity keys for PQC suite negotiation.
-                                // Without this, the next PQC rekey will fail on macOS with suiteNegotiationFailed
-                                // because `peerKEMPublicKeys[suite] == nil`.
-                                await PeerKEMBootstrapStore.shared.upsert(
-                                    deviceIds: [payload.deviceId, peer.deviceId],
-                                    kemPublicKeys: payload.kemPublicKeys,
-                                    platform: payload.platform,
-                                    osVersion: payload.osVersion
-                                )
-                                do {
-                                    // Keep bootstrap metadata/KEM keys, but never wipe previously authenticated
-                                    // authority material (protocol keys / fingerprints / SE keys) with empty placeholders.
-                                    let trust = await MainActor.run { TrustSyncService.shared }
-                                    let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                                    var baseCaps: [String] = ["trusted", "pqc_bootstrap"]
-                                    for capability in payload.capabilities ?? [] {
-                                        let trimmed = capability.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if !trimmed.isEmpty {
-                                            baseCaps.append(trimmed)
-                                        }
-                                    }
-                                    if let platform = payload.platform?.trimmingCharacters(in: .whitespacesAndNewlines),
-                                       !platform.isEmpty {
-                                        baseCaps.append("platform=\(platform)")
-                                    }
-                                    if let osVersion = payload.osVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
-                                       !osVersion.isEmpty {
-                                        baseCaps.append("osVersion=\(osVersion)")
-                                    }
-                                    if let modelName = payload.modelName?.trimmingCharacters(in: .whitespacesAndNewlines),
-                                       !modelName.isEmpty {
-                                        baseCaps.append("modelName=\(modelName)")
-                                    }
-                                    if let chip = payload.chip?.trimmingCharacters(in: .whitespacesAndNewlines),
-                                       !chip.isEmpty {
-                                        baseCaps.append("chip=\(chip)")
-                                    }
-                                    baseCaps.append("peerEndpoint=\(peer.deviceId)")
-
-                                    var bootstrapKnownDeviceIds: [String] = []
-                                    var seenBootstrapIds = Set<String>()
-                                    func appendBootstrapId(_ raw: String?) {
-                                        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
-                                              !raw.isEmpty,
-                                              seenBootstrapIds.insert(raw).inserted else {
-                                            return
-                                        }
-                                        bootstrapKnownDeviceIds.append(raw)
-                                    }
-
-                                    appendBootstrapId(payload.deviceId)
-                                    appendBootstrapId(peer.deviceId)
-                                    appendBootstrapId(peerIdForPresence)
-
-                                    func mergedCapabilities(existing: [String]?, incoming: [String]) -> [String] {
-                                        var flags = Set<String>()
-                                        var keyed: [String: String] = [:]
-
-                                        func ingest(_ items: [String], preferIncoming: Bool) {
-                                            for raw in items {
-                                                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                                                guard !trimmed.isEmpty else { continue }
-                                                let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
-                                                if parts.count == 2 {
-                                                    let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                                                    let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                                                    guard !key.isEmpty, !value.isEmpty else { continue }
-                                                    if preferIncoming || keyed[key] == nil {
-                                                        keyed[key] = value
-                                                    }
-                                                } else {
-                                                    flags.insert(trimmed)
-                                                }
-                                            }
-                                        }
-
-                                        ingest(existing ?? [], preferIncoming: false)
-                                        ingest(incoming, preferIncoming: true)
-
-                                        return flags.sorted() + keyed.keys.sorted().compactMap { key in
-                                            keyed[key].map { "\(key)=\($0)" }
-                                        }
-                                    }
-
-                                    func mergedKEMPublicKeys(
-                                        existing: [KEMPublicKeyInfo]?,
-                                        incoming: [KEMPublicKeyInfo]
-                                    ) -> [KEMPublicKeyInfo]? {
-                                        var bySuite = [UInt16: KEMPublicKeyInfo]()
-                                        for key in KEMPublicKeyInfo.normalizedValidKeys(existing ?? []) {
-                                            bySuite[key.suiteWireId] = key
-                                        }
-                                        for key in KEMPublicKeyInfo.normalizedValidKeys(incoming) {
-                                            bySuite[key.suiteWireId] = key
-                                        }
-                                        let merged = bySuite.values.sorted { $0.suiteWireId < $1.suiteWireId }
-                                        return merged.isEmpty ? nil : merged
-                                    }
-
-                                    func mergedKnownDeviceIds(existing: [String]?, incoming: [String]) -> [String]? {
-                                        let merged = Set((existing ?? []) + incoming)
-                                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                                            .filter { !$0.isEmpty }
-                                        guard !merged.isEmpty else { return nil }
-                                        return Array(merged).sorted()
-                                    }
-
-                                    func upsertBootstrapRecord(deviceId: String, capabilities: [String]) async throws {
-                                        let existing = await trust.getTrustRecord(deviceId: deviceId)
-                                        let record = TrustRecord(
-                                            deviceId: deviceId,
-                                            pubKeyFP: existing?.pubKeyFP ?? "",
-                                            publicKey: existing?.publicKey ?? Data(),
-                                            secureEnclavePublicKey: existing?.secureEnclavePublicKey,
-                                            protocolPublicKey: existing?.protocolPublicKey,
-                                            protocolSigningAlgorithm: existing?.protocolSigningAlgorithm,
-                                            protocolPublicKeyFingerprint: existing?.protocolPublicKeyFingerprint,
-                                            legacyP256PublicKey: existing?.legacyP256PublicKey,
-                                            signatureAlgorithm: existing?.signatureAlgorithm,
-                                            kemPublicKeys: mergedKEMPublicKeys(
-                                                existing: existing?.kemPublicKeys,
-                                                incoming: payload.kemPublicKeys
-                                            ),
-                                            attestationLevel: existing?.attestationLevel ?? .none,
-                                            attestationData: existing?.attestationData,
-                                            capabilities: mergedCapabilities(
-                                                existing: existing?.capabilities,
-                                                incoming: capabilities
-                                            ),
-                                            signature: Data(),
-                                            deviceName: trimmedDisplayName.isEmpty ? existing?.deviceName : trimmedDisplayName,
-                                            currentDeviceId: payload.deviceId,
-                                            knownDeviceIds: mergedKnownDeviceIds(
-                                                existing: existing?.knownDeviceIdsMetadata,
-                                                incoming: bootstrapKnownDeviceIds
-                                            ),
-                                            lifecycleState: existing?.lifecycleStateMetadata
-                                        )
-                                        _ = try await trust.addTrustRecord(record)
-                                    }
-
-                                    try await upsertBootstrapRecord(
-                                        deviceId: payload.deviceId,
-                                        capabilities: baseCaps
+                                guard isCurrentPairingOperation(
+                                    keys: keys,
+                                    authority: pairingAuthorityLease
+                                ) else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_approval"
                                     )
-
-                                    logger.info("🔑 已保存对端 KEM 公钥到 TrustSync：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)")
-                                } catch {
-                                    logger.warning("⚠️ 保存对端 KEM 公钥到 TrustSync 失败，已降级使用 bootstrap cache: \(error.localizedDescription, privacy: .public)")
+                                    return
                                 }
-                                await persistAuthenticatedRemoteAuthority(
-                                    from: payload,
-                                    displayName: displayName
-                                )
-                                await publishClassicTransferSessionSnapshot(keys: keys)
 
                                 let now = Date()
-                                guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                                let shouldSendReply = P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
                                     lastSentAt: lastPairingIdentityExchangeReplyAt,
                                     now: now
+                                )
+                                let replyMaterial: (payload: Data, kemKeyCount: Int)?
+                                if shouldSendReply {
+                                    do {
+                                        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                                        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                            try await DeviceIdentityKeyManager.shared
+                                                .pairingIdentityKEMPublicKeys(using: provider)
+                                        )
+                                        guard !kemKeys.isEmpty else {
+                                            throw PeerKEMBootstrapStore.PairingWriteError.invalidKEMPayload
+                                        }
+                                        let localId = localIdentityDeviceId.trimmingCharacters(
+                                            in: .whitespacesAndNewlines
+                                        )
+                                        guard !localId.isEmpty else {
+                                            throw PeerKEMBootstrapStore.PairingWriteError.invalidIdentifiers
+                                        }
+                                        let localPresentation = LocalDevicePresentation.current()
+                                        let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                                        let reply = AppMessage.pairingIdentityExchange(.init(
+                                            deviceId: localId,
+                                            kemPublicKeys: kemKeys,
+                                            deviceName: localPresentation.deviceName,
+                                            modelName: localPresentation.modelName,
+                                            platform: localPresentation.platformName,
+                                            osVersion: localPresentation.osVersion,
+                                            chip: nil,
+                                            capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                            fileTransferPort: endpoints.fileTransferPort,
+                                            remoteControlPort: endpoints.remoteControlPort
+                                        ))
+                                        let plaintext = try JSONEncoder().encode(reply)
+                                        let ciphertext = try encryptAppPayload(plaintext, with: keys)
+                                        replyMaterial = (
+                                            TrafficPadding.wrapIfEnabled(ciphertext, label: "tx"),
+                                            kemKeys.count
+                                        )
+                                    } catch {
+                                        _ = await rollbackPairingCommit(
+                                            pairingReservation,
+                                            reason: "local_reply_unavailable"
+                                        )
+                                        logger.error(
+                                            "❌ local pairing identity reply unavailable; terminated connection: \(error.localizedDescription, privacy: .private)"
+                                        )
+                                        connection.cancel()
+                                        return
+                                    }
+                                } else {
+                                    replyMaterial = nil
+                                }
+                                guard isCurrentPairingOperation(
+                                    keys: keys,
+                                    authority: pairingAuthorityLease
                                 ) else {
-                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
-                                    break
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_reply_prepare"
+                                    )
+                                    return
                                 }
 
-                                // Reply with our KEM identity public keys (bootstrap for iOS initiator).
-                                let provider = CryptoProviderFactory.make(policy: .preferPQC)
-                                let km = DeviceIdentityKeyManager.shared
-                                let kemKeys: [KEMPublicKeyInfo]
-                                do {
-                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
-                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                    isCurrentPairingOperation(
+                                        keys: keys,
+                                        authority: pairingAuthorityLease
                                     )
+                                }
+                                let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
+                                do {
+                                    let commitResult = try await PairingIdentityExchangeCommitCoordinator
+                                        .commitAuthorityAndKEM(
+                                            reservation: pairingReservation,
+                                            payload: payload,
+                                            authority: pairingAuthorityLease,
+                                            displayName: displayName,
+                                            isCurrent: transportIsCurrent
+                                        )
+                                    guard case .committed(let receipt) = commitResult else {
+                                        return
+                                    }
+                                    commitReceipt = receipt
+                                } catch is CancellationError {
+                                    return
                                 } catch {
-                                    logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
-                                    kemKeys = []
+                                    logger.error(
+                                        "❌ pairing authority/KEM commit failed; terminated connection: \(error.localizedDescription, privacy: .private)"
+                                    )
+                                    connection.cancel()
+                                    return
                                 }
-                                guard !kemKeys.isEmpty else {
-                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
-                                    break
+
+                                await publishClassicTransferSessionSnapshot(
+                                    keys: keys,
+                                    remoteIdentityPayload: payload
+                                )
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    await ClassicTransferSessionRegistry.shared.remove(
+                                        sessionId: classicTransferSessionId
+                                    )
+                                    return
                                 }
-                                let localIdRaw = localIdentityDeviceId
-                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !localId.isEmpty else {
-                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
-                                    break
+
+                                if let replyMaterial {
+                                    do {
+                                        try await transport.send(to: peer, data: replyMaterial.payload)
+                                    } catch {
+                                        logger.error(
+                                            "❌ pairing identity reply failed after commit; terminated connection: \(error.localizedDescription, privacy: .private)"
+                                        )
+                                        connection.cancel()
+                                        return
+                                    }
+                                    guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                        commitReceipt,
+                                        transportIsCurrent: transportIsCurrent
+                                    ) else {
+                                        return
+                                    }
+                                    lastPairingIdentityExchangeReplyAt = now
+                                    logger.info(
+                                        "🔑 已回传本机 KEM 公钥：count=\(replyMaterial.kemKeyCount, privacy: .public) decision=\(decision.rawValue, privacy: .public)"
+                                    )
+                                } else {
+                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
                                 }
-                                let localPresentation = LocalDevicePresentation.current()
-                                let endpoints = ServiceEndpointRegistry.shared.snapshot()
-                                let reply = AppMessage.pairingIdentityExchange(.init(
-                                    deviceId: localId,
-                                    kemPublicKeys: kemKeys,
-                                    deviceName: localPresentation.deviceName,
-                                    modelName: localPresentation.modelName,
-                                    platform: localPresentation.platformName,
-                                    osVersion: localPresentation.osVersion,
-                                    chip: nil,
-                                    capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
-                                    fileTransferPort: endpoints.fileTransferPort,
-                                    remoteControlPort: endpoints.remoteControlPort
-                                ))
-                                let outPlain = try JSONEncoder().encode(reply)
-                                let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
-                                try await transport.send(to: peer, data: outPadded)
-                                lastPairingIdentityExchangeReplyAt = now
-                                logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    return
+                                }
+                                declaredDeviceIdForVerification = payload.deviceId
+                                latestPeerCapabilities = payload.capabilities ?? []
+                                logger.info(
+                                    "🔑 已提交对端 KEM 公钥（bootstrap）：declared=\(Self.protocolIdentityLogRedaction, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
                             case .ping(let payload):
                                 // RTT probe: respond as fast as possible with an echoed pong.
                                 let reply = AppMessage.pong(.init(id: payload.id))
@@ -3372,7 +3389,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             }
                         }
                     } catch {
-                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(error.localizedDescription, privacy: .public)")
+                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                     }
                     continue
                 }
@@ -3388,7 +3405,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
                         inboundPairKey = soaBinding.pairKey
                         if soaBinding.usedAuthenticatedInitiator {
-                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
+                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peerDiagnosticLabel, privacy: .public))")
                         }
                         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
@@ -3402,7 +3419,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             localPQCSuitesAvailable: true
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
-                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
                             )
                             return
                         }
@@ -3429,7 +3446,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 localPQCSuitesAvailable: !localPQCSuites.isEmpty
                             ) {
                                 logger.error(
-                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
                                 )
                                 return
                             }
@@ -3460,9 +3477,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                             "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
                                         ]
                                     ))
-                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
+                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peerDiagnosticLabel, privacy: .public)")
                                 } else {
-                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
+                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peerDiagnosticLabel, privacy: .public)")
                                     return
                                 }
                             } else {
@@ -3487,8 +3504,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 .decodedIdentityPublicKeys()
                 .authoritativeProtocolFingerprint()
                 .lowercased()
+            let authoritativeFingerprints = await DefaultHandshakeTrustProvider()
+                .trustedFingerprints(for: peer.deviceId)
             if let messageAFingerprint,
-               await PeerProtocolIdentityBootstrapStore.shared.containsTrustedFingerprint(messageAFingerprint),
+               authoritativeFingerprints.contains(messageAFingerprint),
                let bootstrapProvider = BootstrapProtocolIdentityTrustProvider(
                     protocolIdentityFingerprint: messageAFingerprint
                ) {
@@ -3521,10 +3540,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
         } catch {
-                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
             if previousSessionKeysBeforeRekey != nil {
                 previousSessionKeysBeforeRekey = nil
                 previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                pairingOperationState.withLock { $0.isRekeying = false }
                 driver = nil
                 continue
             }
@@ -3554,8 +3574,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             }
                         }
                     case .established(let keys):
-                        authenticatedRemoteAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
+                        let establishedAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
+                        authenticatedRemoteAuthority = establishedAuthority
                         sessionKeys = keys
+                        pairingOperationState.withLock {
+                            $0.sessionKeys = keys
+                            $0.authority = establishedAuthority
+                            $0.isRekeying = false
+                        }
                         previousSessionKeysBeforeRekey = nil
                         previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                         await publishClassicTransferSessionSnapshot(keys: keys)
@@ -3574,8 +3600,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         }
                     case .failed(let reason):
                         if let previousKeys = previousSessionKeysBeforeRekey {
+                            let restoredAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
                             sessionKeys = previousKeys
-                            authenticatedRemoteAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
+                            authenticatedRemoteAuthority = restoredAuthority
+                            pairingOperationState.withLock {
+                                $0.sessionKeys = previousKeys
+                                $0.authority = restoredAuthority
+                                $0.isRekeying = false
+                            }
                             previousSessionKeysBeforeRekey = nil
                             previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                             driver = nil
@@ -3660,7 +3692,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             } else if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
                 logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
             } else {
-                logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+                logger.debug("ℹ️ 入站控制通道结束: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
             }
         }
 
@@ -3702,7 +3734,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         case .ready:
             logger.info("📡 监听器就绪")
         case .failed(let error):
-            logger.error("❌ 监听器失败: \(error.localizedDescription, privacy: .public)")
+            logger.error("❌ 监听器失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
         case .cancelled:
             logger.info("⏹️ 监听器已取消")
         default:

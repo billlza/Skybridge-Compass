@@ -3,12 +3,16 @@ import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 extension CrossNetworkConnectionManager {
-    nonisolated static func buildCanonicalQRCodePayload(for qrData: DynamicQRCodeData) -> Data {
+    nonisolated static func buildCanonicalQRCodePayload(for qrData: DynamicQRCodeData) throws -> Data {
+        guard qrData.version == 6 || qrData.version == 7,
+              let wireVersion = UInt16(exactly: qrData.version) else {
+            throw CrossNetworkConnectionError.invalidQRCode
+        }
         var encoder = DeterministicEncoder()
-        encoder.encode(UInt16(max(0, qrData.version)))
+        encoder.encode(wireVersion)
         encoder.encode(qrData.sessionID)
         encoder.encode(qrData.qrBootstrapToken)
-        encoder.encode(Int64(qrData.expiresAt.timeIntervalSince1970 * 1000))
+        encoder.encode(try CrossNetworkQREpochMilliseconds.milliseconds(from: qrData.expiresAt))
         encoder.encode(qrData.canonicalSignalingServerOrigin)
         encoder.encode(qrData.deviceID)
         encoder.encode(qrData.deviceName)
@@ -60,8 +64,15 @@ extension CrossNetworkConnectionManager {
     }
 
     static func verifyDynamicQRCode(_ qrData: DynamicQRCodeData) async -> (ok: Bool, reason: String?, source: QRCodeTrustSource) {
-        guard qrData.version >= 6 else {
-            return (false, "二维码协议版本过旧", .selfAsserted)
+        await verifyDynamicQRCode(qrData, trustService: .shared)
+    }
+
+    static func verifyDynamicQRCode(
+        _ qrData: DynamicQRCodeData,
+        trustService: TrustSyncService
+    ) async -> (ok: Bool, reason: String?, source: QRCodeTrustSource) {
+        guard qrData.version == 6 || qrData.version == 7 else {
+            return (false, "二维码协议版本无效", .selfAsserted)
         }
         guard !qrData.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (false, "二维码缺少 sessionID", .selfAsserted)
@@ -94,16 +105,35 @@ extension CrossNetworkConnectionManager {
                 return (false, "二维码缺少 PQC KEM 公钥", .selfAsserted)
             }
         }
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let nowMs: Int64
+        let expiresAtMs: Int64
+        do {
+            nowMs = try CrossNetworkQREpochMilliseconds.milliseconds(from: Date())
+            expiresAtMs = try CrossNetworkQREpochMilliseconds.milliseconds(from: qrData.expiresAt)
+        } catch {
+            return (false, "二维码过期时间格式无效", .selfAsserted)
+        }
         let skewMs: Int64 = 120_000
-        guard qrData.signatureTimestampMs <= nowMs + skewMs else {
+        let (latestSignatureTimestampMs, signatureBoundOverflow) = nowMs.addingReportingOverflow(skewMs)
+        guard !signatureBoundOverflow,
+              qrData.signatureTimestampMs <= latestSignatureTimestampMs else {
             return (false, "二维码签名时间过于超前", .selfAsserted)
         }
-        guard Int64(qrData.expiresAt.timeIntervalSince1970 * 1000) >= nowMs - skewMs else {
+        let (oldestExpirationTimestampMs, expirationBoundOverflow) = nowMs.subtractingReportingOverflow(skewMs)
+        guard !expirationBoundOverflow,
+              expiresAtMs >= oldestExpirationTimestampMs else {
             return (false, "二维码已过期", .selfAsserted)
         }
-        guard qrData.signatureTimestampMs <= Int64(qrData.expiresAt.timeIntervalSince1970 * 1000) else {
+        guard qrData.signatureTimestampMs <= expiresAtMs else {
             return (false, "二维码时间戳与过期时间矛盾", .selfAsserted)
+        }
+        let (validityDurationMs, validityDurationOverflow) = expiresAtMs.subtractingReportingOverflow(
+            qrData.signatureTimestampMs
+        )
+        let maximumValidityDurationMs = Int64(P2PConstants.qrCodeExpirationSeconds * 1_000)
+        guard !validityDurationOverflow,
+              validityDurationMs <= maximumValidityDurationMs else {
+            return (false, "二维码有效期超出协议上限", .selfAsserted)
         }
         guard let signature = qrData.signature else {
             return (false, "二维码缺少签名", .selfAsserted)
@@ -125,7 +155,7 @@ extension CrossNetworkConnectionManager {
         }
 
         do {
-            let canonical = Self.buildCanonicalQRCodePayload(for: qrData)
+            let canonical = try Self.buildCanonicalQRCodePayload(for: qrData)
             let provider = ProtocolSignatureProviderSelector.select(for: qrData.protocolSigningAlgorithm)
             guard try await Self.awaitVerifyQRCodeSignature(
                 provider: provider,
@@ -139,20 +169,22 @@ extension CrossNetworkConnectionManager {
             return (false, "二维码签名格式无效：\(error.localizedDescription)", .selfAsserted)
         }
 
-        if let conflict = TrustSyncService.shared.evaluateCurrentPathBinding(
-            deviceId: qrData.deviceID,
-            protocolPublicKeyFingerprint: qrData.protocolPublicKeyFingerprint
-        ) {
-            if shouldAllowAuthenticatedQRRebind(for: conflict) {
-                return (true, nil, .selfAsserted)
-            }
+        let trustAssessment: CurrentPathTrustAssessment
+        do {
+            trustAssessment = try await trustService.currentPathTrustAssessment(
+                deviceId: qrData.deviceID,
+                protocolPublicKeyFingerprint: qrData.protocolPublicKeyFingerprint
+            )
+        } catch is CancellationError {
+            return (false, "二维码验证已取消", .selfAsserted)
+        } catch {
+            return (false, "本地信任存储不可用，无法安全验证二维码", .selfAsserted)
+        }
+
+        if case .conflict(let conflict) = trustAssessment {
             switch conflict {
             case .identityConflict:
-                // QR verification only proves the signed payload is internally
-                // consistent. Let same-device authority rotations reach the
-                // server redemption and handshake path as self-asserted input;
-                // those stages perform the authenticated binding update.
-                return (true, nil, .selfAsserted)
+                return (false, "二维码密钥与已 pinned authoritative key 冲突", .selfAsserted)
             case .deviceIdMigrationRequired:
                 return (false, "二维码 deviceId 与已 pinned authoritative key 不匹配", .selfAsserted)
             case .quarantinedIdentity:
@@ -162,10 +194,7 @@ extension CrossNetworkConnectionManager {
             }
         }
 
-        if let _ = TrustSyncService.shared.getCurrentPathTrustRecord(
-            fingerprint: qrData.protocolPublicKeyFingerprint,
-            matchingDeviceId: qrData.deviceID
-        ) {
+        if trustAssessment == .trustedDevice {
             return (true, nil, .trustedDevice)
         }
         return (true, nil, .selfAsserted)

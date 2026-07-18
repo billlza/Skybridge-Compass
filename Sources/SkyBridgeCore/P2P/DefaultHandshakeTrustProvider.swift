@@ -186,24 +186,40 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         let cached = await PeerProtocolIdentityBootstrapStore.shared.trustedFingerprints(
             forCandidates: trustLookupCandidates(for: deviceId)
         )
-        guard !cached.isEmpty else { return trusted }
-        guard !trusted.isDisjoint(with: cached) else {
+        if !cached.isEmpty, trusted.isDisjoint(with: cached) {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ cached protocol identity pins ignored because they are not bound to existing trust: device=\(deviceId, privacy: .public)"
+                "⚠️ cached protocol identity pins ignored because they are not bound to existing trust: device=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId), privacy: .public)"
             )
-            return trusted
         }
-
-        return trusted.union(cached)
+        // Bootstrap observations are non-authoritative hints. They may
+        // corroborate a TrustSync pin, but must never expand the authenticated
+        // protocol identity set or resurrect a rotated key.
+        return trusted
     }
 
     private func trustRecords() async -> [TrustRecord] {
         if let trustRecordsSnapshot {
-            return trustRecordsSnapshot.filter(\.isAuthenticationEligible)
+            return PeerTrustLookup.authenticationEligibleRecordsRespectingDenial(trustRecordsSnapshot)
         }
-        return await MainActor.run {
-            TrustSyncService.shared.activeTrustRecords
+        do {
+            return PeerTrustLookup.authenticationEligibleRecordsRespectingDenial(
+                try await TrustSyncService.shared.trustedRecordsSnapshot()
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Handshake trust snapshot unavailable; protocol identity admission will fail closed: \(error.localizedDescription, privacy: .private)"
+            )
+            return []
         }
+    }
+
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        if let trustRecordsSnapshot {
+            return trustRecordsSnapshot.contains {
+                PeerTrustLookup.record($0, matchesDeviceId: deviceId)
+            }
+        }
+        return await TrustSyncService.shared.requiresPinnedProtocolIdentity(for: deviceId)
     }
 
     private func directRecord(for deviceId: String, in records: [TrustRecord]) -> TrustRecord? {
@@ -250,7 +266,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
                 .map { String($0) }
                 .joined(separator: ",")
             SkyBridgeLogger.p2p.warning(
-                "⚠️ conflicting trusted KEM keys detected; strict trust provider will fail closed for conflicted suites: device=\(deviceId, privacy: .public) suites=\(conflictedSummary, privacy: .public)"
+                "⚠️ conflicting trusted KEM keys detected; strict trust provider will fail closed for conflicted suites: device=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId), privacy: .public) suites=\(conflictedSummary, privacy: .public)"
             )
         }
         let signedRefresh = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
@@ -258,6 +274,16 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
             pinnedProtocolFingerprints: pinnedProtocolFingerprints
         )
         for (suiteWireId, publicKey) in signedRefresh {
+            let suite = CryptoSuite(wireId: suiteWireId)
+            if !conflictedSuites.contains(suite), merged[suite] == nil {
+                merged[suite] = publicKey
+            }
+        }
+        let pairingBootstrap = await PeerKEMBootstrapStore.shared.authorityBoundPairingKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedProtocolFingerprints
+        )
+        for (suiteWireId, publicKey) in pairingBootstrap {
             let suite = CryptoSuite(wireId: suiteWireId)
             if !conflictedSuites.contains(suite), merged[suite] == nil {
                 merged[suite] = publicKey

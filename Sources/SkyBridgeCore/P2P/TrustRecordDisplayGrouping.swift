@@ -285,6 +285,29 @@ extension TrustSyncService {
         pruneSupersededDisplayGroups(buildDisplayGroups(from: records))
     }
 
+    /// Repair records are management projections, not authenticated identity
+    /// evidence. Keep every exact persistence key in its own group so an
+    /// unverified fingerprint, alias, or derived identifier can never widen a
+    /// destructive action.
+    public nonisolated static func buildTrustRepairDisplayGroups(
+        from records: [TrustRecord]
+    ) -> [TrustRecordDisplayGroup] {
+        records
+            .filter { !$0.isTombstone && !$0.isExpired }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.deviceId < rhs.deviceId
+            }
+            .map { record in
+                TrustRecordDisplayGroup(
+                    id: "repair-record:\(record.deviceId)",
+                    primaryRecord: record,
+                    relatedRecords: [record],
+                    displayRecord: record
+                )
+            }
+    }
+
     public nonisolated static func buildDisplayGroups(
         from records: [TrustRecord]
     ) -> [TrustRecordDisplayGroup] {

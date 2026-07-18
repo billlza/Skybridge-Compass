@@ -178,10 +178,11 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.lowercased().contains("unknown suite"))
         }
 
+        await store.upsert(deviceIds: ["id:ios-1"], fingerprints: [fingerprint])
         let unpinnedRequester = validKEMRefreshRequest(sentAt: Date())
         do {
             _ = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: unpinnedRequester)
-            XCTFail("SKR-1 must not serve KEM material to an unpinned requester identity")
+            XCTFail("SKR-1 must not treat the bootstrap observation cache as requester authority")
         } catch {
             XCTAssertEqual(
                 P2PDiscoveryService.signedKEMRefreshFailureCode(for: error),
@@ -198,7 +199,16 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
-        await store.upsert(deviceIds: ["id:ios-1"], fingerprints: [fingerprint])
+        let trust = try await installAuthenticatedMLDSATrustRecordForTesting(
+            peerId: "id:ios-1",
+            publicKey: protocolPublicKey
+        )
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: ["id:ios-1"])
+            trust.endInMemoryPersistenceForTesting()
+            await PeerProtocolIdentityBootstrapStore.shared.clearForTesting()
+            await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
+        }
 
         let mismatchedTarget = String(repeating: "a", count: 64)
         let first = validKEMRefreshRequest(

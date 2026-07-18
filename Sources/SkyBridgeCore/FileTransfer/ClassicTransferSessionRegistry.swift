@@ -97,6 +97,31 @@ actor ClassicTransferSessionRegistry {
         }
     }
 
+    /// Removes only aliases still owned by the expected connection. This is
+    /// used by stale pairing continuations so an older connection cannot erase
+    /// a replacement that already claimed the same device aliases.
+    func remove(
+        connectionId expectedConnectionId: UUID,
+        peerKeys: [String],
+        sessionId: String? = nil
+    ) {
+        for key in peerKeys {
+            let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            for candidate in PeerTrustLookup.lookupCandidates(for: trimmed) {
+                let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !normalized.isEmpty,
+                      connectionsByKey[normalized]?.id == expectedConnectionId else {
+                    continue
+                }
+                connectionsByKey.removeValue(forKey: normalized)
+            }
+        }
+        if let sessionId {
+            sessionsById.removeValue(forKey: sessionId)
+        }
+    }
+
     func activeConnections() -> [P2PConnection] {
         var deduped: [ObjectIdentifier: P2PConnection] = [:]
         for connection in connectionsByKey.values {

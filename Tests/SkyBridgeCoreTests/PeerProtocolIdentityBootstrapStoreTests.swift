@@ -3,7 +3,7 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class PeerProtocolIdentityBootstrapStoreTests: XCTestCase {
-    func testStoreNormalizesAndMergesFingerprints() async throws {
+    func testStoreNormalizesAndReplacesFingerprintObservation() async throws {
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
 
@@ -14,22 +14,22 @@ final class PeerProtocolIdentityBootstrapStoreTests: XCTestCase {
         await store.upsert(deviceIds: ["peer-a"], fingerprints: [secondary])
 
         let trusted = await store.trustedFingerprints(forCandidates: ["peer-a"])
-        XCTAssertEqual(trusted, [primary, secondary])
+        XCTAssertEqual(trusted, [secondary])
         await store.clearForTesting()
     }
 
-    func testDefaultTrustProviderUsesOnlyBoundSupplementalPins() async throws {
+    func testDefaultTrustProviderNeverExpandsAuthoritativePinsFromBootstrapCache() async throws {
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
 
-        let primary = String(repeating: "a", count: 64)
-        let secondary = String(repeating: "b", count: 64)
+        let rejectedOldPin = String(repeating: "a", count: 64)
+        let authoritativeReplacementPin = String(repeating: "b", count: 64)
         let record = TrustRecord(
             deviceId: "stable-peer",
             pubKeyFP: "",
             publicKey: Data(),
             protocolSigningAlgorithm: .ed25519,
-            protocolPublicKeyFingerprint: primary,
+            protocolPublicKeyFingerprint: authoritativeReplacementPin,
             signature: Data(),
             deviceName: "Peer",
             currentDeviceId: "stable-peer",
@@ -38,14 +38,16 @@ final class PeerProtocolIdentityBootstrapStoreTests: XCTestCase {
         )
         let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: [record])
 
-        await store.upsert(deviceIds: ["runtime-peer"], fingerprints: [secondary])
-        let unboundPins = await provider.trustedFingerprints(for: "runtime-peer")
-        XCTAssertEqual(unboundPins, [primary])
-
-        await store.clearForTesting()
-        await store.upsert(deviceIds: ["runtime-peer"], fingerprints: [primary, secondary])
-        let boundPins = await provider.trustedFingerprints(for: "runtime-peer")
-        XCTAssertEqual(boundPins, [primary, secondary])
+        await store.upsert(
+            deviceIds: ["runtime-peer"],
+            fingerprints: [rejectedOldPin, authoritativeReplacementPin]
+        )
+        let resolvedPins = await provider.trustedFingerprints(for: "runtime-peer")
+        XCTAssertEqual(
+            resolvedPins,
+            [authoritativeReplacementPin],
+            "bootstrap history may corroborate current authority but must never re-authorize a rejected old pin"
+        )
         await store.clearForTesting()
     }
 

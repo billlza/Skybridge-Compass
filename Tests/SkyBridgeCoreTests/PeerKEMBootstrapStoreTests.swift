@@ -4,6 +4,233 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class PeerKEMBootstrapStoreTests: XCTestCase {
+    func testPairingWriteReservationRejectsStaleCommitAndRollbackAcrossRestart() async throws {
+        let suiteName = "PeerKEMBootstrapStorePairingGenerationTests.\(UUID().uuidString)"
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        defer {
+            UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        }
+
+        let deviceId = "id:pairing-generation-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+        let oldKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x31, count: 1_184)
+        )
+        let replacementKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65FS.wireId,
+            publicKey: Data(repeating: 0x32, count: 1_184)
+        )
+        let store = PeerKEMBootstrapStore(defaultsSuiteNameForTesting: suiteName)
+
+        let staleGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        let replacementGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        XCTAssertGreaterThan(replacementGeneration, staleGeneration)
+
+        let staleAccepted = try await store.upsert(
+            deviceIds: [deviceId],
+            kemPublicKeys: [oldKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: staleGeneration
+        )
+        XCTAssertFalse(staleAccepted)
+        let replacementAccepted = try await store.upsert(
+            deviceIds: [deviceId],
+            kemPublicKeys: [replacementKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: replacementGeneration
+        )
+        XCTAssertTrue(replacementAccepted)
+        let committed = await store.mergedKEMPublicKeys(forCandidates: [deviceId])
+        XCTAssertEqual(Set(committed.keys), Set([replacementKey.suiteWireId]))
+
+        let staleRollbackRemoved = try await store.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [deviceId],
+            matchingWriteGeneration: staleGeneration
+        )
+        XCTAssertFalse(staleRollbackRemoved)
+        let afterStaleRollback = await store.mergedKEMPublicKeys(forCandidates: [deviceId])
+        XCTAssertEqual(afterStaleRollback[replacementKey.suiteWireId], replacementKey.publicKey)
+
+        let restartedStore = PeerKEMBootstrapStore(defaultsSuiteNameForTesting: suiteName)
+        let restartedGeneration = try await restartedStore.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        XCTAssertGreaterThan(restartedGeneration, replacementGeneration)
+
+        let authoritativeAccepted = try await restartedStore.upsert(
+            deviceIds: [deviceId],
+            kemPublicKeys: [oldKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: restartedGeneration
+        )
+        XCTAssertTrue(authoritativeAccepted)
+        let authoritativeReplacement = await restartedStore.mergedKEMPublicKeys(
+            forCandidates: [deviceId]
+        )
+        XCTAssertEqual(Set(authoritativeReplacement.keys), Set([oldKey.suiteWireId]))
+        XCTAssertNil(authoritativeReplacement[replacementKey.suiteWireId])
+
+        let currentRollbackRemoved = try await restartedStore.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [deviceId],
+            matchingWriteGeneration: restartedGeneration
+        )
+        XCTAssertTrue(currentRollbackRemoved)
+        let afterCurrentRollback = await restartedStore.mergedKEMPublicKeys(forCandidates: [deviceId])
+        XCTAssertTrue(afterCurrentRollback.isEmpty)
+        let postRollbackGeneration = try await restartedStore.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        XCTAssertGreaterThan(postRollbackGeneration, restartedGeneration)
+    }
+
+    func testFailedSuccessorAdmissionCannotReviveOlderCommitReceipt() async throws {
+        let suiteName = "PeerKEMBootstrapStorePairingABA.\(UUID().uuidString)"
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        defer {
+            UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        }
+
+        let deviceId = "id:pairing-aba-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "b", count: 64)
+        let key = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x3A, count: 1_184)
+        )
+        let store = PeerKEMBootstrapStore(defaultsSuiteNameForTesting: suiteName)
+
+        let committedGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        let committed = try await store.upsert(
+            deviceIds: [deviceId],
+            kemPublicKeys: [key],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: committedGeneration
+        )
+        XCTAssertTrue(committed)
+        let initiallyCurrent = await store.isCurrentPairingWriteCommit(
+            deviceIds: [deviceId],
+            matchingGeneration: committedGeneration,
+            matchingProtocolFingerprint: fingerprint
+        )
+        XCTAssertTrue(initiallyCurrent)
+
+        let failedSuccessorGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [deviceId]
+        )
+        XCTAssertGreaterThan(failedSuccessorGeneration, committedGeneration)
+        let releasedSuccessor = try await store.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [deviceId],
+            matchingWriteGeneration: failedSuccessorGeneration
+        )
+        XCTAssertTrue(releasedSuccessor)
+
+        let retainedKeys = await store.mergedKEMPublicKeys(forCandidates: [deviceId])
+        XCTAssertEqual(retainedKeys[key.suiteWireId], key.publicKey)
+        let olderReceiptRevived = await store.isCurrentPairingWriteCommit(
+            deviceIds: [deviceId],
+            matchingGeneration: committedGeneration,
+            matchingProtocolFingerprint: fingerprint
+        )
+        XCTAssertFalse(
+            olderReceiptRevived,
+            "A failed successor must permanently retire the older continuation for this process."
+        )
+    }
+
+    func testPartiallyOverlappingReservationRollbackPreservesSuccessorAndReleasesDisjointAlias() async throws {
+        let suiteName = "PeerKEMBootstrapStorePartialOverlapTests.\(UUID().uuidString)"
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        defer {
+            UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        }
+
+        let firstId = "id:\(UUID().uuidString.lowercased())"
+        let overlappingId = "id:\(UUID().uuidString.lowercased())"
+        let successorId = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "d", count: 64)
+        let staleKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x41, count: 1_184)
+        )
+        let successorKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65FS.wireId,
+            publicKey: Data(repeating: 0x42, count: 1_184)
+        )
+        let store = PeerKEMBootstrapStore(defaultsSuiteNameForTesting: suiteName)
+
+        let staleGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [firstId, overlappingId]
+        )
+        let successorGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [overlappingId, successorId]
+        )
+        XCTAssertGreaterThan(successorGeneration, staleGeneration)
+
+        let staleCommitAccepted = try await store.upsert(
+            deviceIds: [firstId, overlappingId],
+            kemPublicKeys: [staleKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: staleGeneration
+        )
+        XCTAssertFalse(
+            staleCommitAccepted,
+            "an overlap superseded by a newer reservation must reject the entire stale write"
+        )
+
+        let staleRollbackReleased = try await store.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [firstId, overlappingId],
+            matchingWriteGeneration: staleGeneration
+        )
+        XCTAssertFalse(
+            staleRollbackReleased,
+            "a rejected one-shot commit must already release every reservation still owned by its generation"
+        )
+
+        let successorCommitAccepted = try await store.upsert(
+            deviceIds: [overlappingId, successorId],
+            kemPublicKeys: [successorKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: successorGeneration
+        )
+        XCTAssertTrue(
+            successorCommitAccepted,
+            "stale commit cleanup must preserve the newer reservation on the overlapping identity"
+        )
+
+        let staleRollbackAfterSuccessor = try await store.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [firstId, overlappingId],
+            matchingWriteGeneration: staleGeneration
+        )
+        XCTAssertFalse(staleRollbackAfterSuccessor)
+        let overlappingKeys = await store.mergedKEMPublicKeys(forCandidates: [overlappingId])
+        let successorKeys = await store.mergedKEMPublicKeys(forCandidates: [successorId])
+        XCTAssertEqual(overlappingKeys[successorKey.suiteWireId], successorKey.publicKey)
+        XCTAssertEqual(successorKeys[successorKey.suiteWireId], successorKey.publicKey)
+        XCTAssertNil(overlappingKeys[staleKey.suiteWireId])
+
+        let independentGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [firstId]
+        )
+        let independentCommitAccepted = try await store.upsert(
+            deviceIds: [firstId],
+            kemPublicKeys: [staleKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: independentGeneration
+        )
+        XCTAssertTrue(
+            independentCommitAccepted,
+            "a rejected stale commit must release the disjoint part without caller cleanup"
+        )
+        let independentKeys = await store.mergedKEMPublicKeys(forCandidates: [firstId])
+        XCTAssertEqual(independentKeys[staleKey.suiteWireId], staleKey.publicKey)
+    }
+
     func testLookupAcrossAliasCandidates() async throws {
         let store = PeerKEMBootstrapStore.shared
         await store.clearForTesting()
@@ -331,6 +558,65 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         XCTAssertEqual(preserved[CryptoSuite.xwingMLDSA.wireId], signedKey)
         XCTAssertEqual(preservedEvidence?.payloadHashHex, Self.sha256Hex(exchange.payload.signaturePreimage))
 
+        await store.clearForTesting()
+    }
+
+    func testGenerationCommitCoexistsWithAuthorityBoundSignedRefreshWithoutOverwritingIt() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        await store.clearForTesting()
+
+        let signedId = "id:signed-refresh-\(UUID().uuidString.lowercased())"
+        let pairingId = "id:pairing-alias-\(UUID().uuidString.lowercased())"
+        let signedKey = Data(repeating: 0x51, count: 1_216)
+        let pairingKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x52, count: 1_184)
+        )
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: signedId,
+            kemPublicKey: signedKey,
+            generation: 73
+        )
+        let fingerprint = exchange.payload.protocolIdentityFingerprint
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [signedId],
+            payload: exchange.payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [fingerprint],
+            minimumGeneration: nil
+        )
+
+        let pairingGeneration = try await store.reservePairingWriteGeneration(
+            deviceIds: [signedId, pairingId]
+        )
+        let accepted = try await store.upsert(
+            deviceIds: [signedId, pairingId],
+            kemPublicKeys: [pairingKey],
+            verifiedProtocolFingerprint: fingerprint,
+            pairingWriteGeneration: pairingGeneration
+        )
+
+        XCTAssertTrue(accepted)
+        let isCurrentCommit = await store.isCurrentPairingWriteCommit(
+            deviceIds: [signedId, pairingId],
+            matchingGeneration: pairingGeneration,
+            matchingProtocolFingerprint: fingerprint
+        )
+        XCTAssertTrue(isCurrentCommit)
+        let signedEvidence = await store.signedRefreshEvidence(forCandidates: [signedId])
+        XCTAssertEqual(signedEvidence?.source, "signed_lan_kem_refresh")
+        XCTAssertEqual(signedEvidence?.payloadHashHex, Self.sha256Hex(exchange.payload.signaturePreimage))
+        let pairingKeys = await store.mergedKEMPublicKeys(forCandidates: [pairingId])
+        XCTAssertEqual(pairingKeys[pairingKey.suiteWireId], pairingKey.publicKey)
+
+        _ = try await store.rollbackPairingIdentityExchangeEntries(
+            deviceIds: [signedId, pairingId],
+            matchingWriteGeneration: pairingGeneration
+        )
+        let retainedSignedEvidence = await store.signedRefreshEvidence(forCandidates: [signedId])
+        let pairingKeysAfterRollback = await store.mergedKEMPublicKeys(forCandidates: [pairingId])
+        XCTAssertNotNil(retainedSignedEvidence)
+        XCTAssertTrue(pairingKeysAfterRollback.isEmpty)
         await store.clearForTesting()
     }
 

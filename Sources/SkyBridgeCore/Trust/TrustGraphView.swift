@@ -13,6 +13,7 @@ public struct TrustGraphView: View {
     @State private var keyRotationTargetDevice: TrustGraphDevice?
     @State private var keyRotationCertificateText = ""
     @State private var keyRotationErrorMessage: String?
+    @State private var trustOperationErrorMessage: String?
     @State private var isApplyingKeyRotation = false
     @State private var searchText = ""
     
@@ -44,8 +45,12 @@ public struct TrustGraphView: View {
             Button("撤销信任", role: .destructive) {
                 if let device = selectedDevice {
                     Task {
-                        try? await trustManager.revokeDevice(device.deviceId)
-                        selectedDevice = nil
+                        do {
+                            try await trustManager.revokeDevice(device.deviceId)
+                            selectedDevice = nil
+                        } catch {
+                            trustOperationErrorMessage = error.localizedDescription
+                        }
                     }
                 }
             }
@@ -60,7 +65,11 @@ public struct TrustGraphView: View {
         ) {
             Button("清除全部", role: .destructive) {
                 Task {
-                    await trustManager.clearAllTrust()
+                    do {
+                        try await trustManager.clearAllTrust()
+                    } catch {
+                        trustOperationErrorMessage = error.localizedDescription
+                    }
                 }
             }
             Button("取消", role: .cancel) {}
@@ -69,6 +78,17 @@ public struct TrustGraphView: View {
         }
         .sheet(isPresented: $showingKeyRotationSheet) {
             keyRotationSheet
+        }
+        .alert(
+            "信任操作失败",
+            isPresented: Binding(
+                get: { trustOperationErrorMessage != nil },
+                set: { if !$0 { trustOperationErrorMessage = nil } }
+            )
+        ) {
+            Button("好") { trustOperationErrorMessage = nil }
+        } message: {
+            Text(trustOperationErrorMessage ?? "")
         }
     }
     
@@ -711,4 +731,3 @@ struct TrustGraphFlowLayout: Layout {
         .frame(width: 900, height: 600)
 }
 #endif
-

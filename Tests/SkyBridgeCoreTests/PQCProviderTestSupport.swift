@@ -74,30 +74,36 @@ func installAuthenticatedMLDSATrustRecordForTesting(
         publicKeyBytes: publicKey
     )
     let trust = TrustSyncService.shared
-    trust.setInMemoryPersistenceForTesting(true)
+    await trust.beginInMemoryPersistenceForTesting()
     await trust.removeRecordsForTesting(deviceIds: [peerId])
-    _ = try await trust.addTrustRecord(
-        TrustRecord(
-            deviceId: peerId,
-            pubKeyFP: fingerprint,
-            publicKey: publicKey,
-            protocolPublicKey: publicKey,
-            protocolSigningAlgorithm: .mlDSA65,
-            protocolPublicKeyFingerprint: fingerprint,
-            protocolIdentityPins: [
-                ProtocolIdentityPin(
-                    algorithm: .mlDSA65,
-                    fingerprint: fingerprint,
-                    source: .authenticatedHandshake
-                )
-            ],
-            signature: Data(),
-            currentDeviceId: peerId,
-            knownDeviceIds: [peerId],
-            lifecycleState: .active
+    do {
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: peerId,
+                pubKeyFP: fingerprint,
+                publicKey: publicKey,
+                protocolPublicKey: publicKey,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: fingerprint,
+                protocolIdentityPins: [
+                    ProtocolIdentityPin(
+                        algorithm: .mlDSA65,
+                        fingerprint: fingerprint,
+                        source: .authenticatedHandshake
+                    )
+                ],
+                signature: Data(),
+                currentDeviceId: peerId,
+                knownDeviceIds: [peerId],
+                lifecycleState: .active
+            )
         )
-    )
-    return trust
+        return trust
+    } catch {
+        await trust.removeRecordsForTesting(deviceIds: [peerId])
+        trust.endInMemoryPersistenceForTesting()
+        throw error
+    }
 }
 
 @available(macOS 14.0, *)

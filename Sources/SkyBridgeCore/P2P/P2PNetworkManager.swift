@@ -3,6 +3,35 @@ import Network
 import Combine
 import os
 
+struct P2PConnectionAttemptOwnershipState: Sendable {
+    private var tokenByDeviceId: [String: UUID] = [:]
+
+    mutating func begin(deviceId: String) -> UUID {
+        let token = UUID()
+        tokenByDeviceId[deviceId] = token
+        return token
+    }
+
+    func isCurrent(_ token: UUID, deviceId: String) -> Bool {
+        tokenByDeviceId[deviceId] == token
+    }
+
+    @discardableResult
+    mutating func finishIfCurrent(_ token: UUID, deviceId: String) -> Bool {
+        guard isCurrent(token, deviceId: deviceId) else { return false }
+        tokenByDeviceId.removeValue(forKey: deviceId)
+        return true
+    }
+
+    mutating func cancel(deviceId: String) {
+        tokenByDeviceId.removeValue(forKey: deviceId)
+    }
+
+    mutating func removeAll() {
+        tokenByDeviceId.removeAll()
+    }
+}
+
 /// P2P网络管理器 - 统一管理设备发现、连接建立和状态监控
 @MainActor
 public class P2PNetworkManager: ObservableObject, Sendable {
@@ -33,6 +62,8 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     private var p2pNetworkCancellables = Set<AnyCancellable>()
     private var discoveryTimer: Timer?
     private var qualityMonitorTimer: Timer?
+    private var connectionAttemptOwnership = P2PConnectionAttemptOwnershipState()
+    private var connectionAttemptTasksByDeviceId: [String: Task<Void, Never>] = [:]
     
  // MARK: - 初始化
     
@@ -59,8 +90,10 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         
         isStarted = false
         
- // 停止设备发现
+        // 停止设备发现
         stopDiscovery()
+
+        cancelAllConnectionAttempts()
         
  // 断开所有连接
         for deviceId in Array(activeConnections.keys) {
@@ -81,9 +114,10 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  // 清理订阅
         p2pNetworkCancellables.removeAll()
         
- // 清理数据
+        // 清理数据
         discoveredDevices.removeAll()
         activeConnections.removeAll()
+        cancelAllConnectionAttempts()
         connectionHistory.removeAll()
     }
     
@@ -177,32 +211,78 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         SkyBridgeLogger.p2p.debugOnly("🔗 尝试连接到设备: \(device.name)")
         
         networkState = .connecting
-        
+
         let deviceCopy = device
-        Task { @MainActor in
+        connectionAttemptTasksByDeviceId[deviceCopy.deviceId]?.cancel()
+        let attemptToken = connectionAttemptOwnership.begin(deviceId: deviceCopy.deviceId)
+        let attemptTask = Task { @MainActor in
+            var attemptConnection: P2PConnection?
             do {
                 let connection = try await establishConnection(to: deviceCopy)
+                attemptConnection = connection
+                guard self.connectionAttemptOwnership.isCurrent(
+                    attemptToken,
+                    deviceId: deviceCopy.deviceId
+                ) else {
+                    connection.disconnect()
+                    connectionFailed(CancellationError())
+                    return
+                }
+                if let replacedConnection = self.activeConnections[deviceCopy.deviceId],
+                   replacedConnection !== connection {
+                    replacedConnection.disconnect()
+                    self.removeActiveConnection(replacedConnection)
+                }
                 self.activeConnections[deviceCopy.deviceId] = connection
                 self.monitorConnection(connection)
                 self.addToHistory(deviceCopy)
 
                 try await connection.authenticate()
+                guard self.connectionAttemptOwnership.isCurrent(
+                    attemptToken,
+                    deviceId: deviceCopy.deviceId
+                ),
+                      self.activeConnections[deviceCopy.deviceId] === connection else {
+                    if self.activeConnections[deviceCopy.deviceId] === connection {
+                        self.removeActiveConnection(connection)
+                    }
+                    connection.disconnect()
+                    connectionFailed(CancellationError())
+                    return
+                }
+                _ = self.connectionAttemptOwnership.finishIfCurrent(
+                    attemptToken,
+                    deviceId: deviceCopy.deviceId
+                )
+                self.connectionAttemptTasksByDeviceId.removeValue(forKey: deviceCopy.deviceId)
                 self.networkState = .connected
                 connectionEstablished()
             } catch {
-                self.activeConnections.removeValue(forKey: deviceCopy.deviceId)
-                if self.activeConnections.isEmpty {
-                    self.networkState = .disconnected
+                let ownsAttempt = self.connectionAttemptOwnership.finishIfCurrent(
+                    attemptToken,
+                    deviceId: deviceCopy.deviceId
+                )
+                if ownsAttempt {
+                    self.connectionAttemptTasksByDeviceId.removeValue(forKey: deviceCopy.deviceId)
+                    if let attemptConnection,
+                       self.activeConnections[deviceCopy.deviceId] === attemptConnection {
+                        self.removeActiveConnection(attemptConnection)
+                    }
+                    if self.activeConnections.isEmpty {
+                        self.networkState = .disconnected
+                    }
                 }
+                attemptConnection?.disconnect()
                 connectionFailed(error)
             }
         }
+        connectionAttemptTasksByDeviceId[deviceCopy.deviceId] = attemptTask
     }
     
- /// 断开设备连接
+    /// 断开设备连接
     public func disconnectFromDevice(_ deviceId: String) {
-        guard let connection = activeConnections[deviceId]
-                ?? activeConnections.first(where: { entry in
+        let connection = activeConnections[deviceId]
+            ?? activeConnections.first(where: { entry in
                     let key = entry.key
                     let connection = entry.value
                     let targetAliases = Set(PeerTrustLookup.lookupCandidates(for: deviceId))
@@ -210,13 +290,25 @@ public class P2PNetworkManager: ObservableObject, Sendable {
                         PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
                     )
                     return key == deviceId || !targetAliases.isDisjoint(with: connectionAliases)
-                })?.value else { return }
+                })?.value
+        guard let connection else {
+            connectionAttemptOwnership.cancel(deviceId: deviceId)
+            connectionAttemptTasksByDeviceId.removeValue(forKey: deviceId)?.cancel()
+            if activeConnections.isEmpty && connectionAttemptTasksByDeviceId.isEmpty {
+                networkState = .disconnected
+            }
+            return
+        }
         
  // 关闭连接
         connection.disconnect()
         
  // 移除活跃连接
-        removeActiveConnection(connection, additionalKeys: [deviceId])
+        connectionAttemptOwnership.cancel(deviceId: deviceId)
+        connectionAttemptOwnership.cancel(deviceId: connection.device.deviceId)
+        connectionAttemptTasksByDeviceId.removeValue(forKey: deviceId)?.cancel()
+        connectionAttemptTasksByDeviceId.removeValue(forKey: connection.device.deviceId)?.cancel()
+        removeActiveConnection(connection)
         
  // 更新网络状态
         if activeConnections.isEmpty {
@@ -463,21 +555,21 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         }
     }
 
-    private func removeActiveConnection(_ connection: P2PConnection, additionalKeys: [String] = []) {
-        let aliases = Set(
-            additionalKeys.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
-                + PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
-                + PeerTrustLookup.lookupCandidates(for: connection.device.address)
-        )
+    private func removeActiveConnection(_ connection: P2PConnection) {
         for key in Array(activeConnections.keys) {
             guard let stored = activeConnections[key] else { continue }
-            let keyAliases = Set(PeerTrustLookup.lookupCandidates(for: key))
-            if stored === connection ||
-                additionalKeys.contains(key) ||
-                !keyAliases.isDisjoint(with: aliases) {
+            if stored === connection {
                 activeConnections.removeValue(forKey: key)
             }
         }
+    }
+
+    private func cancelAllConnectionAttempts() {
+        for task in connectionAttemptTasksByDeviceId.values {
+            task.cancel()
+        }
+        connectionAttemptTasksByDeviceId.removeAll()
+        connectionAttemptOwnership.removeAll()
     }
     
     private func addToHistory(_ device: P2PDevice) {

@@ -339,8 +339,9 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
-    func testTrustedStableIdentityAliasesCoalesceAndPreferConnectableRoute() throws {
+    func testTrustedStableIdentityAliasesCoalesceAndPreferConnectableRoute() async throws {
         let manager = UnifiedOnlineDeviceManager.shared
+        let trust = TrustSyncService.shared
         let oldStableId = "07CB9A6E-1111-4222-8333-123456789ABC"
         let currentStableId = "9F9D4114-0EA8-4856-A5B1-6912B2EE2542"
         let staleCloudAlias = makeDevice(
@@ -387,13 +388,15 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             currentDeviceId: "id:\(currentStableId)",
             knownDeviceIds: ["id:\(oldStableId)", "id:\(currentStableId)"]
         )
-        let previousTrustRecords = TrustSyncService.shared.activeTrustRecords
-        TrustSyncService.shared.activeTrustRecords = [trustRecord]
-        manager.replaceDevicesForTesting([staleCloudAlias, liveStableRoute])
-        defer {
-            TrustSyncService.shared.activeTrustRecords = previousTrustRecords
+        await trust.beginInMemoryPersistenceForTesting()
+        await trust.removeRecordsForTesting(deviceIds: [trustRecord.deviceId])
+        addTeardownBlock { @MainActor [manager, trust] in
             manager.replaceDevicesForTesting([])
+            await trust.removeRecordsForTesting(deviceIds: [trustRecord.deviceId])
+            trust.endInMemoryPersistenceForTesting()
         }
+        _ = try await trust.addTrustRecord(trustRecord)
+        manager.replaceDevicesForTesting([staleCloudAlias, liveStableRoute])
 
         manager.recomputeDeviceStatusesForTesting()
 
@@ -2255,14 +2258,12 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         let bonjourAlias = "bonjour:ziang-ipad@local."
         let now = Date()
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [oldStableId, newStableId, bonjourAlias])
-        defer {
+        addTeardownBlock { @MainActor [manager, trust] in
             manager.replaceDevicesForTesting([])
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [oldStableId, newStableId, bonjourAlias])
-                trust.setInMemoryPersistenceForTesting(false)
-            }
+            await trust.removeRecordsForTesting(deviceIds: [oldStableId, newStableId, bonjourAlias])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(
@@ -2330,14 +2331,12 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         let bonjourAlias = "bonjour:iPad@local."
         let now = Date()
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [staleStableId, liveStableId, bonjourAlias])
-        defer {
+        addTeardownBlock { @MainActor [manager, trust] in
             manager.replaceDevicesForTesting([])
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [staleStableId, liveStableId, bonjourAlias])
-                trust.setInMemoryPersistenceForTesting(false)
-            }
+            await trust.removeRecordsForTesting(deviceIds: [staleStableId, liveStableId, bonjourAlias])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(

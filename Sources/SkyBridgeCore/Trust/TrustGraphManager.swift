@@ -101,8 +101,11 @@ public final class TrustGraphManager: ObservableObject {
             throw TrustGraphError.deviceNotFound
         }
         
-        // 撤销信任
-        try await trustSyncService.revokeTrustRecord(deviceId: deviceId)
+        // User-visible revocation must remove every verified alias/fingerprint
+        // sibling and all bootstrap/policy material, not just one storage key.
+        try await PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely(
+            deviceIds: [deviceId]
+        )
         
         // 更新本地列表
         await loadTrustGraphDevices()
@@ -247,30 +250,52 @@ public final class TrustGraphManager: ObservableObject {
     }
     
     /// 清除所有信任
-    public func clearAllTrust() async {
+    public func clearAllTrust() async throws {
         logger.warning("⚠️ 清除所有信任记录")
-        
-        for device in trustedDevices {
-            try? await revokeDevice(device.deviceId)
+
+        let devices = trustedDevices
+        guard !devices.isEmpty else {
+            addEvent(.allTrustCleared)
+            return
         }
-        
+        try await PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely(
+            deviceIds: devices.map(\.deviceId)
+        )
+        await loadTrustGraphDevices()
+        for device in devices {
+            addEvent(.deviceRevoked(deviceId: device.deviceId, deviceName: device.displayName))
+        }
         addEvent(.allTrustCleared)
     }
     
     /// 触发 iCloud 同步
     public func syncWithiCloud() async {
         syncStatus = .syncing
-        
-        // 从 Keychain 重新加载信任记录
-        await loadTrustGraphDevices()
-        syncStatus = .completed(Date())
-        addEvent(.syncCompleted)
+        do {
+            try await trustSyncService.sync()
+            guard await loadTrustGraphDevices() else { return }
+            syncStatus = .completed(Date())
+            addEvent(.syncCompleted)
+        } catch {
+            syncStatus = .failed(error.localizedDescription)
+            logger.error(
+                "❌ iCloud 信任同步失败: \(error.localizedDescription, privacy: .private)"
+            )
+        }
     }
     
     // MARK: - 私有方法
     
-    private func loadTrustGraphDevices() async {
-        let records = await trustSyncService.getActiveTrustRecords()
+    @discardableResult
+    private func loadTrustGraphDevices() async -> Bool {
+        let records: [TrustRecord]
+        do {
+            records = try await trustSyncService.trustedRecordsSnapshot()
+        } catch {
+            syncStatus = .failed(error.localizedDescription)
+            logger.error("❌ 无法读取信任存储: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
         
         trustedDevices = records
             .filter { !$0.isTombstone }
@@ -289,8 +314,8 @@ public final class TrustGraphManager: ObservableObject {
                 )
             }
             .sorted { $0.trustedAt > $1.trustedAt }
-        
         logger.info("📋 加载了 \(self.trustedDevices.count) 个信任设备")
+        return true
     }
     
     private func computeFingerprint(_ publicKey: Data) -> String {
@@ -533,4 +558,3 @@ public enum TrustGraphError: Error, LocalizedError {
         }
     }
 }
-

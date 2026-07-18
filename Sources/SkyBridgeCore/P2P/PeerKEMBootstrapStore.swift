@@ -5,6 +5,23 @@ import CryptoKit
 public actor PeerKEMBootstrapStore {
     public static let shared = PeerKEMBootstrapStore()
 
+    public enum PairingWriteError: Error, LocalizedError, Sendable, Equatable {
+        case invalidIdentifiers
+        case invalidKEMPayload
+        case generationOverflow
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidIdentifiers:
+                return "Pairing KEM write has no stable device identifiers"
+            case .invalidKEMPayload:
+                return "Pairing KEM write contains no valid KEM public keys"
+            case .generationOverflow:
+                return "Pairing KEM write generation exhausted"
+            }
+        }
+    }
+
     public enum SignedRefreshImportError: Error, LocalizedError, Sendable, Equatable {
         case signatureVerificationFailed
         case signatureVerificationError(String)
@@ -33,6 +50,9 @@ public actor PeerKEMBootstrapStore {
         var signedRefreshDeviceId: String? = nil
         var platform: String? = nil
         var osVersion: String? = nil
+        /// Local ordering lease for pairing writes. This is deliberately
+        /// separate from the signed remote KEM refresh generation.
+        var pairingWriteGeneration: UInt64? = nil
     }
 
     private struct Snapshot: Codable, Sendable {
@@ -62,10 +82,124 @@ public actor PeerKEMBootstrapStore {
     private static let defaultsKey = "com.skybridge.p2p.bootstrap_kem_store.v1"
     private let defaults: UserDefaults
     private var entries: [String: Entry]
+    private var pairingWriteReservationByDeviceId: [String: UInt64] = [:]
+    /// Monotonic per-identity admission watermark. Unlike the one-shot
+    /// reservation map, this survives a failed successor attempt for as long
+    /// as an older entry remains, so an older post-commit receipt cannot become
+    /// current again after the successor releases its reservation (ABA).
+    private var latestAdmittedPairingWriteGenerationByDeviceId: [String: UInt64]
+    private var maximumIssuedPairingWriteGeneration: UInt64
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.entries = Self.loadEntries(from: defaults)
+        let loadedEntries = Self.loadEntries(from: defaults)
+        self.entries = loadedEntries
+        self.latestAdmittedPairingWriteGenerationByDeviceId = loadedEntries.reduce(into: [:]) { result, element in
+            if let generation = element.value.pairingWriteGeneration {
+                result[element.key] = generation
+            }
+        }
+        self.maximumIssuedPairingWriteGeneration = loadedEntries.values
+            .compactMap(\.pairingWriteGeneration)
+            .max() ?? 0
+    }
+
+#if DEBUG
+    init(defaultsSuiteNameForTesting suiteName: String) {
+        self.init(defaults: Self.requiredDefaultsSuiteForTesting(named: suiteName))
+    }
+
+    private nonisolated static func requiredDefaultsSuiteForTesting(
+        named suiteName: String
+    ) -> UserDefaults {
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            preconditionFailure("Unable to create isolated UserDefaults suite")
+        }
+        return defaults
+    }
+#endif
+
+    /// Reserves a one-shot generation before any pairing operation awaits.
+    /// A later reservation immediately invalidates the older operation even
+    /// when the replacement has not committed its KEM payload yet.
+    public func reservePairingWriteGeneration(deviceIds: [String]) throws -> UInt64 {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty else {
+            throw PairingWriteError.invalidIdentifiers
+        }
+
+        let maximumPersistedGeneration = entries.values
+            .compactMap(\.pairingWriteGeneration)
+            .max() ?? 0
+        let maximumReservedGeneration = pairingWriteReservationByDeviceId.values.max() ?? 0
+        let maximumGeneration = max(
+            maximumIssuedPairingWriteGeneration,
+            max(maximumPersistedGeneration, maximumReservedGeneration)
+        )
+        guard maximumGeneration < UInt64.max else {
+            throw PairingWriteError.generationOverflow
+        }
+        let generation = maximumGeneration + 1
+        maximumIssuedPairingWriteGeneration = generation
+        for deviceId in normalizedIds {
+            pairingWriteReservationByDeviceId[deviceId] = generation
+            latestAdmittedPairingWriteGenerationByDeviceId[deviceId] = generation
+        }
+        return generation
+    }
+
+    /// Returns true only while every identifier in the original reservation
+    /// still belongs to the same generation. Pairing authority persistence uses
+    /// this immediately before its durable write so a newer connection cannot
+    /// commit under an older KEM admission lease.
+    func isCurrentPairingWriteReservation(
+        deviceIds: [String],
+        matchingGeneration: UInt64
+    ) -> Bool {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty else { return false }
+        return normalizedIds.allSatisfy {
+            pairingWriteReservationByDeviceId[$0] == matchingGeneration
+                && latestAdmittedPairingWriteGenerationByDeviceId[$0] == matchingGeneration
+        }
+    }
+
+    /// Validates the post-commit ownership epoch. A newer reservation makes the
+    /// older committed payload stale even before the replacement persists.
+    func isCurrentPairingWriteCommit(
+        deviceIds: [String],
+        matchingGeneration: UInt64,
+        matchingProtocolFingerprint: String
+    ) -> Bool {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty,
+              let normalizedFingerprint = Self.normalizedProtocolFingerprint(
+                matchingProtocolFingerprint
+              ) else {
+            return false
+        }
+        let now = Date()
+        return normalizedIds.allSatisfy { deviceId in
+            guard latestAdmittedPairingWriteGenerationByDeviceId[deviceId]
+                    == matchingGeneration else {
+                return false
+            }
+            if let reservedGeneration = pairingWriteReservationByDeviceId[deviceId],
+               reservedGeneration != matchingGeneration {
+                return false
+            }
+            guard let entry = entries[deviceId] else { return false }
+            if entry.source == "pairing_identity_exchange" {
+                return entry.pairingWriteGeneration == matchingGeneration
+                    && Self.normalizedProtocolFingerprint(entry.protocolIdentityFingerprint)
+                        == normalizedFingerprint
+            }
+            if entry.source == "signed_lan_kem_refresh" {
+                guard entry.expiresAt.map({ $0 > now }) ?? true else { return false }
+                return Self.entry(entry, isBoundToAny: [normalizedFingerprint])
+            }
+            return false
+        }
     }
 
     /// Stores a `pairing_identity_exchange` bootstrap KEM.
@@ -84,24 +218,129 @@ public actor PeerKEMBootstrapStore {
         osVersion: String? = nil,
         verifiedProtocolFingerprint: String? = nil
     ) {
+        do {
+            _ = try upsertPairingKEM(
+                deviceIds: deviceIds,
+                kemPublicKeys: kemPublicKeys,
+                platform: platform,
+                osVersion: osVersion,
+                verifiedProtocolFingerprint: verifiedProtocolFingerprint,
+                pairingWriteGeneration: nil
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Failed to persist pairing KEM bootstrap cache: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    /// Commits a reserved pairing payload as an authoritative replacement.
+    /// Returns `false` when a newer reservation has superseded this operation.
+    @discardableResult
+    public func upsert(
+        deviceIds: [String],
+        kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String? = nil,
+        osVersion: String? = nil,
+        verifiedProtocolFingerprint: String? = nil,
+        pairingWriteGeneration: UInt64
+    ) throws -> Bool {
+        try upsertPairingKEM(
+            deviceIds: deviceIds,
+            kemPublicKeys: kemPublicKeys,
+            platform: platform,
+            osVersion: osVersion,
+            verifiedProtocolFingerprint: verifiedProtocolFingerprint,
+            pairingWriteGeneration: pairingWriteGeneration
+        )
+    }
+
+    private func upsertPairingKEM(
+        deviceIds: [String],
+        kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String?,
+        osVersion: String?,
+        verifiedProtocolFingerprint: String?,
+        pairingWriteGeneration: UInt64?
+    ) throws -> Bool {
         let normalizedIds = trustMaterialIds(deviceIds)
-        guard !normalizedIds.isEmpty else { return }
+        guard !normalizedIds.isEmpty else {
+            if pairingWriteGeneration != nil {
+                throw PairingWriteError.invalidIdentifiers
+            }
+            return true
+        }
+
+        // A reservation is one-shot: every terminal outcome (success,
+        // superseded write, invalid payload, or persistence failure) releases
+        // only the IDs still owned by this generation. This keeps
+        // partial-overlap replacements bounded without allowing an older
+        // operation to erase a successor's reservation.
+        defer {
+            if let pairingWriteGeneration {
+                for deviceId in normalizedIds
+                where pairingWriteReservationByDeviceId[deviceId] == pairingWriteGeneration {
+                    pairingWriteReservationByDeviceId.removeValue(forKey: deviceId)
+                }
+                prunePairingAdmissionWatermarksWithoutEntryOrReservation()
+            }
+        }
 
         let incoming = incomingKEMMap(kemPublicKeys, platform: platform, osVersion: osVersion)
-        guard !incoming.isEmpty else { return }
+        guard !incoming.isEmpty else {
+            if pairingWriteGeneration != nil {
+                throw PairingWriteError.invalidKEMPayload
+            }
+            return true
+        }
+
+        if let pairingWriteGeneration,
+           normalizedIds.contains(where: {
+               pairingWriteReservationByDeviceId[$0] != pairingWriteGeneration
+           }) {
+            return false
+        }
 
         let normalizedFingerprint = Self.normalizedProtocolFingerprint(verifiedProtocolFingerprint)
 
         let now = Date()
+        var updatedEntries = entries
         var changed = false
 
         for deviceId in normalizedIds {
-            if let existing = entries[deviceId],
+            if pairingWriteGeneration == nil,
+               (pairingWriteReservationByDeviceId[deviceId] != nil
+                    || updatedEntries[deviceId]?.pairingWriteGeneration != nil) {
+                continue
+            }
+            if let existing = updatedEntries[deviceId],
                existing.source == "signed_lan_kem_refresh",
                existing.expiresAt.map({ $0 > now }) ?? true {
                 continue
             }
-            let existingEntry = entries[deviceId]
+            let existingEntry = updatedEntries[deviceId]
+
+            if let pairingWriteGeneration {
+                let replacement = Entry(
+                    kemPublicKeys: incoming,
+                    updatedAt: now,
+                    source: "pairing_identity_exchange",
+                    protocolIdentityFingerprint: normalizedFingerprint,
+                    platform: platform,
+                    osVersion: osVersion,
+                    pairingWriteGeneration: pairingWriteGeneration
+                )
+                if existingEntry?.pairingWriteGeneration != pairingWriteGeneration
+                    || existingEntry?.kemPublicKeys != incoming
+                    || existingEntry?.protocolIdentityFingerprint != normalizedFingerprint
+                    || existingEntry?.platform != platform
+                    || existingEntry?.osVersion != osVersion {
+                    updatedEntries[deviceId] = replacement
+                    changed = true
+                }
+                continue
+            }
+
             let existingKeys: [UInt16: Data]
             if existingEntry?.source == "signed_lan_kem_refresh",
                existingEntry?.expiresAt.map({ $0 <= now }) == true {
@@ -124,8 +363,8 @@ public actor PeerKEMBootstrapStore {
             let fingerprintChanged = resolvedFingerprint
                 != Self.normalizedProtocolFingerprint(existingEntry?.protocolIdentityFingerprint)
 
-            if merged != existingKeys || entries[deviceId] == nil || fingerprintChanged {
-                entries[deviceId] = Entry(
+            if merged != existingKeys || updatedEntries[deviceId] == nil || fingerprintChanged {
+                updatedEntries[deviceId] = Entry(
                     kemPublicKeys: merged,
                     updatedAt: now,
                     source: "pairing_identity_exchange",
@@ -134,18 +373,23 @@ public actor PeerKEMBootstrapStore {
                     osVersion: osVersion ?? existingEntry?.osVersion
                 )
                 changed = true
-            } else if var current = entries[deviceId] {
+            } else if var current = updatedEntries[deviceId] {
                 current.updatedAt = now
                 current.platform = platform ?? current.platform
                 current.osVersion = osVersion ?? current.osVersion
-                entries[deviceId] = current
+                updatedEntries[deviceId] = current
             }
         }
 
         if changed {
-            trimIfNeeded(maxEntries: 1024)
-            persist()
+            Self.trim(&updatedEntries, maxEntries: 1024)
+            try persist(updatedEntries)
+            entries = updatedEntries
+            prunePairingAdmissionWatermarksWithoutEntryOrReservation()
+        } else if pairingWriteGeneration == nil {
+            entries = updatedEntries
         }
+        return true
     }
 
     public func upsertSignedKEMRefresh(
@@ -378,47 +622,113 @@ public actor PeerKEMBootstrapStore {
     }
 
     public func clear(deviceIds: [String]) {
+        do {
+            try clearPersisting(deviceIds: deviceIds)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Failed to clear bootstrap KEM cache: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    public func clearPersisting(deviceIds: [String]) throws {
         let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
+        var updatedEntries = entries
         var changed = false
         for deviceId in normalizedIds {
-            if entries.removeValue(forKey: deviceId) != nil {
+            if updatedEntries.removeValue(forKey: deviceId) != nil {
                 changed = true
             }
         }
 
-        guard changed else { return }
-        if entries.isEmpty {
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            persist()
+        if changed {
+            try persist(updatedEntries)
+            entries = updatedEntries
         }
+        for deviceId in normalizedIds {
+            pairingWriteReservationByDeviceId.removeValue(forKey: deviceId)
+        }
+        prunePairingAdmissionWatermarksWithoutEntryOrReservation()
     }
 
     public func clearPairingIdentityExchangeEntries(deviceIds: [String]) {
+        do {
+            try clearPairingIdentityExchangeEntriesPersisting(deviceIds: deviceIds)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Failed to clear pairing KEM bootstrap cache: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func clearPairingIdentityExchangeEntriesPersisting(deviceIds: [String]) throws {
         let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
+        var updatedEntries = entries
         var changed = false
         for deviceId in normalizedIds {
-            guard entries[deviceId]?.source == "pairing_identity_exchange" else {
+            guard updatedEntries[deviceId]?.source == "pairing_identity_exchange" else {
                 continue
             }
-            entries.removeValue(forKey: deviceId)
+            updatedEntries.removeValue(forKey: deviceId)
             changed = true
         }
 
-        guard changed else { return }
-        if entries.isEmpty {
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            persist()
+        if changed {
+            try persist(updatedEntries)
+            entries = updatedEntries
         }
+        for deviceId in normalizedIds {
+            pairingWriteReservationByDeviceId.removeValue(forKey: deviceId)
+        }
+        prunePairingAdmissionWatermarksWithoutEntryOrReservation()
+    }
+
+    /// Cancels or rolls back exactly one reserved pairing write. A stale
+    /// operation cannot erase a replacement entry or its reservation.
+    @discardableResult
+    public func rollbackPairingIdentityExchangeEntries(
+        deviceIds: [String],
+        matchingWriteGeneration: UInt64
+    ) async throws -> Bool {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty else {
+            throw PairingWriteError.invalidIdentifiers
+        }
+
+        var updatedEntries = entries
+        var removedEntry = false
+        for deviceId in normalizedIds {
+            guard updatedEntries[deviceId]?.source == "pairing_identity_exchange",
+                  updatedEntries[deviceId]?.pairingWriteGeneration == matchingWriteGeneration else {
+                continue
+            }
+            updatedEntries.removeValue(forKey: deviceId)
+            removedEntry = true
+        }
+
+        if removedEntry {
+            try persist(updatedEntries)
+            entries = updatedEntries
+        }
+        var removedReservation = false
+        for deviceId in normalizedIds
+        where pairingWriteReservationByDeviceId[deviceId] == matchingWriteGeneration {
+            pairingWriteReservationByDeviceId.removeValue(forKey: deviceId)
+            removedReservation = true
+        }
+        prunePairingAdmissionWatermarksWithoutEntryOrReservation()
+        return removedEntry || removedReservation
     }
 
     func clearForTesting() {
         entries.removeAll()
+        pairingWriteReservationByDeviceId.removeAll()
+        latestAdmittedPairingWriteGenerationByDeviceId.removeAll()
+        maximumIssuedPairingWriteGeneration = 0
         defaults.removeObject(forKey: Self.defaultsKey)
     }
 
@@ -455,6 +765,19 @@ public actor PeerKEMBootstrapStore {
     }
 
     private func trimIfNeeded(maxEntries: Int) {
+        Self.trim(&entries, maxEntries: maxEntries)
+        prunePairingAdmissionWatermarksWithoutEntryOrReservation()
+    }
+
+    private func prunePairingAdmissionWatermarksWithoutEntryOrReservation() {
+        latestAdmittedPairingWriteGenerationByDeviceId =
+            latestAdmittedPairingWriteGenerationByDeviceId.filter { deviceId, _ in
+                entries[deviceId] != nil
+                    || pairingWriteReservationByDeviceId[deviceId] != nil
+            }
+    }
+
+    private static func trim(_ entries: inout [String: Entry], maxEntries: Int) {
         guard entries.count > maxEntries else { return }
         let sortedByAge = entries.sorted { $0.value.updatedAt < $1.value.updatedAt }
         let toRemove = entries.count - maxEntries
@@ -496,14 +819,22 @@ public actor PeerKEMBootstrapStore {
 
     private func persist() {
         do {
-            let snapshot = Snapshot(entries: entries)
-            let data = try JSONEncoder().encode(snapshot)
-            defaults.set(data, forKey: Self.defaultsKey)
+            try persist(entries)
         } catch {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ Failed to persist bootstrap KEM cache: \(error.localizedDescription, privacy: .public)"
             )
         }
+    }
+
+    private func persist(_ snapshotEntries: [String: Entry]) throws {
+        if snapshotEntries.isEmpty {
+            defaults.removeObject(forKey: Self.defaultsKey)
+            return
+        }
+        let snapshot = Snapshot(entries: snapshotEntries)
+        let data = try JSONEncoder().encode(snapshot)
+        defaults.set(data, forKey: Self.defaultsKey)
     }
 
     private static func loadEntries(from defaults: UserDefaults) -> [String: Entry] {

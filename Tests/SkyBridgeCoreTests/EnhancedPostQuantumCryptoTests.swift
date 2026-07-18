@@ -252,7 +252,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         )
         addTeardownBlock { @MainActor [trust] in
             await trust.removeRecordsForTesting(deviceIds: [peerId])
-            trust.setInMemoryPersistenceForTesting(false)
+            trust.endInMemoryPersistenceForTesting()
         }
 
         let required = try await crypto.signPQCRequiredWithAlgorithm(testData, for: peerId)
@@ -520,7 +520,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         )
         addTeardownBlock { @MainActor in
             await trust.removeRecordsForTesting(deviceIds: [peerId])
-            trust.setInMemoryPersistenceForTesting(false)
+            trust.endInMemoryPersistenceForTesting()
         }
     }
 }

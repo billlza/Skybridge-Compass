@@ -5,25 +5,51 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
     func testMacTrustedDeviceDetailSplitsRepairAndFullForgetSemantics() throws {
         let detailSource = try repositorySource("Sources/SkyBridgeCompassApp/Views/TrustedDeviceDetailView.swift")
         let discoverySource = try repositorySource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
+        let trustGraphSource = try repositorySource("Sources/SkyBridgeCore/Trust/TrustGraphManager.swift")
 
         XCTAssertTrue(detailSource.contains("onRepairP2PTrust"))
         XCTAssertTrue(detailSource.contains("修复 P2P 信任"))
         XCTAssertTrue(detailSource.contains("Repair P2P Trust"))
         XCTAssertTrue(detailSource.contains("彻底忘记设备"))
         XCTAssertTrue(detailSource.contains("Forget Device"))
+        XCTAssertTrue(detailSource.contains("移除不安全的信任"))
+        XCTAssertTrue(detailSource.contains("Remove Unsafe Trust"))
         XCTAssertFalse(detailSource.contains("Label(ui(chinese: \"移除信任\""))
 
         XCTAssertTrue(discoverySource.contains("PeerBootstrapTrustMaterialCleanup.repairP2PTrust(deviceIds: idsToRepair)"))
         XCTAssertTrue(discoverySource.contains("let idsToForget = Array(Set(idsToRevoke + [declaredDeviceId].compactMap { $0 }))"))
-        XCTAssertTrue(discoverySource.contains("PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: idsToForget)"))
+        XCTAssertTrue(discoverySource.contains("PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely"))
+        XCTAssertTrue(discoverySource.contains("trustSync.$trustRepairRecords"))
+        XCTAssertTrue(discoverySource.contains("buildTrustRepairDisplayGroups"))
+        XCTAssertTrue(discoverySource.contains("需要修复的设备信任"))
+        XCTAssertTrue(detailSource.contains("Quarantined / Repair Required"))
+        XCTAssertTrue(detailSource.contains("trust_repair_required"))
 
         let repairRange = try XCTUnwrap(discoverySource.range(of: "onRepairP2PTrust"))
         let repairCleanupRange = try XCTUnwrap(discoverySource.range(of: "PeerBootstrapTrustMaterialCleanup.repairP2PTrust"))
         let forgetRange = try XCTUnwrap(discoverySource.range(of: "onRemoveTrust"))
-        let forgetCleanupRange = try XCTUnwrap(discoverySource.range(of: "PeerBootstrapTrustMaterialCleanup.forgetDevice"))
+        let forgetCleanupRange = try XCTUnwrap(discoverySource.range(of: "PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely"))
+        let quarantineBranchStart = try XCTUnwrap(
+            detailSource.range(of: "                if requiresTrustRepair {")
+        )
+        let activeBranchStart = try XCTUnwrap(
+            detailSource.range(
+                of: "} else {",
+                range: quarantineBranchStart.upperBound..<detailSource.endIndex
+            )
+        )
+        let quarantineBranch = String(detailSource[quarantineBranchStart.lowerBound..<activeBranchStart.lowerBound])
 
         XCTAssertLessThan(repairRange.lowerBound, repairCleanupRange.lowerBound)
         XCTAssertLessThan(forgetRange.lowerBound, forgetCleanupRange.lowerBound)
+        XCTAssertTrue(quarantineBranch.contains("onRemoveTrust"))
+        XCTAssertFalse(quarantineBranch.contains("onRepairP2PTrust"))
+        XCTAssertTrue(detailSource.contains("return [record.deviceId]"))
+        XCTAssertTrue(
+            trustGraphSource.contains("PeerBootstrapTrustMaterialCleanup.forgetTrustCompletely"),
+            "TrustGraph revoke actions must use identity-wide fail-closed cleanup instead of revoking one storage key."
+        )
+        XCTAssertFalse(trustGraphSource.contains("trustSyncService.revokeTrustRecord(deviceId: deviceId)"))
     }
 
     func testMacCloudDeviceConnectButtonsUseRealConnectionPaths() throws {

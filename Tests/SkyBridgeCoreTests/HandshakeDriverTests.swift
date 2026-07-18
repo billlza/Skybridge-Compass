@@ -224,7 +224,10 @@ final class HandshakeDriverTests: XCTestCase {
         policy: HandshakePolicy = .default,
         cryptoPolicy: CryptoPolicy = .default,
         timeout: Duration = .seconds(5),
-        trustProvider: (any HandshakeTrustProvider)? = nil,
+        trustProvider: (any HandshakeTrustProvider)? = StaticTrustProvider(
+            deviceId: "unit-test-unpinned-peer",
+            fingerprint: nil
+        ),
         protocolSignatureProvider: (any ProtocolSignatureProvider)? = nil,
         sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519,
         offeredSuites: [CryptoSuite] = [.x25519Ed25519],
@@ -487,16 +490,12 @@ final class HandshakeDriverTests: XCTestCase {
             try await initiator.initiateHandshake(with: peer)
         }
 
-        while await initiatorTransport.getSentMessageCount() == 0 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(1, on: initiatorTransport)
 
         let initiatorMessages = await initiatorTransport.getSentMessages()
         await responder.handleMessage(initiatorMessages[0].1, from: peer)
 
-        while await responderTransport.getSentMessageCount() == 0 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(1, on: responderTransport)
 
         let responderMessages = await responderTransport.getSentMessages()
         await initiator.handleMessage(responderMessages[0].1, from: peer)
@@ -646,7 +645,11 @@ final class HandshakeDriverTests: XCTestCase {
             sigAAlgorithm: .ed25519,
             identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
             offeredSuites: [.x25519Ed25519],
-            timeout: .seconds(2)
+            timeout: .seconds(2),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes)
+            )
         )
 
         let handshakeTask = Task {
@@ -703,7 +706,11 @@ final class HandshakeDriverTests: XCTestCase {
             sigAAlgorithm: .ed25519,
             identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
             offeredSuites: [.x25519Ed25519],
-            timeout: .seconds(2)
+            timeout: .seconds(2),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes)
+            )
         )
 
         let responder = try HandshakeDriver(
@@ -714,7 +721,11 @@ final class HandshakeDriverTests: XCTestCase {
             sigAAlgorithm: .ed25519,
             identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
             offeredSuites: [.x25519Ed25519],
-            timeout: .seconds(2)
+            timeout: .seconds(2),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes)
+            )
         )
 
         await initiatorTransport.setOnFirstSend { peer, messageA in
@@ -816,6 +827,7 @@ final class HandshakeDriverTests: XCTestCase {
 
         let initiatorIdentity = try await provider.generateKeyPair(for: .signing)
         let responderIdentity = try await provider.generateKeyPair(for: .signing)
+        let peer = PeerIdentifier(deviceId: "authority-peer")
 
         let initiator = try HandshakeDriver(
             transport: initiatorTransport,
@@ -825,7 +837,11 @@ final class HandshakeDriverTests: XCTestCase {
             sigAAlgorithm: .ed25519,
             identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
             offeredSuites: [.x25519Ed25519],
-            timeout: .seconds(5)
+            timeout: .seconds(5),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes)
+            )
         )
 
         let responder = try HandshakeDriver(
@@ -836,32 +852,34 @@ final class HandshakeDriverTests: XCTestCase {
             sigAAlgorithm: .ed25519,
             identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
             offeredSuites: [.x25519Ed25519],
-            timeout: .seconds(5)
+            timeout: .seconds(5),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes)
+            )
         )
 
-        let peer = PeerIdentifier(deviceId: "authority-peer")
         let handshakeTask = Task {
             try await initiator.initiateHandshake(with: peer)
         }
-
-        while await initiatorTransport.getSentMessageCount() == 0 {
-            try await Task.sleep(for: .milliseconds(1))
+        addTeardownBlock {
+            handshakeTask.cancel()
+            await initiator.cancel()
+            await responder.cancel()
         }
+
+        try await waitForSentMessageCount(1, on: initiatorTransport)
 
         let messageA = await initiatorTransport.getSentMessages()[0].1
         await responder.handleMessage(messageA, from: peer)
 
-        while await responderTransport.getSentMessageCount() < 2 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(2, on: responderTransport)
 
         let responderMessages = await responderTransport.getSentMessages()
         await initiator.handleMessage(responderMessages[0].1, from: peer)
         await initiator.handleMessage(responderMessages[1].1, from: peer)
 
-        while await initiatorTransport.getSentMessageCount() < 2 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(2, on: initiatorTransport)
 
         let finishedI2R = await initiatorTransport.getSentMessages()[1].1
         await responder.handleMessage(finishedI2R, from: peer)
@@ -1464,9 +1482,7 @@ final class HandshakeDriverTests: XCTestCase {
             try await initiator.initiateHandshake(with: peer)
         }
 
-        while await initiatorTransport.getSentMessageCount() == 0 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(1, on: initiatorTransport)
 
         let initiatorSent = await initiatorTransport.getSentMessages()
         guard initiatorSent.count >= 1 else {
@@ -1475,18 +1491,14 @@ final class HandshakeDriverTests: XCTestCase {
         let messageA = initiatorSent[0].1
         await responder.handleMessage(messageA, from: peer)
 
-        while await responderTransport.getSentMessageCount() < 2 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(2, on: responderTransport)
         let responderSent = await responderTransport.getSentMessages()
         let messageB = responderSent[0].1
         let finishedR2I = responderSent[1].1
         await initiator.handleMessage(messageB, from: peer)
         await initiator.handleMessage(finishedR2I, from: peer)
 
-        while await initiatorTransport.getSentMessageCount() < 2 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        try await waitForSentMessageCount(2, on: initiatorTransport)
         let initiatorSent2 = await initiatorTransport.getSentMessages()
         let finishedI2R = initiatorSent2[1].1
         await responder.handleMessage(finishedI2R, from: peer)
@@ -1768,22 +1780,16 @@ final class HandshakeDriverTests: XCTestCase {
             )
 
             let task = Task { try await initiator.initiateHandshake(with: peer) }
-            while await initiatorTransport.getSentMessageCount() == 0 {
-                try await Task.sleep(for: .milliseconds(1))
-            }
+            try await waitForSentMessageCount(1, on: initiatorTransport)
             let msgA = (await initiatorTransport.getSentMessages())[0].1
             await responder.handleMessage(msgA, from: peer)
 
-            while await responderTransport.getSentMessageCount() < 2 {
-                try await Task.sleep(for: .milliseconds(1))
-            }
+            try await waitForSentMessageCount(2, on: responderTransport)
             let responderMsgs = await responderTransport.getSentMessages()
             await initiator.handleMessage(responderMsgs[0].1, from: peer)
             await initiator.handleMessage(responderMsgs[1].1, from: peer)
 
-            while await initiatorTransport.getSentMessageCount() < 2 {
-                try await Task.sleep(for: .milliseconds(1))
-            }
+            try await waitForSentMessageCount(2, on: initiatorTransport)
             let initiatorMsgs2 = await initiatorTransport.getSentMessages()
             await responder.handleMessage(initiatorMsgs2[1].1, from: peer)
             _ = try await task.value

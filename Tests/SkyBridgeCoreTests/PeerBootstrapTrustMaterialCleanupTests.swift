@@ -3,6 +3,97 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class PeerBootstrapTrustMaterialCleanupTests: XCTestCase {
+    @MainActor
+    func testFailClosedForgetRunsInMonotonicAuthorizationOrder() async throws {
+        var events: [String] = []
+        try await PeerBootstrapTrustMaterialCleanup.performFailClosedForget(
+            loadVerifiedFingerprints: {
+                events.append("load")
+                return [String(repeating: "a", count: 64)]
+            },
+            clearAutoConnect: { _ in events.append("auto") },
+            clearPairingPolicies: { events.append("policy") },
+            removeTrust: { events.append("trust") },
+            clearBootstrap: { events.append("bootstrap") }
+        )
+        XCTAssertEqual(events, ["load", "auto", "policy", "trust", "bootstrap"])
+    }
+
+    @MainActor
+    func testFailClosedForgetStopsBeforeDenyRemovalWhenPolicyClearFails() async {
+        var events: [String] = []
+        do {
+            try await PeerBootstrapTrustMaterialCleanup.performFailClosedForget(
+                loadVerifiedFingerprints: {
+                    events.append("load")
+                    return []
+                },
+                clearAutoConnect: { _ in events.append("auto") },
+                clearPairingPolicies: {
+                    events.append("policy")
+                    throw ForgetCoordinatorTestError.persistenceFailure
+                },
+                removeTrust: { events.append("trust") },
+                clearBootstrap: { events.append("bootstrap") }
+            )
+            XCTFail("policy persistence failure must stop forget")
+        } catch ForgetCoordinatorTestError.persistenceFailure {
+            XCTAssertEqual(events, ["load", "auto", "policy"])
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    @MainActor
+    func testFailClosedForgetDoesNotClearBootstrapAfterTrustRemovalFailure() async {
+        var events: [String] = []
+        do {
+            try await PeerBootstrapTrustMaterialCleanup.performFailClosedForget(
+                loadVerifiedFingerprints: {
+                    events.append("load")
+                    return []
+                },
+                clearAutoConnect: { _ in events.append("auto") },
+                clearPairingPolicies: { events.append("policy") },
+                removeTrust: {
+                    events.append("trust")
+                    throw ForgetCoordinatorTestError.persistenceFailure
+                },
+                clearBootstrap: { events.append("bootstrap") }
+            )
+            XCTFail("trust persistence failure must stop forget")
+        } catch ForgetCoordinatorTestError.persistenceFailure {
+            XCTAssertEqual(events, ["load", "auto", "policy", "trust"])
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    @MainActor
+    func testFailClosedForgetReportsBootstrapPersistenceFailure() async {
+        var events: [String] = []
+        do {
+            try await PeerBootstrapTrustMaterialCleanup.performFailClosedForget(
+                loadVerifiedFingerprints: {
+                    events.append("load")
+                    return []
+                },
+                clearAutoConnect: { _ in events.append("auto") },
+                clearPairingPolicies: { events.append("policy") },
+                removeTrust: { events.append("trust") },
+                clearBootstrap: {
+                    events.append("bootstrap")
+                    throw ForgetCoordinatorTestError.persistenceFailure
+                }
+            )
+            XCTFail("bootstrap persistence failure must be reported")
+        } catch ForgetCoordinatorTestError.persistenceFailure {
+            XCTAssertEqual(events, ["load", "auto", "policy", "trust", "bootstrap"])
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testForgetDeviceClearsKEMAndProtocolIdentityBootstrapMaterial() async throws {
         await PeerKEMBootstrapStore.shared.clearForTesting()
         await PeerProtocolIdentityBootstrapStore.shared.clearForTesting()
@@ -26,7 +117,7 @@ final class PeerBootstrapTrustMaterialCleanupTests: XCTestCase {
             fingerprints: [keptFingerprint]
         )
 
-        await PeerBootstrapTrustMaterialCleanup.forgetDevice(
+        try await PeerBootstrapTrustMaterialCleanup.forgetDevicePersisting(
             deviceIds: ["id:forgotten", "bonjour:Forgotten@local."]
         )
 
@@ -76,4 +167,8 @@ final class PeerBootstrapTrustMaterialCleanupTests: XCTestCase {
         await PeerKEMBootstrapStore.shared.clearForTesting()
         await PeerProtocolIdentityBootstrapStore.shared.clearForTesting()
     }
+}
+
+private enum ForgetCoordinatorTestError: Error {
+    case persistenceFailure
 }

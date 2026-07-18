@@ -79,6 +79,93 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         }
     }
 
+    func testPairingCommitDiagnosticsRedactStableIdentifiers() throws {
+        let sourcePaths = [
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift",
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift",
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        ]
+        let pairingCommitDiagnostics = try sourcePaths.flatMap { path in
+            try readSource(path)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter {
+                    $0.contains("已提交对端 KEM 公钥（bootstrap）")
+                        || $0.contains("authenticated authority and generation-bound KEM committed")
+                }
+                .map(String.init)
+        }
+
+        XCTAssertEqual(
+            pairingCommitDiagnostics.count,
+            sourcePaths.count,
+            "Each pairing transport must expose exactly one reviewed, redacted durable-commit diagnostic."
+        )
+        for diagnostic in pairingCommitDiagnostics {
+            XCTAssertTrue(diagnostic.contains(#"declared=\(Self.protocolIdentityLogRedaction"#))
+            XCTAssertTrue(diagnostic.contains(#"peer=\(Self.protocolIdentityLogRedaction"#))
+            XCTAssertTrue(diagnostic.contains(#"keys=\(payload.kemPublicKeys.count, privacy: .public)"#))
+        }
+
+        assertSource(
+            pairingCommitDiagnostics.joined(separator: "\n"),
+            named: "pairing authority/KEM durable-commit diagnostics",
+            excludes: [
+                #"declared=\(payload.deviceId"#,
+                #"peer=\(peerDeviceId"#,
+                #"peer=\(peer.deviceId"#,
+                #"peer=\(endpointDescription"#
+            ]
+        )
+    }
+
+    func testPairingApprovalAndJoinBootstrapDiagnosticsRedactStableIdentityFields() throws {
+        let approvalSource = try readSource(
+            "Sources/SkyBridgeCore/Security/PairingTrustApprovalService.swift"
+        )
+        let approvalDiagnostics = approvalSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter {
+                $0.contains("Smoke auto-approving pairing request")
+                    || $0.contains("Pairing request rejected while a resolved verification sheet remains open")
+                    || $0.contains("Pairing request coalesced with pending prompt")
+                    || $0.contains("Pairing request ignored because another prompt is pending")
+                    || $0.contains("Pairing/trust approval required")
+                    || $0.contains("Pairing/trust decision:")
+            }
+            .joined(separator: "\n")
+
+        XCTAssertEqual(
+            approvalDiagnostics.components(separatedBy: #"deviceId=\(Self.protocolIdentityLogRedaction"#).count - 1,
+            6
+        )
+        XCTAssertTrue(
+            approvalDiagnostics.contains(#"name=\(Self.protocolIdentityLogRedaction"#)
+        )
+        assertSource(
+            approvalDiagnostics,
+            named: "pairing approval diagnostics",
+            excludes: [
+                #"deviceId=\(request.declaredDeviceId"#,
+                #"deviceId=\(deviceId"#,
+                #"name=\(request.displayName"#
+            ]
+        )
+
+        let crossNetworkSource = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let joinBootstrapDiagnostics = crossNetworkSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.contains("join-bootstrap-") && $0.contains("remote=") }
+            .joined(separator: "\n")
+
+        XCTAssertEqual(
+            joinBootstrapDiagnostics.components(separatedBy: #"remote=\(Self.protocolIdentityLogRedaction)"#).count - 1,
+            3
+        )
+        XCTAssertFalse(joinBootstrapDiagnostics.contains(#"remote=\(normalizedRemoteId)"#))
+    }
+
     func testHandshakeDiagnosticsUseReasonCodesAndStateSummaries() throws {
         let helper = try readSource("Sources/SkyBridgeCore/Common/SkyBridgeDiagnosticRedaction.swift")
 

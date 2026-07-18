@@ -13,7 +13,7 @@ struct TrustedDeviceCard: View {
             HStack(spacing: 12) {
                 Image(systemName: iconName)
                     .font(.title2)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(requiresTrustRepair ? .orange : .green)
                     .frame(width: 28)
                 
                 VStack(alignment: .leading, spacing: 2) {
@@ -50,6 +50,7 @@ struct TrustedDeviceCard: View {
     }
     
     private var iconName: String {
+        if requiresTrustRepair { return "exclamationmark.shield.fill" }
         let caps = record.capabilities.joined(separator: "|").lowercased()
         if caps.contains("ios") || caps.contains("iphone") { return "iphone" }
         if caps.contains("ipad") { return "ipad" }
@@ -58,6 +59,7 @@ struct TrustedDeviceCard: View {
     }
     
     private var statusColor: Color {
+        if requiresTrustRepair { return .orange }
         switch status {
         case .connected:
             return .green
@@ -69,6 +71,13 @@ struct TrustedDeviceCard: View {
     }
 
     private var statusText: String {
+        if requiresTrustRepair {
+            return localizedText(
+                chinese: "需修复",
+                english: "Repair Required",
+                japanese: "修復が必要"
+            )
+        }
         switch status {
         case .connected:
             return localizedText(
@@ -89,6 +98,11 @@ struct TrustedDeviceCard: View {
                 japanese: "オフライン"
             )
         }
+    }
+
+    private var requiresTrustRepair: Bool {
+        record.lifecycleState != .active
+            || record.capabilities.contains("trust_repair_required")
     }
 
     private func localizedText(chinese: String, english: String, japanese: String) -> String {
@@ -135,6 +149,7 @@ struct TrustedDeviceDetailView: View {
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
     @ObservedObject private var autoConnectStore = TrustedAutoConnectStore.shared
     @State private var showingMessaging = false
+    @State private var operationErrorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -149,14 +164,16 @@ struct TrustedDeviceDetailView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
 
-                Image(systemName: "checkmark.shield.fill")
+                Image(systemName: requiresTrustRepair ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
                     .font(.title2)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(requiresTrustRepair ? .orange : .green)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(record.deviceName ?? "受信任设备")
                         .font(.title3)
                         .fontWeight(.semibold)
-                    Text(ui(chinese: "已配对/已信任", english: "Paired / Trusted", japanese: "ペア済み / 信頼済み"))
+                    Text(requiresTrustRepair
+                         ? ui(chinese: "已隔离 / 需要修复", english: "Quarantined / Repair Required", japanese: "隔離済み / 修復が必要")
+                         : ui(chinese: "已配对/已信任", english: "Paired / Trusted", japanese: "ペア済み / 信頼済み"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -187,10 +204,19 @@ struct TrustedDeviceDetailView: View {
             )
 
             // 随航自动连接（opt-in，按公钥指纹存储）。仅对已绑定指纹的受信设备可设。
-            if !record.pubKeyFP.isEmpty {
+            if !requiresTrustRepair && !record.pubKeyFP.isEmpty {
                 Toggle(isOn: Binding(
                     get: { autoConnectStore.allowsAutoConnect(fingerprint: record.pubKeyFP) },
-                    set: { autoConnectStore.setAllowAutoConnect($0, fingerprint: record.pubKeyFP) }
+                    set: { allow in
+                        do {
+                            try autoConnectStore.setAllowAutoConnect(
+                                allow,
+                                fingerprint: record.pubKeyFP
+                            )
+                        } catch {
+                            operationErrorMessage = error.localizedDescription
+                        }
+                    }
                 )) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(ui(chinese: "允许随航自动连接", english: "Allow follow-along auto-connect", japanese: "フォロー自動接続を許可"))
@@ -208,7 +234,7 @@ struct TrustedDeviceDetailView: View {
                 .padding(.horizontal, 4)
             }
 
-            if !record.pubKeyFP.isEmpty {
+            if !requiresTrustRepair && !record.pubKeyFP.isEmpty {
                 Button {
                     showingMessaging = true
                 } label: {
@@ -234,17 +260,33 @@ struct TrustedDeviceDetailView: View {
                         Label(LocalizationManager.shared.localizedString("action.disconnect"), systemImage: "xmark.circle")
                     }
                 }
-                Button {
-                    onRepairP2PTrust(idsToRevoke)
-                } label: {
-                    Label(ui(chinese: "修复 P2P 信任", english: "Repair P2P Trust", japanese: "P2P 信頼を修復"), systemImage: "wrench.and.screwdriver")
+                if requiresTrustRepair {
+                    Button(role: .destructive) {
+                        onRemoveTrust(idsToRevoke, declaredDeviceId)
+                    } label: {
+                        Label(
+                            ui(
+                                chinese: "移除不安全的信任",
+                                english: "Remove Unsafe Trust",
+                                japanese: "安全でない信頼を削除"
+                            ),
+                            systemImage: "trash"
+                        )
+                    }
+                    .keyboardShortcut(.delete)
+                } else {
+                    Button {
+                        onRepairP2PTrust(idsToRevoke)
+                    } label: {
+                        Label(ui(chinese: "修复 P2P 信任", english: "Repair P2P Trust", japanese: "P2P 信頼を修復"), systemImage: "wrench.and.screwdriver")
+                    }
+                    Button(role: .destructive) {
+                        onRemoveTrust(idsToRevoke, declaredDeviceId)
+                    } label: {
+                        Label(ui(chinese: "彻底忘记设备", english: "Forget Device", japanese: "デバイスを完全に忘れる"), systemImage: "trash")
+                    }
+                    .keyboardShortcut(.delete)
                 }
-                Button(role: .destructive) {
-                    onRemoveTrust(idsToRevoke, declaredDeviceId)
-                } label: {
-                    Label(ui(chinese: "彻底忘记设备", english: "Forget Device", japanese: "デバイスを完全に忘れる"), systemImage: "trash")
-                }
-                .keyboardShortcut(.delete)
             }
         }
         .sheet(isPresented: $showingMessaging) {
@@ -253,6 +295,19 @@ struct TrustedDeviceDetailView: View {
                 deviceId: record.currentDeviceId,
                 deviceName: record.deviceName ?? "设备"
             )
+        }
+        .alert(
+            ui(chinese: "设置保存失败", english: "Unable to Save Setting", japanese: "設定を保存できません"),
+            isPresented: Binding(
+                get: { operationErrorMessage != nil },
+                set: { if !$0 { operationErrorMessage = nil } }
+            )
+        ) {
+            Button(LocalizationManager.shared.localizedString("action.close")) {
+                operationErrorMessage = nil
+            }
+        } message: {
+            Text(operationErrorMessage ?? "")
         }
     }
 
@@ -298,6 +353,10 @@ struct TrustedDeviceDetailView: View {
         var ids = Set<String>()
         let records = relatedRecords.isEmpty ? [record] : relatedRecords
 
+        if requiresTrustRepair {
+            return [record.deviceId]
+        }
+
         for relatedRecord in records {
             ids.insert(relatedRecord.deviceId)
             ids.formUnion(relatedRecord.knownDeviceIds)
@@ -325,6 +384,11 @@ struct TrustedDeviceDetailView: View {
             }
         }
         return dict
+    }
+
+    private var requiresTrustRepair: Bool {
+        record.lifecycleState != .active
+            || record.capabilities.contains("trust_repair_required")
     }
 
     private func ui(chinese: String, english: String, japanese: String) -> String {

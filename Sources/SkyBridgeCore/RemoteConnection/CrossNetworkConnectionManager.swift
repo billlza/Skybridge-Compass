@@ -18,6 +18,57 @@ import WebRTCAudioDeviceBridge
 import UIKit
 #endif
 
+/// Two-phase business-readiness commit used by WebRTC handshake/rekey paths.
+/// A validation result may resume after cleanup or session replacement; in
+/// that case the stale operation is discarded and must not mutate or tear down
+/// the replacement session.
+@MainActor
+enum CrossNetworkBusinessReadinessCommitCoordinator {
+    static func perform(
+        validate: @MainActor () async throws -> Void,
+        isCurrent: @MainActor () -> Bool,
+        commit: @MainActor () -> Void
+    ) async throws -> Bool {
+        do {
+            try await validate()
+        } catch {
+            guard isCurrent() else { return false }
+            throw error
+        }
+        guard !Task.isCancelled, isCurrent() else { return false }
+        commit()
+        return true
+    }
+}
+
+/// Opaque post-commit key leases prevent continuations from resuming business
+/// traffic after a newer handshake or rekey has replaced their keys.
+struct CrossNetworkBusinessKeyLeaseState: Sendable {
+    private var currentLeaseBySessionID: [String: UUID] = [:]
+
+    mutating func commit(sessionID: String) -> UUID {
+        let lease = UUID()
+        currentLeaseBySessionID[sessionID] = lease
+        return lease
+    }
+
+    func isCurrent(_ lease: UUID, sessionID: String) -> Bool {
+        currentLeaseBySessionID[sessionID] == lease
+    }
+
+    func currentLease(sessionID: String) -> UUID? {
+        currentLeaseBySessionID[sessionID]
+    }
+
+    mutating func remove(sessionID: String) {
+        currentLeaseBySessionID.removeValue(forKey: sessionID)
+    }
+
+    mutating func removeAll() {
+        currentLeaseBySessionID.removeAll()
+    }
+}
+
 /// 跨网络连接管理器 - 2025年创新架构
 ///
 /// 三层连接方案：
@@ -26,6 +77,26 @@ import UIKit
 /// 3. 智能连接码 + P2P 穿透（通用方案）
 @MainActor
 public final class CrossNetworkConnectionManager: ObservableObject {
+    private enum CurrentPathBusinessReadinessError: Error, LocalizedError {
+        case missingExpectedAuthority
+        case trustStoreUnavailable
+        case commitLeaseInvalidated
+        case authorityInvalidated(CurrentPathTrustConflict)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingExpectedAuthority:
+                return "连接缺少预期的远端身份，已拒绝进入可用状态"
+            case .trustStoreUnavailable:
+                return "本地信任存储不可用，已拒绝进入可用状态"
+            case .commitLeaseInvalidated:
+                return "连接身份在校验期间已变化，已拒绝提交旧会话状态"
+            case .authorityInvalidated:
+                return "连接完成前信任状态已变化，已拒绝进入可用状态"
+            }
+        }
+    }
+
     /// Shared instance so multiple views (connection + file transfer) can operate on the same active WebRTC session.
     public static let shared = CrossNetworkConnectionManager()
 
@@ -82,8 +153,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var activeConnectionCodeAuthorityDeviceId: String?
     private var activeConnectionCodeAuthorityFingerprint: String?
     private var authorityBoundWebRTCBootstrapSessionIds = Set<String>()
+    /// Only connection-code sessions may use the transcript-authenticated
+    /// same-device identity-conflict healing path. QR sessions are never
+    /// admitted to this set.
+    private var authenticatedConnectionCodeRebindSessionIds = Set<String>()
     private var strictPQCClassicBootstrapOnlySessionIds = Set<String>()
     private var connectionCodeExpiryTask: Task<Void, Never>?
+    private var trustInvalidationCancellables = Set<AnyCancellable>()
 
     // MARK: - WebRTC (ICE / DataChannel)
 
@@ -120,10 +196,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcConnectionTimeoutTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcControlTaskTokenBySessionId: [String: UUID] = [:]
     private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
     private var webrtcOutboundHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcOutboundHeartbeatTaskTokenBySessionId: [String: UUID] = [:]
     private var webrtcScreenStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcScreenStreamingTaskTokenBySessionId: [String: UUID] = [:]
     private var webrtcInteractionStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcInteractionStreamingTaskTokenBySessionId: [String: UUID] = [:]
     private var webrtcInteractionStreamingAllowedSessionIds: Set<String> = []
     private var webrtcRemoteLivenessWatchdogTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcRekeyInProgressSessionIds: Set<String> = []
@@ -136,14 +216,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcSessionReadyDiagnosticSessionIds: Set<String> = []
     private var webrtcRemoteControlNoticeApprovedSessionIds: Set<String> = []
     private var webrtcRemoteControlNoticePendingSessionIds: Set<String> = []
+    private var webrtcRemoteControlNoticeTokenBySessionId: [String: UUID] = [:]
+    private var webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId: [String: UUID] = [:]
     private var webrtcRemoteSecurityIdentityBySessionId: [String: RemoteControlSecurityIdentity] = [:]
     private var webrtcBootstrapReplyFingerprintBySessionId: [String: String] = [:]
     var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
+    /// A fresh opaque lease is committed atomically with every key commit.
+    /// Post-commit continuations must still own this lease before restarting
+    /// business traffic, so an older rekey cannot revive streaming.
+    private var webrtcBusinessKeyLeases = CrossNetworkBusinessKeyLeaseState()
     var webrtcSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
     var webrtcSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
     var webrtcSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
     private var activeWebRTCClipboardSessionId: String?
     private var activeWebRTCClipboardToken: UUID?
+    private var activeWebRTCClipboardBusinessKeyLease: UUID?
 
     // File transfer waiters (sessionID|transferId|op|chunkIndex -> continuation)
     var webrtcFileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -177,8 +264,38 @@ public final class CrossNetworkConnectionManager: ObservableObject {
            let mode = ConnectionCodeLeaseMode(rawValue: rawMode) {
             self.connectionCodeLeaseMode = mode
         }
+        TrustSyncService.shared.trustInvalidationPublisher
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { [weak self] in
+                    self?.handleTrustInvalidation(event)
+                }
+            }
+            .store(in: &trustInvalidationCancellables)
 
         logger.info("跨网络连接管理器初始化完成")
+    }
+
+    private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        let sessionIDs = webrtcSessionsBySessionId.keys.filter { sessionID in
+            if let authority = currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+               event.matches(
+                   deviceId: authority.deviceId,
+                   protocolFingerprint: authority.protocolPublicKeyFingerprint
+               ) {
+                return true
+            }
+            return event.matches(deviceId: webrtcRemoteIdBySessionId[sessionID])
+        }
+        guard !sessionIDs.isEmpty else { return }
+        for sessionID in sessionIDs {
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "trust_invalidated",
+                disconnectKind: .explicit
+            )
+        }
+        connectionStatus = .failed("设备信任已撤销，连接已终止")
+        readiness = .idle
     }
 
     public var isTransportReady: Bool {
@@ -404,8 +521,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private func configureWebRTCClipboardSyncIfNeeded(
         for sessionID: String,
-        session: WebRTCSession
+        session: WebRTCSession,
+        businessKeyLease: UUID
     ) {
+        guard isCurrentWebRTCBusinessKeyLease(
+            sessionID: sessionID,
+            session: session,
+            lease: businessKeyLease
+        ) else {
+            return
+        }
         guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
             stopWebRTCClipboardSyncIfNeeded(for: sessionID)
             appendSmokeStatus(
@@ -418,26 +543,40 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let clipboard = ClipboardRedirectionManager.shared
 
         if shouldEnable {
-            if activeWebRTCClipboardSessionId != sessionID {
+            if activeWebRTCClipboardSessionId != sessionID
+                || activeWebRTCClipboardBusinessKeyLease != businessKeyLease {
                 if let activeSession = activeWebRTCClipboardSessionId {
                     stopWebRTCClipboardSyncIfNeeded(for: activeSession)
                 }
                 activeWebRTCClipboardSessionId = sessionID
                 activeWebRTCClipboardToken = UUID()
+                activeWebRTCClipboardBusinessKeyLease = businessKeyLease
             }
 
-            guard let token = activeWebRTCClipboardToken else { return }
+            guard let token = activeWebRTCClipboardToken,
+                  activeWebRTCClipboardBusinessKeyLease == businessKeyLease else {
+                return
+            }
             clipboard.enable(for: token)
             clipboard.onLocalClipboardChanged = { [weak self] data, mimeType in
                 guard let self else { return }
                 Task { @MainActor [weak self] in
                     guard let self,
-                          self.activeWebRTCClipboardSessionId == sessionID else { return }
+                          self.activeWebRTCClipboardSessionId == sessionID,
+                          self.activeWebRTCClipboardToken == token,
+                          self.activeWebRTCClipboardBusinessKeyLease == businessKeyLease,
+                          self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: businessKeyLease
+                          ) else { return }
                     await self.sendWebRTCClipboardPayload(
                         data: data,
                         mimeType: mimeType,
                         sessionID: sessionID,
-                        session: session
+                        session: session,
+                        clipboardToken: token,
+                        businessKeyLease: businessKeyLease
                     )
                 }
             }
@@ -453,6 +592,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         clipboard.disable()
         activeWebRTCClipboardSessionId = nil
         activeWebRTCClipboardToken = nil
+        activeWebRTCClipboardBusinessKeyLease = nil
     }
 
     private func noteWebRTCRemoteSecurityIdentity(
@@ -480,13 +620,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private func waitForWebRTCRemoteControlNoticeMetadata(
         sessionID: String,
         session: WebRTCSession,
+        noticeToken: UUID,
+        businessKeyLease: UUID,
         timeout: Duration = .seconds(5)
-    ) async -> (identity: RemoteControlSecurityIdentity?, remoteIPAddress: String?) {
+    ) async -> (identity: RemoteControlSecurityIdentity?, remoteIPAddress: String?)? {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
         var lastRemoteIPAddress = await session.currentObservedRemoteCandidateAddress()
 
         while clock.now < deadline {
+            guard !Task.isCancelled,
+                  webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken,
+                  webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+                  isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                  ) else {
+                return nil
+            }
             let identity = webrtcRemoteSecurityIdentityBySessionId[sessionID]
             lastRemoteIPAddress = await session.currentObservedRemoteCandidateAddress()
             if Self.noticeMetadataPresent(identity?.accountDisplayName),
@@ -494,9 +646,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                Self.noticeMetadataPresent(lastRemoteIPAddress) {
                 return (identity, lastRemoteIPAddress)
             }
-            try? await Task.sleep(for: .milliseconds(100))
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return nil
+            }
         }
 
+        guard webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken,
+              webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+              isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+              ) else {
+            return nil
+        }
         return (webrtcRemoteSecurityIdentityBySessionId[sessionID], lastRemoteIPAddress)
     }
 
@@ -507,40 +672,111 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return !trimmed.isEmpty && trimmed != "missing" && trimmed != "-"
     }
 
+    private func bindApprovedWebRTCRemoteControlNotice(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        businessKeyLease: UUID
+    ) -> Bool {
+        guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID),
+              isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+        ) else {
+            return false
+        }
+        if webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+           webrtcRemoteControlNoticeTokenBySessionId[sessionID] != nil {
+            return true
+        }
+
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+        let noticeToken = webrtcRemoteControlNoticeTokenBySessionId[sessionID] ?? UUID()
+        webrtcRemoteControlNoticeTokenBySessionId[sessionID] = noticeToken
+        webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] = businessKeyLease
+        noticeCenter.updateCryptoSuite(
+            webRTCSecurityCryptoSuite(keys),
+            sessionId: sessionID,
+            transportKind: .webrtc
+        )
+        noticeCenter.setDisconnectHandler(for: noticeToken) { [weak self, weak session] in
+            guard let self, let session,
+                  self.webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken,
+                  self.webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+                  self.isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                  ) else { return }
+            self.cleanupWebRTCSession(
+                sessionID,
+                expectedSession: session,
+                reason: "remote_control_notice_disconnect",
+                disconnectKind: .explicit
+            )
+        }
+        return true
+    }
+
     private func ensureWebRTCRemoteControlSecurityApproved(
         sessionID: String,
         session: WebRTCSession,
-        keys: SessionKeys
+        keys: SessionKeys,
+        businessKeyLease: UUID
     ) async -> Bool {
-        if webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) {
-            RemoteControlSecurityNoticeCenter.shared.updateCryptoSuite(
-                webRTCSecurityCryptoSuite(keys),
-                sessionId: sessionID,
-                transportKind: .webrtc
-            )
-            return true
+        guard isCurrentWebRTCBusinessKeyLease(
+            sessionID: sessionID,
+            session: session,
+            lease: businessKeyLease
+        ) else {
+            return false
         }
-        guard webrtcRemoteControlNoticePendingSessionIds.insert(sessionID).inserted else {
+
+        if webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) {
+            return bindApprovedWebRTCRemoteControlNotice(
+                sessionID: sessionID,
+                session: session,
+                keys: keys,
+                businessKeyLease: businessKeyLease
+            )
+        }
+
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+
+        if webrtcRemoteControlNoticePendingSessionIds.contains(sessionID),
+           webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease {
             appendSmokeStatus(
                 "remoteControlStartBlocked session=\(sessionID) transport=webrtc reason=security_notice_pending"
             )
             return false
         }
+
+        let noticeToken = UUID()
+        webrtcRemoteControlNoticeTokenBySessionId[sessionID] = noticeToken
+        webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] = businessKeyLease
+        webrtcRemoteControlNoticePendingSessionIds.insert(sessionID)
         defer {
-            webrtcRemoteControlNoticePendingSessionIds.remove(sessionID)
+            if webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken {
+                webrtcRemoteControlNoticePendingSessionIds.remove(sessionID)
+            }
         }
 
-        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
         let localIdentity = noticeCenter.localIdentitySnapshot()
-        let noticeMetadata = await waitForWebRTCRemoteControlNoticeMetadata(
+        guard let noticeMetadata = await waitForWebRTCRemoteControlNoticeMetadata(
             sessionID: sessionID,
-            session: session
-        )
+            session: session,
+            noticeToken: noticeToken,
+            businessKeyLease: businessKeyLease
+        ) else {
+            return false
+        }
         let remoteIdentity = noticeMetadata.identity
         let remoteDeviceId = remoteIdentity?.deviceId
             ?? webrtcRemoteIdBySessionId[sessionID]
             ?? sessionID
         let descriptor = RemoteControlSecurityDescriptor(
+            id: noticeToken,
             sessionId: sessionID,
             transportKind: .webrtc,
             remoteIPAddress: noticeMetadata.remoteIPAddress,
@@ -552,19 +788,38 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             localNebulaId: localIdentity?.nebulaId,
             cryptoSuite: webRTCSecurityCryptoSuite(keys)
         )
-        noticeCenter.setDisconnectHandler(for: descriptor.id) { [weak self] in
-            self?.cleanupWebRTCSession(
+        noticeCenter.setDisconnectHandler(for: descriptor.id) { [weak self, weak session] in
+            guard let self, let session,
+                  self.webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken,
+                  self.webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+                  self.isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                  ) else { return }
+            self.cleanupWebRTCSession(
                 sessionID,
+                expectedSession: session,
                 reason: "remote_control_notice_disconnect",
                 disconnectKind: .explicit
             )
         }
 
         let decision = await noticeCenter.requestApproval(descriptor)
-        guard decision == .approved, webrtcSessionsBySessionId[sessionID] != nil else {
+        guard webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken,
+              webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease,
+              isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+              ) else {
+            return false
+        }
+        guard decision == .approved else {
             webrtcRemoteControlNoticeApprovedSessionIds.remove(sessionID)
             cleanupWebRTCSession(
                 sessionID,
+                expectedSession: session,
                 reason: "remote_control_notice_\(decision.rawValue)",
                 disconnectKind: .explicit
             )
@@ -576,10 +831,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 pendingConfiguration,
                 sessionID: sessionID,
                 session: session,
-                keys: keys
+                keys: keys,
+                businessKeyLease: businessKeyLease
             )
         }
-        return true
+        return isCurrentWebRTCBusinessKeyLease(
+            sessionID: sessionID,
+            session: session,
+            lease: businessKeyLease
+        )
     }
 
     private func webRTCSecurityCryptoSuite(_ keys: SessionKeys) -> String {
@@ -594,8 +854,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         _ config: RemoteDesktopStreamConfiguration,
         sessionID: String,
         session: WebRTCSession,
-        keys: SessionKeys
+        keys: SessionKeys,
+        businessKeyLease: UUID
     ) async {
+        guard isCurrentWebRTCBusinessKeyLease(
+            sessionID: sessionID,
+            session: session,
+            lease: businessKeyLease
+        ) else {
+            return
+        }
         let previousConfig = webrtcRemoteStreamConfigurationBySessionId[sessionID]
         let plan = Self.planWebRTCStreamConfigurationIngress(
             config,
@@ -620,7 +888,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         if plan.shouldStopScreenStreaming {
             stopWebRTCScreenStreaming(sessionID: sessionID)
-            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+            configureWebRTCClipboardSyncIfNeeded(
+                for: sessionID,
+                session: session,
+                businessKeyLease: businessKeyLease
+            )
             logger.info(
                 "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
             )
@@ -659,6 +931,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     maxChunkBytes: 16 * 1024,
                     maxBufferedAmountBytes: 96 * 1024
                 )
+                guard isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                ) else {
+                    return
+                }
                 appendWebRTCSessionDiagnostic(
                     "streamConfigurationAckSent session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken)) audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present")",
                     sessionID: sessionID
@@ -673,11 +952,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 )
             }
         }
+        guard isCurrentWebRTCBusinessKeyLease(
+            sessionID: sessionID,
+            session: session,
+            lease: businessKeyLease
+        ) else {
+            return
+        }
         if plan.shouldMarkPendingStreamRefresh {
             webrtcPendingStreamRefreshSessionIds.insert(sessionID)
         }
         if plan.shouldConfigureClipboard {
-            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+            configureWebRTCClipboardSyncIfNeeded(
+                for: sessionID,
+                session: session,
+                businessKeyLease: businessKeyLease
+            )
         }
     }
 
@@ -685,9 +975,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         data: Data,
         mimeType: String,
         sessionID: String,
-        session: WebRTCSession
+        session: WebRTCSession,
+        clipboardToken: UUID,
+        businessKeyLease: UUID
     ) async {
-        guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+        guard activeWebRTCClipboardSessionId == sessionID,
+              activeWebRTCClipboardToken == clipboardToken,
+              activeWebRTCClipboardBusinessKeyLease == businessKeyLease,
+              isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+              ),
+              webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
             stopWebRTCClipboardSyncIfNeeded(for: sessionID)
             appendSmokeStatus(
                 "remoteControlClipboardSendBlocked session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
@@ -730,27 +1030,76 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(keys) ?? []
     }
 
-    private func protocolIdentityFingerprints(
-        from payload: AppMessage.PairingIdentityExchangePayload
-    ) -> Set<String> {
-        Set((AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(payload.protocolIdentityPublicKeys) ?? [])
-            .compactMap { $0.authoritativeFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty })
+    nonisolated static func authenticatedSessionDelegatedProtocolFingerprints(
+        protocolIdentityPublicKeys: [AppMessage.ProtocolIdentityPublicKeyInfo]?,
+        authorityAlgorithm: ProtocolSigningAlgorithm,
+        authorityFingerprint: String
+    ) -> Set<String>? {
+        let rawKeys = protocolIdentityPublicKeys ?? []
+        guard !rawKeys.isEmpty, rawKeys.count <= 2 else { return nil }
+
+        var fingerprintByAlgorithm: [ProtocolSigningAlgorithm: String] = [:]
+        for rawKey in rawKeys {
+            guard let algorithm = rawKey.normalizedAlgorithm,
+                  fingerprintByAlgorithm[algorithm] == nil else {
+                return nil
+            }
+            let expectedPublicKeyLength: Int
+            switch algorithm {
+            case .ed25519:
+                expectedPublicKeyLength = 32
+            case .mlDSA65:
+                expectedPublicKeyLength = 1_952
+            }
+            guard rawKey.publicKey.count == expectedPublicKeyLength else { return nil }
+            do {
+                try ProtocolIdentityBinding.validateKeyEncoding(
+                    bytes: rawKey.publicKey,
+                    algorithm: algorithm
+                )
+            } catch {
+                return nil
+            }
+            guard let fingerprint = rawKey.authoritativeFingerprint else { return nil }
+            fingerprintByAlgorithm[algorithm] = fingerprint.lowercased()
+        }
+
+        let normalizedAuthorityFingerprint = authorityFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard fingerprintByAlgorithm[authorityAlgorithm] == normalizedAuthorityFingerprint else {
+            return nil
+        }
+        return Set(
+            fingerprintByAlgorithm
+                .filter { $0.key != authorityAlgorithm }
+                .map(\.value)
+        )
     }
 
-    private func recordCurrentPathProtocolFingerprints(
+    private func replaceCurrentPathDelegatedProtocolFingerprints(
         from payload: AppMessage.PairingIdentityExchangePayload,
+        authority: CurrentPathRemoteAuthority,
         sessionID: String,
         peerDeviceId: String
     ) {
-        let fingerprints = protocolIdentityFingerprints(from: payload)
-        guard !fingerprints.isEmpty else { return }
-        currentPathAdditionalProtocolFingerprintsBySessionId[sessionID, default: []].formUnion(fingerprints)
+        guard let authenticatedFingerprints = Self.authenticatedSessionDelegatedProtocolFingerprints(
+            protocolIdentityPublicKeys: payload.protocolIdentityPublicKeys,
+            authorityAlgorithm: authority.protocolSigningAlgorithm,
+            authorityFingerprint: authority.protocolPublicKeyFingerprint
+        ) else {
+            currentPathAdditionalProtocolFingerprintsBySessionId.removeValue(forKey: sessionID)
+            logger.warning(
+                "⚠️ WebRTC pairing protocol delegation rejected; current session delegation was cleared: session=\(Self.protocolIdentityLogRedaction, privacy: .public)"
+            )
+            return
+        }
+        currentPathAdditionalProtocolFingerprintsBySessionId[sessionID] = authenticatedFingerprints
         appendSmokeStatus(
-            "protocol-identity-pins session=\(Self.protocolIdentityLogRedaction) peer=\(Self.protocolIdentityLogRedaction) declared=\(Self.protocolIdentityLogRedaction) count=\(fingerprints.count)"
+            "protocol-identity-pins session=\(Self.protocolIdentityLogRedaction) peer=\(Self.protocolIdentityLogRedaction) declared=\(Self.protocolIdentityLogRedaction) count=\(authenticatedFingerprints.count)"
         )
         logger.info(
-            "🔐 WebRTC current-path protocol identity pins updated: session=\(Self.protocolIdentityLogRedaction, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public) count=\(fingerprints.count, privacy: .public)"
+            "🔐 WebRTC current-path protocol delegation replaced atomically: session=\(Self.protocolIdentityLogRedaction, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public) count=\(authenticatedFingerprints.count, privacy: .public)"
         )
     }
 
@@ -1039,9 +1388,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard normalizedRemoteId == expected.deviceId,
                   incomingAlgorithm == expected.protocolSigningAlgorithm,
                   incomingFingerprint == expectedFingerprint else {
-                logger.error("❌ rejecting mismatched WebRTC join bootstrap: session=\(sessionID, privacy: .public) remote=\(normalizedRemoteId, privacy: .public)")
+                logger.error("❌ rejecting mismatched WebRTC join bootstrap: session=\(sessionID, privacy: .public) remote=\(Self.protocolIdentityLogRedaction, privacy: .public)")
                 appendWebRTCSessionDiagnostic(
-                    "join-bootstrap-rejected session=\(sessionID) remote=\(normalizedRemoteId)",
+                    "join-bootstrap-rejected session=\(sessionID) remote=\(Self.protocolIdentityLogRedaction)",
                     sessionID: sessionID
                 )
                 return
@@ -1075,7 +1424,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             )
             verifiedAuthorityFingerprint = authority.fingerprint
             appendWebRTCSessionDiagnostic(
-                "join-bootstrap-authority-seeded session=\(sessionID) remote=\(normalizedRemoteId)",
+                "join-bootstrap-authority-seeded session=\(sessionID) remote=\(Self.protocolIdentityLogRedaction)",
                 sessionID: sessionID
             )
         }
@@ -1097,7 +1446,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             verifiedProtocolFingerprint: verifiedAuthorityFingerprint
         )
         appendWebRTCSessionDiagnostic(
-            "join-bootstrap-accepted session=\(sessionID) remote=\(normalizedRemoteId) kemKeys=\(kemKeys.count) bound=\(verifiedAuthorityFingerprint != nil)",
+            "join-bootstrap-accepted session=\(sessionID) remote=\(Self.protocolIdentityLogRedaction) kemKeys=\(kemKeys.count) bound=\(verifiedAuthorityFingerprint != nil)",
             sessionID: sessionID
         )
     }
@@ -1350,13 +1699,47 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLocalICECandidatesBySessionId[sessionID] = cached
     }
 
+    @discardableResult
+    private func commitWebRTCSessionKeys(
+        _ keys: SessionKeys,
+        sessionID: String
+    ) -> UUID {
+        if activeWebRTCClipboardSessionId == sessionID {
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+        }
+        webrtcSessionKeysBySessionId[sessionID] = keys
+        return webrtcBusinessKeyLeases.commit(sessionID: sessionID)
+    }
+
+    private func isCurrentWebRTCBusinessKeyLease(
+        sessionID: String,
+        session: WebRTCSession,
+        lease: UUID
+    ) -> Bool {
+        webrtcSessionsBySessionId[sessionID] === session
+            && webrtcBusinessKeyLeases.isCurrent(lease, sessionID: sessionID)
+            && webrtcSessionKeysBySessionId[sessionID] != nil
+            && !webrtcRekeyInProgressSessionIds.contains(sessionID)
+            && !strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)
+    }
+
     private func cleanupWebRTCSession(
         _ sessionID: String,
+        expectedSession: WebRTCSession? = nil,
         reason: String,
         disconnectKind: SessionDisconnectKind = .explicit,
         snapshotToken: UUID? = nil,
         closeSession: Bool = true
     ) {
+        if let expectedSession {
+            guard let currentSession = webrtcSessionsBySessionId[sessionID],
+                  currentSession === expectedSession else {
+                logger.debug(
+                    "Ignoring stale WebRTC cleanup request for replaced session: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)"
+                )
+                return
+            }
+        }
         logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
 
         notifyWebRTCTerminalSessionIfNeeded(
@@ -1387,10 +1770,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentPathExpectedRemoteAuthorityBySessionId.removeValue(forKey: sessionID)
         currentPathAdditionalProtocolFingerprintsBySessionId.removeValue(forKey: sessionID)
         authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
+        authenticatedConnectionCodeRebindSessionIds.remove(sessionID)
         strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
         currentPathSignalingOriginBySessionId.removeValue(forKey: sessionID)
         currentPathSignalingWebSocketPathBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
+        webrtcBusinessKeyLeases.remove(sessionID: sessionID)
         clearWebRTCSecureEnvelopeState(for: sessionID)
         webrtcRekeyInProgressSessionIds.remove(sessionID)
         webrtcRemoteDesktopHeartbeatAtBySessionId.removeValue(forKey: sessionID)
@@ -1403,6 +1788,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
         webrtcRemoteControlNoticeApprovedSessionIds.remove(sessionID)
         webrtcRemoteControlNoticePendingSessionIds.remove(sessionID)
+        webrtcRemoteControlNoticeTokenBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteSecurityIdentityBySessionId.removeValue(forKey: sessionID)
         webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
         stopWebRTCClipboardSyncIfNeeded(for: sessionID)
@@ -1413,15 +1800,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if let controlTask = webrtcControlTasksBySessionId.removeValue(forKey: sessionID) {
             controlTask.cancel()
         }
+        webrtcControlTaskTokenBySessionId.removeValue(forKey: sessionID)
         if let outboundHeartbeatTask = webrtcOutboundHeartbeatTasksBySessionId.removeValue(forKey: sessionID) {
             outboundHeartbeatTask.cancel()
         }
+        webrtcOutboundHeartbeatTaskTokenBySessionId.removeValue(forKey: sessionID)
         if let streamTask = webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
             streamTask.cancel()
         }
+        webrtcScreenStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
         if let interactionTask = webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID) {
             interactionTask.cancel()
         }
+        webrtcInteractionStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
         if let inboundQueue = webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID) {
             Task { await inboundQueue.finish() }
         }
@@ -1820,7 +2211,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return nil
     }
 
-    private func startWebRTCLivenessWatchdogIfNeeded(for sessionID: String) {
+    private func startWebRTCLivenessWatchdogIfNeeded(
+        for sessionID: String,
+        session: WebRTCSession
+    ) {
         guard webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] == nil else { return }
         webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
         webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
@@ -1829,12 +2223,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let handshakeGraceTimeoutSeconds: TimeInterval = 30.0
             let transportReadyAt = Date()
 
-            defer {
-                self.webrtcRemoteLivenessWatchdogTasksBySessionId.removeValue(forKey: sessionID)
-            }
-
             while !Task.isCancelled {
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { break }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { break }
                 let hasSessionKeys = self.webrtcSessionKeysBySessionId[sessionID] != nil
                 let rekeyInProgress = self.webrtcRekeyInProgressSessionIds.contains(sessionID)
                 let strictBootstrapOnly = self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)
@@ -2142,6 +2532,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     /// - 取消控制/屏幕推流任务
     /// - 清空会话密钥（防止密钥残留）
     public func disconnect() async {
+        if let activeClipboardSessionId = activeWebRTCClipboardSessionId {
+            stopWebRTCClipboardSyncIfNeeded(for: activeClipboardSessionId)
+        }
         let securityNoticeSessionIDs = Set(webrtcSessionsBySessionId.keys)
             .union(webrtcRemoteControlNoticeApprovedSessionIds)
             .union(webrtcRemoteControlNoticePendingSessionIds)
@@ -2184,17 +2577,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             task.cancel()
         }
         webrtcControlTasksBySessionId.removeAll()
+        webrtcControlTaskTokenBySessionId.removeAll()
 
         // 4) 取消屏幕推流任务
         for (_, task) in webrtcScreenStreamingTasksBySessionId {
             task.cancel()
         }
         webrtcScreenStreamingTasksBySessionId.removeAll()
+        webrtcScreenStreamingTaskTokenBySessionId.removeAll()
 
         for (_, task) in webrtcInteractionStreamingTasksBySessionId {
             task.cancel()
         }
         webrtcInteractionStreamingTasksBySessionId.removeAll()
+        webrtcInteractionStreamingTaskTokenBySessionId.removeAll()
 
         // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
@@ -2207,6 +2603,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         currentPathAdditionalProtocolFingerprintsBySessionId.removeAll()
         authorityBoundWebRTCBootstrapSessionIds.removeAll()
+        authenticatedConnectionCodeRebindSessionIds.removeAll()
         strictPQCClassicBootstrapOnlySessionIds.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
         currentPathSignalingWebSocketPathBySessionId.removeAll()
@@ -2221,12 +2618,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcRemoteSecurityIdentityBySessionId.removeAll()
         webrtcBootstrapReplyFingerprintBySessionId.removeAll()
         webrtcRekeyInProgressSessionIds.removeAll()
+        webrtcBusinessKeyLeases.removeAll()
         webrtcPendingStreamRefreshSessionIds.removeAll()
         webrtcAwaitingStreamConfigurationSessionIds.removeAll()
         webrtcSessionReadyDiagnosticSessionIds.removeAll()
         webrtcInteractionStreamingAllowedSessionIds.removeAll()
         webrtcRemoteControlNoticeApprovedSessionIds.removeAll()
         webrtcRemoteControlNoticePendingSessionIds.removeAll()
+        webrtcRemoteControlNoticeTokenBySessionId.removeAll()
+        webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId.removeAll()
         removeAllPendingWebRTCJoinBootstraps()
         pendingWebRTCOfferSessionIds.removeAll()
 
@@ -2244,6 +2644,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             task.cancel()
         }
         webrtcOutboundHeartbeatTasksBySessionId.removeAll()
+        webrtcOutboundHeartbeatTaskTokenBySessionId.removeAll()
 
         for (_, task) in webrtcRemoteLivenessWatchdogTasksBySessionId {
             task.cancel()
@@ -2277,6 +2678,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         activeConnectionCodeAuthorityDeviceId = nil
         activeConnectionCodeAuthorityFingerprint = nil
         authorityBoundWebRTCBootstrapSessionIds.removeAll()
+        authenticatedConnectionCodeRebindSessionIds.removeAll()
         strictPQCClassicBootstrapOnlySessionIds.removeAll()
         Self.removeConnectionCodeSnapshot()
         connectionCodeExpiryTask?.cancel()
@@ -2487,7 +2889,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
 
             if let invite = try? Self.decodeServerBackedQRCodeInvite(from: jsonData),
-               invite.version >= 8 {
+               invite.version == 8 {
                 return try await scanServerBackedQRCodeInvite(invite)
             }
 
@@ -2755,6 +3157,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 binding: localBinding
             )
             self.authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)
+            self.authenticatedConnectionCodeRebindSessionIds.insert(lease.sessionID)
             self.connectionStatus = .waiting(code: code)
             self.readiness = .idle
             if let expiresAt = self.connectionCodeExpiresAt {
@@ -2841,7 +3244,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 origin: lookup.signalingServerOrigin,
                 wsPath: lookup.wsPath
             )
-            try enforceCurrentPathTrustBinding(
+            try await enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
                 authenticatedConnectionCodeRebindAllowed: true
@@ -2891,7 +3294,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             session.onLocalAnswer = { [weak self] sdp in
                 guard let self else { return }
                 Task { @MainActor in
-                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     self.webrtcLatestAnswerBySessionId[sessionID] = sdp
                     await self.sendSignal(.init(
                         sessionId: sessionID,
@@ -2905,7 +3308,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             session.onLocalICECandidate = { [weak self] payload in
                 guard let self else { return }
                 Task { @MainActor in
-                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     self.cacheLocalICECandidate(payload, for: sessionID)
                     guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
                         self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
@@ -2923,7 +3326,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             session.onDisconnected = { [weak self] reason in
                 guard let self else { return }
                 Task { @MainActor in
-                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     self.cleanupWebRTCSession(
                         sessionID,
                         reason: "transport_disconnected:\(reason)",
@@ -2937,12 +3340,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             session.onReady = { [weak self] in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
                     self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                     self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                     self.connectionStatus = .connecting
                     self.readiness = .transportReady(sessionId: sessionID)
-                    self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
+                    self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
                     self.updatePreparedSessionSnapshot(
                         sessionID: sessionID,
                         phase: .transportReady,
@@ -2955,6 +3359,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
 
             beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
+            authenticatedConnectionCodeRebindSessionIds.insert(sessionID)
             webrtcSessionsBySessionId[sessionID] = session
             await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
 
@@ -3024,6 +3429,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.activeConnectionCodeAuthorityFingerprint = nil
                 Self.removeConnectionCodeSnapshot()
                 self.authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
+                self.authenticatedConnectionCodeRebindSessionIds.remove(sessionID)
                 self.connectionCodeExpiryTask = nil
                 if case .waiting(let waitingCode) = self.connectionStatus, waitingCode == code {
                     self.connectionStatus = .idle
@@ -3052,6 +3458,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
               redeemed.initiatorProtocolPublicKeyFingerprint == invite.protocolPublicKeyFingerprint else {
             throw CrossNetworkConnectionError.invalidSignature
         }
+        try await enforceCurrentPathTrustBinding(
+            deviceId: invite.deviceID,
+            protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint,
+            authenticatedConnectionCodeRebindAllowed: false
+        )
         let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
             origin: redeemed.signalingServerOrigin,
             wsPath: redeemed.wsPath
@@ -3309,7 +3720,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onLocalOffer = { [weak self] sdp in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.webrtcLatestOfferBySessionId[sessionID] = sdp
                 await self.sendSignal(.init(
                     sessionId: sessionID,
@@ -3323,7 +3734,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onLocalICECandidate = { [weak self] payload in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.cacheLocalICECandidate(payload, for: sessionID)
                 guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
                     self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
@@ -3341,7 +3752,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onDisconnected = { [weak self] reason in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.cleanupWebRTCSession(
                     sessionID,
                     reason: "transport_disconnected:\(reason)",
@@ -3355,12 +3766,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onReady = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
                 self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
-                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
+                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
                 self.activatePreparedSessionSnapshot(sessionID: sessionID, phase: .transportReady)
 
                 // 启动“握手/控制通道”消费者：把 DataChannel 当作一条 length-framed byte stream，复用现有 HandshakeDriver / AppMessage 逻辑。
@@ -3444,7 +3856,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onLocalAnswer = { [weak self] sdp in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.webrtcLatestAnswerBySessionId[sessionID] = sdp
                 await self.sendSignal(.init(
                     sessionId: sessionID,
@@ -3458,7 +3870,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onLocalICECandidate = { [weak self] payload in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.cacheLocalICECandidate(payload, for: sessionID)
                 guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
                     self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
@@ -3476,7 +3888,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onDisconnected = { [weak self] reason in
             guard let self else { return }
             Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.cleanupWebRTCSession(
                     sessionID,
                     reason: "transport_disconnected:\(reason)",
@@ -3490,12 +3902,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         session.onReady = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                 self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
                 self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: remoteDeviceName, transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
-                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
+                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
                 self.updatePreparedSessionSnapshot(
                     sessionID: sessionID,
                     phase: .transportReady,
@@ -3861,9 +4274,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if let task = webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
             task.cancel()
         }
+        webrtcScreenStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
         if let task = webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID) {
             task.cancel()
         }
+        webrtcInteractionStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
         webrtcSessionsBySessionId[sessionID]?.setOutgoingSystemAudioTrackEnabled(false)
     }
 
@@ -3934,11 +4349,23 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 #endif
 
     private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
-        if webrtcControlTasksBySessionId[sessionID] != nil { return }
+        if let existingTask = webrtcControlTasksBySessionId[sessionID] {
+            if webrtcSessionsBySessionId[sessionID] === session {
+                return
+            }
+            existingTask.cancel()
+            webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
+            webrtcControlTaskTokenBySessionId.removeValue(forKey: sessionID)
+            if let existingQueue = webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID) {
+                Task { await existingQueue.finish() }
+            }
+        }
 
         let queue = InboundChunkQueue()
         let orderedInboundRelay = OrderedInboundChunkRelay()
+        let taskToken = UUID()
         webrtcInboundQueuesBySessionId[sessionID] = queue
+        webrtcControlTaskTokenBySessionId[sessionID] = taskToken
         session.onData = { data in
             orderedInboundRelay.submit {
                 await queue.push(data)
@@ -3956,20 +4383,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             await queue.finish()
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                guard self.webrtcControlTaskTokenBySessionId[sessionID] == taskToken,
+                      self.webrtcSessionsBySessionId[sessionID] === session else {
+                    orderedInboundRelay.cancel()
+                    return
+                }
                 self.webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
+                self.webrtcControlTaskTokenBySessionId.removeValue(forKey: sessionID)
                 self.webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID)
                 self.stopWebRTCScreenStreaming(sessionID: sessionID)
                 self.failAllFileTransferWaitersForSession(sessionID: sessionID, message: "WebRTC control channel closed")
                 orderedInboundRelay.cancel()
-                if self.webrtcSessionsBySessionId[sessionID] != nil {
-                    self.cleanupWebRTCSession(
-                        sessionID,
-                        reason: "control_channel_closed",
-                        disconnectKind: .transient
-                    )
-                    self.connectionStatus = .failed("WebRTC control channel closed")
-                    self.readiness = .idle
-                }
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    expectedSession: session,
+                    reason: "control_channel_closed",
+                    disconnectKind: .transient
+                )
+                self.connectionStatus = .failed("WebRTC control channel closed")
+                self.readiness = .idle
             }
         }
     }
@@ -4047,6 +4479,28 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         let handshakeState = WebRTCHandshakeLoopState()
 
+        func terminateForCurrentPathBusinessReadinessFailure(
+            _ error: Error,
+            stage: String
+        ) {
+            handshakeState.sessionKeys = nil
+            handshakeState.previousSessionKeysBeforeRekey = nil
+            handshakeState.driver = nil
+            self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+            self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+            self.lastRekeyEvent = "failed authority-revalidation stage=\(stage)"
+            self.logger.error(
+                "⛔️ WebRTC current-path authority revalidation failed closed: session=\(sessionID, privacy: .public) stage=\(stage, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
+            )
+            self.cleanupWebRTCSession(
+                sessionID,
+                reason: "current_path_authority_revalidation_failed",
+                disconnectKind: .explicit
+            )
+            self.connectionStatus = .failed(error.localizedDescription)
+            self.readiness = .idle
+        }
+
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             WebRTCControlChannelCodec.isLikelyHandshakeControlPacket(data)
         }
@@ -4096,6 +4550,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         @MainActor
         func startOutboundHeartbeatIfNeeded() {
             guard self.webrtcOutboundHeartbeatTasksBySessionId[sessionID] == nil else { return }
+            guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+            let taskToken = UUID()
+            self.webrtcOutboundHeartbeatTaskTokenBySessionId[sessionID] = taskToken
             self.appendWebRTCSessionDiagnostic(
                 "app-heartbeat-send-start session=\(sessionID) interval=2.0",
                 sessionID: sessionID
@@ -4103,10 +4560,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             self.webrtcOutboundHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
                 defer {
-                    self.webrtcOutboundHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
+                    if self.webrtcOutboundHeartbeatTaskTokenBySessionId[sessionID] == taskToken {
+                        self.webrtcOutboundHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
+                        self.webrtcOutboundHeartbeatTaskTokenBySessionId.removeValue(forKey: sessionID)
+                    }
                 }
                 while !Task.isCancelled {
-                    guard self.webrtcSessionsBySessionId[sessionID] === session else { break }
+                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                          self.webrtcOutboundHeartbeatTaskTokenBySessionId[sessionID] == taskToken else {
+                        break
+                    }
                     guard case .connected = self.connectionStatus else {
                         try? await Task.sleep(for: .milliseconds(250))
                         continue
@@ -4160,6 +4623,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func pairingExchangeFingerprint(_ payload: AppMessage.PairingIdentityExchangePayload) -> String {
             WebRTCControlChannelCodec.pairingExchangeFingerprint(payload)
+        }
+
+        @discardableResult
+        func rollbackPairingCommit(
+            _ reservation: PairingIdentityExchangeCommitCoordinator.Reservation,
+            reason: String
+        ) async -> Bool {
+            switch await PairingIdentityExchangeCommitCoordinator.rollbackResult(reservation) {
+            case .completed:
+                return true
+            case .failed(let errorDescription):
+                self.logger.error(
+                    "⛔️ Failed to release pairing KEM write reservation: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public) err=\(errorDescription, privacy: .private)"
+                )
+                self.appendWebRTCSessionDiagnostic(
+                    "pairing-kem-release-failed session=\(sessionID) reason=\(reason) error=\(sanitizeStatus(errorDescription))",
+                    sessionID: sessionID
+                )
+                return false
+            }
         }
 
         func makeLocalPairingIdentityExchangePayload() async throws -> AppMessage.PairingIdentityExchangePayload {
@@ -4225,10 +4708,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func sendLocalAuthenticatedRouteBindings(
             keys: SessionKeys,
+            businessKeyLease: UUID,
             stage: String
         ) async {
-            if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID) ||
-                self.webrtcRekeyInProgressSessionIds.contains(sessionID) {
+            guard self.isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+            ), !Task.isCancelled else {
                 self.appendWebRTCSessionDiagnostic(
                     "authenticated-route-binding-send-skipped session=\(sessionID) stage=\(stage) reason=session_not_business_ready",
                     sessionID: sessionID
@@ -4262,6 +4749,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 )
                 return
             }
+            guard self.isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+            ),
+            self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == remoteAuthority,
+            !Task.isCancelled else { return }
             let localFingerprint = localIdentity.pubKeyFP.trimmingCharacters(in: .whitespacesAndNewlines)
             let endpointSnapshot = ServiceEndpointRegistry.shared.snapshot()
             let routes = CrossNetworkWebRTCLocalAppMessageFactory.localAuthenticatedRouteBindingRoutes(
@@ -4285,11 +4779,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     sessionBinding: WebRTCControlChannelCodec.sessionBindingDescriptor(for: keys)
                 )
                 for message in messages {
+                    guard self.isCurrentWebRTCBusinessKeyLease(
+                        sessionID: sessionID,
+                        session: session,
+                        lease: businessKeyLease
+                    ),
+                    self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == remoteAuthority,
+                    !Task.isCancelled else { return }
                     let outPlain = try JSONEncoder().encode(message)
                     let outCipher = try encryptAppPayload(outPlain, with: keys)
                     let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-route-binding")
                     try await sendFramed(outPadded)
                 }
+                guard self.isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                ),
+                self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == remoteAuthority,
+                !Task.isCancelled else { return }
                 self.appendWebRTCSessionDiagnostic(
                     "authenticated-route-binding-send session=\(sessionID) stage=\(stage) routes=\(messages.count)",
                     sessionID: sessionID
@@ -4298,6 +4806,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     Self.emitSmokeLog("🧪 mac app message=authenticatedRouteBinding sent routes=\(messages.count)")
                 }
             } catch {
+                guard self.isCurrentWebRTCBusinessKeyLease(
+                    sessionID: sessionID,
+                    session: session,
+                    lease: businessKeyLease
+                ), !Task.isCancelled else { return }
                 logger.warning(
                     "⚠️ WebRTC authenticatedRouteBinding send failed: session=\(sessionID, privacy: .public) stage=\(stage, privacy: .public) err=\(self.sanitizeStatus(error.localizedDescription), privacy: .public)"
                 )
@@ -4435,7 +4948,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         guard !shared.isEmpty else {
                             // Fail closed: no mutually-supported PQC family. NEVER fall back to classic.
                             logger.error(
-                                "⛔️ WebRTC 初始出站握手挑选不出共享 PQC 套件: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) localAdvertised=\(advertised.map(\.wireId), privacy: .public) peerKEM=\(Array(trustedPeerKEMKeys.keys), privacy: .public)"
+                                "⛔️ WebRTC 初始出站握手挑选不出共享 PQC 套件: session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) localAdvertised=\(advertised.map(\.wireId), privacy: .public) peerKEM=\(Array(trustedPeerKEMKeys.keys), privacy: .public)"
                             )
                             throw NSError(
                                 domain: "CrossNetworkConnectionManager",
@@ -4470,24 +4983,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     handshakeState.driver = outboundDriver
 
                     logger.info(
-                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) policy=\(selection.rawValue, privacy: .public) mode=\(bootstrapPlan.bootstrapMode, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public) authorityBootstrap=\(bootstrapPlan.usesClassicAuthorityBootstrap, privacy: .public)"
+                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) policy=\(selection.rawValue, privacy: .public) mode=\(bootstrapPlan.bootstrapMode, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public) authorityBootstrap=\(bootstrapPlan.usesClassicAuthorityBootstrap, privacy: .public)"
                     )
                     let keys = try await outboundDriver.initiateHandshake(
                         with: PeerIdentifier(deviceId: trustLookupPeerId)
                     )
 
                     guard handshakeState.driver === outboundDriver,
-                    self.webrtcSessionsBySessionId[sessionID] != nil else {
+                          self.webrtcSessionsBySessionId[sessionID] === session else {
                         return
                     }
 
-                    handshakeState.sessionKeys = keys
-                    handshakeState.driver = nil
-                    self.webrtcSessionKeysBySessionId[sessionID] = keys
                     let isStrictClassicAuthorityBootstrap = strictPQCRequested
                         && useClassicAuthorityBootstrap
                         && !(keys.negotiatedSuite.isNegotiable && keys.negotiatedSuite.isPQCGroup)
                     if isStrictClassicAuthorityBootstrap {
+                        handshakeState.sessionKeys = keys
+                        handshakeState.driver = nil
+                        self.commitWebRTCSessionKeys(keys, sessionID: sessionID)
                         self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
                         self.strictPQCClassicBootstrapOnlySessionIds.insert(sessionID)
                         self.logger.warning(
@@ -4512,29 +5025,65 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         }
                         return
                     }
-                    self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
-                    self.connectionStatus = .connected
-                    self.readiness = .handshakeComplete(
-                        sessionId: sessionID,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    var committedBusinessKeyLease: UUID?
+                    let committed = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                        validate: {
+                            try await self.enforceCurrentPathAuthorityBeforeBusinessReady(
+                                sessionID: sessionID
+                            )
+                        },
+                        isCurrent: {
+                            handshakeState.driver === outboundDriver
+                                && self.webrtcSessionsBySessionId[sessionID] === session
+                        },
+                        commit: {
+                            handshakeState.sessionKeys = keys
+                            handshakeState.driver = nil
+                            committedBusinessKeyLease = self.commitWebRTCSessionKeys(
+                                keys,
+                                sessionID: sessionID
+                            )
+                            self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                            self.connectionStatus = .connected
+                            self.readiness = .handshakeComplete(
+                                sessionId: sessionID,
+                                negotiatedSuite: keys.negotiatedSuite.rawValue
+                            )
+                            self.markCrossNetworkPresenceConnected(
+                                sessionID: sessionID,
+                                negotiatedSuite: keys.negotiatedSuite.rawValue
+                            )
+                            self.updatePreparedSessionSnapshot(
+                                sessionID: sessionID,
+                                phase: .handshakeComplete,
+                                negotiatedSuite: keys.negotiatedSuite.rawValue
+                            )
+                        }
                     )
-                    self.markCrossNetworkPresenceConnected(
-                        sessionID: sessionID,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
-                    )
-                    self.updatePreparedSessionSnapshot(
-                        sessionID: sessionID,
-                        phase: .handshakeComplete,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
-                    )
+                    guard committed,
+                          let committedBusinessKeyLease,
+                          self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: committedBusinessKeyLease
+                          ) else { return }
                     startOutboundHeartbeatIfNeeded()
-                    await sendLocalAuthenticatedRouteBindings(keys: keys, stage: "initial-handshake")
-                    startScreenStreamingIfNeeded(keys: keys)
+                    await sendLocalAuthenticatedRouteBindings(
+                        keys: keys,
+                        businessKeyLease: committedBusinessKeyLease,
+                        stage: "initial-handshake"
+                    )
+                    guard self.isCurrentWebRTCBusinessKeyLease(
+                        sessionID: sessionID,
+                        session: session,
+                        lease: committedBusinessKeyLease
+                    ) else { return }
+                    startScreenStreamingIfNeeded(businessKeyLease: committedBusinessKeyLease)
                     logger.info(
                         "✅ WebRTC 初始出站握手完成: session=\(sessionID, privacy: .public) suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
                     )
                 } catch {
-                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     handshakeState.driver = nil
                     self.cleanupWebRTCSession(
                         sessionID,
@@ -4549,10 +5098,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func maybeStartOutboundPQCRekeyIfNeeded(
             from pairingPayload: AppMessage.PairingIdentityExchangePayload,
-            trigger: String
+            trigger: String,
+            pairingCommitIsCurrent: @escaping @MainActor @Sendable () async -> Bool
         ) async {
+            guard await pairingCommitIsCurrent() else { return }
             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                Self.emitSmokeLog("🧪 mac maybeStartPQCRekey trigger=\(trigger) deviceId=\(pairingPayload.deviceId) keys=\(pairingPayload.kemPublicKeys.count)")
+                Self.emitSmokeLog(
+                    "🧪 mac maybeStartPQCRekey trigger=\(trigger) " +
+                    "peer=\(Self.protocolIdentityLogRedaction) keys=\(pairingPayload.kemPublicKeys.count)"
+                )
             }
             guard let establishedKeys = handshakeState.sessionKeys else { return }
             guard !(establishedKeys.negotiatedSuite.isNegotiable && establishedKeys.negotiatedSuite.isPQCGroup) else {
@@ -4601,20 +5155,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 localDeviceId: localElectionDeviceId,
                 remoteDeviceId: remoteElectionDeviceId
             ) else {
-                self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) election"
+                self.lastRekeyEvent = "waiting peer=\(Self.protocolIdentityLogRedaction) election"
                 logger.info(
-                    "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) local=\(localElectionDeviceId ?? "nil", privacy: .public) peer=\(remoteElectionDeviceId ?? "nil", privacy: .public)"
+                    "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) local=\(Self.protocolIdentityLogRedaction, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
                 failStrictClassicBootstrap(
                     reason: "unstable_rekey_election",
-                    diagnostic: "stable initiator election unavailable (local=\(localElectionDeviceId ?? "nil") peer=\(remoteElectionDeviceId ?? "nil"))"
+                    diagnostic: "stable initiator election unavailable"
                 )
                 return
             }
             guard shouldInitiate else {
-                self.lastRekeyEvent = "await inbound peer=\(pairingPayload.deviceId)"
+                self.lastRekeyEvent = "await inbound peer=\(Self.protocolIdentityLogRedaction)"
                 logger.info(
-                    "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
+                    "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
                 return
             }
@@ -4651,6 +5205,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     forCandidates: [candidateId],
                     sessionID: sessionID
                 )
+                guard await pairingCommitIsCurrent() else { return }
             }
 
             let peerHasXWing = peerKEMByCandidateId.values.contains { keys in
@@ -4679,7 +5234,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     let localSuitesSummary = candidateLocalSuites.map(\.rawValue).joined(separator: ",")
                     Self.emitSmokeLog(
-                        "🧪 mac PQC candidates=\(candidateIds.joined(separator: ",")) " +
+                        "🧪 mac PQC candidates=\(Self.protocolIdentityLogRedaction) " +
                         "provider=\(candidate.label) localSuites=\(localSuitesSummary)"
                     )
                 }
@@ -4713,6 +5268,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     forCandidates: candidateIds,
                     sessionID: sessionID
                 )
+                guard await pairingCommitIsCurrent() else { return }
                 let missingCanonicalSuites = Array(Set(
                     providerCandidates
                         .flatMap { $0.suites.filter { $0.isNegotiable && $0.isPQCGroup } }
@@ -4724,9 +5280,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     Self.emitSmokeLog("🧪 mac skip PQC rekey: missing peer KEM suites=\(missingSummary)")
                 }
-                self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) missing=\(missingSummary)"
+                self.lastRekeyEvent = "waiting peer=\(Self.protocolIdentityLogRedaction) missing=\(missingSummary)"
                 logger.info(
-                    "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) candidates=\(candidateIds.joined(separator: ","), privacy: .public) missing=\(missingSummary, privacy: .public)"
+                    "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) candidates=\(Self.protocolIdentityLogRedaction, privacy: .public) missing=\(missingSummary, privacy: .public)"
                 )
                 failStrictClassicBootstrap(
                     reason: "missing_common_peer_kem",
@@ -4738,6 +5294,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
 
             do {
+                guard await pairingCommitIsCurrent() else { return }
                 let identityProvider = DeviceIdentityHandshakeProvider(sigAAlgorithm: .mlDSA65)
                 let rekeyTrustProvider = CurrentPathHandshakeTrustProvider(
                     expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionID],
@@ -4757,33 +5314,54 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     trustProvider: rekeyTrustProvider
                 )
 
+                guard await pairingCommitIsCurrent() else { return }
                 handshakeState.previousSessionKeysBeforeRekey = establishedKeys
                 handshakeState.driver = outboundDriver
                 self.webrtcRekeyInProgressSessionIds.insert(sessionID)
                 if let streamTask = self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
                     streamTask.cancel()
                 }
+                self.webrtcScreenStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
                 if let interactionTask = self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID) {
                     interactionTask.cancel()
                 }
+                self.webrtcInteractionStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
 
                 let offeredSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     Self.emitSmokeLog(
-                        "🧪 mac start PQC rekey peer=\(selectedPeerId) offered=\(offeredSummary) " +
+                        "🧪 mac start PQC rekey peer=\(Self.protocolIdentityLogRedaction) offered=\(offeredSummary) " +
                         "provider=\(String(describing: type(of: cryptoProvider))) source=\(selectedProviderLabel)"
                     )
                 }
-                self.lastRekeyEvent = "start peer=\(selectedPeerId) policy=requirePQC"
+                self.lastRekeyEvent = "start peer=\(Self.protocolIdentityLogRedaction) policy=requirePQC"
                 logger.info(
-                    "🔁 WebRTC outbound PQC rekey start: session=\(sessionID, privacy: .public) event=pqcRekeyStarted trigger=\(trigger, privacy: .public) peer=\(selectedPeerId, privacy: .public) offered=\(offeredSummary, privacy: .public)"
+                    "🔁 WebRTC outbound PQC rekey start: session=\(sessionID, privacy: .public) event=pqcRekeyStarted trigger=\(trigger, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) offered=\(offeredSummary, privacy: .public)"
                 )
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-	                    do {
-	                        let rekeyed = try await outboundDriver.initiateHandshake(
-	                            with: PeerIdentifier(deviceId: selectedPeerId)
+	                    guard await pairingCommitIsCurrent() else {
+	                        self.cleanupWebRTCSession(
+	                            sessionID,
+	                            expectedSession: session,
+	                            reason: "pairing_rekey_superseded_before_start",
+	                            disconnectKind: .explicit
 	                        )
+	                        return
+	                    }
+		                    do {
+		                        let rekeyed = try await outboundDriver.initiateHandshake(
+		                            with: PeerIdentifier(deviceId: selectedPeerId)
+		                        )
+		                        guard await pairingCommitIsCurrent() else {
+		                            self.cleanupWebRTCSession(
+		                                sessionID,
+		                                expectedSession: session,
+		                                reason: "pairing_rekey_superseded_after_handshake",
+		                                disconnectKind: .explicit
+		                            )
+		                            return
+		                        }
 	                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
 	                            Self.emitSmokeLog("🧪 mac PQC rekey task completed suite=\(rekeyed.negotiatedSuite.rawValue)")
 	                        }
@@ -4795,93 +5373,236 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                        let rekeyCompletionLabel = negotiatedPQC
 	                            ? "PQC"
 	                            : "classic compatibility"
-	                        self.logger.info(
-	                            "✅ WebRTC outbound \(rekeyCompletionLabel, privacy: .public) rekey completed: session=\(sessionID, privacy: .public) event=\(rekeyCompletionEvent, privacy: .public) peer=\(selectedPeerId, privacy: .public) suite=\(rekeyed.negotiatedSuite.rawValue, privacy: .public)"
-	                        )
-                        guard handshakeState.driver === outboundDriver else { return }
-                        handshakeState.sessionKeys = rekeyed
-                        handshakeState.previousSessionKeysBeforeRekey = nil
-                        handshakeState.driver = nil
-	                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-	                        self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
-	                        self.lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
-                            PairingTrustApprovalService.shared.updateVerificationCode(
-                                declaredDeviceId: pairingPayload.deviceId,
-                                sessionKeys: rekeyed
+                        var committedBusinessKeyLease: UUID?
+                        let committed = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                            validate: {
+                                try await self.enforceCurrentPathAuthorityBeforeBusinessReady(
+                                    sessionID: sessionID
+                                )
+                                guard await pairingCommitIsCurrent() else {
+                                    throw CancellationError()
+                                }
+                            },
+                            isCurrent: {
+                                handshakeState.driver === outboundDriver
+                                    && self.webrtcSessionsBySessionId[sessionID] === session
+                            },
+                            commit: {
+                                handshakeState.sessionKeys = rekeyed
+                                handshakeState.previousSessionKeysBeforeRekey = nil
+                                handshakeState.driver = nil
+	                            self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+	                            self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+	                            self.lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
+                                PairingTrustApprovalService.shared.updateVerificationCode(
+                                    declaredDeviceId: pairingPayload.deviceId,
+                                    sessionKeys: rekeyed
+                                )
+	                            committedBusinessKeyLease = self.commitWebRTCSessionKeys(
+                                    rekeyed,
+                                    sessionID: sessionID
+                                )
+	                            self.connectionStatus = .connected
+                                self.readiness = .handshakeComplete(
+                                    sessionId: sessionID,
+                                    negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                                )
+                                self.markCrossNetworkPresenceConnected(
+                                    sessionID: sessionID,
+                                    negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                                )
+                                self.updatePreparedSessionSnapshot(
+                                    sessionID: sessionID,
+                                    phase: .handshakeComplete,
+                                    negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                                )
+                            }
+                        )
+                        guard await pairingCommitIsCurrent() else {
+                            self.cleanupWebRTCSession(
+                                sessionID,
+                                expectedSession: session,
+                                reason: "pairing_rekey_superseded_after_commit",
+                                disconnectKind: .explicit
                             )
-	                        self.webrtcSessionKeysBySessionId[sessionID] = rekeyed
-	                        self.connectionStatus = .connected
-                        self.readiness = .handshakeComplete(
-                            sessionId: sessionID,
-                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
-                        )
-                        self.markCrossNetworkPresenceConnected(
-                            sessionID: sessionID,
-                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
-                        )
-                        self.updatePreparedSessionSnapshot(
-                            sessionID: sessionID,
-                            phase: .handshakeComplete,
-                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
-                        )
-                        startOutboundHeartbeatIfNeeded()
-                        await sendLocalAuthenticatedRouteBindings(keys: rekeyed, stage: "outbound-rekey")
-                        startScreenStreamingIfNeeded(keys: rekeyed)
-                    } catch {
-                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                            Self.emitSmokeLog("🧪 mac PQC rekey task failed err=\(error.localizedDescription)")
+                            return
                         }
-                        guard handshakeState.driver === outboundDriver else { return }
+                        guard committed,
+                              let committedBusinessKeyLease,
+                              self.isCurrentWebRTCBusinessKeyLease(
+                                sessionID: sessionID,
+                                session: session,
+                                lease: committedBusinessKeyLease
+                              ) else { return }
+                        startOutboundHeartbeatIfNeeded()
+                        await sendLocalAuthenticatedRouteBindings(
+                            keys: rekeyed,
+                            businessKeyLease: committedBusinessKeyLease,
+                            stage: "outbound-rekey"
+                        )
+                        guard await pairingCommitIsCurrent() else {
+                            self.cleanupWebRTCSession(
+                                sessionID,
+                                expectedSession: session,
+                                reason: "pairing_rekey_superseded_after_route_binding",
+                                disconnectKind: .explicit
+                            )
+                            return
+                        }
+                        guard self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: committedBusinessKeyLease
+                        ) else { return }
+                        startScreenStreamingIfNeeded(businessKeyLease: committedBusinessKeyLease)
+                        self.logger.info(
+                            "✅ WebRTC outbound \(rekeyCompletionLabel, privacy: .public) rekey completed: session=\(sessionID, privacy: .public) event=\(rekeyCompletionEvent, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) suite=\(rekeyed.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                    } catch let error as CurrentPathBusinessReadinessError {
+                        guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                        terminateForCurrentPathBusinessReadinessFailure(
+                            error,
+                            stage: "outbound-rekey-commit"
+                        )
+                    } catch is CancellationError {
+                        guard handshakeState.driver === outboundDriver,
+                              self.webrtcSessionsBySessionId[sessionID] === session else {
+                            return
+                        }
+                        terminateForCurrentPathBusinessReadinessFailure(
+                            CancellationError(),
+                            stage: "outbound-rekey-cancelled"
+                        )
+                    } catch {
+                        let rekeyFailureSummary = SkyBridgeDiagnosticRedaction.errorSummary(error)
+                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                            Self.emitSmokeLog("🧪 mac PQC rekey task failed err=\(rekeyFailureSummary)")
+                        }
+                        guard await pairingCommitIsCurrent() else {
+                            self.cleanupWebRTCSession(
+                                sessionID,
+                                expectedSession: session,
+                                reason: "pairing_rekey_superseded_after_failure",
+                                disconnectKind: .explicit
+                            )
+                            return
+                        }
+                        guard handshakeState.driver === outboundDriver,
+                              self.webrtcSessionsBySessionId[sessionID] === session else { return }
 
                         if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
                             if strictPQCRequired,
                                !(fallbackKeys.negotiatedSuite.isNegotiable && fallbackKeys.negotiatedSuite.isPQCGroup) {
                                 self.logger.error(
-                                    "⛔️ WebRTC outbound PQC rekey failed under strictPQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                    "⛔️ WebRTC outbound PQC rekey failed under strictPQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed peer=\(Self.protocolIdentityLogRedaction, privacy: .public) err=\(rekeyFailureSummary, privacy: .public)"
                                 )
                                 handshakeState.previousSessionKeysBeforeRekey = nil
                                 handshakeState.driver = nil
                                 self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-                                self.lastRekeyEvent = "failed strict reason=\(error.localizedDescription)"
+                                self.lastRekeyEvent = "failed strict reason=\(rekeyFailureSummary)"
                                 self.cleanupWebRTCSession(
                                     sessionID,
                                     reason: "strict_pqc_rekey_failed",
                                     disconnectKind: .explicit
                                 )
-                                self.connectionStatus = .failed("Strict PQC rekey failed: \(error.localizedDescription)")
+                                self.connectionStatus = .failed("Strict PQC rekey failed: \(rekeyFailureSummary)")
                                 self.readiness = .idle
                                 return
                             }
+                            let fallbackCommitted: Bool
+                            var fallbackBusinessKeyLease: UUID?
+                            do {
+                                fallbackCommitted = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                                    validate: {
+                                        try await self.enforceCurrentPathAuthorityBeforeBusinessReady(
+                                            sessionID: sessionID
+                                        )
+                                        guard await pairingCommitIsCurrent() else {
+                                            throw CancellationError()
+                                        }
+                                    },
+                                    isCurrent: {
+                                        handshakeState.driver === outboundDriver
+                                            && self.webrtcSessionsBySessionId[sessionID] === session
+                                    },
+                                    commit: {
+                                        handshakeState.sessionKeys = fallbackKeys
+                                        handshakeState.previousSessionKeysBeforeRekey = nil
+                                        handshakeState.driver = nil
+                                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                                        self.lastRekeyEvent = "failed reason=\(rekeyFailureSummary)"
+                                        fallbackBusinessKeyLease = self.commitWebRTCSessionKeys(
+                                            fallbackKeys,
+                                            sessionID: sessionID
+                                        )
+                                    }
+                                )
+                            } catch {
+                                terminateForCurrentPathBusinessReadinessFailure(
+                                    error,
+                                    stage: "outbound-rekey-fallback"
+                                )
+                                return
+                            }
+                            guard await pairingCommitIsCurrent() else {
+                                self.cleanupWebRTCSession(
+                                    sessionID,
+                                    expectedSession: session,
+                                    reason: "pairing_rekey_superseded_after_fallback",
+                                    disconnectKind: .explicit
+                                )
+                                return
+                            }
+                            guard fallbackCommitted,
+                                  let fallbackBusinessKeyLease,
+                                  self.isCurrentWebRTCBusinessKeyLease(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    lease: fallbackBusinessKeyLease
+                                  ) else { return }
                             self.logger.warning(
-                                "⚠️ WebRTC outbound PQC rekey failed, preserving established session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed establishedClassicPreserved=true peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                "⚠️ WebRTC outbound PQC rekey failed, preserving established session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed establishedClassicPreserved=true peer=\(Self.protocolIdentityLogRedaction, privacy: .public) err=\(rekeyFailureSummary, privacy: .public)"
                             )
-                            handshakeState.sessionKeys = fallbackKeys
-                            handshakeState.previousSessionKeysBeforeRekey = nil
-                            handshakeState.driver = nil
-                            self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-                            self.lastRekeyEvent = "failed reason=\(error.localizedDescription)"
-                            self.webrtcSessionKeysBySessionId[sessionID] = fallbackKeys
                             startOutboundHeartbeatIfNeeded()
-                            await sendLocalAuthenticatedRouteBindings(keys: fallbackKeys, stage: "outbound-rekey-fallback")
-                            startScreenStreamingIfNeeded(keys: fallbackKeys)
+                            await sendLocalAuthenticatedRouteBindings(
+                                keys: fallbackKeys,
+                                businessKeyLease: fallbackBusinessKeyLease,
+                                stage: "outbound-rekey-fallback"
+                            )
+                            guard await pairingCommitIsCurrent() else {
+                                self.cleanupWebRTCSession(
+                                    sessionID,
+                                    expectedSession: session,
+                                    reason: "pairing_rekey_superseded_after_fallback_route_binding",
+                                    disconnectKind: .explicit
+                                )
+                                return
+                            }
+                            guard self.isCurrentWebRTCBusinessKeyLease(
+                                sessionID: sessionID,
+                                session: session,
+                                lease: fallbackBusinessKeyLease
+                            ) else { return }
+                            startScreenStreamingIfNeeded(businessKeyLease: fallbackBusinessKeyLease)
                         } else {
                             self.cleanupWebRTCSession(
                                 sessionID,
                                 reason: "handshake_failed",
                                 disconnectKind: .explicit
                             )
-                            self.connectionStatus = .failed("WebRTC handshake failed: \(error.localizedDescription)")
+                            self.connectionStatus = .failed("WebRTC handshake failed: \(rekeyFailureSummary)")
                             self.readiness = .idle
                         }
                     }
                 }
             } catch {
+                let setupFailureSummary = SkyBridgeDiagnosticRedaction.errorSummary(error)
                 logger.warning(
-                    "⚠️ WebRTC PQC rekey bootstrap setup failed: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                    "⚠️ WebRTC PQC rekey bootstrap setup failed: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) err=\(setupFailureSummary, privacy: .public)"
                 )
                 failStrictClassicBootstrap(
                     reason: "rekey_driver_setup_failed",
-                    diagnostic: error.localizedDescription
+                    diagnostic: setupFailureSummary
                 )
             }
         }
@@ -5086,7 +5807,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             )
         }
 
-        func startInteractionStreamingIfNeeded() {
+        func startInteractionStreamingIfNeeded(businessKeyLease: UUID) {
+            guard self.isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+            ) else {
+                return
+            }
             guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
                 self.appendSmokeStatus(
                     "interaction-streaming-blocked session=\(sessionID) reason=awaiting_security_notice"
@@ -5094,6 +5822,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 return
             }
             guard self.webrtcInteractionStreamingTasksBySessionId[sessionID] == nil else { return }
+            let taskToken = UUID()
+            self.webrtcInteractionStreamingTaskTokenBySessionId[sessionID] = taskToken
             self.webrtcInteractionStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
 
@@ -5109,10 +5839,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var overlayChannelWasEnabled = false
 
                 defer {
-                    self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                    if self.webrtcInteractionStreamingTaskTokenBySessionId[sessionID] == taskToken {
+                        self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                        self.webrtcInteractionStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
+                    }
                 }
 
                 while !Task.isCancelled {
+                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                          self.webrtcInteractionStreamingTaskTokenBySessionId[sessionID] == taskToken,
+                          self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: businessKeyLease
+                          ) else {
+                        break
+                    }
                     guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
                         break
                     }
@@ -5238,12 +5980,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     try? await Task.sleep(for: .milliseconds(16))
                 }
 #else
-                self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                if self.webrtcInteractionStreamingTaskTokenBySessionId[sessionID] == taskToken {
+                    self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                    self.webrtcInteractionStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
+                }
 #endif
             }
         }
 
-        func startScreenStreamingIfNeeded(keys: SessionKeys) {
+        func startScreenStreamingIfNeeded(businessKeyLease: UUID) {
+            guard self.isCurrentWebRTCBusinessKeyLease(
+                sessionID: sessionID,
+                session: session,
+                lease: businessKeyLease
+            ), let keys = self.webrtcSessionKeysBySessionId[sessionID] else {
+                return
+            }
             guard RemoteDesktopSettingsManager.shared.settings.networkSettings.enableUDPTransport else {
                 self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
                 self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
@@ -5260,7 +6012,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 return
             }
             guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
-                guard !self.webrtcRemoteControlNoticePendingSessionIds.contains(sessionID) else {
+                let hasCurrentLeaseNoticePending = self.webrtcRemoteControlNoticePendingSessionIds.contains(sessionID)
+                    && self.webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease
+                guard !hasCurrentLeaseNoticePending else {
                     self.appendSmokeStatus(
                         "stream-deferred session=\(sessionID) reason=security_notice_pending"
                     )
@@ -5271,15 +6025,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     guard await self.ensureWebRTCRemoteControlSecurityApproved(
                         sessionID: sessionID,
                         session: session,
-                        keys: keys
+                        keys: keys,
+                        businessKeyLease: businessKeyLease
                     ) else {
                         return
                     }
-                    startScreenStreamingIfNeeded(keys: keys)
+                    startScreenStreamingIfNeeded(businessKeyLease: businessKeyLease)
                 }
                 self.appendSmokeStatus(
                     "stream-deferred session=\(sessionID) reason=await_security_notice"
                 )
+                return
+            }
+            guard self.bindApprovedWebRTCRemoteControlNotice(
+                sessionID: sessionID,
+                session: session,
+                keys: keys,
+                businessKeyLease: businessKeyLease
+            ) else {
                 return
             }
             if self.webrtcSessionReadyDiagnosticSessionIds.insert(sessionID).inserted {
@@ -5315,6 +6078,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
             self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
             guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
+            let taskToken = UUID()
+            self.webrtcScreenStreamingTaskTokenBySessionId[sessionID] = taskToken
             self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
                 let heartbeatTimeoutSeconds: TimeInterval = 12.0
@@ -5407,8 +6172,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 #endif
                     encodedFrameStore.clear()
-                    self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
-                    self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                    if self.webrtcScreenStreamingTaskTokenBySessionId[sessionID] == taskToken {
+                        self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                        self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                        self.webrtcScreenStreamingTaskTokenBySessionId.removeValue(forKey: sessionID)
+                    }
                 }
 
                 @MainActor
@@ -6400,6 +7168,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 #endif
 
                 while !Task.isCancelled {
+                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                          self.webrtcScreenStreamingTaskTokenBySessionId[sessionID] == taskToken,
+                          self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: businessKeyLease
+                          ) else {
+                        break
+                    }
                     guard let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] else {
                         self.logger.info("⏸️ WebRTC 屏幕推流等待远端心跳: session=\(sessionID, privacy: .public)")
                         break
@@ -6499,7 +7276,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 "interaction-stream-enabled session=\(sessionID) reason=screenChannelState:\(screenRoute.state)"
                             )
                         }
-                        startInteractionStreamingIfNeeded()
+                        startInteractionStreamingIfNeeded(businessKeyLease: businessKeyLease)
                     } else {
                         self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
                     }
@@ -7656,7 +8433,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                        (try? HandshakeMessageA.decode(from: frame)) != nil {
                         lastControlLoopEvent = "duplicate_message_a_while_waiting_finished"
                         logger.warning(
-                            "♻️ WebRTC responder ignored duplicate fresh MessageA while waiting for Finished: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public) frameBytes=\(frame.count, privacy: .public)"
+                            "♻️ WebRTC responder ignored duplicate fresh MessageA while waiting for Finished: session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) frameBytes=\(frame.count, privacy: .public)"
                         )
                         continue
                     }
@@ -7707,7 +8484,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     break
                                 case .consumeLivenessLocally:
                                     switch msg {
-                                    case .heartbeat(let payload):
+		                            case .heartbeat(let payload):
+		                                guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+		                                    sessionID: sessionID
+		                                ), self.isCurrentWebRTCBusinessKeyLease(
+		                                    sessionID: sessionID,
+		                                    session: session,
+		                                    lease: businessKeyLease
+		                                ) else {
+		                                    break
+		                                }
                                             self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
                                             self.updateCrossNetworkRemoteMetadata(
                                                 sessionID: sessionID,
@@ -7756,7 +8542,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 		                            case .pairingIdentityExchange(let rawPayload):
                                 guard let payload = rawPayload.normalizedBootstrapPayload else {
                                     logger.warning(
-                                        "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                        "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                                     )
                                     break
                                 }
@@ -7764,27 +8550,139 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 self.appendSmokeStatus(
                                     "app-pairing-recv session=\(sessionID) formats=\(remoteFormatsSummary)"
                                 )
-                                self.updateCrossNetworkRemoteMetadata(
-                                    sessionID: sessionID,
-                                    deviceId: payload.deviceId,
-                                    deviceName: payload.deviceName
-                                )
-                                self.noteWebRTCRemoteSecurityIdentity(
-                                    sessionID: sessionID,
-                                    accountDisplayName: payload.accountDisplayName,
-                                    nebulaId: payload.nebulaId,
-                                    deviceId: payload.deviceId,
-                                    deviceName: payload.deviceName
-                                )
-                                self.webrtcRemoteVideoFormatsBySessionId[sessionID] = Set(
-                                    (payload.remoteVideoFormats ?? []).map { $0.lowercased() }
-                                )
-                                let policyBindingKey = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID].flatMap { authority in
-                                    PairingTrustApprovalService.policyBindingKey(
-                                        declaredDeviceId: payload.deviceId,
-                                        algorithmRawValue: authority.protocolSigningAlgorithm.rawValue,
-                                        protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                                guard let pairingAuthorityLease = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] else {
+                                    self.logger.error(
+                                        "⛔️ WebRTC pairing exchange rejected without current-path authority: session=\(sessionID, privacy: .public)"
                                     )
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        reason: "pairing_missing_current_path_authority",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("连接缺少已认证的配对身份，已终止")
+                                    self.readiness = .idle
+                                    return
+                                }
+                                let declaredDeviceId = try? ProtocolIdentityBinding.normalizedDeviceId(
+                                    payload.deviceId
+                                )
+                                let authorityDeviceId = try? ProtocolIdentityBinding.normalizedDeviceId(
+                                    pairingAuthorityLease.deviceId
+                                )
+                                guard let declaredDeviceId,
+                                      let authorityDeviceId,
+                                      declaredDeviceId == authorityDeviceId else {
+                                    self.logger.error(
+                                        "⛔️ WebRTC pairing declared identity does not match current-path authority: session=\(sessionID, privacy: .public)"
+                                    )
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        expectedSession: session,
+                                        reason: "pairing_declared_identity_mismatch",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("配对声明身份与已认证连接身份不一致，连接已终止")
+                                    self.readiness = .idle
+                                    return
+                                }
+                                let authenticatedPairingAuthority = AuthenticatedRemoteAuthority(
+                                    protocolSigningAlgorithm: pairingAuthorityLease.protocolSigningAlgorithm,
+                                    protocolPublicKeyFingerprint: pairingAuthorityLease.protocolPublicKeyFingerprint
+                                )
+                                let pairingKEMDeviceIds = orderedUniqueCandidateIds([
+                                    payload.deviceId,
+                                    pairingAuthorityLease.deviceId,
+                                    peerDeviceId,
+                                    endpointDescription
+                                ])
+                                let transportIsCurrent: @MainActor @Sendable () -> Bool = { [weak self, weak session] in
+                                    guard let self, let session,
+                                          !Task.isCancelled,
+                                          self.webrtcSessionsBySessionId[sessionID] === session,
+                                          let currentAuthority = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+                                          (try? ProtocolIdentityBinding.normalizedDeviceId(currentAuthority.deviceId)) == authorityDeviceId,
+                                          currentAuthority.protocolSigningAlgorithm == pairingAuthorityLease.protocolSigningAlgorithm,
+                                          currentAuthority.protocolPublicKeyFingerprint == pairingAuthorityLease.protocolPublicKeyFingerprint,
+                                          let currentKeys = handshakeState.sessionKeys,
+                                          currentKeys.sessionId == keys.sessionId,
+                                          currentKeys.transcriptHash == keys.transcriptHash else {
+                                        return false
+                                    }
+                                    return true
+                                }
+                                func publishAuthenticatedPairingMetadata() {
+                                    self.updateCrossNetworkRemoteMetadata(
+                                        sessionID: sessionID,
+                                        deviceId: payload.deviceId,
+                                        deviceName: payload.deviceName
+                                    )
+                                    self.noteWebRTCRemoteSecurityIdentity(
+                                        sessionID: sessionID,
+                                        accountDisplayName: payload.accountDisplayName,
+                                        nebulaId: payload.nebulaId,
+                                        deviceId: payload.deviceId,
+                                        deviceName: payload.deviceName
+                                    )
+                                    self.webrtcRemoteVideoFormatsBySessionId[sessionID] = Set(
+                                        (payload.remoteVideoFormats ?? []).map { $0.lowercased() }
+                                    )
+                                    self.replaceCurrentPathDelegatedProtocolFingerprints(
+                                        from: payload,
+                                        authority: pairingAuthorityLease,
+                                        sessionID: sessionID,
+                                        peerDeviceId: peerDeviceId
+                                    )
+                                }
+                                let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                do {
+                                    pairingReservation = try await PairingIdentityExchangeCommitCoordinator.reserve(
+                                        deviceIds: pairingKEMDeviceIds
+                                    )
+                                } catch {
+                                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                                          self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == pairingAuthorityLease else {
+                                        break
+                                    }
+                                    self.logger.error(
+                                        "⛔️ Pairing KEM admission unavailable: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
+                                    )
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        reason: "pairing_kem_admission_unavailable",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("配对密钥写入门禁不可用，连接已终止")
+                                    self.readiness = .idle
+                                    return
+                                }
+                                guard transportIsCurrent() else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "reservation_stale"
+                                    )
+                                    break
+                                }
+                                guard let policyBindingKey = PairingTrustApprovalService.policyBindingKey(
+                                    declaredDeviceId: payload.deviceId,
+                                    algorithmRawValue: pairingAuthorityLease.protocolSigningAlgorithm.rawValue,
+                                    protocolPublicKeyFingerprint: pairingAuthorityLease.protocolPublicKeyFingerprint
+                                ) else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "invalid_policy_binding"
+                                    )
+                                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                                          self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == pairingAuthorityLease else {
+                                        return
+                                    }
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        reason: "pairing_invalid_policy_binding",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("配对身份绑定无效，连接已终止")
+                                    self.readiness = .idle
+                                    return
                                 }
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpointDescription,
@@ -7796,127 +8694,301 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     osVersion: payload.osVersion,
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
-                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                let decision: PairingTrustApprovalService.Decision
+                                do {
+                                    decision = try await PairingTrustApprovalService.shared.decide(for: request)
+                                    try Task.checkCancellation()
+                                } catch is CancellationError {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_cancelled"
+                                    )
+                                    return
+                                } catch {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_failed"
+                                    )
+                                    guard self.webrtcSessionsBySessionId[sessionID] === session,
+                                          self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] == pairingAuthorityLease else {
+                                        return
+                                    }
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        reason: "pairing_policy_unavailable",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("配对信任审批不可用，连接已终止")
+                                    self.readiness = .idle
+                                    return
+                                }
+                                guard transportIsCurrent() else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_approval"
+                                    )
+                                    break
+                                }
                                 self.appendSmokeStatus(
                                     "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
                                 )
                                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                                     Self.emitSmokeLog("🧪 mac pairing decision=\(decision.rawValue)")
                                 }
-                                guard decision != PairingTrustApprovalService.Decision.reject else { break }
-                                let sendPairingReply = sendFramed
-	                                Task { @MainActor [weak self] in
-                                    guard let self else { return }
-
-                                    await PeerKEMBootstrapStore.shared.upsert(
-                                        deviceIds: orderedUniqueCandidateIds([
-                                            payload.deviceId,
-                                            peerDeviceId,
-                                            endpointDescription
-                                        ]),
-                                        kemPublicKeys: payload.kemPublicKeys,
-                                        platform: payload.platform,
-                                        osVersion: payload.osVersion
+                                guard decision != PairingTrustApprovalService.Decision.reject else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "approval_rejected"
                                     )
-                                    logger.info(
-                                        "🔑 WebRTC bootstrap KEM cache updated: declared=\(payload.deviceId, privacy: .public) peer=\(endpointDescription, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                    break
+                                }
+                                guard !Task.isCancelled else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "cancelled_after_approval"
                                     )
-                                    self.recordCurrentPathProtocolFingerprints(
-                                        from: payload,
-                                        sessionID: sessionID,
-                                        peerDeviceId: peerDeviceId
+                                    return
+                                }
+                                let provider: any CryptoProvider = CryptoProviderFactory.make(policy: .preferPQC)
+                                let km = DeviceIdentityKeyManager.shared
+                                let kemKeys: [KEMPublicKeyInfo]
+                                do {
+                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
                                     )
+                                } catch is CancellationError {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "local_kem_cancelled"
+                                    )
+                                    return
+                                } catch {
+                                    logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
+                                    self.appendSmokeStatus(
+                                        "app-pairing-send-failed session=\(sessionID) stage=prepare_kem error=\(sanitizeStatus(error.localizedDescription))"
+                                    )
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "local_kem_unavailable"
+                                    )
+                                    break
+                                }
+                                guard transportIsCurrent() else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_local_kem"
+                                    )
+                                    if Task.isCancelled { return }
+                                    break
+                                }
+                                guard !kemKeys.isEmpty else {
+                                    logger.warning("⚠️ WebRTC bootstrap reply skipped: no valid local KEM public keys")
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "empty_local_kem"
+                                    )
+                                    break
+                                }
 
-                                    let provider: any CryptoProvider = CryptoProviderFactory.make(policy: .preferPQC)
-                                    let km = DeviceIdentityKeyManager.shared
-                                    let kemKeys: [KEMPublicKeyInfo]
-                                    do {
-                                        kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
-                                            try await km.pairingIdentityKEMPublicKeys(using: provider)
-                                        )
-                                    } catch {
-                                        logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
-                                        self.appendSmokeStatus(
-                                            "app-pairing-send-failed session=\(sessionID) stage=prepare_kem error=\(sanitizeStatus(error.localizedDescription))"
-                                        )
-                                        return
-                                    }
-                                    guard !kemKeys.isEmpty else {
-                                        logger.warning("⚠️ WebRTC bootstrap reply skipped: no valid local KEM public keys")
-                                        return
-                                    }
-
-                                    let localIdRaw = try await SelfIdentityProvider.shared
+                                let localIdRaw: String
+                                do {
+                                    localIdRaw = try await SelfIdentityProvider.shared
                                         .protocolIdentityDeviceId(allowCreate: true)
-                                    let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    guard !localId.isEmpty else {
-                                        logger.warning("⚠️ WebRTC bootstrap reply skipped: empty local deviceId")
-                                        self.appendSmokeStatus(
-                                            "app-pairing-send-skipped session=\(sessionID) stage=empty_local_device_id"
-                                        )
-                                        return
-                                    }
-                                    let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
-                                    let replyPayload = CrossNetworkWebRTCLocalAppMessageFactory.pairingIdentityExchangePayload(
-                                        deviceId: localId,
-                                        kemPublicKeys: kemKeys,
-                                        protocolIdentityPublicKeys: await self.localProtocolIdentityPublicKeysForPairing(),
-                                        remoteVideoFormats: Self.supportedRemoteVideoFormats(),
-                                        accountDisplayName: localIdentity?.accountDisplayName,
-                                        nebulaId: localIdentity?.nebulaId
+                                } catch is CancellationError {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "local_identity_cancelled"
                                     )
-                                    let replyFingerprint = pairingExchangeFingerprint(replyPayload)
-                                    if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
-                                        await maybeStartOutboundPQCRekeyIfNeeded(
-                                            from: payload,
-                                            trigger: "pairing_exchange"
-                                        )
-                                        return
+                                    return
+                                } catch {
+                                    self.logger.error(
+                                        "⛔️ WebRTC pairing local identity unavailable: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
+                                    )
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "local_identity_unavailable"
+                                    )
+                                    break
+                                }
+                                guard transportIsCurrent() else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_local_identity"
+                                    )
+                                    if Task.isCancelled { return }
+                                    break
+                                }
+                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !localId.isEmpty else {
+                                    logger.warning("⚠️ WebRTC bootstrap reply skipped: empty local deviceId")
+                                    self.appendSmokeStatus(
+                                        "app-pairing-send-skipped session=\(sessionID) stage=empty_local_device_id"
+                                    )
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "empty_local_identity"
+                                    )
+                                    break
+                                }
+                                let localProtocolIdentityPublicKeys = await self.localProtocolIdentityPublicKeysForPairing()
+                                guard transportIsCurrent() else {
+                                    _ = await rollbackPairingCommit(
+                                        pairingReservation,
+                                        reason: "stale_after_local_protocol_identity"
+                                    )
+                                    if Task.isCancelled { return }
+                                    break
+                                }
+                                let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+                                let replyPayload = CrossNetworkWebRTCLocalAppMessageFactory.pairingIdentityExchangePayload(
+                                    deviceId: localId,
+                                    kemPublicKeys: kemKeys,
+                                    protocolIdentityPublicKeys: localProtocolIdentityPublicKeys,
+                                    remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                                    accountDisplayName: localIdentity?.accountDisplayName,
+                                    nebulaId: localIdentity?.nebulaId
+                                )
+                                let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
+                                do {
+                                    let commitResult = try await PairingIdentityExchangeCommitCoordinator
+                                        .commitAuthorityAndKEM(
+                                        reservation: pairingReservation,
+                                        payload: payload,
+                                        authority: authenticatedPairingAuthority,
+                                        displayName: payload.deviceName ?? payload.deviceId,
+                                        platform: payload.platform,
+                                        osVersion: payload.osVersion,
+                                        isCurrent: transportIsCurrent
+                                    )
+                                    guard case .committed(let receipt) = commitResult else {
+                                        break
                                     }
-                                    let reply = AppMessage.pairingIdentityExchange(replyPayload)
-                                    if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                                        Self.emitSmokeLog("🧪 mac pairing reply deviceId=\(localId) keys=\(kemKeys.count)")
-                                        Self.emitSmokeLog("🧪 mac pairing reply provider=\(String(describing: type(of: provider)))")
-                                        let digests = kemKeys
-                                            .sorted { $0.suiteWireId < $1.suiteWireId }
-                                            .map { key in
-                                                let digest = SHA256.hash(data: key.publicKey).prefix(8)
-                                                    .map { String(format: "%02x", $0) }
-                                                    .joined()
-                                                return String(format: "0x%04x:%@", key.suiteWireId, digest)
-                                            }
-                                            .joined(separator: ",")
-                                        Self.emitSmokeLog("🧪 mac pairing reply KEM digests=\(digests)")
+                                    commitReceipt = receipt
+                                } catch is CancellationError {
+                                    return
+                                } catch {
+                                    guard transportIsCurrent() else {
+                                        break
                                     }
+                                    self.logger.error(
+                                        "⛔️ Pairing authority/KEM commit failed: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
+                                    )
+                                    self.cleanupWebRTCSession(
+                                        sessionID,
+                                        expectedSession: session,
+                                        reason: "pairing_kem_commit_failed",
+                                        disconnectKind: .explicit
+                                    )
+                                    self.connectionStatus = .failed("配对密钥无法安全持久化，连接已终止")
+                                    self.readiness = .idle
+                                    return
+                                }
+                                let pairingCommitIsCurrent: @MainActor @Sendable () async -> Bool = {
+                                    await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                        commitReceipt,
+                                        transportIsCurrent: transportIsCurrent
+                                    )
+                                }
+                                guard await pairingCommitIsCurrent() else {
+                                    if Task.isCancelled { return }
+                                    break
+                                }
+                                logger.info(
+                                    "🔑 WebRTC authenticated authority and generation-bound KEM committed: declared=\(Self.protocolIdentityLogRedaction, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+                                let replyFingerprint = pairingExchangeFingerprint(replyPayload)
+                                if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
+                                    guard await pairingCommitIsCurrent() else {
+                                        break
+                                    }
+                                    publishAuthenticatedPairingMetadata()
+                                    await maybeStartOutboundPQCRekeyIfNeeded(
+                                        from: payload,
+                                        trigger: "pairing_exchange",
+                                        pairingCommitIsCurrent: pairingCommitIsCurrent
+                                    )
+                                    continue
+                                }
+                                let reply = AppMessage.pairingIdentityExchange(replyPayload)
+                                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                                    Self.emitSmokeLog("🧪 mac pairing reply deviceId=\(localId) keys=\(kemKeys.count)")
+                                    Self.emitSmokeLog("🧪 mac pairing reply provider=\(String(describing: type(of: provider)))")
+                                    let digests = kemKeys
+                                        .sorted { $0.suiteWireId < $1.suiteWireId }
+                                        .map { key in
+                                            let digest = SHA256.hash(data: key.publicKey).prefix(8)
+                                                .map { String(format: "%02x", $0) }
+                                                .joined()
+                                            return String(format: "0x%04x:%@", key.suiteWireId, digest)
+                                        }
+                                        .joined(separator: ",")
+                                    Self.emitSmokeLog("🧪 mac pairing reply KEM digests=\(digests)")
+                                }
+                                do {
+                                    let outPlain = try JSONEncoder().encode(reply)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
+                                    try await sendFramed(outPadded)
+                                    try Task.checkCancellation()
+                                    guard await pairingCommitIsCurrent() else {
+                                        break
+                                    }
+                                    self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] = replyFingerprint
                                     self.appendSmokeStatus(
                                         "app-pairing-send session=\(sessionID) deviceId=\(localId) keys=\(kemKeys.count)"
                                     )
-                                    do {
-                                        let outPlain = try JSONEncoder().encode(reply)
-                                        let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                        let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
-                                        try await sendPairingReply(outPadded)
-                                        self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] = replyFingerprint
-                                        if let rawDelay = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_DELAY_HOST_PQC_REKEY_SECONDS"],
-                                           let delaySeconds = Double(rawDelay.trimmingCharacters(in: .whitespacesAndNewlines)),
-                                           delaySeconds > 0 {
-                                            self.appendSmokeStatus(
-                                                "rekey-delay session=\(sessionID) seconds=\(delaySeconds)"
-                                            )
-                                            try? await Task.sleep(for: .milliseconds(Int(delaySeconds * 1000)))
-                                        }
-                                        await maybeStartOutboundPQCRekeyIfNeeded(
-                                            from: payload,
-                                            trigger: "pairing_exchange"
-                                        )
-                                    } catch {
+                                    if let rawDelay = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_DELAY_HOST_PQC_REKEY_SECONDS"],
+                                       let delaySeconds = Double(rawDelay.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                       delaySeconds > 0 {
                                         self.appendSmokeStatus(
-                                            "app-pairing-send-failed session=\(sessionID) stage=send error=\(sanitizeStatus(error.localizedDescription))"
+                                            "rekey-delay session=\(sessionID) seconds=\(delaySeconds)"
                                         )
+                                        try await Task.sleep(for: .milliseconds(Int(delaySeconds * 1000)))
                                     }
-	                                }
-	                            case .heartbeat(let payload):
-	                                let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
+                                    guard await pairingCommitIsCurrent() else {
+                                        if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
+                                            self.webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
+                                        }
+                                        break
+                                    }
+                                    publishAuthenticatedPairingMetadata()
+                                    await maybeStartOutboundPQCRekeyIfNeeded(
+                                        from: payload,
+                                        trigger: "pairing_exchange",
+                                        pairingCommitIsCurrent: pairingCommitIsCurrent
+                                    )
+                                } catch is CancellationError {
+                                    if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
+                                        self.webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
+                                    }
+                                    return
+                                } catch {
+                                    self.appendSmokeStatus(
+                                        "app-pairing-send-failed session=\(sessionID) stage=send error=\(sanitizeStatus(error.localizedDescription))"
+                                    )
+                                    if transportIsCurrent() {
+                                        self.cleanupWebRTCSession(
+                                            sessionID,
+                                            expectedSession: session,
+                                            reason: "pairing_reply_failed_after_commit",
+                                            disconnectKind: .explicit
+                                        )
+                                        self.connectionStatus = .failed("配对回复发送失败，连接已终止")
+                                        self.readiness = .idle
+                                        return
+                                    }
+                                }
+		                            case .heartbeat(let payload):
+		                                guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+		                                    sessionID: sessionID
+		                                ), self.isCurrentWebRTCBusinessKeyLease(
+		                                    sessionID: sessionID,
+		                                    session: session,
+		                                    lease: businessKeyLease
+		                                ) else {
+		                                    break
+		                                }
+		                                let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
 	                                self.appendSmokeStatus(
                                     "app-heartbeat-recv session=\(sessionID) formats=\(remoteFormatsSummary)"
                                 )
@@ -7942,10 +9014,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         formats.map { $0.lowercased() }
                                     )
                                 }
-                                startScreenStreamingIfNeeded(keys: keys)
-                            case .ping(let payload):
-                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
-                                startScreenStreamingIfNeeded(keys: keys)
+	                                startScreenStreamingIfNeeded(businessKeyLease: businessKeyLease)
+	                            case .ping(let payload):
+	                                guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+	                                    sessionID: sessionID
+	                                ), self.isCurrentWebRTCBusinessKeyLease(
+	                                    sessionID: sessionID,
+	                                    session: session,
+	                                    lease: businessKeyLease
+	                                ) else {
+	                                    break
+	                                }
+	                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+	                                startScreenStreamingIfNeeded(businessKeyLease: businessKeyLease)
                                 let reply = AppMessage.pong(.init(id: payload.id))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
@@ -7953,8 +9034,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 try await sendFramed(outPadded)
                             case .pong:
                                 self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
-                            case .authenticatedRouteBinding(let payload):
-                                await self.applyAuthenticatedRouteBinding(
+	                            case .authenticatedRouteBinding(let payload):
+	                                guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+	                                    sessionID: sessionID
+	                                ), self.isCurrentWebRTCBusinessKeyLease(
+	                                    sessionID: sessionID,
+	                                    session: session,
+	                                    lease: businessKeyLease
+	                                ) else {
+	                                    break
+	                                }
+	                                await self.applyAuthenticatedRouteBinding(
                                     payload,
                                     sessionID: sessionID,
                                     localDeviceId: session.localDeviceId,
@@ -7970,6 +9060,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                            )
 	                            continue
 		                        } else if openedPayload.packetType == .fileTransfer {
+	                                guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+	                                    sessionID: sessionID
+	                                ), self.isCurrentWebRTCBusinessKeyLease(
+	                                    sessionID: sessionID,
+	                                    session: session,
+	                                    lease: businessKeyLease
+	                                ) else {
+	                                    continue
+	                                }
                                 let ft: CrossNetworkFileTransferMessage
                                 do {
                                     ft = try JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext)
@@ -8036,8 +9135,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                }
 	                            )
 	                            continue
-	                        } else if openedPayload.packetType == .remoteControl,
-                                      let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+		                        } else if openedPayload.packetType == .remoteControl,
+	                                      let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+	                            guard let businessKeyLease = self.webrtcBusinessKeyLeases.currentLease(
+	                                sessionID: sessionID
+	                            ), self.isCurrentWebRTCBusinessKeyLease(
+	                                sessionID: sessionID,
+	                                session: session,
+	                                lease: businessKeyLease
+	                            ) else {
+	                                continue
+	                            }
                             if rm.type == .streamConfiguration,
                                !self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID),
                                let config = try? JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: rm.payload) {
@@ -8086,7 +9194,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 }
                             case .clipboard:
                                 if let payload = try? JSONDecoder().decode(RemoteClipboardPayload.self, from: rm.payload) {
-                                    configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+	                                    configureWebRTCClipboardSyncIfNeeded(
+	                                        for: sessionID,
+	                                        session: session,
+	                                        businessKeyLease: businessKeyLease
+	                                    )
                                     ClipboardRedirectionManager.shared.setRemoteClipboard(
                                         data: payload.data,
                                         mimeType: payload.mimeType
@@ -8120,7 +9232,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                    }
 	                                    if plan.shouldStopScreenStreaming {
 	                                        self.stopWebRTCScreenStreaming(sessionID: sessionID)
-	                                        self.configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+		                                        self.configureWebRTCClipboardSyncIfNeeded(
+		                                            for: sessionID,
+		                                            session: session,
+		                                            businessKeyLease: businessKeyLease
+		                                        )
 	                                        self.logger.info(
 	                                            "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
 	                                        )
@@ -8180,12 +9296,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                             self.logger.warning(
                                                 "⚠️ WebRTC streamConfigurationAck 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                                             )
-                                            self.appendWebRTCSessionDiagnostic(
-                                                "streamConfigurationAckFailed session=\(sessionID) error=\(error.localizedDescription)",
-                                                sessionID: sessionID
+	                                            self.appendWebRTCSessionDiagnostic(
+	                                                "streamConfigurationAckFailed session=\(sessionID) error=\(error.localizedDescription)",
+	                                                sessionID: sessionID
 	                                            )
 	                                        }
                                     }
+	                                    guard self.isCurrentWebRTCBusinessKeyLease(
+	                                        sessionID: sessionID,
+	                                        session: session,
+	                                        lease: businessKeyLease
+	                                    ) else {
+	                                        continue
+	                                    }
                                     if plan.shouldMarkPendingStreamRefresh {
                                         self.webrtcPendingStreamRefreshSessionIds.insert(sessionID)
                                         if effectiveConfig.streamRefreshToken != nil {
@@ -8195,12 +9318,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         }
                                     }
 	                                    if plan.shouldConfigureClipboard {
-	                                        self.configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
-	                                    }
-	                                    if plan.shouldStartScreenStreamingIfNeeded,
-	                                       let activeKeys = handshakeState.sessionKeys ?? self.webrtcSessionKeysBySessionId[sessionID] {
-	                                        startScreenStreamingIfNeeded(keys: activeKeys)
-	                                    }
+		                                        self.configureWebRTCClipboardSyncIfNeeded(
+		                                            for: sessionID,
+		                                            session: session,
+		                                            businessKeyLease: businessKeyLease
+		                                        )
+		                                    }
+		                                    if plan.shouldStartScreenStreamingIfNeeded {
+		                                        startScreenStreamingIfNeeded(businessKeyLease: businessKeyLease)
+		                                    }
 	                                }
                             case .damageReport, .cursorUpdate, .overlayUpdate:
                                 break
@@ -8219,6 +9345,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             logger.debug("ℹ️ WebRTC 业务消息解密成功但未匹配已知消息类型")
                             continue
                         }
+                    } catch is CancellationError {
+                        return
                     } catch {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                             Self.emitSmokeLog("🧪 mac app decrypt/parse failed err=\(error.localizedDescription)")
@@ -8242,7 +9370,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     if let messageA = decodedMessageA {
                         guard messageA.hasNegotiableOfferShape else {
                             logger.error(
-                                "⛔️ Rejected non-negotiable WebRTC MessageA before pausing established session state. session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "⛔️ Rejected non-negotiable WebRTC MessageA before pausing established session state. session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                             continue
                         }
@@ -8265,7 +9393,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             handshakeState.previousSessionKeysBeforeRekey = establishedKeys
                             self.lastRekeyEvent = "candidate peer=\(peerDeviceId)"
                             logger.info(
-                                "🔁 WebRTC 收到对端 transactional rekey candidate，旧会话保持活跃直到新 Finished 验证: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "🔁 WebRTC 收到对端 transactional rekey candidate，旧会话保持活跃直到新 Finished 验证: session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                         }
 
@@ -8281,7 +9409,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             localPQCSuitesAvailable: true
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
-                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                             self.cleanupWebRTCSession(
                                 sessionID,
@@ -8298,7 +9426,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         ) else {
                             let rejectionMessage = StrictPQCAdmissionRejection.localPQCUnavailable.diagnosticMessage
                             logger.error(
-                                "❌ \(rejectionMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "❌ \(rejectionMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                             self.cleanupWebRTCSession(
                                 sessionID,
@@ -8329,7 +9457,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 ]
                             ))
                             logger.info(
-                                "🧩 WebRTC inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "🧩 WebRTC inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                         }
                         let sigAAlgorithm = responderSelection.sigAAlgorithm
@@ -8342,7 +9470,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             localPQCSuitesAvailable: localPQCSuitesAvailable
                         ) {
                             logger.error(
-                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                             )
                             self.cleanupWebRTCSession(
                                 sessionID,
@@ -8390,7 +9518,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
                             self.lastRekeyEvent = "driver suites=\(suiteSummary)"
                         }
-                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) peer=\(peerDeviceId, privacy: .public) policyRequirePQC=\(handshakePolicy.requirePQC, privacy: .public)")
+                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) policyRequirePQC=\(handshakePolicy.requirePQC, privacy: .public)")
                     } else {
                         continue
                     }
@@ -8405,6 +9533,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 await activeDriver.handleMessage(frame, from: peer)
                 let st = await activeDriver.getCurrentState()
+                guard !Task.isCancelled,
+                      handshakeState.driver === activeDriver,
+                      self.webrtcSessionsBySessionId[sessionID] === session else {
+                    return
+                }
                 lastHandshakeDriverState = String(describing: st)
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     Self.emitSmokeLog("🧪 mac driver state=\(String(describing: st))")
@@ -8439,44 +9572,87 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         self.readiness = .idle
                         return
                     }
-                    handshakeState.sessionKeys = keys
-                    handshakeState.driver = nil
-                    handshakeState.previousSessionKeysBeforeRekey = nil
-                    self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-                    if negotiatedPQC {
-                        self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
-                    }
                     let isStrictClassicAuthorityBootstrap =
                         self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)
                         && !negotiatedPQC
                     if isStrictClassicAuthorityBootstrap {
+                        handshakeState.sessionKeys = keys
+                        handshakeState.driver = nil
+                        handshakeState.previousSessionKeysBeforeRekey = nil
+                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
                         self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
-                        self.webrtcSessionKeysBySessionId[sessionID] = keys
+                        self.commitWebRTCSessionKeys(keys, sessionID: sessionID)
                         logger.warning(
                             "⏳ WebRTC inbound strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionID, privacy: .public) event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
                         )
                         continue
                     }
-                    self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
-                    self.lastRekeyEvent = "complete suite=\(keys.negotiatedSuite.rawValue)"
-                    self.webrtcSessionKeysBySessionId[sessionID] = keys
-                    self.connectionStatus = .connected
-                    self.readiness = .handshakeComplete(
-                        sessionId: sessionID,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
-                    )
-                    self.markCrossNetworkPresenceConnected(
-                        sessionID: sessionID,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
-                    )
-                    self.updatePreparedSessionSnapshot(
-                        sessionID: sessionID,
-                        phase: .handshakeComplete,
-                        negotiatedSuite: keys.negotiatedSuite.rawValue
-                    )
+                    let committed: Bool
+                    var committedBusinessKeyLease: UUID?
+                    do {
+                        committed = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                            validate: {
+                                try await self.enforceCurrentPathAuthorityBeforeBusinessReady(
+                                    sessionID: sessionID
+                                )
+                            },
+                            isCurrent: {
+                                handshakeState.driver === activeDriver
+                                    && self.webrtcSessionsBySessionId[sessionID] === session
+                            },
+                            commit: {
+                                handshakeState.sessionKeys = keys
+                                handshakeState.driver = nil
+                                handshakeState.previousSessionKeysBeforeRekey = nil
+                                self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                                self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                                self.lastRekeyEvent = "complete suite=\(keys.negotiatedSuite.rawValue)"
+                                committedBusinessKeyLease = self.commitWebRTCSessionKeys(
+                                    keys,
+                                    sessionID: sessionID
+                                )
+                                self.connectionStatus = .connected
+                                self.readiness = .handshakeComplete(
+                                    sessionId: sessionID,
+                                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                                )
+                                self.markCrossNetworkPresenceConnected(
+                                    sessionID: sessionID,
+                                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                                )
+                                self.updatePreparedSessionSnapshot(
+                                    sessionID: sessionID,
+                                    phase: .handshakeComplete,
+                                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                                )
+                            }
+                        )
+                    } catch {
+                        terminateForCurrentPathBusinessReadinessFailure(
+                            error,
+                            stage: wasInboundRekey ? "inbound-rekey-commit" : "inbound-handshake-commit"
+                        )
+                        return
+                    }
+                    guard committed,
+                          let committedBusinessKeyLease,
+                          self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: committedBusinessKeyLease
+                          ) else { return }
 	                    startOutboundHeartbeatIfNeeded()
-	                    await sendLocalAuthenticatedRouteBindings(keys: keys, stage: "inbound-rekey")
-	                    startScreenStreamingIfNeeded(keys: keys)
+	                    await sendLocalAuthenticatedRouteBindings(
+                            keys: keys,
+                            businessKeyLease: committedBusinessKeyLease,
+                            stage: wasInboundRekey ? "inbound-rekey" : "inbound-handshake"
+                        )
+	                    guard self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: committedBusinessKeyLease
+                        ) else { return }
+	                    startScreenStreamingIfNeeded(businessKeyLease: committedBusinessKeyLease)
 	                    let rekeyCompletionEvent = negotiatedPQC
 	                        ? "pqcRekeyComplete"
 	                        : "classicRekeyComplete"
@@ -8509,18 +9685,60 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             self.readiness = .idle
                             return
                         }
+                        let fallbackCommitted: Bool
+                        var fallbackBusinessKeyLease: UUID?
+                        do {
+                            fallbackCommitted = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                                validate: {
+                                    try await self.enforceCurrentPathAuthorityBeforeBusinessReady(
+                                        sessionID: sessionID
+                                    )
+                                },
+                                isCurrent: {
+                                    handshakeState.driver === activeDriver
+                                        && self.webrtcSessionsBySessionId[sessionID] === session
+                                },
+                                commit: {
+                                    handshakeState.sessionKeys = fallbackKeys
+                                    handshakeState.previousSessionKeysBeforeRekey = nil
+                                    handshakeState.driver = nil
+                                    self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                                    self.lastRekeyEvent = "failed reason=\(String(describing: reason))"
+                                    fallbackBusinessKeyLease = self.commitWebRTCSessionKeys(
+                                        fallbackKeys,
+                                        sessionID: sessionID
+                                    )
+                                }
+                            )
+                        } catch {
+                            terminateForCurrentPathBusinessReadinessFailure(
+                                error,
+                                stage: "inbound-rekey-fallback"
+                            )
+                            return
+                        }
+                        guard fallbackCommitted,
+                              let fallbackBusinessKeyLease,
+                              self.isCurrentWebRTCBusinessKeyLease(
+                                sessionID: sessionID,
+                                session: session,
+                                lease: fallbackBusinessKeyLease
+                              ) else { return }
                         logger.warning(
                             "⚠️ WebRTC rekey 失败，保留既有会话: session=\(sessionID, privacy: .public) event=pqcRekeyFailed reason=\(String(describing: reason), privacy: .public)"
                         )
-                        handshakeState.sessionKeys = fallbackKeys
-                        handshakeState.previousSessionKeysBeforeRekey = nil
-                        handshakeState.driver = nil
-                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-                        self.lastRekeyEvent = "failed reason=\(String(describing: reason))"
-                        self.webrtcSessionKeysBySessionId[sessionID] = fallbackKeys
                         startOutboundHeartbeatIfNeeded()
-                        await sendLocalAuthenticatedRouteBindings(keys: fallbackKeys, stage: "inbound-rekey-fallback")
-                        startScreenStreamingIfNeeded(keys: fallbackKeys)
+                        await sendLocalAuthenticatedRouteBindings(
+                            keys: fallbackKeys,
+                            businessKeyLease: fallbackBusinessKeyLease,
+                            stage: "inbound-rekey-fallback"
+                        )
+                        guard self.isCurrentWebRTCBusinessKeyLease(
+                            sessionID: sessionID,
+                            session: session,
+                            lease: fallbackBusinessKeyLease
+                        ) else { return }
+                        startScreenStreamingIfNeeded(businessKeyLease: fallbackBusinessKeyLease)
                         continue
                     }
 
@@ -8540,7 +9758,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logger.warning(
                 """
                 ⚠️ WebRTC 控制通道结束: session=\(sessionID, privacy: .public) \
-                peer=\(peerDeviceId, privacy: .public) error=\(error.localizedDescription, privacy: .public) \
+                peer=\(Self.protocolIdentityLogRedaction, privacy: .public) error=\(error.localizedDescription, privacy: .private) \
                 lastFrameLen=\(lastInboundFrameLength, privacy: .public) decodedFrameLen=\(lastDecodedFrameLength, privacy: .public) \
                 driverState=\(lastHandshakeDriverState, privacy: .public) lastEvent=\(lastControlLoopEvent, privacy: .public) \
                 lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)
@@ -8738,11 +9956,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         deviceId: String,
         protocolPublicKeyFingerprint: String,
         authenticatedConnectionCodeRebindAllowed: Bool = false
-    ) throws {
-        if let conflict = TrustSyncService.shared.evaluateCurrentPathBinding(
-            deviceId: deviceId,
-            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
-        ) {
+    ) async throws {
+        let assessment: CurrentPathTrustAssessment
+        do {
+            assessment = try await TrustSyncService.shared.currentPathTrustAssessment(
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NSError(
+                domain: "CrossNetworkConnectionManager",
+                code: 8405,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "本地信任存储不可用，无法安全建立连接",
+                    NSUnderlyingErrorKey: error
+                ]
+            )
+        }
+        if case .conflict(let conflict) = assessment {
             if authenticatedConnectionCodeRebindAllowed,
                Self.shouldAllowAuthenticatedConnectionCodeRebind(for: conflict) {
                 logger.warning(
@@ -8776,6 +10009,44 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     userInfo: [NSLocalizedDescriptionKey: "连接目标身份已撤销"]
                 )
             }
+        }
+    }
+
+    private func enforceCurrentPathAuthorityBeforeBusinessReady(sessionID: String) async throws {
+        guard let expectedSession = webrtcSessionsBySessionId[sessionID] else {
+            throw CurrentPathBusinessReadinessError.commitLeaseInvalidated
+        }
+        guard let authority = currentPathExpectedRemoteAuthorityBySessionId[sessionID] else {
+            throw CurrentPathBusinessReadinessError.missingExpectedAuthority
+        }
+        let assessment: CurrentPathTrustAssessment
+        do {
+            assessment = try await TrustSyncService.shared.currentPathTrustAssessment(
+                deviceId: authority.deviceId,
+                protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw CurrentPathBusinessReadinessError.trustStoreUnavailable
+        }
+        try Task.checkCancellation()
+        guard webrtcSessionsBySessionId[sessionID] === expectedSession,
+              currentPathExpectedRemoteAuthorityBySessionId[sessionID] == authority else {
+            throw CurrentPathBusinessReadinessError.commitLeaseInvalidated
+        }
+        guard case .conflict(let conflict) = assessment else { return }
+        switch conflict {
+        case .identityConflict:
+            // Only an explicit connection-code flow may heal a same-device
+            // authority conflict after the transcript authenticates that key.
+            // Server-backed and legacy QR sessions remain fail closed.
+            guard authenticatedConnectionCodeRebindSessionIds.contains(sessionID),
+                  Self.shouldAllowAuthenticatedConnectionCodeRebind(for: conflict) else {
+                throw CurrentPathBusinessReadinessError.authorityInvalidated(conflict)
+            }
+        case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:
+            throw CurrentPathBusinessReadinessError.authorityInvalidated(conflict)
         }
     }
 

@@ -30,10 +30,8 @@ enum RemoteControlInboundTrustResolver {
             return .missing
         }
 
-        let matches = records.filter { record in
-            guard record.isAuthenticationEligible else {
-                return false
-            }
+        let matches = PeerTrustLookup.authenticationEligibleRecordsRespectingDenial(records)
+            .filter { record in
             return PeerTrustLookup.recordLookupCandidates(record).contains { candidate in
                 soaPeerId(for: candidate) == remoteSOAPeerId
             }

@@ -2,6 +2,35 @@ import Foundation
 import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
+enum CrossNetworkQREpochMilliseconds {
+    // QR timestamps are interoperable Gregorian/Unix timestamps. Keeping the
+    // upper bound at the final millisecond of year 9999 also guarantees that
+    // converting through Foundation.Date cannot overflow Int64.
+    nonisolated static let maximumSupportedValue: Int64 = 253_402_300_799_999
+
+    nonisolated static func date(from value: Int64) throws -> Date {
+        guard (0...maximumSupportedValue).contains(value) else {
+            throw CurrentPathSecurityError.invalidBootstrap("QR expiration milliseconds are out of range")
+        }
+        let date = Date(timeIntervalSince1970: TimeInterval(value) / 1_000)
+        guard try milliseconds(from: date) == value else {
+            throw CurrentPathSecurityError.invalidBootstrap("QR expiration milliseconds cannot be represented exactly")
+        }
+        return date
+    }
+
+    nonisolated static func milliseconds(from date: Date) throws -> Int64 {
+        let value = date.timeIntervalSince1970 * 1_000
+        guard value.isFinite,
+              value >= 0,
+              value <= Double(maximumSupportedValue) else {
+            throw CurrentPathSecurityError.invalidBootstrap("QR expiration date is out of range")
+        }
+        return Int64(value.rounded(.towardZero))
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 enum CrossNetworkConnectPayloadCodec {
     nonisolated static func base64URLEncodedString(from data: Data) -> String {
         data.base64EncodedString()
@@ -57,7 +86,7 @@ extension CrossNetworkConnectionManager {
     }
 
     nonisolated static func encodeQRCodeConnectLink(_ qrData: DynamicQRCodeData) throws -> Data {
-        let compactPayload = CompactDynamicQRCodeData(from: qrData)
+        let compactPayload = try CompactDynamicQRCodeData(from: qrData)
         let jsonData = try JSONEncoder().encode(compactPayload)
         let base64String = Self.base64URLEncodedString(from: jsonData)
         guard let data = "skybridge://connect/\(base64String)".data(using: .utf8) else {
@@ -67,7 +96,7 @@ extension CrossNetworkConnectionManager {
     }
 
     nonisolated static func encodeQRCodeConnectLink(_ invite: ServerBackedDynamicQRCodeInvite) throws -> Data {
-        let compactPayload = CompactServerBackedDynamicQRCodeInvite(from: invite)
+        let compactPayload = try CompactServerBackedDynamicQRCodeInvite(from: invite)
         let jsonData = try JSONEncoder().encode(compactPayload)
         let base64String = Self.base64URLEncodedString(from: jsonData)
         guard let data = "skybridge://connect/\(base64String)".data(using: .utf8) else {
@@ -267,7 +296,7 @@ struct CompactServerBackedDynamicQRCodeInvite: Codable {
     let f: String
     let e: Int64
 
-    init(from invite: ServerBackedDynamicQRCodeInvite) {
+    init(from invite: ServerBackedDynamicQRCodeInvite) throws {
         self.v = invite.version
         self.s = invite.sessionID
         self.q = invite.qrBootstrapToken
@@ -278,12 +307,12 @@ struct CompactServerBackedDynamicQRCodeInvite: Codable {
         self.o = invite.osVersion.precomposedStringWithCanonicalMapping
         self.a = invite.protocolSigningAlgorithm.rawValue
         self.f = invite.protocolPublicKeyFingerprint.lowercased()
-        self.e = Int64(invite.expiresAt.timeIntervalSince1970 * 1000)
+        self.e = try CrossNetworkQREpochMilliseconds.milliseconds(from: invite.expiresAt)
     }
 
     func expanded() throws -> ServerBackedDynamicQRCodeInvite {
-        guard v >= 8 else {
-            throw CurrentPathSecurityError.invalidBootstrap("server-backed QR invite requires v8")
+        guard v == 8 else {
+            throw CurrentPathSecurityError.invalidBootstrap("unsupported server-backed QR invite version")
         }
         guard let algorithm = ProtocolSigningAlgorithm(rawValue: a) else {
             throw CurrentPathSecurityError.invalidBootstrap("unknown protocol signing algorithm")
@@ -299,7 +328,7 @@ struct CompactServerBackedDynamicQRCodeInvite: Codable {
             osVersion: o,
             protocolSigningAlgorithm: algorithm,
             protocolPublicKeyFingerprint: f,
-            expiresAt: Date(timeIntervalSince1970: TimeInterval(e) / 1000.0)
+            expiresAt: try CrossNetworkQREpochMilliseconds.date(from: e)
         )
     }
 }
@@ -341,7 +370,7 @@ struct CompactDynamicQRCodeData: Codable {
     let t: Int64
     let e: Int64
 
-    init(from qrData: DynamicQRCodeData) {
+    init(from qrData: DynamicQRCodeData) throws {
         self.v = qrData.version
         self.s = qrData.sessionID
         self.q = qrData.qrBootstrapToken
@@ -358,10 +387,13 @@ struct CompactDynamicQRCodeData: Codable {
         self.m = compactKEM.isEmpty ? nil : compactKEM
         self.g = qrData.signature.map { CrossNetworkConnectPayloadCodec.base64URLEncodedString(from: $0) }
         self.t = qrData.signatureTimestampMs
-        self.e = Int64(qrData.expiresAt.timeIntervalSince1970 * 1000)
+        self.e = try CrossNetworkQREpochMilliseconds.milliseconds(from: qrData.expiresAt)
     }
 
     func expanded() throws -> DynamicQRCodeData {
+        guard v == 6 || v == 7 else {
+            throw CurrentPathSecurityError.invalidBootstrap("unsupported dynamic QR payload version")
+        }
         guard let algorithm = ProtocolSigningAlgorithm(rawValue: a) else {
             throw CurrentPathSecurityError.invalidBootstrap("unknown protocol signing algorithm")
         }
@@ -394,7 +426,7 @@ struct CompactDynamicQRCodeData: Codable {
             kemPublicKeys: kemKeys,
             signature: signatureData,
             signatureTimestampMs: t,
-            expiresAt: Date(timeIntervalSince1970: TimeInterval(e) / 1000.0)
+            expiresAt: try CrossNetworkQREpochMilliseconds.date(from: e)
         )
     }
 }

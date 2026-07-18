@@ -31,8 +31,11 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
         let deviceIdentity = self.deviceIdentity
         self.deviceIdentity = nil
         let trust = TrustSyncService.shared
-        await trust.removeRecordsForTesting(deviceIds: Array(installedTrustIds))
-        trust.setInMemoryPersistenceForTesting(false)
+        let trustIds = Array(installedTrustIds)
+        await trust.removeRecordsForTesting(deviceIds: trustIds)
+        for _ in trustIds {
+            trust.endInMemoryPersistenceForTesting()
+        }
         installedTrustIds.removeAll()
         SettingsManager.shared.enablePQC = originalEnablePQC
         SettingsManager.shared.pqcSignatureAlgorithm = originalPQCSignatureAlgorithm
@@ -226,13 +229,14 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     }
 
     private func installLocalProtocolIdentityTrust(for peerId: String) async throws {
-        guard installedTrustIds.insert(peerId).inserted else { return }
+        guard !installedTrustIds.contains(peerId) else { return }
         let publicKey = try await XCTUnwrap(deviceIdentity).manager
             .getProtocolSigningPublicKey(for: .mlDSA65)
         _ = try await installAuthenticatedMLDSATrustRecordForTesting(
             peerId: peerId,
             publicKey: publicKey
         )
+        installedTrustIds.insert(peerId)
     }
 }
 

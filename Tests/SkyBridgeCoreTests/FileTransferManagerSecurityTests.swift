@@ -203,6 +203,72 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
     }
 
+    func testClassicTransferRegistryConnectionIdCleanupPreservesReplacement() async {
+        let registry = ClassicTransferSessionRegistry.shared
+        let peerKey = "id:registry-owner-\(UUID().uuidString.lowercased())"
+        let first = P2PConnection(
+            device: P2PDevice.mockDevice,
+            connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        )
+        let replacement = P2PConnection(
+            device: P2PDevice.mockDevice,
+            connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        )
+
+        await registry.upsert(connection: first, peerKeys: [peerKey])
+        await registry.upsert(connection: replacement, peerKeys: [peerKey])
+        await registry.remove(connectionId: first.id, peerKeys: [peerKey])
+
+        var active = await registry.activeConnections()
+        XCTAssertFalse(active.contains(where: { $0 === first }))
+        XCTAssertTrue(
+            active.contains(where: { $0 === replacement }),
+            "An older cleanup token must not remove the replacement connection."
+        )
+
+        await registry.remove(connectionId: replacement.id, peerKeys: [peerKey])
+        active = await registry.activeConnections()
+        XCTAssertFalse(active.contains(where: { $0 === replacement }))
+        first.disconnect()
+        replacement.disconnect()
+    }
+
+    func testP2PDisconnectRegistryCleanupCannotRetainSelfAcrossDeinit() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let connectionSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PModels.swift"),
+            encoding: .utf8
+        )
+        let registrySource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/FileTransfer/ClassicTransferSessionRegistry.swift"
+            ),
+            encoding: .utf8
+        )
+        let disconnectStart = try XCTUnwrap(connectionSource.range(of: "public func disconnect()"))
+        let disconnectEnd = try XCTUnwrap(
+            connectionSource.range(
+                of: "// MARK: - Authentication (HandshakeDriver)",
+                range: disconnectStart.upperBound..<connectionSource.endIndex
+            )
+        )
+        let disconnectBody = String(
+            connectionSource[disconnectStart.lowerBound..<disconnectEnd.lowerBound]
+        )
+
+        XCTAssertTrue(disconnectBody.contains("let connectionId = id"))
+        XCTAssertTrue(disconnectBody.contains("connectionId: connectionId"))
+        XCTAssertFalse(
+            disconnectBody.contains("connection: self"),
+            "deinit-triggered cleanup must not create an asynchronous strong reference to self."
+        )
+        XCTAssertTrue(registrySource.contains("connectionId expectedConnectionId: UUID"))
+        XCTAssertTrue(registrySource.contains("connectionsByKey[normalized]?.id == expectedConnectionId"))
+    }
+
     func testClassicTransferRegistryReturnsNewestLiveSnapshotAndPrunesStaleOnes() async {
         let oldSessionId = "registry-old-\(UUID().uuidString)"
         let freshSessionId = "registry-fresh-\(UUID().uuidString)"

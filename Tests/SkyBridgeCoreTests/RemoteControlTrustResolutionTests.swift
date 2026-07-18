@@ -3,6 +3,42 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class RemoteControlTrustResolutionTests: XCTestCase {
+    @MainActor
+    func testTrustInvalidationSynchronouslyRemovesMatchingPeerAdmissionOnly() async {
+        let manager = RemoteControlManager()
+        let revokedId = "id:remote-control-revoked-\(UUID().uuidString.lowercased())"
+        let retainedId = "id:remote-control-retained-\(UUID().uuidString.lowercased())"
+        let revokedProbe = manager.testingRegisterPeerForTrustInvalidation(deviceId: revokedId)
+        manager.testingRegisterPeerForTrustInvalidation(deviceId: retainedId)
+        XCTAssertEqual(manager.testingPeerSecurityAdmissionApproved(deviceId: revokedId), true)
+        XCTAssertEqual(manager.testingPeerSecurityAdmissionApproved(deviceId: retainedId), true)
+
+        manager.testingHandleTrustInvalidation(
+            TrustInvalidationEvent(
+                revision: UUID(),
+                deviceIds: [revokedId],
+                protocolFingerprints: []
+            )
+        )
+
+        XCTAssertFalse(revokedProbe.isSecurityAdmissionApproved)
+        XCTAssertTrue(revokedProbe.didCancelConnection)
+        XCTAssertFalse(manager.testingHasCurrentPeer(deviceId: revokedId))
+        XCTAssertTrue(manager.testingHasCurrentPeer(deviceId: retainedId))
+        XCTAssertEqual(manager.testingPeerSecurityAdmissionApproved(deviceId: retainedId), true)
+        XCTAssertFalse(manager.connectedDevices.contains(revokedId))
+        XCTAssertTrue(manager.connectedDevices.contains(retainedId))
+
+        manager.testingHandleTrustInvalidation(
+            TrustInvalidationEvent(
+                revision: UUID(),
+                deviceIds: [retainedId],
+                protocolFingerprints: []
+            )
+        )
+        await Task.yield()
+    }
+
     func testQuarantinedAndReverificationRecordsCannotAuthorizeInboundOrHandshakeTrust() async {
         let deviceId = "id:lifecycle-gated-peer"
         let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
@@ -33,7 +69,7 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         }
     }
 
-    func testActiveRecordAuthorizesWhenQuarantinedAliasAlsoExists() async {
+    func testQuarantinedAliasSuppressesMatchingActiveAuthority() async {
         let deviceId = "id:mixed-lifecycle-peer"
         let activeFingerprint = String(repeating: "c", count: 64)
         let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
@@ -54,11 +90,13 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
                 remoteSOAPeerId: remotePeerId,
                 records: [active, quarantined]
             ),
-            .resolved(deviceId: deviceId, fingerprint: activeFingerprint)
+            .missing
         )
         let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: [active, quarantined])
         let trustedFingerprints = await provider.trustedFingerprints(for: deviceId)
-        XCTAssertEqual(trustedFingerprints, [activeFingerprint])
+        XCTAssertTrue(trustedFingerprints.isEmpty)
+        let requiresPin = await provider.requiresPinnedProtocolIdentity(for: deviceId)
+        XCTAssertTrue(requiresPin)
     }
 
     func testEquivalentInboundTrustRecordsCollapseToSingleCanonicalDevice() {
@@ -335,13 +373,11 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         let mlFingerprint = String(repeating: "c", count: 64)
         let trust = TrustSyncService.shared
 
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-        defer {
-            trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-            }
+        addTeardownBlock { @MainActor [trust] in
+            await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
+            trust.endInMemoryPersistenceForTesting()
         }
 
         _ = try await trust.addTrustRecord(

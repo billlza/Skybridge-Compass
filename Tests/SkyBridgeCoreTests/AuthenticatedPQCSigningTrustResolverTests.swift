@@ -111,13 +111,13 @@ final class AuthenticatedPQCSigningTrustResolverTests: XCTestCase {
         XCTAssertEqual(promotedRecord.protocolPublicKey, publicKey)
 
         let trust = TrustSyncService.shared
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [peerId])
-        _ = try await trust.addTrustRecord(promotedRecord)
         addTeardownBlock { @MainActor [trust] in
             await trust.removeRecordsForTesting(deviceIds: [peerId])
-            trust.setInMemoryPersistenceForTesting(false)
+            trust.endInMemoryPersistenceForTesting()
         }
+        _ = try await trust.addTrustRecord(promotedRecord)
 
         let verified = try await EnhancedPostQuantumCrypto(
             deviceIdentityKeyManager: deviceIdentity.manager
@@ -128,6 +128,52 @@ final class AuthenticatedPQCSigningTrustResolverTests: XCTestCase {
             algorithm: "ML-DSA-65"
         )
         XCTAssertTrue(verified)
+    }
+
+    @MainActor
+    func testTrustMutationWaitsForInitialPersistenceLoad() async throws {
+        let gate = TrustInitialLoadGate()
+        let operationState = TrustInitialLoadOperationState()
+        let trust = TrustSyncService(initialLoadOperationForTesting: {
+            await gate.wait()
+        }, useInMemoryPersistenceForTesting: true)
+
+        let peerId = "initial-load-barrier-\(UUID().uuidString)"
+        let record = makeRecord(
+            deviceId: peerId,
+            publicKey: Data(repeating: 0x45, count: 1_952)
+        )
+        let addTask = Task { @MainActor [record, trust] in
+            await operationState.markStarted()
+            let added = try await trust.addTrustRecord(record)
+            await operationState.markCompleted()
+            return added
+        }
+
+        var observedStart = false
+        for _ in 0..<1_000 {
+            if await operationState.hasStarted() {
+                observedStart = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(observedStart, "trust mutation task did not start")
+
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+        let completedBeforeInitialLoad = await operationState.hasCompleted()
+        XCTAssertFalse(
+            completedBeforeInitialLoad,
+            "trust mutation bypassed the initial persistence-load barrier"
+        )
+
+        await gate.open()
+        let added = try await addTask.value
+        XCTAssertEqual(added.deviceId, peerId)
+        let activeRecords = await trust.getActiveTrustRecords()
+        XCTAssertEqual(activeRecords.filter { $0.deviceId == peerId }, [added])
     }
 
     func testActiveAuthenticatedMLDSA65RecordResolvesExactProtocolKey() throws {
@@ -265,5 +311,50 @@ final class AuthenticatedPQCSigningTrustResolverTests: XCTestCase {
             knownDeviceIds: knownDeviceIds ?? [deviceId],
             lifecycleState: lifecycleState
         )
+    }
+}
+
+private actor TrustInitialLoadGate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            if isOpen {
+                continuation.resume()
+            } else {
+                precondition(self.continuation == nil, "initial-load gate supports one waiter")
+                self.continuation = continuation
+            }
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor TrustInitialLoadOperationState {
+    private var started = false
+    private var completed = false
+
+    func markStarted() {
+        started = true
+    }
+
+    func markCompleted() {
+        completed = true
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func hasCompleted() -> Bool {
+        completed
     }
 }

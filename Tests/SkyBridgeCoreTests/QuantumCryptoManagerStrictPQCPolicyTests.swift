@@ -557,46 +557,43 @@ final class QuantumCryptoManagerStrictPQCPolicyTests: XCTestCase {
     }
 
     func testPairingIdentityExchangeKEMBootstrapFailsClosedWhenTrustSyncPersistenceFails() throws {
-        let p2pSource = try Self.readRepositorySource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
-        let bootstrapStoreSource = try Self.readRepositorySource("Sources/SkyBridgeCore/P2P/PeerKEMBootstrapStore.swift")
-        let persistenceBody = try Self.functionBody(
-            named: "persistPeerKEMTrustRecords",
-            in: p2pSource,
-            before: "@available(macOS 14.0, iOS 17.0, *)\n    @MainActor"
+        let coordinatorSource = try Self.readRepositorySource(
+            "Sources/SkyBridgeCore/P2P/PairingIdentityExchangeCommitCoordinator.swift"
         )
-        let cacheClearBody = try Self.functionBody(
-            named: "clearPairingIdentityExchangeEntries",
-            in: bootstrapStoreSource,
-            before: "func clearForTesting()"
+        let commitBody = try Self.functionBody(
+            named: "commitAuthorityAndKEM",
+            in: coordinatorSource,
+            before: "static func isCurrent("
         )
 
         XCTAssertTrue(
-            persistenceBody.contains("if savedIds.isEmpty, let lastError"),
-            "The pairing identity exchange importer must separate full TrustSync persistence failure from partial success."
+            commitBody.contains("recordAuthenticatedRemoteAuthorityForPairing("),
+            "The pairing transaction must persist authenticated authority before accepting KEM material."
         )
         XCTAssertTrue(
-            persistenceBody.contains("clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)"),
-            "Unsigned bootstrap KEM material must be removed when TrustSync persists zero records."
+            commitBody.contains("guard persisted else") &&
+                commitBody.contains("throw CommitError.authorityNotPromoted"),
+            "A failed authority promotion must remain an explicit transaction failure."
         )
         XCTAssertTrue(
-            persistenceBody.contains("throw lastError"),
-            "TrustSync persistence failure must remain observable instead of continuing with bootstrap-only KEM material."
-        )
-        XCTAssertFalse(
-            persistenceBody.contains("using bootstrap cache only"),
-            "TrustSync failure must not degrade into a bootstrap-cache-only trust path."
-        )
-        XCTAssertFalse(
-            persistenceBody.contains("TrustSync degraded"),
-            "The importer must not log TrustSync failure as a usable degraded state."
+            commitBody.contains("pairingWriteGeneration: reservation.generation"),
+            "KEM persistence must be bound to the same reserved generation."
         )
         XCTAssertTrue(
-            cacheClearBody.contains("entries[deviceId]?.source == \"pairing_identity_exchange\""),
-            "The cleanup path should remove only unsigned pairing exchange entries."
+            commitBody.contains("_ = try await rollback(reservation)"),
+            "Every superseded or failed transaction must roll back only its exact generation."
+        )
+        XCTAssertTrue(
+            commitBody.contains("throw error"),
+            "Persistence errors must remain observable after exact rollback."
         )
         XCTAssertFalse(
-            cacheClearBody.contains("signed_lan_kem_refresh"),
-            "Signed SKR-1 refresh cache must survive the unsigned bootstrap cleanup path."
+            commitBody.contains("using bootstrap cache only"),
+            "Authority persistence failure must not degrade into bootstrap-cache trust."
+        )
+        XCTAssertFalse(
+            commitBody.contains("TrustSync degraded"),
+            "Authority persistence failure must not be presented as a usable degraded state."
         )
     }
 

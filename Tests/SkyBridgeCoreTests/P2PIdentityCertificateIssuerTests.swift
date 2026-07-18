@@ -40,11 +40,11 @@ final class P2PIdentityCertificateIssuerTests: XCTestCase {
         )
 
         let trust = TrustSyncService.shared
-        trust.setInMemoryPersistenceForTesting(true)
+        await trust.beginInMemoryPersistenceForTesting()
         await trust.removeRecordsForTesting(deviceIds: [signerId])
         addTeardownBlock { @MainActor [trust] in
             await trust.removeRecordsForTesting(deviceIds: [signerId])
-            trust.setInMemoryPersistenceForTesting(false)
+            trust.endInMemoryPersistenceForTesting()
         }
 
         for lifecycleState in [

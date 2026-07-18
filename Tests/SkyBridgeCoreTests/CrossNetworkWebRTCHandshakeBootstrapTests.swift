@@ -3,6 +3,184 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
+    func testAuthenticatedSessionDelegationAcceptsValidEd25519AndMLDSAKeys() throws {
+        let ed25519 = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: Data(repeating: 0x11, count: 32)
+        )
+        let mlDSA65 = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+            publicKey: Data(repeating: 0x22, count: 1_952)
+        )
+        let authorityFingerprint = try XCTUnwrap(ed25519.authoritativeFingerprint)
+        let delegatedFingerprint = try XCTUnwrap(mlDSA65.authoritativeFingerprint)
+
+        let delegated = CrossNetworkConnectionManager.authenticatedSessionDelegatedProtocolFingerprints(
+            protocolIdentityPublicKeys: [ed25519, mlDSA65],
+            authorityAlgorithm: .ed25519,
+            authorityFingerprint: authorityFingerprint
+        )
+
+        XCTAssertEqual(delegated, Set([delegatedFingerprint]))
+    }
+
+    func testAuthenticatedSessionDelegationRejectsWrongKeyLength() {
+        let invalid = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: Data(repeating: 0x11, count: 31)
+        )
+
+        XCTAssertNil(
+            CrossNetworkConnectionManager.authenticatedSessionDelegatedProtocolFingerprints(
+                protocolIdentityPublicKeys: [invalid],
+                authorityAlgorithm: .ed25519,
+                authorityFingerprint: String(repeating: "a", count: 64)
+            )
+        )
+    }
+
+    func testAuthenticatedSessionDelegationRejectsDuplicateAlgorithm() throws {
+        let first = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: Data(repeating: 0x11, count: 32)
+        )
+        let duplicate = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: Data(repeating: 0x12, count: 32)
+        )
+
+        XCTAssertNil(
+            CrossNetworkConnectionManager.authenticatedSessionDelegatedProtocolFingerprints(
+                protocolIdentityPublicKeys: [first, duplicate],
+                authorityAlgorithm: .ed25519,
+                authorityFingerprint: try XCTUnwrap(first.authoritativeFingerprint)
+            )
+        )
+    }
+
+    func testAuthenticatedSessionDelegationRejectsMissingAuthorityAnchor() throws {
+        let authority = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: Data(repeating: 0x11, count: 32)
+        )
+        let delegatedOnly = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+            publicKey: Data(repeating: 0x22, count: 1_952)
+        )
+
+        XCTAssertNil(
+            CrossNetworkConnectionManager.authenticatedSessionDelegatedProtocolFingerprints(
+                protocolIdentityPublicKeys: [delegatedOnly],
+                authorityAlgorithm: .ed25519,
+                authorityFingerprint: try XCTUnwrap(authority.authoritativeFingerprint)
+            )
+        )
+    }
+
+    func testBusinessKeyLeaseInvalidatesOlderPostCommitContinuationsForEveryHandshakeStage() {
+        var leases = CrossNetworkBusinessKeyLeaseState()
+        let stages = [
+            "initial-handshake",
+            "outbound-rekey",
+            "outbound-rekey-fallback",
+            "inbound-rekey",
+            "inbound-rekey-fallback"
+        ]
+
+        for stage in stages {
+            let sessionID = "lease-\(stage)"
+            let oldLease = leases.commit(sessionID: sessionID)
+            XCTAssertTrue(leases.isCurrent(oldLease, sessionID: sessionID))
+
+            let replacementLease = leases.commit(sessionID: sessionID)
+            XCTAssertFalse(
+                leases.isCurrent(oldLease, sessionID: sessionID),
+                "an older \(stage) continuation must not resume business traffic"
+            )
+            XCTAssertTrue(leases.isCurrent(replacementLease, sessionID: sessionID))
+            XCTAssertEqual(leases.currentLease(sessionID: sessionID), replacementLease)
+
+            leases.remove(sessionID: sessionID)
+            XCTAssertFalse(leases.isCurrent(replacementLease, sessionID: sessionID))
+            XCTAssertNil(leases.currentLease(sessionID: sessionID))
+        }
+    }
+
+    func testWebRTCAsyncOwnersRequireExactSessionTaskTokenAndBusinessKeyLease() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+
+        XCTAssertTrue(source.contains("webrtcControlTaskTokenBySessionId[sessionID] == taskToken"))
+        XCTAssertTrue(source.contains("webrtcOutboundHeartbeatTaskTokenBySessionId[sessionID] == taskToken"))
+        XCTAssertTrue(source.contains("webrtcScreenStreamingTaskTokenBySessionId[sessionID] == taskToken"))
+        XCTAssertTrue(source.contains("webrtcInteractionStreamingTaskTokenBySessionId[sessionID] == taskToken"))
+        XCTAssertTrue(source.contains("webrtcSessionsBySessionId[sessionID] === session"))
+        XCTAssertTrue(source.contains("webrtcRemoteControlNoticeTokenBySessionId[sessionID] == noticeToken"))
+        XCTAssertTrue(source.contains("webrtcRemoteControlNoticeBusinessKeyLeaseBySessionId[sessionID] == businessKeyLease"))
+        XCTAssertTrue(source.contains("activeWebRTCClipboardToken == clipboardToken"))
+        XCTAssertTrue(source.contains("activeWebRTCClipboardBusinessKeyLease == businessKeyLease"))
+    }
+
+    @MainActor
+    func testBusinessReadinessCommitDropsSuccessThatBecomesStaleDuringValidation() async throws {
+        let barrier = CrossNetworkCommitBarrier()
+        var isCurrent = true
+        var commitCount = 0
+        let task = Task { @MainActor in
+            try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                validate: { await barrier.block() },
+                isCurrent: { isCurrent },
+                commit: { commitCount += 1 }
+            )
+        }
+        await barrier.waitUntilEntered()
+        isCurrent = false
+        await barrier.release()
+
+        let committed = try await task.value
+        XCTAssertFalse(committed)
+        XCTAssertEqual(commitCount, 0)
+    }
+
+    @MainActor
+    func testBusinessReadinessCommitDoesNotPropagateStaleValidationFailure() async throws {
+        let barrier = CrossNetworkCommitBarrier()
+        var isCurrent = true
+        var commitCount = 0
+        let task = Task { @MainActor in
+            try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                validate: {
+                    await barrier.block()
+                    throw CrossNetworkCommitTestError.validationFailed
+                },
+                isCurrent: { isCurrent },
+                commit: { commitCount += 1 }
+            )
+        }
+        await barrier.waitUntilEntered()
+        isCurrent = false
+        await barrier.release()
+
+        let committed = try await task.value
+        XCTAssertFalse(committed)
+        XCTAssertEqual(commitCount, 0)
+    }
+
+    @MainActor
+    func testBusinessReadinessCommitPropagatesCurrentValidationFailure() async {
+        do {
+            _ = try await CrossNetworkBusinessReadinessCommitCoordinator.perform(
+                validate: { throw CrossNetworkCommitTestError.validationFailed },
+                isCurrent: { true },
+                commit: { XCTFail("failed validation must never commit") }
+            )
+            XCTFail("current validation error must propagate")
+        } catch CrossNetworkCommitTestError.validationFailed {
+            // Expected.
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testCrossNetworkPresenceUsesStableDeviceIdWhenAvailable() {
         XCTAssertEqual(
             CrossNetworkConnectionManager.crossNetworkPresencePeerID(
@@ -606,6 +784,50 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)"))
     }
 
+    func testMacBusinessReadyTrustRevalidationPrecedesKeyCommitAndFallback() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        XCTAssertTrue(source.contains("case missingExpectedAuthority"))
+        XCTAssertTrue(source.contains("throw CurrentPathBusinessReadinessError.missingExpectedAuthority"))
+        XCTAssertTrue(source.contains("reason: \"current_path_authority_revalidation_failed\""))
+
+        let outbound = try sourceSlice(
+            from: "let rekeyed = try await outboundDriver.initiateHandshake(",
+            to: "} catch let error as CurrentPathBusinessReadinessError {",
+            in: source
+        )
+        let outboundValidation = try XCTUnwrap(
+            outbound.range(of: "try await self.enforceCurrentPathAuthorityBeforeBusinessReady")
+        )
+        let outboundCommit = try XCTUnwrap(
+            outbound.range(of: "handshakeState.sessionKeys = rekeyed")
+        )
+        XCTAssertLessThan(outboundValidation.lowerBound, outboundCommit.lowerBound)
+
+        let inboundStage = try XCTUnwrap(
+            source.range(of: "stage: wasInboundRekey ? \"inbound-rekey-commit\"")
+        )
+        let inboundValidation = try XCTUnwrap(
+            source.range(
+                of: "try await self.enforceCurrentPathAuthorityBeforeBusinessReady",
+                options: .backwards,
+                range: source.startIndex..<inboundStage.lowerBound
+            )
+        )
+        let inboundCommit = try XCTUnwrap(
+            source.range(
+                of: "handshakeState.sessionKeys = keys",
+                options: .backwards,
+                range: source.startIndex..<inboundStage.lowerBound
+            )
+        )
+        XCTAssertLessThan(inboundValidation.lowerBound, inboundCommit.lowerBound)
+        XCTAssertTrue(source.contains("CrossNetworkBusinessReadinessCommitCoordinator.perform"))
+
+        for fallbackStage in ["outbound-rekey-fallback", "inbound-rekey-fallback"] {
+            XCTAssertTrue(source.contains("stage: \"\(fallbackStage)\""))
+        }
+    }
+
     func testMacWebRTCQueuesPreSessionOfferAnswerAndIceOnly() throws {
         let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
@@ -1000,7 +1222,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     }
 
     func testCurrentPathTrustBridgeLogsRedactStableIdentifiers() throws {
-        let source = try [
+        let bridgeSource = try [
             "Sources/SkyBridgeCore/P2P/P2PModels.swift",
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
             "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift",
@@ -1008,17 +1230,22 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         ].map { path in
             try readSource(path)
         }.joined(separator: "\n")
-        let currentPathTrustLogLines = source
+        let coordinatorSource = try readSource(
+            "Sources/SkyBridgeCore/P2P/PairingIdentityExchangeCommitCoordinator.swift"
+        )
+        let currentPathTrustLogLines = bridgeSource
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter {
-                $0.contains("current-path trust bridge")
-                    || $0.contains("pairingIdentityExchange protocol identity pins")
+                $0.contains("pairing identity exchange has no authenticated authority")
+                    || $0.contains("pairing authority/KEM")
+                    || $0.contains("pairingIdentityExchange authority/KEM")
             }
             .joined(separator: "\n")
 
-        XCTAssertTrue(currentPathTrustLogLines.contains("Self.protocolIdentityLogRedaction"))
-        XCTAssertTrue(currentPathTrustLogLines.contains("fp=\\(Self.protocolIdentityLogRedaction"))
-        XCTAssertTrue(currentPathTrustLogLines.contains("privacy: .private"))
+        XCTAssertFalse(
+            currentPathTrustLogLines.isEmpty,
+            "The reviewed pairing authority/KEM diagnostics must remain covered."
+        )
 
         [
             "peer=\\(self.handshakePeer.deviceId",
@@ -1037,11 +1264,11 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         }
 
         XCTAssertTrue(
-            source.contains("recordAuthenticatedRemoteAuthority("),
+            coordinatorSource.contains("recordAuthenticatedRemoteAuthorityForPairing("),
             "The trust bridge must continue persisting the authenticated authority; only logs are redacted."
         )
         XCTAssertTrue(
-            source.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"),
+            coordinatorSource.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"),
             "Fingerprint data still needs to reach TrustSyncService for fail-closed current-path trust."
         )
     }
@@ -1401,9 +1628,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionID]"))
         XCTAssertTrue(source.contains("ServiceEndpointRegistry.shared.snapshot()"))
         XCTAssertTrue(source.contains("WebRTCControlChannelCodec.sessionBindingDescriptor(for: keys)"))
-        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: keys, stage: \"initial-handshake\")"))
-        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: rekeyed, stage: \"outbound-rekey\")"))
-        XCTAssertTrue(source.contains("await sendLocalAuthenticatedRouteBindings(keys: keys, stage: \"inbound-rekey\")"))
+        XCTAssertTrue(source.contains("businessKeyLease: committedBusinessKeyLease"))
+        XCTAssertTrue(source.contains("stage: \"initial-handshake\""))
+        XCTAssertTrue(source.contains("stage: \"outbound-rekey\""))
+        XCTAssertTrue(source.contains("stage: wasInboundRekey ? \"inbound-rekey\" : \"inbound-handshake\""))
+        XCTAssertTrue(source.contains("isCurrentWebRTCBusinessKeyLease("))
+        XCTAssertTrue(source.contains("CrossNetworkBusinessKeyLeaseState"))
         XCTAssertTrue(source.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)"))
         XCTAssertTrue(source.contains("webrtcRekeyInProgressSessionIds.contains(sessionID)"))
     }
@@ -1485,23 +1715,49 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         }
     }
 
-    func testPairingTrustApprovalCoalescesDuplicatePromptAndPersistsAlwaysAllowByDeviceId() throws {
+    func testPairingTrustApprovalCoalescesWithCancellationAwareBindingPolicy() throws {
         let source = try readSource("Sources/SkyBridgeCore/Security/PairingTrustApprovalService.swift")
 
         XCTAssertTrue(source.contains("isSameTrustRequest(pendingRequest, request)"))
         XCTAssertTrue(source.contains("Pairing request coalesced with pending prompt"))
-        XCTAssertTrue(source.contains("continuationByRequestId[pendingRequest.id, default: []].append(cont)"))
-        XCTAssertTrue(source.contains("case .alwaysAllow, .reject:"))
-        XCTAssertTrue(source.contains("policyByDeviceId[deviceId] = decision.rawValue"))
+        XCTAssertTrue(source.contains("withTaskCancellationHandler"))
+        XCTAssertTrue(source.contains("cancelDecisionWaiter"))
+        XCTAssertTrue(source.contains("policyByDeviceId[policyKey] = decision.rawValue"))
+        XCTAssertFalse(source.contains("policyByDeviceId[deviceId] = decision.rawValue"))
     }
 
     func testWebRTCPairingTrustUsesCurrentPathAuthorityBindingKey() throws {
         let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
-        XCTAssertTrue(source.contains("let policyBindingKey = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID].flatMap"))
+        XCTAssertTrue(source.contains("guard let pairingAuthorityLease = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID]"))
+        XCTAssertTrue(source.contains("guard let policyBindingKey = PairingTrustApprovalService.policyBindingKey"))
         XCTAssertTrue(source.contains("PairingTrustApprovalService.policyBindingKey"))
         XCTAssertTrue(source.contains("policyBindingKey: policyBindingKey"))
+        XCTAssertTrue(source.contains("PairingIdentityExchangeCommitCoordinator.reserve("))
+        XCTAssertTrue(source.contains(".commitAuthorityAndKEM("))
+        XCTAssertTrue(source.contains("authority: authenticatedPairingAuthority"))
+        XCTAssertTrue(source.contains("pairingCommitIsCurrent: pairingCommitIsCurrent"))
         XCTAssertTrue(source.contains("PairingTrustApprovalService.shared.updateVerificationCode"))
+
+        let duplicateReplyStart = try XCTUnwrap(
+            source.range(
+                of: "if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint"
+            )
+        )
+        let nextReplyStart = try XCTUnwrap(
+            source.range(
+                of: "let reply = AppMessage.pairingIdentityExchange(replyPayload)",
+                range: duplicateReplyStart.upperBound..<source.endIndex
+            )
+        )
+        let duplicateReplyBranch = String(
+            source[duplicateReplyStart.lowerBound..<nextReplyStart.lowerBound]
+        )
+        XCTAssertTrue(duplicateReplyBranch.contains("continue"))
+        XCTAssertFalse(
+            duplicateReplyBranch.contains("return"),
+            "reusing an existing pairing reply must not terminate the current WebRTC control loop"
+        )
     }
 
     func testStrictWebRTCInitialHandshakeRequiresPinnedCurrentPathAuthorityBeforeTrustedKEM() throws {
@@ -1567,19 +1823,51 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     func testLegacyBootstrapKEMCacheIsKnownMaterialNotTrustAuthority() throws {
         let source = try readSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
         let bootstrapStoreSource = try readSource("Sources/SkyBridgeCore/P2P/PeerKEMBootstrapStore.swift")
+        let trustProviderSource = try readSource("Sources/SkyBridgeCore/P2P/DefaultHandshakeTrustProvider.swift")
 
         XCTAssertTrue(source.contains("currentKnownPeerKEMPublicKeysByCanonicalWireId"))
         XCTAssertTrue(source.contains("return \"bootstrapCache\""))
         XCTAssertTrue(source.contains("hasTrust: diagnostic.hasTrust"))
-        XCTAssertTrue(source.contains("clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)"))
-        XCTAssertTrue(source.contains("cleared unsigned bootstrap KEM cache and failing closed"))
+        XCTAssertTrue(source.contains("DefaultHandshakeTrustProvider()"))
+        XCTAssertTrue(source.contains("trustedKEMPublicKeys(for: candidate)"))
+        XCTAssertFalse(source.contains("mergedKEMPublicKeys(forCandidates: candidates)"))
         XCTAssertFalse(source.contains("using bootstrap cache only"))
         XCTAssertFalse(source.contains("TrustSync degraded"))
         XCTAssertFalse(source.contains("currentTrustedPeerKEMPublicKeysByCanonicalWireId"))
         XCTAssertFalse(source.contains("hasTrust: diagnostic.hasTrust || !cachedSuites.isEmpty"))
         XCTAssertTrue(bootstrapStoreSource.contains("entry.source == \"signed_lan_kem_refresh\""))
-        XCTAssertTrue(bootstrapStoreSource.contains("public func clearPairingIdentityExchangeEntries(deviceIds: [String])"))
-        XCTAssertTrue(bootstrapStoreSource.contains("entries[deviceId]?.source == \"pairing_identity_exchange\""))
+        XCTAssertTrue(bootstrapStoreSource.contains("authorityBoundPairingKEMPublicKeys("))
+        XCTAssertTrue(trustProviderSource.contains("authorityBoundPairingKEMPublicKeys("))
+        XCTAssertTrue(trustProviderSource.contains("pinnedProtocolFingerprints"))
+    }
+
+    func testPairingTriggeredWebRTCRekeyRevalidatesCommitReceiptAcrossSuspensions() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let helper = try sourceSlice(
+            from: "func maybeStartOutboundPQCRekeyIfNeeded(",
+            to: "let inboundFileTransferReceiver = WebRTCInboundFileTransferReceiver(",
+            in: source
+        )
+
+        XCTAssertTrue(helper.contains("pairingCommitIsCurrent: @escaping @MainActor @Sendable () async -> Bool"))
+        XCTAssertGreaterThanOrEqual(
+            helper.components(separatedBy: "await pairingCommitIsCurrent()").count - 1,
+            10,
+            "Every KEM lookup, handshake, readiness commit, and route-binding suspension must revalidate the pairing receipt."
+        )
+        let stateCommitPrefix = try sourceSlice(
+            from: "let outboundDriver = try HandshakeDriver(",
+            to: "handshakeState.previousSessionKeysBeforeRekey = establishedKeys",
+            in: helper
+        )
+        XCTAssertTrue(stateCommitPrefix.contains("guard await pairingCommitIsCurrent() else { return }"))
+        XCTAssertTrue(helper.contains("pairing_rekey_superseded_before_start"))
+        XCTAssertTrue(helper.contains("pairing_rekey_superseded_after_handshake"))
+        XCTAssertTrue(helper.contains("pairing_rekey_superseded_after_route_binding"))
+        XCTAssertFalse(helper.contains("candidates=" + "\\(" + "candidateIds.joined"))
+        XCTAssertFalse(helper.contains("peer=" + "\\(" + "selectedPeerId"))
+        XCTAssertFalse(helper.contains("deviceId=" + "\\(" + "pairingPayload.deviceId"))
+        XCTAssertTrue(helper.contains("SkyBridgeDiagnosticRedaction.errorSummary(error)"))
     }
 
     func testSignedAppSmokeHasAppLevelPairingApprovalSurface() throws {
@@ -2085,5 +2373,35 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         var description: String {
             "Source marker not found from '\(startMarker)' to '\(endMarker)'"
         }
+    }
+}
+
+private enum CrossNetworkCommitTestError: Error {
+    case validationFailed
+}
+
+private actor CrossNetworkCommitBarrier {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func block() async {
+        entered = true
+        enteredWaiters.forEach { $0.resume() }
+        enteredWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }

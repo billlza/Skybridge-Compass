@@ -304,6 +304,72 @@ enum PeerTrustLookup {
         }
     }
 
+    /// Returns only records that can authorize after applying lifecycle
+    /// denial evidence across every stable ID, route alias, and protocol-key
+    /// fingerprint. A tombstone/quarantine must not be bypassed by a second
+    /// active record stored under another alias.
+    static func authenticationEligibleRecordsRespectingDenial(
+        _ records: [TrustRecord]
+    ) -> [TrustRecord] {
+        let denialRecords = records.filter(isLifecycleDenialEvidence)
+        return records.filter { record in
+            record.isAuthenticationEligible
+                && !denialRecords.contains(where: { recordsShareTrustIdentity(record, $0) })
+        }
+    }
+
+    static func record(_ record: TrustRecord, matchesDeviceId deviceId: String) -> Bool {
+        let candidates = Set(
+            lookupCandidates(for: deviceId)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        guard !candidates.isEmpty else { return false }
+        return recordLookupCandidates(record).contains {
+            candidates.contains($0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+    }
+
+    private static func isLifecycleDenialEvidence(_ record: TrustRecord) -> Bool {
+        guard !record.isExpired else { return false }
+        if record.isTombstone || record.lifecycleState == .revoked {
+            return true
+        }
+        switch record.lifecycleState {
+        case .quarantined, .reverificationRequired:
+            return true
+        case .active, .revoked:
+            return false
+        }
+    }
+
+    static func recordsShareTrustIdentity(_ lhs: TrustRecord, _ rhs: TrustRecord) -> Bool {
+        let lhsFingerprints = lhs.currentPathAuthorityFingerprints
+        if !lhsFingerprints.isDisjoint(with: rhs.currentPathAuthorityFingerprints) {
+            return true
+        }
+
+        let lhsLegacyFingerprint = lhs.pubKeyFP
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let rhsLegacyFingerprint = rhs.pubKeyFP
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if !lhsLegacyFingerprint.isEmpty, lhsLegacyFingerprint == rhsLegacyFingerprint {
+            return true
+        }
+
+        let lhsCandidates = Set(
+            recordLookupCandidates(lhs)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        guard !lhsCandidates.isEmpty else { return false }
+        return recordLookupCandidates(rhs).contains {
+            lhsCandidates.contains($0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+    }
+
     private static func recordLookupCandidatesUncached(_ record: TrustRecord) -> [String] {
         var ordered: [String] = []
         var seen: Set<String> = []

@@ -11,6 +11,7 @@
 //
 
 import CryptoKit
+import Security
 import XCTest
 @testable import SkyBridgeCore
 
@@ -405,22 +406,66 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertTrue(source.contains("private func upsertFallbackRecord(_ record: TrustRecord) throws"))
         XCTAssertTrue(source.contains("private func removeFallbackRecord(deviceId: String) throws"))
         XCTAssertTrue(source.contains("private func deleteFromKeychain(deviceId: String) throws"))
-        XCTAssertTrue(source.contains("let status = SecItemDelete(query as CFDictionary)"))
+        XCTAssertTrue(source.contains("SecItemDelete(query as CFDictionary)"))
         XCTAssertTrue(source.contains("throw TrustSyncError.keychainError(status)"))
         XCTAssertFalse(source.contains("SecItemDelete(query as CFDictionary)\n        try removeFallbackRecord"))
+        XCTAssertTrue(source.contains("try Self.performMonotonicTrustDeletion("))
         XCTAssertFalse(source.contains("try? storeFallbackRecords"))
         XCTAssertFalse(source.contains("try? Self.protectedFallbackRecordStore.remove()"))
         XCTAssertTrue(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
+    }
+
+    @MainActor
+    func testMonotonicTrustDeletionFailureInjectionNeverDeletesKeychainFirst() {
+        enum InjectedFailure: Error {
+            case fallbackWrite
+        }
+
+        var events: [String] = []
+        XCTAssertThrowsError(
+            try TrustSyncService.performMonotonicTrustDeletion(
+                removeProtectedFallback: {
+                    events.append("fallback")
+                    throw InjectedFailure.fallbackWrite
+                },
+                deleteAuthoritativeKeychainRecord: {
+                    events.append("keychain")
+                    return errSecSuccess
+                }
+            )
+        )
+        XCTAssertEqual(events, ["fallback"])
+
+        events.removeAll()
+        XCTAssertThrowsError(
+            try TrustSyncService.performMonotonicTrustDeletion(
+                removeProtectedFallback: {
+                    events.append("fallback")
+                },
+                deleteAuthoritativeKeychainRecord: {
+                    events.append("keychain")
+                    return errSecAuthFailed
+                }
+            )
+        ) { error in
+            guard case TrustSyncError.keychainError(let status) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(status, errSecAuthFailed)
+        }
+        XCTAssertEqual(events, ["fallback", "keychain"])
     }
 
     func testLocalTrustRecordLoadVerifiesSignaturesBeforeMerging() throws {
         let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
 
         XCTAssertTrue(source.contains("private func verifiedTrustRecordsForLocalLoad("))
-        XCTAssertTrue(source.contains("guard try await verifyRecordSignature(record) else"))
+        XCTAssertTrue(source.contains("isValid = try await verifyRecordSignature(record)"))
         XCTAssertTrue(source.contains("reason=invalid_signature device=redacted"))
         XCTAssertTrue(source.contains("reason=verification_error"))
-        XCTAssertTrue(source.contains("let verifiedRecords = await verifiedTrustRecordsForLocalLoad(allRecords, source: \"Keychain sync\")"))
+        XCTAssertTrue(source.contains("let verificationBatch = try await verifiedTrustRecordsForLocalLoad("))
+        XCTAssertTrue(source.contains("batch.rejected.append(record)"))
+        XCTAssertTrue(source.contains("throw TrustSyncError.verificationFailed"))
         XCTAssertTrue(source.contains("Rejected malformed \\(source, privacy: .public) trust record during local load"))
         XCTAssertTrue(source.contains("throw TrustSyncError.decodingError(\"trust record index \\(index): \\(error.localizedDescription)"))
         XCTAssertTrue(source.contains("try Self.protectedFallbackRecordStore.loadOrThrow() ?? []"))
@@ -437,13 +482,11 @@ final class P2PTrustSyncTests: XCTestCase {
         let aliasId = "bonjour:skybridge-\(suffix)@local."
         let stableId = "id:\(suffix)"
 
-        service.setInMemoryPersistenceForTesting(true)
+        await service.beginInMemoryPersistenceForTesting()
         await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-        defer {
-            service.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-            }
+        addTeardownBlock { @MainActor [service] in
+            await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+            service.endInMemoryPersistenceForTesting()
         }
 
         _ = try await service.addTrustRecord(
@@ -495,6 +538,13 @@ final class P2PTrustSyncTests: XCTestCase {
  // Note: We can't force sync unavailable status without actual iCloud state
  // This is a documentation of expected behavior
         }
+    }
+
+    func testKeychainDeleteRequiresConfirmedDeletion() {
+        XCTAssertTrue(TrustSyncService.isConfirmedKeychainDeletionStatus(errSecSuccess))
+        XCTAssertTrue(TrustSyncService.isConfirmedKeychainDeletionStatus(errSecItemNotFound))
+        XCTAssertFalse(TrustSyncService.isConfirmedKeychainDeletionStatus(errSecInteractionNotAllowed))
+        XCTAssertFalse(TrustSyncService.isConfirmedKeychainDeletionStatus(errSecMissingEntitlement))
     }
     
  // MARK: - Additional Trust Record Tests
@@ -556,11 +606,11 @@ final class P2PTrustSyncTests: XCTestCase {
         let reverificationId = "id:reverify-\(suffix)"
         let ids = [activeId, quarantineId, reverificationId]
 
-        service.setInMemoryPersistenceForTesting(true)
+        await service.beginInMemoryPersistenceForTesting()
         await service.removeRecordsForTesting(deviceIds: ids)
         addTeardownBlock { @MainActor in
             await service.removeRecordsForTesting(deviceIds: ids)
-            service.setInMemoryPersistenceForTesting(false)
+            service.endInMemoryPersistenceForTesting()
         }
 
         let records = [
@@ -647,15 +697,17 @@ final class P2PTrustSyncTests: XCTestCase {
     
  /// Test tombstone expiration
     func testTombstoneExpiration() {
- // Create tombstone with old revokedAt
+        let oldSignedRevocationDate = Date().addingTimeInterval(-31 * 24 * 60 * 60)
+ // Expiry is anchored to signed updatedAt; revokedAt alone is not trusted.
         let expiredTombstone = TrustRecord(
             deviceId: "expired-tombstone",
             pubKeyFP: String(repeating: "a", count: 64),
             publicKey: Data(repeating: 0x01, count: 32),
             attestationLevel: .none,
+            updatedAt: oldSignedRevocationDate,
             signature: Data(repeating: 0xAA, count: 64),
             recordType: .revoke,
-            revokedAt: Date().addingTimeInterval(-31 * 24 * 60 * 60) // 31 days ago
+            revokedAt: oldSignedRevocationDate
         )
         
  // Property: Old tombstone should be expired
@@ -764,6 +816,54 @@ final class P2PTrustSyncTests: XCTestCase {
                        "Revoked record should preserve known device ids")
         XCTAssertEqual(revoked.lifecycleStateMetadata, .revoked,
                        "Revoked record should force lifecycle state to revoked")
+    }
+
+    func testAuthoritativeKeychainActiveBeatsNewerFallbackButDenialStillWins() {
+        let deviceId = "source-aware-persistence-\(UUID().uuidString.lowercased())"
+        let authoritative = createTestTrustRecord(
+            deviceId: deviceId,
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let newerFallback = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "b", count: 64),
+            publicKey: Data(repeating: 0x02, count: 32),
+            createdAt: Date(timeIntervalSince1970: 200),
+            updatedAt: Date(timeIntervalSince1970: 200),
+            signature: Data(repeating: 0xBB, count: 64)
+        )
+
+        XCTAssertEqual(
+            TrustSyncService.resolveLocalPersistenceConflict(
+                authoritativeKeychain: authoritative,
+                fallback: newerFallback
+            ),
+            authoritative
+        )
+
+        let fallbackTombstone = newerFallback.revoked(
+            signature: Data(repeating: 0xCC, count: 64),
+            at: Date(timeIntervalSince1970: 300)
+        )
+        XCTAssertEqual(
+            TrustSyncService.resolveLocalPersistenceConflict(
+                authoritativeKeychain: authoritative,
+                fallback: fallbackTombstone
+            ),
+            fallbackTombstone
+        )
+
+        let authoritativeTombstone = authoritative.revoked(
+            signature: Data(repeating: 0xDD, count: 64),
+            at: Date(timeIntervalSince1970: 400)
+        )
+        XCTAssertEqual(
+            TrustSyncService.resolveLocalPersistenceConflict(
+                authoritativeKeychain: authoritativeTombstone,
+                fallback: newerFallback
+            ),
+            authoritativeTombstone
+        )
     }
     
  // MARK: - Helper Methods

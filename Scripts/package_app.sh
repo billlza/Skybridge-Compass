@@ -994,6 +994,10 @@ PACKAGING_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-package.XXXXXX")"
 ACTIVE_APP_PACKAGING_ENTITLEMENTS="${PACKAGING_TMP_DIR}/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
+if is_release_distribution_context; then
+  # 与 build_dmg.sh 保持同一发布纪律：Swift 与 Clang warning 都必须阻断产物。
+  export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1
+fi
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_build_destination)}"
 XCODE_WORKSPACE="${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=0
@@ -1072,6 +1076,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
     swift build \
       "${SWIFTPM_BUILD_ARGS[@]}" \
       --product SkyBridgeCompassApp \
+      -Xswiftc -warnings-as-errors \
       --disable-automatic-resolution
   elif [[ "${USE_XCODE_WORKSPACE}" -eq 0 ]]; then
     log "未找到 package.xcworkspace，直接从 Swift package 根目录构建"
@@ -1476,7 +1481,10 @@ build_power_metrics_helper() {
   if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
     swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
   fi
-  swift build "${swiftpm_build_args[@]}" --product "${HELPER_EXECUTABLE}"
+  swift build \
+    "${swiftpm_build_args[@]}" \
+    --product "${HELPER_EXECUTABLE}" \
+    -Xswiftc -warnings-as-errors
 }
 
 HELPER_BIN_PATH="$(resolve_helper_bin_path)"
