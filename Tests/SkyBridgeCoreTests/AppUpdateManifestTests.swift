@@ -422,6 +422,18 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(releaseReadiness.contains("generate_macos_update_manifest.swift"))
         XCTAssertTrue(releaseReadiness.contains("publish_macos_update_release.sh"))
         XCTAssertTrue(releaseReadiness.contains("validate_macos_update_manifest.sh"))
+        XCTAssertTrue(
+            releaseReadiness.contains(
+                #"https://github.com/\${REPOSITORY}/releases/download/\${ARTIFACT_TAG_NAME}"#
+            ),
+            "Release readiness must require update downloads to use the immutable artifact release tag."
+        )
+        XCTAssertFalse(
+            releaseReadiness.contains(
+                #"https://github.com/\${REPOSITORY}/releases/download/\${TAG_NAME}"#
+            ),
+            "Release readiness must not accept update downloads from the mutable channel tag."
+        )
         XCTAssertTrue(releaseReadiness.contains("Package integrity-only validation complete; full_release_readiness=false release_proof=false"))
         XCTAssertTrue(releaseReadiness.contains("macOS release readiness completed with explicit skips; full_release_readiness=false release_proof=false"))
         XCTAssertTrue(releaseReadiness.contains("full macOS release readiness checks passed"))

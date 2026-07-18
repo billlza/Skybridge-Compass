@@ -384,8 +384,8 @@ validate_update_check_configuration() {
     || fail "GitHub update publisher must download uploaded release assets for post-upload verification"
   grep -q 'xcrun stapler validate' "${github_publisher}" \
     || fail "GitHub update publisher must verify notarization/stapling before advertising a DMG update"
-  grep -Fq "https://github.com/\${REPOSITORY}/releases/download/\${TAG_NAME}" "${github_publisher}" \
-    || fail "GitHub update publisher must build a download URL matching GitHub Releases asset URLs"
+  grep -Fq "https://github.com/\${REPOSITORY}/releases/download/\${ARTIFACT_TAG_NAME}" "${github_publisher}" \
+    || fail "GitHub update publisher must build a download URL from the immutable artifact release tag"
 }
 
 validate_local_update_manifest() {
