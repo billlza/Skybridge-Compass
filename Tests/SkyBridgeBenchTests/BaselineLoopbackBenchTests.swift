@@ -54,7 +54,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         }
     }
 
-    func testLoopbackLifecycleCancellationFailsAfterCleanup() async throws {
+    func testLoopbackLifecycleImmediateCancellationFailsAfterSuccessfulCleanup() async throws {
         let operation = Task {
             try await NetworkLoopbackLifecycle.measureHandshakes(
                 protocolName: "cancellation",
@@ -72,7 +72,40 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             _ = try await operation.value
             XCTFail("A cancelled benchmark must not return successful samples")
         } catch let error as NetworkLoopbackLifecycleError {
-            XCTAssertTrue(error.description.contains("task cancelled"), "Unexpected cancellation error: \(error)")
+            switch error {
+            case .listener(
+                protocolName: "cancellation",
+                stage: let stage,
+                detail: "task cancelled"
+            ) where stage == "ready" || stage == "operation":
+                break
+            case .listener(
+                protocolName: "cancellation",
+                stage: "state",
+                detail: "cancelled before ready"
+            ), .accept(
+                protocolName: "cancellation",
+                iteration: _,
+                detail: "task cancelled"
+            ), .connection(
+                protocolName: "cancellation",
+                iteration: _,
+                role: _,
+                stage: "ready",
+                detail: "task cancelled"
+            ), .connection(
+                protocolName: "cancellation",
+                iteration: _,
+                role: _,
+                stage: "state",
+                detail: "cancelled before ready"
+            ):
+                break
+            case .operationAndCleanup(_, let cleanup):
+                XCTFail("Cancellation cleanup failed: \(cleanup)")
+            default:
+                XCTFail("Unexpected cancellation error: \(error)")
+            }
         }
     }
 
