@@ -77,6 +77,7 @@ actor RemoteAudioPlaybackController {
     private let hardResetQueuedFrames: AVAudioFrameCount = 48_000 * 2
 
     private var minimumAcceptedGeneration: UInt64 = 0
+    private var activatedSession: AVAudioSession?
     private var engine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
     private var decodeConverter: AVAudioConverter?
@@ -391,16 +392,20 @@ actor RemoteAudioPlaybackController {
 
         let session = AVAudioSession.sharedInstance()
         try configureSession(session)
+        activatedSession = session
 
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
         engine.attach(playerNode)
         engine.connect(playerNode, to: engine.mainMixerNode, format: playbackFormat)
         engine.prepare()
+        self.engine = engine
+        self.playerNode = playerNode
         do {
             try engine.start()
         } catch {
             let nsError = error as NSError
+            teardown(deactivateSession: true, resetFailureState: false)
             SkyBridgeLogger.shared.warning(
                 "⚠️ 远端音频阶段失败 stage=engine_start domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
             )
@@ -408,8 +413,6 @@ actor RemoteAudioPlaybackController {
         }
         playerNode.play()
 
-        self.engine = engine
-        self.playerNode = playerNode
         decodeConverter = nil
         decodeFormatSignature = nil
         queuedFrames = 0
@@ -436,8 +439,19 @@ actor RemoteAudioPlaybackController {
         oldPlayerNode?.stop()
         oldPlayerNode?.reset()
         oldEngine?.stop()
-        if deactivateSession {
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        if deactivateSession, let activatedSession {
+            do {
+                try activatedSession.setActive(
+                    false,
+                    options: [.notifyOthersOnDeactivation]
+                )
+                self.activatedSession = nil
+            } catch {
+                let nsError = error as NSError
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 远端音频阶段失败 stage=session_deactivate domain=\(nsError.domain) code=\(nsError.code)"
+                )
+            }
         }
     }
 

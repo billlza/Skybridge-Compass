@@ -21,6 +21,23 @@ printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
 "${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
 
 printf '%s\n' \
+  "Test Suite 'All tests' started" \
+  "[plugin] AddInstanceForFactory: No factory registered for id F8BB1C28" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' \
+  "Test Suite 'All tests' started" \
+  "[ddagg] AggregateDevice.mm:912 couldn't get default output device, ID = 0, err = 0!" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' \
+  "[plugin] AddInstanceForFactory: No factory registered for id F8BB1C28" >"${BUILD_LOG}"
+printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' "SwiftExplicitDependencyGeneratePcm IOSurface-ABCDE.pcm" >"${BUILD_LOG}"
+
+printf '%s\n' \
   "IOSurfaceClientSetSurfaceNotify failed e00002c7" \
   "Test Suite 'All tests' started" >"${TEST_LOG}"
 "${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null

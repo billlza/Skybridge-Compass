@@ -62,6 +62,12 @@ run_check_strict_no_warnings \
   bash "${ROOT_DIR}/Scripts/test_ios_simulator_helpers.sh"
 
 run_check_strict_no_warnings \
+  "ios-runtime-diagnostic-validator" \
+  "code" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_validate_ios_simulator_runtime_diagnostics.sh"
+
+run_check_strict_no_warnings \
   "swift-build" \
   "code" \
   "source-quality" \

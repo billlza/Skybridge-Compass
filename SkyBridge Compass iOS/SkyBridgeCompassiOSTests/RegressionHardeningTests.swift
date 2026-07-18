@@ -378,6 +378,27 @@ final class RegressionHardeningTests: XCTestCase {
       "A hard reset should remain available only for truly runaway queued audio."
     )
     XCTAssertTrue(
+      audioSource.contains("private var activatedSession: AVAudioSession?"),
+      "Audio teardown must track session activation independently from engine construction."
+    )
+    XCTAssertTrue(audioSource.contains("activatedSession = session"))
+    XCTAssertTrue(
+      audioSource.contains(
+        "self.engine = engine\n        self.playerNode = playerNode\n        do {\n            try engine.start()"
+      ),
+      "A partially constructed engine must be owned before start can fail."
+    )
+    XCTAssertTrue(
+      audioSource.contains("teardown(deactivateSession: true, resetFailureState: false)"),
+      "Engine-start failure must release the controller-owned audio session."
+    )
+    XCTAssertTrue(audioSource.contains("if deactivateSession, let activatedSession"))
+    XCTAssertTrue(audioSource.contains("self.activatedSession = nil"))
+    XCTAssertFalse(
+      audioSource.contains("hadPlaybackPipeline"),
+      "Engine/player existence is not proof of AVAudioSession activation ownership."
+    )
+    XCTAssertTrue(
       managerSource.contains(
         "Task.detached(priority: .utility) { [remoteAudioPlayback] in\n            await remoteAudioPlayback.handle(payload, context: context)\n        }"
       ),

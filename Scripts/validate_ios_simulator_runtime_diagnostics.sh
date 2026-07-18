@@ -9,12 +9,20 @@ fi
 BUILD_LOG="$1"
 TEST_LOG="$2"
 ALLOWED_IOSURFACE_DIAGNOSTIC="IOSurfaceClientSetSurfaceNotify failed e00002c7"
+DISALLOWED_COREAUDIO_PATTERN="AddInstanceForFactory: No factory registered|AggregateDevice.*couldn't get default output device"
 TEST_SUITE_START="Test Suite 'All tests' started"
 
 for log_file in "${BUILD_LOG}" "${TEST_LOG}"; do
   if [[ ! -f "${log_file}" ]]; then
     echo "[iOS simulator diagnostics] missing log: ${log_file}" >&2
     exit 2
+  fi
+done
+
+for log_file in "${BUILD_LOG}" "${TEST_LOG}"; do
+  if LC_ALL=C grep -En "${DISALLOWED_COREAUDIO_PATTERN}" "${log_file}" >&2; then
+    echo "[iOS simulator diagnostics] project-triggered CoreAudio lifecycle diagnostic detected" >&2
+    exit 1
   fi
 done
 
