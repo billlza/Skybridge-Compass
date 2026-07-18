@@ -126,7 +126,11 @@ if [ ! -f "$APP_INFO_PLIST_SOURCE" ]; then
 fi
 cp "$APP_INFO_PLIST_SOURCE" "$APP_BUNDLE/Contents/Info.plist"
 
-VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.0.0")
+if ! VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null) \
+  || [ -z "$VERSION" ]; then
+    log_error "主应用 Info.plist 缺少 CFBundleShortVersionString"
+    exit 1
+fi
 
 # 复制图标
 ICON_SOURCE="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.icns"
@@ -288,7 +292,11 @@ log_success "主应用已签名"
 
 # 验证签名
 log_info "验证签名..."
-codesign --verify --verbose "$APP_BUNDLE" && log_success "签名验证通过" || log_info "签名验证警告（ad-hoc 签名正常）"
+if ! codesign --verify --verbose "$APP_BUNDLE"; then
+    log_error "签名验证失败"
+    exit 1
+fi
+log_success "签名验证通过"
 
 # ============================================================================
 # 步骤 5: 创建 DMG

@@ -1,6 +1,6 @@
 # macOS Update Management
 
-Last verified: 2026-05-26
+Last verified: 2026-07-18
 
 This document defines how SkyBridge Compass Pro discovers and publishes macOS
 updates outside the Mac App Store.
@@ -34,7 +34,7 @@ packages, non-DMG packages, and sequence rollback all fail closed.
 Use these fields consistently:
 
 ```text
-CFBundleShortVersionString  user-visible version, for example 1.0.0
+CFBundleShortVersionString  user-visible version, for example 1.0.1
 CFBundleVersion             app build string, currently may be dotted
 manifest.sequence           positive Int64 anti-rollback sequence
 ```
@@ -72,6 +72,7 @@ The workflow only publishes update assets when `publish_update_release=true`.
 Build, sign, notarize, and staple the app and DMG:
 
 ```bash
+export SKYBRIDGE_PACKAGE_BUILD_ID="$(date -u '+%Y%m%d%H%M%S')"
 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
 SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
@@ -86,26 +87,50 @@ Verify the notarized artifacts:
 
 ```bash
 xcrun stapler validate "dist/SkyBridge Compass Pro.app"
-xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.0.dmg"
+xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.1.dmg"
 spctl --assess --type execute --verbose=4 "dist/SkyBridge Compass Pro.app"
-spctl --assess --type open --verbose=4 "dist/SkyBridgeCompassPro-1.0.0.dmg"
+spctl --assess --type open --verbose=4 "dist/SkyBridgeCompassPro-1.0.1.dmg"
 ```
 
-Publish the stable update assets:
+Generate and cryptographically verify the candidate manifest locally without
+mutating GitHub:
 
 ```bash
 bash Scripts/publish_macos_update_release.sh \
   --repository billlza/Skybridge-Compass \
   --tag stable \
+  --artifact-tag "macos-v1.0.1-build-${SKYBRIDGE_PACKAGE_BUILD_ID}" \
   --app-path "dist/SkyBridge Compass Pro.app" \
-  --dmg-path "dist/SkyBridgeCompassPro-1.0.0.dmg" \
+  --dmg-path "dist/SkyBridgeCompassPro-1.0.1.dmg" \
   --key-id skybridge-release-ed25519-2026-05-local \
-  --private-key-file "$HOME/.config/skybridge/update-manifest-ed25519-2026-05.seed"
+  --private-key-file "$HOME/.config/skybridge/update-manifest-ed25519-2026-05.seed" \
+  --sequence "${SKYBRIDGE_PACKAGE_BUILD_ID}" \
+  --skip-upload
 ```
 
-The publisher verifies stapling before manifest generation, uploads both assets
-with `gh release upload --clobber`, downloads them back, and checks that the
-downloaded DMG hash matches the manifest `sha256`.
+Stable publication is restricted to a `workflow_dispatch` run from `main` of
+`.github/workflows/macos-release-readiness.yml`. The workflow must first verify
+the six exact-commit real-device artifacts, write
+`Artifacts/release-gate/release-artifact-run-provenance.json`, pass full
+readiness, and then pass that provenance file to the publisher. Do not emulate
+this context from a local shell.
+
+The publisher verifies the packaged Git commit and clean state, notarization,
+both Ed25519 signatures, and a strictly increasing remote sequence. It then
+creates or reuses the exact version/build release, preserves the previous
+stable manifest as immutable recovery evidence, uploads the uniquely named DMG
+without clobbering, and downloads it back. Only after the DMG hash is proven
+does it recheck that the remote sequence has not changed concurrently, replace
+`macos-stable.json` on the `stable` channel release, and perform a final two-tag
+read-back. Dispatched stable runs share one non-cancelling concurrency group.
+
+For an RC awaiting real-device validation, publish only the unique DMG on a
+prerelease whose tag points to the exact source commit. Do not upload
+`macos-stable.json`. Promotion happens only after the same bytes pass all gates.
+
+If a stable switch later needs correction, do not restore the old lower-sequence
+manifest. Generate a new, higher-sequence signed corrective manifest that points
+to a previously preserved notarized DMG, then run the same read-back checks.
 
 ## App Behavior
 

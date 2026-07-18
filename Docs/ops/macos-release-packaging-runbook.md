@@ -1,6 +1,6 @@
 # macOS Release Packaging Runbook
 
-Last verified: 2026-05-26
+Last verified: 2026-07-18
 
 This runbook records the only supported release packaging path for SkyBridge
 Compass Pro on macOS. Its purpose is to prevent four regressions that are easy
@@ -21,7 +21,16 @@ to reintroduce:
 Use the release script as the entry point:
 
 ```bash
-Scripts/build_dmg.sh --notarize-app --notarize-dmg --require-notarization
+export SKYBRIDGE_PACKAGE_BUILD_ID="$(date -u '+%Y%m%d%H%M%S')"
+SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
+SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
+SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
+Scripts/build_dmg.sh \
+  --identity "Developer ID Application: Zi ang Li (YKUPL7Z869)" \
+  --notarytool-keychain-profile skybridge-notary \
+  --notarize-app \
+  --notarize-dmg \
+  --require-notarization
 ```
 
 For an already-built Release product, this reuse path is allowed:
@@ -34,8 +43,8 @@ The successful output artifacts are:
 
 ```text
 dist/SkyBridge Compass Pro.app
-dist/SkyBridgeCompassPro-1.0.0.dmg
-~/Desktop/SkyBridgeCompassPro-1.0.0.dmg
+dist/SkyBridgeCompassPro-1.0.1.dmg
+~/Desktop/SkyBridgeCompassPro-1.0.1.dmg
 ```
 
 ## Correct Build Source
@@ -233,10 +242,13 @@ Scripts/check_macos_release_readiness.sh \
   --launch-timeout 30 \
   --steady-state 8 \
   --app-path "dist/SkyBridge Compass Pro.app" \
-  --dmg-path "dist/SkyBridgeCompassPro-1.0.0.dmg" \
+  --dmg-path "dist/SkyBridgeCompassPro-1.0.1.dmg" \
   --connectivity-artifact-dir "Artifacts/<real-device-connectivity-matrix>" \
   --p2p-remote-artifact-dir "Artifacts/<real-device-p2p-remote-smoke>" \
-  --file-transfer-artifact-dir "Artifacts/<real-device-file-transfer-smoke>"
+  --file-transfer-artifact-dir "Artifacts/<real-device-file-transfer-smoke>" \
+  --p2p-notice-artifact-dir "Artifacts/<real-device-p2p-notice>" \
+  --webrtc-notice-artifact-dir "Artifacts/<real-device-webrtc-notice>" \
+  --notice-panel-artifact-dir "Artifacts/<real-device-notice-panel>"
 ```
 
 This gate runs the Rust CLI operator check-surface coverage threshold
@@ -253,7 +265,7 @@ du -sh \
   "dist/SkyBridge Compass Pro.app/Contents/MacOS/SkyBridgeCompassApp" \
   "dist/SkyBridge Compass Pro.app/Contents/Frameworks/WebRTC.framework" \
   "dist/SkyBridge Compass Pro.app/Contents/Resources/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle" \
-  "dist/SkyBridgeCompassPro-1.0.0.dmg"
+  "dist/SkyBridgeCompassPro-1.0.1.dmg"
 ```
 
 Expected scale from the 2026-05-12 known-good package:
@@ -308,7 +320,7 @@ signed, notarized DMG has passed the real-device CLI with a Mac-initiated
 reconnect transfer:
 
 ```bash
-SKYBRIDGE_SMOKE_MAC_DMG_PATH="$HOME/Desktop/SkyBridgeCompassPro-1.0.0.dmg" \
+SKYBRIDGE_SMOKE_MAC_DMG_PATH="$HOME/Desktop/SkyBridgeCompassPro-1.0.1.dmg" \
 SKYBRIDGE_SMOKE_USER_REALISTIC=1 \
 SKYBRIDGE_SMOKE_MAC_HOST_MODE=signed-app \
 SKYBRIDGE_SMOKE_REQUIRE_MAC_INITIATED_RECONNECT=1 \
@@ -395,7 +407,7 @@ before failing; after any retry, independently validate both artifacts:
 
 ```bash
 xcrun stapler validate "dist/SkyBridge Compass Pro.app"
-xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.0.dmg"
+xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.1.dmg"
 ```
 
 ## Do Not

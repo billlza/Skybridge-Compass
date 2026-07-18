@@ -33,10 +33,19 @@ trap cleanup_gate_tmp EXIT
 count_pattern_hits() {
   local pattern="$1"
   local file_path="$2"
-  if command -v rg >/dev/null 2>&1; then
-    (rg -n "${pattern}" "${file_path}" 2>/dev/null || true) | wc -l | tr -d ' '
+  local matches=""
+  local scan_status=0
+
+  if matches="$(/usr/bin/grep -En "${pattern}" "${file_path}")"; then
+    printf '%s\n' "${matches}" | wc -l | tr -d ' '
   else
-    (grep -nE "${pattern}" "${file_path}" 2>/dev/null || true) | wc -l | tr -d ' '
+    scan_status=$?
+    if [[ "${scan_status}" -eq 1 ]]; then
+      printf '0\n'
+      return 0
+    fi
+    echo "gate log scan failed for ${file_path} with status ${scan_status}" >&2
+    return "${scan_status}"
   fi
 }
 
@@ -64,8 +73,8 @@ _run_gate_check() {
   fi
 
   local warning_count error_count status message
-  warning_count="$(count_pattern_hits '(^|[^A-Za-z])warning:|\\bWARNING:\\b' "${log_path}")"
-  error_count="$(count_pattern_hits '(^|[^A-Za-z])error:|\\bERROR:\\b' "${log_path}")"
+  warning_count="$(count_pattern_hits '(^|[^[:alpha:]])(warning:|WARNING:)' "${log_path}")"
+  error_count="$(count_pattern_hits '(^|[^[:alpha:]])(error:|ERROR:)' "${log_path}")"
 
   status="pass"
   message="ok"

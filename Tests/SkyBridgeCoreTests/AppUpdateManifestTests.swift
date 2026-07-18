@@ -274,6 +274,7 @@ final class AppUpdateManifestTests: XCTestCase {
         let generator = try repositorySource("Scripts/generate_macos_update_manifest.swift")
         let manifestValidator = try repositorySource("Scripts/validate_macos_update_manifest.sh")
         let publisher = try repositorySource("Scripts/publish_macos_update_release.sh")
+        let publisherTests = try repositorySource("Scripts/test_publish_macos_update_release.sh")
         let releaseReadiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
         let workflow = try repositorySource(".github/workflows/macos-release-readiness.yml")
         let fastfile = try repositorySource("fastlane/Fastfile")
@@ -342,19 +343,80 @@ final class AppUpdateManifestTests: XCTestCase {
             publisher.contains("xcrun stapler validate \"$dmg_path\" >/dev/null"),
             "stapler validate returns failure on notarized DMGs on some macOS versions when stdout is redirected; keep the output visible so the publish gate observes the real notarization result."
         )
-        XCTAssertTrue(publisher.contains("--clobber"))
+        XCTAssertTrue(
+            publisher.contains("gh release upload \"$TAG_NAME\" \\\n    \"$MANIFEST_PATH\"")
+        )
+        XCTAssertFalse(
+            publisher.contains("gh release upload \"$TAG_NAME\" \\\n    \"$DMG_PATH\""),
+            "Stable publication must never clobber a DMG on the mutable channel release."
+        )
         XCTAssertTrue(publisher.contains("\"sdk_name\": \"macosx\""))
         XCTAssertTrue(publisher.contains("\"sdk_version\": \"26.5\""))
         XCTAssertTrue(publisher.contains("\"swift_target\": \"arm64-apple-macosx26.0\""))
         XCTAssertTrue(publisher.contains("\"secure_enclave_symbols_included\": True"))
         XCTAssertTrue(publisher.contains("resolve_default_sequence"))
         XCTAssertTrue(publisher.contains("date -u '+%Y%m%d%H%M%S'"))
-        XCTAssertTrue(publisher.contains("https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}"))
+        XCTAssertTrue(publisher.contains("ARTIFACT_TAG_NAME=\"macos-v${APP_VERSION}-build-${APP_BUILD}\""))
+        XCTAssertTrue(publisher.contains("https://github.com/${REPOSITORY}/releases/download/${ARTIFACT_TAG_NAME}"))
+        XCTAssertTrue(publisher.contains("manifest sequence ${proposed_sequence} must be greater than remote stable sequence"))
+        XCTAssertTrue(publisher.contains("refusing to overwrite immutable version asset"))
+        XCTAssertTrue(publisher.contains("could not inspect release assets"))
+        XCTAssertTrue(publisher.contains("--prerelease"))
+        XCTAssertTrue(publisher.contains("previous-macos-stable-sequence-${remote_sequence}.json"))
+        XCTAssertTrue(publisher.contains("validate_packaged_source_provenance"))
+        XCTAssertTrue(publisher.contains("packaged app commit ${app_git_commit} does not match publisher source commit"))
+        XCTAssertTrue(publisher.contains("publisher source worktree is dirty"))
+        XCTAssertTrue(publisher.contains("stable channel publication is restricted to the official GitHub Actions release workflow"))
+        XCTAssertTrue(publisher.contains("stable channel publication is restricted to refs/heads/main"))
+        XCTAssertTrue(publisher.contains("exactly six validated release artifacts are required"))
+        XCTAssertTrue(publisher.contains("producer run head_sha does not match the publish commit"))
+        if
+            let sequenceCheck = publisher.range(
+                of: "require_remote_sequence_monotonic \"$SEQUENCE\"",
+                options: .backwards
+            ),
+            let artifactRelease = publisher.range(of: "ensure_artifact_release", options: .backwards),
+            let previousManifest = publisher.range(of: "preserve_previous_manifest \\", options: .backwards),
+            let dmgUpload = publisher.range(of: "ensure_unique_dmg_uploaded", options: .backwards),
+            let promotion = publisher.range(of: "promote_artifact_release_if_needed", options: .backwards),
+            let sequenceRecheck = publisher.range(
+                of: "require_remote_sequence_unchanged \"$REMOTE_SEQUENCE\"",
+                options: .backwards
+            ),
+            let manifestSwitch = publisher.range(
+                of: "gh release upload \"$TAG_NAME\" \\",
+                options: .backwards
+            ),
+            let finalReadback = publisher.range(of: "verify_uploaded_release_assets \\", options: .backwards)
+        {
+            XCTAssertLessThan(sequenceCheck.lowerBound, artifactRelease.lowerBound)
+            XCTAssertLessThan(artifactRelease.lowerBound, previousManifest.lowerBound)
+            XCTAssertLessThan(previousManifest.lowerBound, dmgUpload.lowerBound)
+            XCTAssertLessThan(dmgUpload.lowerBound, promotion.lowerBound)
+            XCTAssertLessThan(promotion.lowerBound, sequenceRecheck.lowerBound)
+            XCTAssertLessThan(sequenceRecheck.lowerBound, manifestSwitch.lowerBound)
+            XCTAssertLessThan(manifestSwitch.lowerBound, finalReadback.lowerBound)
+        } else {
+            XCTFail("Publisher must preserve the fail-closed immutable-DMG-before-stable-manifest transaction.")
+        }
+        XCTAssertTrue(publisherTests.contains("test_remote_sequence_must_increase"))
+        XCTAssertTrue(publisherTests.contains("test_release_asset_inspection_fails_closed"))
+        XCTAssertTrue(publisherTests.contains("test_concurrent_sequence_change_is_rejected"))
+        XCTAssertTrue(publisherTests.contains("test_stable_publish_requires_official_workflow_context"))
+        XCTAssertTrue(publisherTests.contains("test_release_provenance_binds_main_commit_and_six_artifacts"))
+        XCTAssertTrue(publisherTests.contains("test_immutable_dmg_refuses_different_bytes"))
+        XCTAssertTrue(publisherTests.contains("test_artifact_tag_must_match_source_commit"))
+        XCTAssertTrue(publisherTests.contains("test_previous_manifest_backup_is_read_back"))
+        XCTAssertTrue(publisherTests.contains("test_remote_transaction_order"))
+        XCTAssertTrue(publisherTests.contains("test_final_verification_downloads_from_both_tags"))
         XCTAssertTrue(manifestValidator.contains("bundle_id"))
         XCTAssertTrue(manifestValidator.contains("does not match app CFBundleIdentifier"))
         XCTAssertTrue(manifestValidator.contains("expires_at"))
         XCTAssertTrue(manifestValidator.contains("does not match DMG sha256"))
         XCTAssertTrue(manifestValidator.contains("apple_pqc_sdk_build must be present and signed"))
+        XCTAssertTrue(manifestValidator.contains("Curve25519.Signing.PublicKey"))
+        XCTAssertTrue(manifestValidator.contains("signingPayload"))
+        XCTAssertTrue(manifestValidator.contains("applePQCSDKBuildSigningPayload"))
         XCTAssertTrue(manifestValidator.contains("expected_basename=expected_dmg_name"))
         XCTAssertTrue(manifestValidator.contains(#"validate_https_url(download_url, "download_url", require_github=True"#))
         XCTAssertTrue(releaseReadiness.contains("generate_macos_update_manifest.swift"))
@@ -427,6 +489,20 @@ final class AppUpdateManifestTests: XCTestCase {
             XCTFail("Release workflow must keep provenance validation, artifact download, and signing-secret validation steps visible.")
         }
         XCTAssertTrue(workflow.contains("Scripts/publish_macos_update_release.sh"))
+        XCTAssertTrue(workflow.contains("Self-Test Gate Log Scanner"))
+        XCTAssertTrue(workflow.contains("bash Scripts/test_gate_common.sh"))
+        XCTAssertTrue(workflow.contains("'macos-stable-release'"))
+        XCTAssertTrue(workflow.contains("github.event_name != 'workflow_dispatch'"))
+        XCTAssertTrue(workflow.contains("Require Main Branch for Stable Release"))
+        XCTAssertTrue(workflow.contains("github.ref != 'refs/heads/main'"))
+        XCTAssertTrue(workflow.contains("artifact_tag=\"macos-v${app_version}-build-${app_build}\""))
+        XCTAssertTrue(workflow.contains("--artifact-tag \"$artifact_tag\""))
+        XCTAssertTrue(workflow.contains("--sequence \"$app_build\""))
+        XCTAssertTrue(
+            workflow.contains(
+                "--release-provenance-path \"Artifacts/release-gate/release-artifact-run-provenance.json\""
+            )
+        )
         XCTAssertTrue(workflow.contains("Scripts/validate_macos_release_public_artifacts.sh"))
         XCTAssertTrue(workflow.contains("--require-public-redacted-artifacts"))
         XCTAssertTrue(workflow.contains("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64"))
@@ -441,7 +517,8 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(workflow.contains("CFBundleShortVersionString"))
         XCTAssertTrue(workflow.contains("dmg_path=\"dist/SkyBridgeCompassPro-${app_version}.dmg\""))
         XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
-        XCTAssertTrue(fastfile.contains("Scripts/publish_macos_update_release.sh"))
+        XCTAssertFalse(fastfile.contains("Scripts/publish_macos_update_release.sh"))
+        XCTAssertTrue(fastfile.contains("Fastlane 不具备远端六件制品 provenance authority"))
         XCTAssertTrue(xcodeVerifier.contains("TOOLCHAIN_POLICY=\"${SKYBRIDGE_XCODE_TOOLCHAIN_POLICY:-stable-release}\""))
         XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_VERSION=\"26.6\""))
         XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_BUILD=\"17F113\""))

@@ -647,6 +647,7 @@ assert_no_device_metadata_files
 CLEAN_LOG_OUTPUT="${TMP_DIR}/clean-log.out"
 set +e
 run_lane "${CLEAN_LOG_OUTPUT}" env \
+  PATH="${TMP_DIR}/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
   SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
   SKYBRIDGE_IOS_DEVICE_REQUIRE_RELEASE_TYPE=Beta \

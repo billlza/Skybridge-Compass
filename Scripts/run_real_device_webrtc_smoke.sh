@@ -60,7 +60,17 @@ SIGNALING_SERVER_URL="${SKYBRIDGE_SMOKE_SIGNALING_SERVER_URL:-${SKYBRIDGE_SIGNAL
 SIGNALING_WS_URL="${SKYBRIDGE_SMOKE_SIGNALING_WEBSOCKET_URL:-${SKYBRIDGE_SIGNALING_WEBSOCKET_URL:-$DEFAULT_SIGNALING_WS_URL}}"
 STUN_URL="${SKYBRIDGE_STUN_URL:-}"
 TURN_URLS="${SKYBRIDGE_TURN_URLS:-}"
-CLIENT_VERSION="${SKYBRIDGE_CLIENT_VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Sources/SkyBridgeCompassApp/Info.plist" 2>/dev/null || echo "1.0.0")}"
+if [[ -n "${SKYBRIDGE_CLIENT_VERSION:-}" ]]; then
+  CLIENT_VERSION="${SKYBRIDGE_CLIENT_VERSION}"
+elif ! CLIENT_VERSION=$(
+  /usr/libexec/PlistBuddy \
+    -c 'Print :CFBundleShortVersionString' \
+    "$ROOT_DIR/Sources/SkyBridgeCompassApp/Info.plist" \
+    2>/dev/null
+) || [[ -z "$CLIENT_VERSION" ]]; then
+  echo "Sources/SkyBridgeCompassApp/Info.plist is missing CFBundleShortVersionString" >&2
+  exit 1
+fi
 PROTOCOL_VERSION="${SKYBRIDGE_PROTOCOL_VERSION:-1}"
 
 mkdir -p "$ARTIFACT_DIR"
@@ -103,7 +113,6 @@ PY
 IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-}"
 MAC_DEVICE_ID="${SKYBRIDGE_SMOKE_MAC_DEVICE_ID:-real-webrtc-mac-${RUN_ID}}"
 IOS_LOGICAL_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-real-webrtc-ios-${RUN_ID}}"
-MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 
 AUTH_SESSION_SOURCE_FILE="${SKYBRIDGE_SMOKE_AUTH_SESSION_FILE:-${SKYBRIDGE_AUTH_SESSION_FILE:-}}"
 AUTH_SESSION_FILE=""

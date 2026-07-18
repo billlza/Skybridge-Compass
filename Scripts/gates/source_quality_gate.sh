@@ -32,6 +32,12 @@ fi
 echo "[source-quality] Apple PQC iPhoneOS symbols verified: sdk=${SKYBRIDGE_PQC_SDK_VER} target=${SKYBRIDGE_PQC_SWIFT_TARGET}"
 
 run_check_strict_no_warnings \
+  "gate-log-scanner-selftest" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_gate_common.sh"
+
+run_check_strict_no_warnings \
   "release-no-print-guard" \
   "code" \
   "source-quality" \
@@ -66,6 +72,18 @@ run_check_strict_no_warnings \
   "code" \
   "source-quality" \
   bash "${ROOT_DIR}/Scripts/test_validate_ios_simulator_runtime_diagnostics.sh"
+
+run_check_strict_no_warnings \
+  "macos-update-manifest-signature-validator" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_validate_macos_update_manifest.sh"
+
+run_check_strict_no_warnings \
+  "macos-update-publish-transaction" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_publish_macos_update_release.sh"
 
 run_check_strict_no_warnings \
   "swift-build" \

@@ -80,8 +80,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-release-readiness-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_dispatch' && 'macos-stable-release' || format('macos-release-readiness-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   macos-preflight:
@@ -101,6 +101,15 @@ jobs:
           [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Self-Test Gate Log Scanner
+        run: bash Scripts/test_gate_common.sh
+
+      - name: Verify macOS Update Manifest Signatures
+        run: bash Scripts/test_validate_macos_update_manifest.sh
+
+      - name: Verify macOS Update Publish Transaction
+        run: bash Scripts/test_publish_macos_update_release.sh
 
       - name: Self-Test iOS XCTest Guardrail
         run: bash Scripts/test_check_ios_test_configuration.sh
@@ -173,6 +182,12 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
+      - name: Require Main Branch for Stable Release
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Stable signing and publication are restricted to refs/heads/main."
+          exit 1
+
       - name: Require Successful Preflight and OS27 Source Contracts
         if: needs.macos-preflight.result != 'success' || needs.os27-source-contracts.result != 'success'
         run: |
@@ -454,11 +469,16 @@ jobs:
           UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
         run: |
           app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
+          app_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
           dmg_path="dist/SkyBridgeCompassPro-${app_version}.dmg"
+          artifact_tag="macos-v${app_version}-build-${app_build}"
           [[ -f "$dmg_path" ]] || { echo "::error::Notarized DMG not found at $dmg_path"; exit 1; }
           bash Scripts/publish_macos_update_release.sh \
             --repository "${GITHUB_REPOSITORY}" \
             --tag stable \
+            --artifact-tag "$artifact_tag" \
             --app-path "dist/SkyBridge Compass Pro.app" \
             --dmg-path "$dmg_path" \
-            --key-id "$UPDATE_MANIFEST_KEY_ID"
+            --key-id "$UPDATE_MANIFEST_KEY_ID" \
+            --sequence "$app_build" \
+            --release-provenance-path "Artifacts/release-gate/release-artifact-run-provenance.json"

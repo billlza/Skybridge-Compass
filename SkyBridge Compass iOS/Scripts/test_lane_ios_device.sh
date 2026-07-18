@@ -498,14 +498,22 @@ run_xcodebuild_step() {
   fi
 
   if [[ "${SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS:-0}" == "1" ]]; then
-    local matches
-    matches="$(
-      { rg -n '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}" 2>/dev/null || true; }
-    )"
-    if [[ -n "${matches}" ]]; then
+    local matches=""
+    local scan_status=0
+    if matches="$(
+      /usr/bin/grep -En \
+        '(^|[^[:alpha:]])(warning:|error:|WARNING:|ERROR:)|Error locating DeviceSupport directory' \
+        "${log_path}"
+    )"; then
       echo "[iOS device lane] ERROR: ${label} emitted warnings/errors under clean-log gate" >&2
       redact_ios_device_log <<<"${matches}" >&2
       return 1
+    else
+      scan_status=$?
+      if [[ "${scan_status}" -ne 1 ]]; then
+        echo "[iOS device lane] ERROR: ${label} clean-log scan failed with status ${scan_status}" >&2
+        return "${scan_status}"
+      fi
     fi
   fi
 }

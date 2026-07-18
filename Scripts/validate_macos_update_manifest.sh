@@ -68,7 +68,16 @@ done
 [[ -f "${APP_PATH}/Contents/Info.plist" ]] || fail "app Info.plist does not exist: ${APP_PATH}/Contents/Info.plist"
 [[ -f "${DMG_PATH}" ]] || fail "DMG does not exist: ${DMG_PATH}"
 
-python3 - "${MANIFEST_PATH}" "${APP_PATH}/Contents/Info.plist" "${DMG_PATH}" "${REQUIRE_APPLE_PQC_SDK_BUILD}" "${NOW}" <<'PY'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
+UPDATE_EVALUATOR_SOURCE="${PROJECT_ROOT}/Sources/SkyBridgeCore/Updates/AppUpdateManifest.swift"
+[[ -f "${UPDATE_EVALUATOR_SOURCE}" ]] \
+  || fail "update manifest evaluator source does not exist: ${UPDATE_EVALUATOR_SOURCE}"
+command -v xcrun >/dev/null 2>&1 || fail "xcrun is required for CryptoKit signature verification"
+
+STRUCTURAL_VALIDATION_STATUS=0
+python3 - "${MANIFEST_PATH}" "${APP_PATH}/Contents/Info.plist" "${DMG_PATH}" "${REQUIRE_APPLE_PQC_SDK_BUILD}" "${NOW}" <<'PY' \
+  || STRUCTURAL_VALIDATION_STATUS=$?
 import base64
 import binascii
 import datetime as dt
@@ -320,6 +329,215 @@ if errors:
     for item in errors:
         print(f"[validate-macos-update-manifest] {item}", file=sys.stderr)
     sys.exit(1)
-
-print("[validate-macos-update-manifest] ok")
 PY
+
+CRYPTO_VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-update-signature-verify.XXXXXX")"
+cleanup_crypto_verifier() {
+  rm -rf -- "${CRYPTO_VERIFY_DIR}"
+}
+trap cleanup_crypto_verifier EXIT
+
+CRYPTO_VERIFY_SOURCE="${CRYPTO_VERIFY_DIR}/main.swift"
+CRYPTO_VERIFY_BINARY="${CRYPTO_VERIFY_DIR}/verify-update-manifest-signatures"
+
+cat >"${CRYPTO_VERIFY_SOURCE}" <<'SWIFT'
+import CryptoKit
+import Foundation
+
+private enum ReleaseManifestSignatureError: Error, CustomStringConvertible {
+    case unreadableFile(String)
+    case invalidInfoPlist
+    case missingTrustedKeyMap
+    case malformedTrustedKeyEntry(String)
+    case duplicateTrustedKeyId(String)
+    case missingSignature(String)
+    case unsupportedAlgorithm(String, String)
+    case untrustedKey(String, String)
+    case invalidPublicKey(String)
+    case invalidSignatureEncoding(String)
+    case verificationFailed(String)
+    case missingApplePQCSDKBuild
+
+    var description: String {
+        switch self {
+        case .unreadableFile(let path):
+            return "could not read release verification input: \(path)"
+        case .invalidInfoPlist:
+            return "app Info.plist is not a dictionary"
+        case .missingTrustedKeyMap:
+            return "app Info.plist has no trusted update manifest signing keys"
+        case .malformedTrustedKeyEntry(let entry):
+            return "app Info.plist contains a malformed trusted signing key entry: \(entry)"
+        case .duplicateTrustedKeyId(let keyId):
+            return "app Info.plist contains duplicate trusted signing key id: \(keyId)"
+        case .missingSignature(let label):
+            return "\(label) must include an Ed25519 signature"
+        case .unsupportedAlgorithm(let label, let algorithm):
+            return "\(label) signature algorithm must be ed25519, got \(algorithm)"
+        case .untrustedKey(let label, let keyId):
+            return "\(label) signature key is not trusted: \(keyId)"
+        case .invalidPublicKey(let keyId):
+            return "trusted update manifest signing key is invalid: \(keyId)"
+        case .invalidSignatureEncoding(let label):
+            return "\(label) signature must be a 64-byte base64 or base64url value"
+        case .verificationFailed(let label):
+            return "\(label) signature verification failed"
+        case .missingApplePQCSDKBuild:
+            return "apple_pqc_sdk_build must be present and signed"
+        }
+    }
+}
+
+private func readData(at path: String) throws -> Data {
+    guard let data = FileManager.default.contents(atPath: path) else {
+        throw ReleaseManifestSignatureError.unreadableFile(path)
+    }
+    return data
+}
+
+private func parseTrustedSigningKeys(from infoPlist: [String: Any]) throws -> [String: String] {
+    guard let raw = infoPlist["SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS"] as? String,
+          !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw ReleaseManifestSignatureError.missingTrustedKeyMap
+    }
+
+    var keys: [String: String] = [:]
+    for rawEntry in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" }) {
+        let parts = rawEntry.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
+        guard parts.count == 2 else {
+            throw ReleaseManifestSignatureError.malformedTrustedKeyEntry(String(rawEntry))
+        }
+        let keyId = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicKey = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyId.isEmpty, !publicKey.isEmpty else {
+            throw ReleaseManifestSignatureError.malformedTrustedKeyEntry(String(rawEntry))
+        }
+        guard keys[keyId] == nil else {
+            throw ReleaseManifestSignatureError.duplicateTrustedKeyId(keyId)
+        }
+        keys[keyId] = publicKey
+    }
+
+    guard !keys.isEmpty else {
+        throw ReleaseManifestSignatureError.missingTrustedKeyMap
+    }
+    return keys
+}
+
+private func decodeBase64OrBase64URL(_ raw: String) -> Data? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let data = Data(base64Encoded: trimmed) {
+        return data
+    }
+    var normalized = trimmed
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    let remainder = normalized.count % 4
+    if remainder != 0 {
+        normalized.append(String(repeating: "=", count: 4 - remainder))
+    }
+    return Data(base64Encoded: normalized)
+}
+
+private func verifySignature(
+    _ signature: SkyBridgeAppUpdateManifestSignature?,
+    label: String,
+    payload: Data,
+    trustedKeys: [String: String]
+) throws {
+    guard let signature else {
+        throw ReleaseManifestSignatureError.missingSignature(label)
+    }
+    guard signature.algorithm.lowercased() == "ed25519" else {
+        throw ReleaseManifestSignatureError.unsupportedAlgorithm(label, signature.algorithm)
+    }
+    guard let encodedPublicKey = trustedKeys[signature.keyId] else {
+        throw ReleaseManifestSignatureError.untrustedKey(label, signature.keyId)
+    }
+    guard let publicKeyData = decodeBase64OrBase64URL(encodedPublicKey),
+          publicKeyData.count == 32 else {
+        throw ReleaseManifestSignatureError.invalidPublicKey(signature.keyId)
+    }
+    guard let signatureData = decodeBase64OrBase64URL(signature.value),
+          signatureData.count == 64 else {
+        throw ReleaseManifestSignatureError.invalidSignatureEncoding(label)
+    }
+
+    let publicKey: Curve25519.Signing.PublicKey
+    do {
+        publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+    } catch {
+        throw ReleaseManifestSignatureError.invalidPublicKey(signature.keyId)
+    }
+    guard publicKey.isValidSignature(signatureData, for: payload) else {
+        throw ReleaseManifestSignatureError.verificationFailed(label)
+    }
+}
+
+@main
+private struct ReleaseManifestSignatureVerifier {
+    static func main() {
+        do {
+            guard CommandLine.arguments.count == 4 else {
+                throw ReleaseManifestSignatureError.unreadableFile("invalid verifier arguments")
+            }
+            let manifestData = try readData(at: CommandLine.arguments[1])
+            let infoPlistData = try readData(at: CommandLine.arguments[2])
+            let requireApplePQCSDKBuild = CommandLine.arguments[3] == "1"
+
+            let manifest = try SkyBridgeAppUpdateEvaluator.decodeManifest(from: manifestData)
+            let plistValue = try PropertyListSerialization.propertyList(from: infoPlistData, format: nil)
+            guard let infoPlist = plistValue as? [String: Any] else {
+                throw ReleaseManifestSignatureError.invalidInfoPlist
+            }
+            let trustedKeys = try parseTrustedSigningKeys(from: infoPlist)
+
+            try verifySignature(
+                manifest.signature,
+                label: "manifest",
+                payload: SkyBridgeAppUpdateEvaluator.signingPayload(for: manifest),
+                trustedKeys: trustedKeys
+            )
+
+            if let attestation = manifest.applePQCSDKBuild {
+                try verifySignature(
+                    attestation.signature,
+                    label: "apple_pqc_sdk_build",
+                    payload: SkyBridgeAppUpdateEvaluator.applePQCSDKBuildSigningPayload(
+                        for: manifest,
+                        attestation: attestation
+                    ),
+                    trustedKeys: trustedKeys
+                )
+            } else if requireApplePQCSDKBuild {
+                throw ReleaseManifestSignatureError.missingApplePQCSDKBuild
+            }
+        } catch {
+            FileHandle.standardError.write(
+                Data("[validate-macos-update-manifest] \(error)\n".utf8)
+            )
+            exit(1)
+        }
+    }
+}
+SWIFT
+
+xcrun swiftc \
+  -parse-as-library \
+  -warnings-as-errors \
+  "${UPDATE_EVALUATOR_SOURCE}" \
+  "${CRYPTO_VERIFY_SOURCE}" \
+  -o "${CRYPTO_VERIFY_BINARY}"
+
+CRYPTO_VERIFY_STATUS=0
+"${CRYPTO_VERIFY_BINARY}" \
+  "${MANIFEST_PATH}" \
+  "${APP_PATH}/Contents/Info.plist" \
+  "${REQUIRE_APPLE_PQC_SDK_BUILD}" \
+  || CRYPTO_VERIFY_STATUS=$?
+
+if [[ "${STRUCTURAL_VALIDATION_STATUS}" -ne 0 || "${CRYPTO_VERIFY_STATUS}" -ne 0 ]]; then
+  exit 1
+fi
+
+echo "[validate-macos-update-manifest] ok"

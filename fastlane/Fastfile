@@ -102,11 +102,7 @@ platform :mac do
     sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh #{readiness_args.join(' ')}")
 
     if ENV["SKYBRIDGE_PUBLISH_UPDATE_RELEASE"] == "1"
-      update_key_id = ENV["SKYBRIDGE_UPDATE_MANIFEST_KEY_ID"]
-      if update_key_id.to_s.empty?
-        UI.user_error!("发布 GitHub stable 更新必须设置 SKYBRIDGE_UPDATE_MANIFEST_KEY_ID")
-      end
-      sh("cd .. && ./Scripts/publish_macos_update_release.sh --key-id #{Shellwords.escape(update_key_id)}")
+      UI.user_error!("GitHub stable 更新只能由 main 分支的 macos-release-readiness workflow_dispatch 发布；Fastlane 不具备远端六件制品 provenance authority")
     end
 
     UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")
