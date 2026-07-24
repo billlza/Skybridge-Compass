@@ -501,8 +501,12 @@ extension FileTransferNetworkService: NetServiceDelegate {
     }
 
     nonisolated public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
+        // Snapshot the delegate error payload into a Sendable value before hopping
+        // to the main actor; [String: NSNumber] is not Sendable and cannot be
+        // captured directly by the @MainActor closure under Swift 6 strict concurrency.
+        let failureDescription = errorDict.mapValues(\.stringValue)
         Task { @MainActor in
-            self.logger.error("❌ Bonjour服务发布失败: \(errorDict)")
+            self.logger.error("❌ Bonjour服务发布失败: \(failureDescription)")
         }
     }
 }
