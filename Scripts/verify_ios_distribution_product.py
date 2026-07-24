@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from apple_provisioning_profile import load_verified_profile
+
 EXPECTED_ARGUMENT_COUNT = 27
 
 # A nested Widget shares only its own keychain-access-group and the App Group
@@ -56,23 +58,10 @@ def widget_signed_entitlements_conform(signed_entitlements: dict) -> bool:
 
 
 def load_profile(path: Path) -> dict:
-    payload = path.read_bytes()
-    try:
-        value = plistlib.loads(payload)
-    except Exception:
-        value = None
-    if isinstance(value, dict):
-        return value
-    for command in (
-        ["/usr/bin/security", "cms", "-D", "-i", str(path)],
-        ["/usr/bin/openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
-    ):
-        completed = subprocess.run(command, check=False, capture_output=True)
-        if completed.returncode == 0 and completed.stdout:
-            decoded = plistlib.loads(completed.stdout)
-            if isinstance(decoded, dict):
-                return decoded
-    raise RuntimeError("embedded provisioning profile could not be decoded")
+    # The formal iOS release-evidence path must reject a bare (unsigned) plist
+    # and only trust profiles whose CMS signer is the Apple Provisioning Profile
+    # Signing authority with a valid trust chain.
+    return load_verified_profile(path, verify_authenticity=True)
 
 
 def expand_tokens(value, team_identifier: str, application_prefix: str):

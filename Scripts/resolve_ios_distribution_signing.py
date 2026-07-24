@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from apple_provisioning_profile import load_verified_profile
+
 (
     output_arg,
     explicit_app_arg,
@@ -32,23 +34,10 @@ profile_roots = tuple(
 
 
 def load_profile(path: Path) -> dict:
-    payload = path.read_bytes()
-    try:
-        value = plistlib.loads(payload)
-    except Exception:
-        value = None
-    if isinstance(value, dict):
-        return value
-    for command in (
-        ["/usr/bin/security", "cms", "-D", "-i", str(path)],
-        ["/usr/bin/openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
-    ):
-        completed = subprocess.run(command, check=False, capture_output=True)
-        if completed.returncode == 0 and completed.stdout:
-            decoded = plistlib.loads(completed.stdout)
-            if isinstance(decoded, dict):
-                return decoded
-    raise ValueError("profile could not be decoded")
+    # Formal acceptance selection must only consider authentic Apple-signed
+    # profiles. ProfileAuthenticityError subclasses ValueError, so validate_profile
+    # skips any non-authentic candidate instead of crashing the scan.
+    return load_verified_profile(path, verify_authenticity=True)
 
 
 def scalar_identifier(value) -> str:
