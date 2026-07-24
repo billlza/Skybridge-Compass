@@ -25,8 +25,6 @@ DerivedData/
 
 # Swift Package Manager
 .build/
-/.build-*/
-/.test-home-*/
 .swiftpm/
 .swiftpm_build/
 .swiftpm_cache/
@@ -39,7 +37,13 @@ DerivedData/
 # which requires a checked-in Package.resolved (otherwise SwiftPM reports
 # "a resolved file is required ... dependencies were added: swift-asn1").
 !Package.resolved
-Packages/
+# Keep generated/downloaded package contents ignored, but the in-repository camera protocol
+# package is first-party source and must remain version controlled.
+Packages/*
+!Packages/SkyBridgeCameraKit/
+!Packages/SkyBridgeCameraKit/**
+Packages/SkyBridgeCameraKit/.build/
+Packages/SkyBridgeCameraKit/.swiftpm/
 Package.pins
 .swift_test_output.txt
 
