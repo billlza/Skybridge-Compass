@@ -57,14 +57,26 @@ xcodebuild archive \
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
   GCC_TREAT_WARNINGS_AS_ERRORS=YES \
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
-  "INFOPLIST_KEY_SkyBridgePackagingBuildConfiguration=Release" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitDirtyState=clean" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitCommit=${SOURCE_COMMIT}" \
-  "INFOPLIST_KEY_SkyBridgePackagingSourceRepository=${SOURCE_REPOSITORY}" \
-  "INFOPLIST_KEY_SkyBridgePackagingProductSurface=production" \
-  "INFOPLIST_KEY_SkyBridgePackagingSwiftActiveCompilationConditions=HAS_APPLE_PQC_SDK" \
   >"${ARCHIVE_LOG}" 2>&1
 log "archive complete: ${ARCHIVE_PATH}"
+
+# Stamp production-surface provenance into the archived app Info.plist before the
+# export step re-signs the bundle. (INFOPLIST_KEY_* only injects Apple-recognised
+# keys, not arbitrary custom keys, into an explicit Info.plist; the macOS lane in
+# package_app.sh stamps provenance the same way via plutil -replace.)
+ARCHIVE_APP="$(find "${ARCHIVE_PATH}/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+if [[ -z "${ARCHIVE_APP}" || ! -d "${ARCHIVE_APP}" ]]; then
+  echo "[ios-release-candidate] ERROR: archived app not found for provenance stamping." >&2
+  exit 1
+fi
+ARCHIVE_APP_INFO="${ARCHIVE_APP}/Info.plist"
+plutil -replace SkyBridgePackagingBuildConfiguration -string "Release" "${ARCHIVE_APP_INFO}"
+plutil -replace SkyBridgePackagingGitDirtyState -string "clean" "${ARCHIVE_APP_INFO}"
+plutil -replace SkyBridgePackagingGitCommit -string "${SOURCE_COMMIT}" "${ARCHIVE_APP_INFO}"
+plutil -replace SkyBridgePackagingSourceRepository -string "${SOURCE_REPOSITORY}" "${ARCHIVE_APP_INFO}"
+plutil -replace SkyBridgePackagingProductSurface -string "production" "${ARCHIVE_APP_INFO}"
+plutil -replace SkyBridgePackagingSwiftActiveCompilationConditions -string "HAS_APPLE_PQC_SDK" "${ARCHIVE_APP_INFO}"
+log "stamped production provenance into archived app Info.plist"
 
 log "exporting release-testing IPA"
 xcodebuild -exportArchive \
