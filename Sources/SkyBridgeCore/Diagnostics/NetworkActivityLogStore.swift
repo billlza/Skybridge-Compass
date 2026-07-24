@@ -23,12 +23,6 @@ public actor NetworkActivityLogStore {
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("SkyBridge", isDirectory: true)
         logFileURL = logsDirectory.appendingPathComponent("network-activity.log")
-
-        do {
-            try FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
-        } catch {
-            logger.error("创建网络日志目录失败: \(error.localizedDescription, privacy: .public)")
-        }
     }
 
     nonisolated public func setEnabled(_ enabled: Bool) {
@@ -59,7 +53,14 @@ public actor NetworkActivityLogStore {
         }
 
         for url in candidates where manager.fileExists(atPath: url.path) {
-            try? manager.removeItem(at: url)
+            do {
+                try manager.removeItem(at: url)
+            } catch {
+                let removalError = error as NSError
+                logger.error(
+                    "清理网络日志失败: domain=\(removalError.domain, privacy: .private) code=\(removalError.code, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -76,14 +77,34 @@ public actor NetworkActivityLogStore {
 
             if FileManager.default.fileExists(atPath: logFileURL.path) {
                 let handle = try FileHandle(forWritingTo: logFileURL)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
+                let writeResult: Result<Void, Error>
+                do {
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: data)
+                    writeResult = .success(())
+                } catch {
+                    writeResult = .failure(error)
+                }
+                do {
+                    try handle.close()
+                } catch {
+                    let closeError = error as NSError
+                    logger.error(
+                        "关闭网络日志文件失败: domain=\(closeError.domain, privacy: .private) code=\(closeError.code, privacy: .public)"
+                    )
+                    if case .success = writeResult {
+                        throw error
+                    }
+                }
+                try writeResult.get()
             } else {
                 try data.write(to: logFileURL, options: .atomic)
             }
         } catch {
-            logger.error("写入网络日志失败: \(error.localizedDescription, privacy: .public)")
+            let writeError = error as NSError
+            logger.error(
+                "写入网络日志失败: domain=\(writeError.domain, privacy: .private) code=\(writeError.code, privacy: .public)"
+            )
         }
     }
 

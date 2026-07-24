@@ -49,8 +49,15 @@ final class FileTransferProgressTruthSourceContractTests: XCTestCase {
             "Aggregate progress should be weighted by bytes instead of averaging per-transfer percentages."
         )
         XCTAssertTrue(
+            webRTCSource.contains("let expectedReceivedBytes = sentBytes + Int64(data.count)")
+        )
+        XCTAssertTrue(
+            webRTCSource.contains("validateChunkAck("),
+            "Outbound WebRTC progress must advance only after an exact cumulative-byte ACK."
+        )
+        XCTAssertFalse(
             webRTCSource.contains("let progressed = ack.receivedBytes"),
-            "Outbound WebRTC progress must prefer receiver-acknowledged bytes."
+            "A receiver must not be able to skip unsent source bytes by reporting progress ahead of the current chunk."
         )
         XCTAssertTrue(
             webRTCSource.contains("FileTransferManager.shared.updateExternalOutboundProgress")

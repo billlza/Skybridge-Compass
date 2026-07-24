@@ -13,7 +13,7 @@
     "smoke": "bash ./deploy/scripts/smoke_local.sh http://127.0.0.1:8443"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.6.0"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",
@@ -23,5 +23,8 @@
     "redis": "^6.0.0",
     "standardwebhooks": "^1.0.0",
     "ws": "^8.21.0"
+  },
+  "allowScripts": {
+    "@alicloud/openapi-core@1.0.7": true
   }
 }

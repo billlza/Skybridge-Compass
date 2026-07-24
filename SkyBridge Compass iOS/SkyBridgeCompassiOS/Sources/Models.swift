@@ -837,6 +837,15 @@ public enum EncryptionType: String, Codable, Sendable {
 }
 
 /// 文件传输
+public enum FileTransferReceiptDeliveryStatus: String, Codable, Sendable {
+    case delivered
+    case unknown
+}
+
+public enum FileTransferOperationalWarning: String, Codable, Sendable {
+    case committedFileReleaseFailed
+}
+
 public struct FileTransfer: Identifiable, Codable, Sendable {
     public let id: String
     public var fileName: String
@@ -850,6 +859,12 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
     public var timestamp: Date
     /// 本地文件路径（接收时用于展示“保存位置”）
     public var localPath: String?
+    /// For a durable inbound file, whether the signed success receipt reached
+    /// the sender. `unknown` never authorizes an automatic retransmission.
+    public var receiptDeliveryStatus: FileTransferReceiptDeliveryStatus?
+    /// A durable file may still have a local bookkeeping fault after commit.
+    /// This warning is persisted separately from transport receipt delivery.
+    public var operationalWarning: FileTransferOperationalWarning?
     
     public init(
         id: String = UUID().uuidString,
@@ -862,7 +877,9 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
         isIncoming: Bool,
         remotePeer: String,
         timestamp: Date = Date(),
-        localPath: String? = nil
+        localPath: String? = nil,
+        receiptDeliveryStatus: FileTransferReceiptDeliveryStatus? = nil,
+        operationalWarning: FileTransferOperationalWarning? = nil
     ) {
         self.id = id
         self.fileName = fileName
@@ -875,6 +892,8 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
         self.remotePeer = remotePeer
         self.timestamp = timestamp
         self.localPath = localPath
+        self.receiptDeliveryStatus = receiptDeliveryStatus
+        self.operationalWarning = operationalWarning
     }
 }
 

@@ -142,6 +142,205 @@ final class SignalingLifecycleContractTests: XCTestCase {
         )
     }
 
+    func testBoundFrameMustMatchCurrentHandleSession() async {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-E",
+            generation: 1
+        )
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: "SESSION-E",
+            backend: .urlSession,
+            generation: 1
+        )
+        await client.testOnlySeedCurrentHandle(handle)
+
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: #"{"type":"bound","sessionId":"SESSION-OTHER"}"#
+        )
+
+        let isBound = await client.testOnlyIsBound()
+        let phase = await client.currentLifecyclePhase()
+        let terminalErrorCount = await client.testOnlyTerminalErrorCount()
+        XCTAssertFalse(isBound)
+        XCTAssertEqual(phase, .failed)
+        XCTAssertEqual(terminalErrorCount, 1)
+    }
+
+    func testMatchingBoundUnlocksOnlyMatchingEnvelope() async {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-F",
+            generation: 3
+        )
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: "SESSION-F",
+            backend: .urlSession,
+            generation: 3
+        )
+        let deliveries = SignalingDeliveryProbe()
+        await client.setOnEnvelope { _ in deliveries.record() }
+        await client.testOnlySeedCurrentHandle(handle)
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: #"{"type":"bound","sessionId":"session-f"}"#
+        )
+        let boundAfterMatchingFrame = await client.testOnlyIsBound()
+        XCTAssertTrue(boundAfterMatchingFrame)
+
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: #"{"sessionId":"SESSION-OTHER","from":"peer","type":"offer","payload":{"sdp":"v=0"}}"#
+        )
+
+        let boundAfterMismatch = await client.testOnlyIsBound()
+        let phase = await client.currentLifecyclePhase()
+        XCTAssertFalse(boundAfterMismatch)
+        XCTAssertEqual(phase, .failed)
+        XCTAssertEqual(deliveries.count, 0)
+    }
+
+    func testBackToBackOfferAndICEAwaitEachInboundHandlerInOrder() async throws {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-ORDER",
+            generation: 9
+        )
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: "SESSION-ORDER",
+            backend: .native,
+            generation: 9
+        )
+        let probe = OrderedSignalingDeliveryProbe()
+        await client.setOnEnvelope { envelope in
+            await probe.receive(envelope.type)
+        }
+        await client.testOnlySeedCurrentHandle(handle)
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: #"{"type":"bound","sessionId":"SESSION-ORDER"}"#
+        )
+        let offer = WebRTCSignalingEnvelope(
+            sessionId: "SESSION-ORDER",
+            from: "peer-a",
+            type: .offer,
+            payload: .init(sdp: "v=0")
+        )
+        let ice = WebRTCSignalingEnvelope(
+            sessionId: "SESSION-ORDER",
+            from: "peer-a",
+            type: .iceCandidate,
+            payload: .init(
+                candidate: "candidate:1 1 udp 1 127.0.0.1 9 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: 0
+            )
+        )
+
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: try encodedEnvelope(offer)
+        )
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: try encodedEnvelope(ice)
+        )
+
+        let events = await probe.snapshot()
+        XCTAssertEqual(
+            events,
+            ["start:offer", "finish:offer", "start:iceCandidate", "finish:iceCandidate"]
+        )
+    }
+
+    func testNativeInboundCallbacksRemainAwaitedBeforeNextReceive() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let native = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeAppleTransport/Connection/NativeWebSocketClient.swift"
+            ),
+            encoding: .utf8
+        )
+        let signaling = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeAppleTransport/RemoteConnection/WebRTC/WebSocketSignalingClient.swift"
+            ),
+            encoding: .utf8
+        )
+        let manager = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(native.contains("public var onText: (@Sendable (String) async -> Void)?"))
+        XCTAssertTrue(native.contains("await callbacks.onText?(text)"))
+        XCTAssertTrue(native.contains("await callbacks.onBinary?(data)"))
+        let textDelivery = try XCTUnwrap(native.range(of: "await callbacks.onText?(text)"))
+        let nextReceive = try XCTUnwrap(native.range(
+            of: "continueReceiveIfNeeded(on: conn, generation: generation)",
+            range: textDelivery.upperBound..<native.endIndex
+        ))
+        XCTAssertLessThan(textDelivery.lowerBound, nextReceive.lowerBound)
+        XCTAssertTrue(signaling.contains(
+            "public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) async -> Void)?"
+        ))
+        XCTAssertTrue(signaling.contains("await onEnvelope?(env)"))
+        XCTAssertTrue(manager.contains(
+            "await client.setOnEnvelope { [weak self] env in\n            await self?.handleSignalingEnvelope(env)"
+        ))
+    }
+
+    func testOversizedSignalingMessageFailsClosed() async {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-G",
+            generation: 5
+        )
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: "SESSION-G",
+            backend: .urlSession,
+            generation: 5
+        )
+        await client.testOnlySeedCurrentHandle(handle)
+
+        await client.testOnlyHandleText(
+            handleId: handle,
+            text: String(repeating: "x", count: (64 * 1024) + 1)
+        )
+
+        let phase = await client.currentLifecyclePhase()
+        XCTAssertEqual(phase, .failed)
+    }
+
+    private func encodedEnvelope(_ envelope: WebRTCSignalingEnvelope) throws -> String {
+        let data = try JSONEncoder().encode(envelope)
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    func testIOSSignalingSourceCarriesSameSessionAndSizeGuards() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("maximumInboundTextBytes = 64 * 1024"))
+        XCTAssertTrue(source.contains("sessionIDsMatch(env.sessionId, handleId.sessionId)"))
+        XCTAssertTrue(source.contains("bound_session_mismatch"))
+        XCTAssertTrue(source.contains("terminalErrorsByHandle.removeAll(keepingCapacity: true)"))
+    }
+
     func testSignalingLifecycleStateLivesInCoordinator() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -163,5 +362,132 @@ final class SignalingLifecycleContractTests: XCTestCase {
         XCTAssertTrue(coordinatorSource.contains("private var generationBySessionId: [String: Int]"))
         XCTAssertTrue(coordinatorSource.contains("private var activeHandle: HandleID?"))
         XCTAssertTrue(coordinatorSource.contains("private var recoveryTasksBySessionId: [String: Task<Void, Never>]"))
+    }
+
+    func testCancelledRecoveryBackoffDoesNotReconnectOrMutateHealth() async throws {
+        enum ProbeError: Error { case failed }
+
+        let coordinator = CrossNetworkSignalingLifecycleCoordinator()
+        var attempts = 0
+        var healthMutations: [SignalingSessionHealth] = []
+        coordinator.scheduleRecovery(
+            for: "SESSION-CANCEL",
+            tokenExpired: false,
+            maxAttempts: 2,
+            reconnectDelayMilliseconds: { _ in 500 },
+            currentShardKey: { "SESSION-CANCEL" },
+            isHandshakeComplete: { _ in false },
+            ensureConnected: { _ in
+                attempts += 1
+                throw ProbeError.failed
+            },
+            setHealth: { healthMutations.append($0) },
+            logCancellation: { _, _ in },
+            logFailure: { _, _, _ in }
+        )
+
+        for _ in 0..<1_000 {
+            if attempts == 1 { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(attempts, 1)
+
+        coordinator.cancelRecovery(for: "SESSION-CANCEL")
+        try await Task.sleep(for: .milliseconds(600))
+
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(healthMutations.isEmpty)
+    }
+
+    func testSessionTeardownRemovesGenerationHandleAndRecoveryTogether() async throws {
+        enum ProbeError: Error { case failed }
+
+        let sessionID = "SESSION-TEARDOWN"
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: sessionID,
+            backend: .urlSession,
+            generation: 7
+        )
+        let coordinator = CrossNetworkSignalingLifecycleCoordinator()
+        coordinator.seed(sessionID: sessionID, generation: 7, handle: handle)
+
+        var attempts = 0
+        coordinator.scheduleRecovery(
+            for: sessionID,
+            tokenExpired: false,
+            maxAttempts: 2,
+            reconnectDelayMilliseconds: { _ in 500 },
+            currentShardKey: { sessionID },
+            isHandshakeComplete: { _ in false },
+            ensureConnected: { _ in
+                attempts += 1
+                throw ProbeError.failed
+            },
+            setHealth: { _ in },
+            logCancellation: { _, _ in },
+            logFailure: { _, _, _ in }
+        )
+
+        for _ in 0..<1_000 {
+            if attempts == 1 { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(attempts, 1)
+
+        coordinator.teardown(sessionID: sessionID)
+        XCTAssertNil(coordinator.currentHandle())
+        XCTAssertEqual(coordinator.generation(for: sessionID), 0)
+        XCTAssertEqual(coordinator.nextGeneration(for: sessionID), 1)
+
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertEqual(attempts, 1)
+    }
+
+    func testRealSessionCleanupUsesFullSignalingTeardownAndClearsPreSessionQueue() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let managerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(managerSource.contains("signalingLifecycle.teardown(sessionID: sessionID)"))
+        XCTAssertTrue(managerSource.contains("pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionID)"))
+        XCTAssertTrue(managerSource.contains("pendingPreSessionSignalingEnvelopesBySessionId.removeAll()"))
+    }
+}
+
+private final class SignalingDeliveryProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deliveryCount = 0
+
+    func record() {
+        lock.lock()
+        deliveryCount += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return deliveryCount
+    }
+}
+
+private actor OrderedSignalingDeliveryProbe {
+    private var events: [String] = []
+
+    func receive(_ type: WebRTCSignalingEnvelope.MessageType) async {
+        events.append("start:\(type.rawValue)")
+        for _ in 0..<8 {
+            await Task.yield()
+        }
+        events.append("finish:\(type.rawValue)")
+    }
+
+    func snapshot() -> [String] {
+        events
     }
 }

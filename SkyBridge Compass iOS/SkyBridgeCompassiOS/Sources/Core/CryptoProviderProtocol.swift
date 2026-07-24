@@ -99,6 +99,37 @@ public protocol CryptoProvider: Sendable {
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair
 }
 
+/// KEM providers whose shared secret is cryptographically bound to a canonical
+/// protocol application context. Q-Periapt ABI2 must use this surface and must
+/// reject the context-free `CryptoProvider` KEM entry points.
+public protocol ApplicationContextBoundCryptoProvider: CryptoProvider {
+    func kemEncapsulate(
+        recipientPublicKey: Data,
+        applicationContext: Data
+    ) async throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes)
+
+    func kemDecapsulate(
+        encapsulatedKey: Data,
+        privateKey: SecureBytes,
+        applicationContext: Data
+    ) async throws -> SecureBytes
+}
+
+/// Internal identity of a provider admitted by one immutable Q-Periapt runtime
+/// session. Persistence and capability code use these authenticated values
+/// instead of deriving namespaces from a mutable registry label.
+protocol QPeriaptRuntimeBoundCryptoProvider: ApplicationContextBoundCryptoProvider {
+    var qPeriaptAuthProfile: String { get }
+    var qPeriaptTrustRootFingerprint: Data { get }
+}
+
+/// Q provider after one driver has frozen the exact committed signing slot.
+/// Raw runtime providers do not conform, so handshake phases cannot infer a
+/// signing configuration from mutable defaults after driver creation.
+protocol QPeriaptHandshakeBoundCryptoProvider: QPeriaptRuntimeBoundCryptoProvider {
+    var qPeriaptProtocolIdentityConfiguration: ProtocolIdentityConfigurationRecord { get }
+}
+
 // MARK: - Default Implementations
 
 public extension CryptoProvider {

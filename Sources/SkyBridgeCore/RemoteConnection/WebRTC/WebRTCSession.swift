@@ -165,6 +165,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case framedPayloadTooLarge(Int)
         case screenFrameBudgetExceeded(framedBytes: Int, bufferedAmount: UInt64, maxBufferedAmountBytes: UInt64)
         case alreadyClosed
+        case alreadyStarted
+        case remoteICECandidateOverflow(Int)
         case invalidICEConfiguration(String)
         
         public var errorDescription: String? {
@@ -180,6 +182,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             case .screenFrameBudgetExceeded(let framedBytes, let bufferedAmount, let maxBufferedAmountBytes):
                 return "SBC2 屏幕帧超过发送预算：framedBytes=\(framedBytes) buffered=\(bufferedAmount) budget=\(maxBufferedAmountBytes)"
             case .alreadyClosed: return "WebRTCSession 已关闭"
+            case .alreadyStarted: return "WebRTCSession 已启动"
+            case .remoteICECandidateOverflow(let limit): return "远端 ICE 候选队列超过上限：\(limit)"
             case .invalidICEConfiguration(let message): return "ICE 配置无效：\(message)"
             }
         }
@@ -188,6 +192,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private let logger = Logger(subsystem: "com.skybridge.webrtc", category: "WebRTCSession")
     private static let controlChannelLabel = "skybridge"
     private static let screenChannelLabel = "skybridge-screen"
+    private static let maxPendingRemoteICECandidates = 256
+    private static let maxTrackedRemoteICECandidates = 512
     private static let maxPendingInboundControlBuffers = 64
     private static let maxPendingInboundControlBytes = 512 * 1024
     private static let maxPendingInboundScreenBuffers = 256
@@ -290,6 +296,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     
     private var isClosed = false
+    private var hasStarted = false
     private var sslHeld = false
     private var didNotifyDisconnected = false
     private var didNotifyReady = false
@@ -360,6 +367,23 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case .asyncOffStateQueue:
             callbackQueue.async(execute: DispatchWorkItem(block: operation))
         case .executeInline:
+            operation()
+        }
+    }
+
+    private func dispatchActiveLifecycleCallback(_ operation: @escaping () -> Void) {
+        let expectedLifecycleToken = withState { lifecycleToken }
+        dispatchCallback { [weak self] in
+            guard let self else { return }
+            let remainsActive = self.withState {
+                Self.lifecycleGuardAllowsCallback(
+                    peerConnectionMatches: true,
+                    isClosed: self.isClosed,
+                    currentLifecycleToken: self.lifecycleToken,
+                    expectedLifecycleToken: expectedLifecycleToken
+                )
+            }
+            guard remainsActive else { return }
             operation()
         }
     }
@@ -470,6 +494,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         withState {
             guard !isClosed else { return }
             isClosed = true
+            hasStarted = false
             didNotifyDisconnected = true
             didNotifyReady = false
             hasRemoteDescription = false
@@ -482,8 +507,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             pendingRemoteICECandidates.removeAll(keepingCapacity: false)
             seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
             latestObservedRemoteICECandidateAddress = nil
+            dataChannel?.delegate = nil
             dataChannel?.close()
             dataChannel = nil
+            screenDataChannel?.delegate = nil
             screenDataChannel?.close()
             screenDataChannel = nil
             localVideoTrack = nil
@@ -516,6 +543,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             lastOutgoingNativeVideoTargetFPS = 60
             lastOutgoingNativeVideoDisallowQualityDegradation = false
             lastOutgoingNativeVideoFrameLogAt = .distantPast
+            peerConnection?.delegate = nil
             peerConnection?.close()
             peerConnection = nil
             if sslHeld {
@@ -560,8 +588,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     private static var shouldForceRelayOnlyForSmoke: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil &&
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
+#else
+        false
+#endif
     }
 
 #if canImport(WebRTC)
@@ -628,6 +660,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     private func startOnStateQueue() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
+        guard !hasStarted else { throw WebRTCError.alreadyStarted }
+#if canImport(WebRTC)
+        // Validate configuration before retaining process-wide SSL state.
+        let iceServers = try buildIceServers()
+#endif
         didNotifyDisconnected = false
         didNotifyReady = false
         hasRemoteDescription = false
@@ -651,7 +688,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         if Self.shouldForceRelayOnlyForSmoke {
             config.iceTransportPolicy = .relay
         }
-        config.iceServers = try buildIceServers()
+        config.iceServers = iceServers
 
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
@@ -676,11 +713,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             let dcConfig = RTCDataChannelConfiguration()
             dcConfig.isOrdered = true
             dcConfig.isNegotiated = false
-            let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
-            dc?.delegate = self
+            guard let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig) else {
+                peerConnection?.close()
+                peerConnection = nil
+                sslHeld = false
+                WebRTCSSL.release()
+                throw WebRTCError.peerConnectionCreationFailed
+            }
+            dc.delegate = self
             self.dataChannel = dc
         }
 
+        hasStarted = true
         logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
 
         if role == .offerer {
@@ -706,7 +750,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 )
                 logLocalSDPSummary(kind: "offer-reemit", sdp: sdp)
                 let handler = onLocalOffer
-                dispatchCallback {
+                dispatchActiveLifecycleCallback {
                     handler?(sdp)
                 }
                 return true
@@ -743,7 +787,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return onReady
         }
         guard let handler else { return }
-        dispatchCallback {
+        dispatchActiveLifecycleCallback {
             handler()
         }
     }
@@ -771,7 +815,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         inboundDataLock.unlock()
 
         guard let handler else { return }
-        dispatchCallback {
+        dispatchActiveLifecycleCallback {
             buffered.forEach(handler)
         }
     }
@@ -798,7 +842,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         inboundScreenDataLock.unlock()
 
         guard let handler else { return }
-        dispatchCallback {
+        dispatchActiveLifecycleCallback {
             buffered.forEach(handler)
         }
     }
@@ -850,7 +894,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         guard let handler else { return }
-        dispatchCallback {
+        dispatchActiveLifecycleCallback {
             buffered.forEach(handler)
             handler(data)
         }
@@ -903,7 +947,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         guard let handler else { return }
-        dispatchCallback {
+        dispatchActiveLifecycleCallback {
             buffered.forEach(handler)
             handler(data)
         }
@@ -973,6 +1017,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.isSettingRemoteDescription = false
                     if let error {
                         self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
+                        self._onTrace?("set-remote-offer failed session=\(self.sessionId) reason=set_remote_offer_failed")
+                        self.notifyDisconnectedIfNeeded(reason: "set_remote_offer_failed")
+                        self.close()
                         return
                     }
                     self.hasRemoteDescription = true
@@ -1044,6 +1091,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                             return
                         }
                         self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
+                        self._onTrace?("set-remote-answer failed session=\(self.sessionId) reason=set_remote_answer_failed")
+                        self.notifyDisconnectedIfNeeded(reason: "set_remote_answer_failed")
+                        self.close()
                         return
                     }
                     self.hasRemoteDescription = true
@@ -1080,7 +1130,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             switch Self.pendingRemoteICEPlan(
                 isDuplicate: !self.trackRemoteICECandidateIfNeeded(cand),
                 hasRemoteDescription: self.hasRemoteDescription,
-                pendingCount: self.pendingRemoteICECandidates.count
+                pendingCount: self.pendingRemoteICECandidates.count,
+                maxPendingCount: Self.maxPendingRemoteICECandidates
             ) {
             case .ignoreDuplicate:
                 return
@@ -1089,6 +1140,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 self.logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(nextPendingCount, privacy: .public)")
             case .applyImmediately:
                 self.addRemoteICECandidateInternal(cand)
+            case .overflow:
+                self.rejectInvalidRemoteICECandidate(
+                    WebRTCError.remoteICECandidateOverflow(Self.maxPendingRemoteICECandidates),
+                    source: "trickle-overflow"
+                )
             }
         }
 #endif
@@ -1310,25 +1366,40 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             )
 
             var offset = 0
-            while offset < framed.count {
+            var didQueueFragment = false
+            do {
+                while offset < framed.count {
+                    try await waitForBufferedAmountBelow(
+                        maxBufferedAmountBytes,
+                        pollInterval: pollInterval,
+                        timeout: drainTimeout,
+                        channel: channel
+                    )
+                    let end = min(offset + maxChunkBytes, framed.count)
+                    let chunk = Data(framed[offset..<end])
+                    try send(chunk, over: channel)
+                    didQueueFragment = true
+                    offset = end
+                }
+
                 try await waitForBufferedAmountBelow(
                     maxBufferedAmountBytes,
                     pollInterval: pollInterval,
                     timeout: drainTimeout,
                     channel: channel
                 )
-                let end = min(offset + maxChunkBytes, framed.count)
-                let chunk = Data(framed[offset..<end])
-                try send(chunk, over: channel)
-                offset = end
+            } catch {
+                // A length-prefixed frame is atomic at the protocol layer. Once
+                // any fragment has entered the DataChannel, releasing the frame
+                // gate and reusing this channel after an interrupted send would
+                // desynchronize the receiver. Poison the session before the gate
+                // is released; callers may reconnect, but they may not append a
+                // new frame to an indeterminate byte stream.
+                if didQueueFragment {
+                    close()
+                }
+                throw error
             }
-
-            try await waitForBufferedAmountBelow(
-                maxBufferedAmountBytes,
-                pollInterval: pollInterval,
-                timeout: drainTimeout,
-                channel: channel
-            )
         }
     }
 
@@ -2263,6 +2334,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
         let mid = candidate.sdpMid?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let key = "\(candidate.sdpMLineIndex)|\(mid)|\(normalizedSDP)"
+        if !seenRemoteICECandidateKeys.contains(key),
+           seenRemoteICECandidateKeys.count >= Self.maxTrackedRemoteICECandidates {
+            rejectInvalidRemoteICECandidate(
+                WebRTCError.remoteICECandidateOverflow(Self.maxTrackedRemoteICECandidates),
+                source: "tracked-candidate-overflow"
+            )
+            return false
+        }
         let inserted = seenRemoteICECandidateKeys.insert(key).inserted
         if inserted, let address = Self.remoteICECandidateAddress(from: normalizedSDP) {
             latestObservedRemoteICECandidateAddress = address
@@ -2312,10 +2391,22 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     private func addRemoteICECandidateInternal(_ candidate: RTCIceCandidate) {
         guard let pc = peerConnection else { return }
-        pc.add(candidate) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.logger.error("⚠️ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+        let expectedLifecycleToken = lifecycleToken
+        pc.add(candidate) { [weak self, weak pc] error in
+            guard let self, let error else { return }
+            self.scheduleState { [weak self, weak pc] in
+                guard let self,
+                      let pc,
+                      Self.lifecycleGuardAllowsCallback(
+                          peerConnectionMatches: self.peerConnection === pc,
+                          isClosed: self.isClosed,
+                          currentLifecycleToken: self.lifecycleToken,
+                          expectedLifecycleToken: expectedLifecycleToken
+                      ) else { return }
+                self.logger.error("❌ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+                self._onTrace?("remote-ice failed session=\(self.sessionId) reason=add_ice_candidate_failed")
+                self.notifyDisconnectedIfNeeded(reason: "add_ice_candidate_failed")
+                self.close()
             }
         }
     }
@@ -2380,6 +2471,13 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 }
                 addRemoteICECandidateInternal(candidate)
             } else {
+                guard pendingRemoteICECandidates.count < Self.maxPendingRemoteICECandidates else {
+                    rejectInvalidRemoteICECandidate(
+                        WebRTCError.remoteICECandidateOverflow(Self.maxPendingRemoteICECandidates),
+                        source: "sdp-overflow"
+                    )
+                    return
+                }
                 pendingRemoteICECandidates.append(candidate)
             }
         }
@@ -2581,9 +2679,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                       ) else { return }
                 if let error {
                     self.logger.error("❌ offer failed: \(error.localizedDescription, privacy: .public)")
+                    self._onTrace?("create-offer failed session=\(self.sessionId) reason=create_offer_failed")
+                    self.notifyDisconnectedIfNeeded(reason: "create_offer_failed")
+                    self.close()
                     return
                 }
-                guard let sdp else { return }
+                guard let sdp else {
+                    self.logger.error("❌ offer completed without SDP")
+                    self.notifyDisconnectedIfNeeded(reason: "create_offer_missing_sdp")
+                    self.close()
+                    return
+                }
                 let rawSDPString = sdp.sdp
                 let sdpString = self.localSDPWithNativeScreenH264ConstraintsIfNeeded(
                     rawSDPString,
@@ -2605,12 +2711,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                               ) else { return }
                         if let err {
                             self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
+                            self._onTrace?("set-local-offer failed session=\(self.sessionId) reason=set_local_offer_failed")
+                            self.notifyDisconnectedIfNeeded(reason: "set_local_offer_failed")
+                            self.close()
                             return
                         }
                         self.logLocalSDPSummary(kind: "offer", sdp: sdpString)
                         self.lastEmittedLocalSDP = sdpString
                         let handler = self.onLocalOffer
-                        self.dispatchCallback {
+                        self.dispatchActiveLifecycleCallback {
                             handler?(sdpString)
                         }
                     }
@@ -2644,9 +2753,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                       ) else { return }
                 if let error {
                     self.logger.error("❌ answer failed: \(error.localizedDescription, privacy: .public)")
+                    self._onTrace?("create-answer failed session=\(self.sessionId) reason=create_answer_failed")
+                    self.notifyDisconnectedIfNeeded(reason: "create_answer_failed")
+                    self.close()
                     return
                 }
-                guard let sdp else { return }
+                guard let sdp else {
+                    self.logger.error("❌ answer completed without SDP")
+                    self.notifyDisconnectedIfNeeded(reason: "create_answer_missing_sdp")
+                    self.close()
+                    return
+                }
                 let rawSDPString = sdp.sdp
                 let sdpString = self.localSDPWithNativeScreenH264ConstraintsIfNeeded(
                     rawSDPString,
@@ -2668,12 +2785,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                               ) else { return }
                         if let err {
                             self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
+                            self._onTrace?("set-local-answer failed session=\(self.sessionId) reason=set_local_answer_failed")
+                            self.notifyDisconnectedIfNeeded(reason: "set_local_answer_failed")
+                            self.close()
                             return
                         }
                         self.logLocalSDPSummary(kind: "answer", sdp: sdpString)
                         self.lastEmittedLocalSDP = sdpString
                         let handler = self.onLocalAnswer
-                        self.dispatchCallback {
+                        self.dispatchActiveLifecycleCallback {
                             handler?(sdpString)
                         }
                     }
@@ -2717,12 +2837,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         switch role {
         case .offerer:
             let handler = onLocalOffer
-            dispatchCallback {
+            dispatchActiveLifecycleCallback {
                 handler?(sdp)
             }
         case .answerer:
             let handler = onLocalAnswer
-            dispatchCallback {
+            dispatchActiveLifecycleCallback {
                 handler?(sdp)
             }
         }
@@ -3047,7 +3167,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
                 sdpMid: candidate.sdpMid,
                 sdpMLineIndex: candidate.sdpMLineIndex
             )
-            self.dispatchCallback {
+            self.dispatchActiveLifecycleCallback {
                 handler?(payload)
             }
         }

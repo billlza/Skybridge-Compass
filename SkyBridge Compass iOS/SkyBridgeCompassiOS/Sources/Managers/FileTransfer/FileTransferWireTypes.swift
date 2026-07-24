@@ -7,6 +7,9 @@ public extension Notification.Name {
     static let fileTransferProgress = Notification.Name("FileTransferProgress")
     static let fileTransferCompleted = Notification.Name("FileTransferCompleted")
     static let fileTransferFailed = Notification.Name("FileTransferFailed")
+    static let fileTransferReceiptDeliveryUnknown = Notification.Name(
+        "FileTransferReceiptDeliveryUnknown"
+    )
     static let quantumCertValidationEvent = Notification.Name("QuantumCertValidationEvent")
 }
 
@@ -262,8 +265,13 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
     case networkStageFailed(stage: String, endpoint: String?, details: String)
     case timeout
     case receiptWaitFailed(stage: FileTransferReceiptWaitStage, details: String?)
+    case deliveryConfirmationUnknown
+    case partialFileCleanupFailed
+    case committedFileReleaseFailed
     case encryptionFailed
     case secureSessionRequired
+    case capacityExceeded
+    case invalidTransferState
 
     public var errorDescription: String? {
         switch self {
@@ -284,9 +292,82 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
         case .receiptWaitFailed(let stage, let details):
             let suffix = details.map { ": \($0)" } ?? ""
             return "等待接收端落盘回执失败(\(stage.rawValue))\(suffix)"
+        case .deliveryConfirmationUnknown:
+            return "文件数据已发送，但未收到落盘确认；为避免重复文件，系统不会自动重发"
+        case .partialFileCleanupFailed:
+            return "文件传输失败，且未完成文件清理失败"
+        case .committedFileReleaseFailed:
+            return "文件已安全落盘，但入站文件句柄释放失败"
         case .encryptionFailed: return "加密失败"
         case .secureSessionRequired: return "需要已认证的安全会话"
+        case .capacityExceeded: return "文件传输并发等待队列已满"
+        case .invalidTransferState: return "文件传输标识已被另一活动传输占用"
         }
+    }
+}
+
+enum ClassicTransferDeliveryConfirmationPolicy {
+    static func normalizedReceiptWaitError(_ error: Error) -> Error {
+        guard let transferError = error as? FileTransferError else {
+            return error
+        }
+        switch transferError {
+        case .receiptWaitFailed(let stage, _)
+            where stage == .headerTimeout || stage == .payloadTimeout:
+            return FileTransferError.deliveryConfirmationUnknown
+        case .networkStageFailed(let stage, _, _)
+            where stage == "receipt_header"
+                || stage == "receipt_header_connection_closed"
+                || stage == "receipt_payload"
+                || stage == "receipt_payload_connection_closed":
+            return FileTransferError.deliveryConfirmationUnknown
+        case .timeout:
+            return FileTransferError.deliveryConfirmationUnknown
+        default:
+            return transferError
+        }
+    }
+
+    static func isUnknown(_ error: Error) -> Bool {
+        guard let transferError = error as? FileTransferError,
+              case .deliveryConfirmationUnknown = transferError else {
+            return false
+        }
+        return true
+    }
+}
+
+enum WebRTCCompletionConfirmationPolicy {
+    static func normalizedWaitError(_ error: Error) -> Error {
+        if error is CancellationError {
+            // The complete frame may have committed remotely before cancellation
+            // interrupted only the local confirmation wait.
+            return FileTransferError.deliveryConfirmationUnknown
+        }
+        if let waitError = error as? CrossNetworkWebRTCManager.FileTransferWaitError {
+            switch waitError {
+            case .cancelled:
+                return FileTransferError.transferCancelled
+            case .timeout, .transportClosed:
+                return FileTransferError.deliveryConfirmationUnknown
+            }
+        }
+        if let transferError = error as? FileTransferError {
+            return transferError
+        }
+        return FileTransferError.deliveryConfirmationUnknown
+    }
+}
+
+enum WebRTCChunkAcknowledgmentRetryPolicy {
+    static func shouldRetry(after error: Error) -> Bool {
+        guard let waitError = error as? CrossNetworkWebRTCManager.FileTransferWaitError else {
+            return false
+        }
+        if case .timeout = waitError {
+            return true
+        }
+        return false
     }
 }
 

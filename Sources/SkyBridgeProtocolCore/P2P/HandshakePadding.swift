@@ -152,7 +152,10 @@ public enum HandshakePadding {
         return out
     }
 
-    public static func unwrapIfNeeded(_ data: Data, label: String? = nil) -> Data {
+    public static func unwrapIfNeeded(_ input: Data, label: String? = nil) -> Data {
+        // Handshake frames are size-bounded. Rebasing once makes every
+        // downstream wire-relative decoder safe for Data slices.
+        let data = Data(input)
         guard data.count >= headerLen else { return data }
         guard data.prefix(4).elementsEqual(magic) else { return data }
 

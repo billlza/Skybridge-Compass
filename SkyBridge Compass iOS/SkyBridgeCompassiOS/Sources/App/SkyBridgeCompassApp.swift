@@ -38,26 +38,36 @@ struct SkyBridgeCompassApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTeardownTask: Task<Void, Never>?
     @State private var didStartServices = false
+#if DEBUG || SKYBRIDGE_TESTING
     @State private var didInstallUITestFixtures = false
 
     private var isUITesting: Bool {
         SkyBridgeRuntimeEnvironment.isUITesting
     }
+#endif
 
     private var shouldSkipInteractiveStartup: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
         SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup
+#else
+        false
+#endif
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var shouldDisableAnimationsForUITests: Bool {
         SkyBridgeRuntimeEnvironment.shouldDisableAnimationsForUITests
     }
+#endif
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var shouldShowSmokeNativeRenderHost: Bool {
         let environment = ProcessInfo.processInfo.environment
         return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client"
             && environment["SKYBRIDGE_SMOKE_REQUIRE_NATIVE_VIDEO"] == "1"
             && environment["SKYBRIDGE_SMOKE_USE_NATIVE_RENDER_OVERLAY"] == "1"
     }
+#endif
     
     // MARK: - Scene Configuration
     
@@ -73,6 +83,7 @@ struct SkyBridgeCompassApp: App {
                 .environmentObject(localizationManager)
                 .environment(\.locale, localizationManager.locale)
                 .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
+#if DEBUG || SKYBRIDGE_TESTING
                 .overlay {
 #if canImport(WebRTC)
                     if shouldShowSmokeNativeRenderHost {
@@ -80,6 +91,7 @@ struct SkyBridgeCompassApp: App {
                     }
 #endif
                 }
+#endif
                 .onAppear {
                     setupApplication()
                     if !didStartServices {
@@ -90,6 +102,14 @@ struct SkyBridgeCompassApp: App {
                             await initializeServices()
                         }
                     }
+                }
+                .task(id: authManager.currentPathAuthenticationPrincipal) {
+                    let principal = shouldSkipInteractiveStartup
+                        ? nil
+                        : authManager.currentPathAuthenticationPrincipal
+                    await IOSCurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(
+                        authenticationPrincipal: principal
+                    )
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     Task { @MainActor in
@@ -107,15 +127,19 @@ struct SkyBridgeCompassApp: App {
     
     /// 设置应用初始化
     private func setupApplication() {
+#if DEBUG || SKYBRIDGE_TESTING
         if isUITesting && shouldDisableAnimationsForUITests {
             UIView.setAnimationsEnabled(false)
         }
+#endif
 
         if shouldSkipInteractiveStartup {
             SettingsManager.instance.enableRealTimeWeather = false
         }
 
+#if DEBUG || SKYBRIDGE_TESTING
         installUITestFixturesIfNeeded()
+#endif
 
         // BUILD FINGERPRINT (must be unmistakable in device logs)
         SkyBridgeLogger.shared.info("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
@@ -124,13 +148,16 @@ struct SkyBridgeCompassApp: App {
         // 配置日志系统
         SkyBridgeLogger.shared.configure(level: .debug)
 
-        if LocalWebRTCSmokeHarness.shared.isEnabled || LocalP2PSmokeHarness.shared.isEnabled || shouldSkipInteractiveStartup {
+#if DEBUG || SKYBRIDGE_TESTING
+        if LocalWebRTCSmokeHarness.shared.isEnabled
+            || LocalP2PSmokeHarness.shared.isEnabled
+            || shouldSkipInteractiveStartup {
             var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
             smokeDefaults["pqc_allow_classic_fallback"] = false
             UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
             UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
         }
-        
+
         // 请求必要的权限
         if shouldSkipInteractiveStartup {
             SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过交互式权限弹窗")
@@ -139,6 +166,9 @@ struct SkyBridgeCompassApp: App {
         } else {
             requestPermissions()
         }
+#else
+        requestPermissions()
+#endif
         
         // 配置通知
         if !shouldSkipInteractiveStartup {
@@ -154,14 +184,21 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.info("📱 iOS 版本: \(UIDevice.current.systemVersion)")
         SkyBridgeLogger.shared.info("📲 设备类型: \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")")
 
-        // Supabase config quick sanity (prints in device logs even if user profile refresh hasn't run yet)
-        if SupabaseService.Configuration.fromEnvironment(logIfMissing: false) != nil {
-            SkyBridgeLogger.shared.info("🔐 Supabase 配置状态=present")
-        } else {
-            SkyBridgeLogger.shared.info("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
+        // Supabase config quick sanity without blocking launch on Security.framework I/O.
+        Task { @MainActor in
+            do {
+                if try await SupabaseService.shared.availableConfiguration(logIfMissing: false) != nil {
+                    SkyBridgeLogger.shared.info("🔐 Supabase 配置状态=present")
+                } else {
+                    SkyBridgeLogger.shared.info("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
+                }
+            } catch {
+                SkyBridgeLogger.shared.error("❌ Supabase 安全配置读取失败: \(error.localizedDescription)")
+            }
         }
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private func installUITestFixturesIfNeeded() {
         guard isUITesting, !didInstallUITestFixtures else { return }
         didInstallUITestFixtures = true
@@ -181,7 +218,13 @@ struct SkyBridgeCompassApp: App {
                 portMap: [DiscoveredDevice.fileTransferServiceType: 8080]
             )
             fixtureConnections.append(fileConnection)
-            FileTransferManager.instance.installUITestHistoryFixture(for: fileConnection.device.name)
+            do {
+                try FileTransferManager.instance.installUITestHistoryFixture(
+                    for: fileConnection.device.name
+                )
+            } catch {
+                preconditionFailure("UI test file-transfer fixture installation failed")
+            }
         }
 
         if arguments.contains("UITEST_SCENARIO_REMOTE") {
@@ -262,6 +305,7 @@ struct SkyBridgeCompassApp: App {
             connectedAt: Date()
         )
     }
+#endif
     
     /// 初始化核心服务
     private func initializeServices() async {
@@ -271,16 +315,29 @@ struct SkyBridgeCompassApp: App {
         }
 
         do {
-            // Smoke IDs are accepted only at this explicit launch boundary and
-            // remain actor-memory-only. Production resolution ignores the
-            // environment and converges through the shared Keychain authority.
-            try await ProtocolDeviceIdentity.configureExplicitSmokeOverrideIfPresent()
-            _ = try await ProtocolDeviceIdentity.resolveDeviceId()
+            _ = try await IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()
         } catch {
             SkyBridgeLogger.shared.error(
-                "❌ 协议身份 authority 初始化失败，拒绝启动任何可通告服务: \(error.localizedDescription)"
+                "❌ Current-path authority 恢复失败；监听、发现与能力广告保持停用: \(error.localizedDescription)"
             )
             return
+        }
+
+        do {
+            switch try await QPeriaptIOSRuntime.prepareProductionSession() {
+            case .unprovisioned:
+                SkyBridgeLogger.shared.info(
+                    "ℹ️ Q-Periapt ABI2 未配置生产信任根；套件 0x0012 保持停用且不广告"
+                )
+            case .activated:
+                SkyBridgeLogger.shared.info("✅ Q-Periapt ABI2 生产策略会话已激活")
+            }
+        } catch is CancellationError {
+            SkyBridgeLogger.shared.info("ℹ️ Q-Periapt ABI2 启动准备已取消；套件保持停用")
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "❌ Q-Periapt ABI2 生产策略会话激活失败；套件保持停用: \(error.localizedDescription)"
+            )
         }
 
         do {
@@ -321,21 +378,11 @@ struct SkyBridgeCompassApp: App {
 
         // 5. 监听器启动完成后再发布 KVS presence。启动失败时会显式发布离线，
         // 避免 Mac 将心跳存活误判为 P2P 控制端口可达。
-        do {
-            try await ICloudDevicePresenceService.shared.start()
-        } catch {
-            SkyBridgeLogger.shared.error(
-                "❌ iCloud presence identity 初始化失败，保持离线: \(error.localizedDescription)"
-            )
-        }
+        ICloudDevicePresenceService.shared.start()
 
-        // 6. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
+        // 6. CloudKit 信任同步异步启动，不阻塞其余启动服务。
         if SettingsManager.instance.enableCloudKitSync {
-            SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：CloudKit 初始化")
-            let cloudKitStartedAt = Date()
-            await CloudKitSyncManager.instance.initialize()
-            let cloudKitElapsedMs = Int(Date().timeIntervalSince(cloudKitStartedAt) * 1000)
-            SkyBridgeLogger.shared.info("✅ CloudKit 同步已初始化 (\(cloudKitElapsedMs)ms)")
+            scheduleCloudKitTrustedDeviceSync(trigger: .startup)
         } else {
             SkyBridgeLogger.shared.info("ℹ️ CloudKit 同步未开启（SettingsManager.enableCloudKitSync = false）")
         }
@@ -353,9 +400,15 @@ struct SkyBridgeCompassApp: App {
         // 9. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：文件传输监听")
         let fileTransferStartedAt = Date()
-        await FileTransferRuntime.shared.startIfNeeded()
-        let fileTransferElapsedMs = Int(Date().timeIntervalSince(fileTransferStartedAt) * 1000)
-        SkyBridgeLogger.shared.info("✅ 文件传输监听步骤完成 (\(fileTransferElapsedMs)ms)")
+        do {
+            try await FileTransferRuntime.shared.startIfNeeded()
+            let fileTransferElapsedMs = Int(Date().timeIntervalSince(fileTransferStartedAt) * 1000)
+            SkyBridgeLogger.shared.info("✅ 文件传输监听步骤完成 (\(fileTransferElapsedMs)ms)")
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "❌ 文件传输监听不可用，已撤销本机文件传输能力广告: \(error.localizedDescription)"
+            )
+        }
 
         // 10. 启动灵动岛 Live Activity（显示天气或连接状态）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：Live Activity")
@@ -364,8 +417,10 @@ struct SkyBridgeCompassApp: App {
         let liveActivityElapsedMs = Int(Date().timeIntervalSince(liveActivityStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ Live Activity 启动步骤完成 (\(liveActivityElapsedMs)ms)")
         SkyBridgeLogger.shared.info("✅ 启动服务初始化流程已完成")
+#if DEBUG || SKYBRIDGE_TESTING
         await LocalP2PSmokeHarness.shared.startIfNeeded()
         await LocalWebRTCSmokeHarness.shared.startIfNeeded()
+#endif
     }
 
     /// 初始化灵动岛 Live Activity
@@ -465,14 +520,9 @@ struct SkyBridgeCompassApp: App {
                 SkyBridgeLogger.shared.error("❌ 前台恢复 P2P 监听器失败: \(error.localizedDescription)")
             }
             // 回到前台：在监听器启动结果确定后重启 presence。start() 会立即发布一次。
-            do {
-                try await ICloudDevicePresenceService.shared.start()
-            } catch {
-                SkyBridgeLogger.shared.error(
-                    "❌ 前台恢复 iCloud presence 失败，保持离线: \(error.localizedDescription)"
-                )
-            }
+            ICloudDevicePresenceService.shared.start()
             applyClipboardSettings()
+            scheduleCloudKitTrustedDeviceSync(trigger: .foreground)
 
         case .background:
             // 后台：若不允许后台连接，则关掉 discovery + listener（省电）
@@ -507,6 +557,27 @@ struct SkyBridgeCompassApp: App {
 
         default:
             break
+        }
+    }
+
+    private func scheduleCloudKitTrustedDeviceSync(
+        trigger: CloudKitSyncManager.TrustedDeviceSyncTrigger
+    ) {
+        guard SettingsManager.instance.enableCloudKitSync else { return }
+
+        // CloudKit APIs are async; the utility-priority lifecycle task lets
+        // startup/foreground work continue while the manager single-flights
+        // overlapping requests and publishes completion/error state.
+        Task(priority: .utility) { @MainActor in
+            do {
+                try await CloudKitSyncManager.instance.refreshTrustedDevices(
+                    trigger: trigger
+                )
+            } catch {
+                SkyBridgeLogger.shared.error(
+                    "⛔️ CloudKit 生命周期同步失败: trigger=\(trigger.rawValue) error=\(CloudKitSyncManager.safeErrorSummary(error))"
+                )
+            }
         }
     }
 

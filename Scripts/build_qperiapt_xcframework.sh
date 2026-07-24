@@ -13,30 +13,30 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/qperiapt_install_transaction.sh"
 
-QPERIAPT_RELEASE_TAG="v0.1.0-alpha.2"
+QPERIAPT_RELEASE_TAG="v0.1.0-alpha.2-r1"
 QPERIAPT_RELEASE_BASE_URL="https://github.com/billlza/q-periapt/releases/download/${QPERIAPT_RELEASE_TAG}"
 QPERIAPT_RELEASE_DIR="${QPERIAPT_RELEASE_DIR:-}"
 QPERIAPT_BUILD_ROOT="${QPERIAPT_BUILD_ROOT:-$ROOT_DIR/.build/qperiapt-abi2-release}"
 
-QPERIAPT_ZIP_SHA256="22dd93c69fae763eeb341157542f7a4acf19c4ecadb31f88bdf2af09098c1f06"
-QPERIAPT_MANIFEST_SHA256="29d0e971520178c8e636ea3e52a817a27062aeceb4cfc744c371835381b6cee4"
-QPERIAPT_DISTRIBUTION_SHA256="697aa87da548ef60fa3e8333d827c9ccf6215bacf73d0afadb55583546f78ec3"
-QPERIAPT_SUMS_SHA256="cb9e22571450ac8d6df274484959f263d4e71219c4c5ed6c72a44a57dcbdd3a3"
+QPERIAPT_ZIP_SHA256="4480061244b5844cd1ff2349c05d261d0455db68c459449be33cbab63c94be0f"
+QPERIAPT_MANIFEST_SHA256="0eafcf6989fe40835e9f2550098d1165d958b6bbe27373ba5ead9ee1a1757439"
+QPERIAPT_DISTRIBUTION_SHA256="5d92029803d66864b1b964ccb539f6e613a97be57b084cc845e178cbcb2b415b"
+QPERIAPT_SUMS_SHA256="253a5888eb0f4eaae301ce2b7d59e1554369c4eeaa594f5939cdd6b9b0874e98"
 QPERIAPT_HEADER_SHA256="6e5be78c9b43fa245777eabd84dea4a137ecd6ebdb0266fa018a8aa4e3f1771f"
 QPERIAPT_ABI_CONTRACT_SHA256="a8b49d6df4f0fc3b80eeb5ae3e200cbab94842128926e47e0aace036f90651f9"
-QPERIAPT_SOURCE_COMMIT="f15917ee7daa7b07976ee147eb102d2afb468b76"
+QPERIAPT_SOURCE_COMMIT="5664fd86a617f92b620ea37e7692d3417d0e307d"
 QPERIAPT_TEAM_ID="YKUPL7Z869"
 QPERIAPT_AUTHORITY="Developer ID Application: Zi ang Li (YKUPL7Z869)"
-QPERIAPT_CDHASH="5f58bb35e1547e197315d21c588179fe9d1b250a"
+QPERIAPT_CDHASH="86ad573a34e57e02e7d34ab203d3fa750e917395"
 
-MAC_LIBRARY_SHA256="a2051d393c49a1960509c0304c28b9eac516803b0268ca856aad55dd06415865"
-IOS_LIBRARY_SHA256="a8fc015ff871611810a484b566ce5179a375c3753d60b7f9b0faf80140fee616"
-IOS_SIM_LIBRARY_SHA256="d92e9dfafddf46756edc416168f4efe47b5636b800d92797a7a5443f708fd3bb"
+MAC_LIBRARY_SHA256="7c64f5ff2bd166458bf68d95667066bf85612737a6d65f885fe1038157bdc6cb"
+IOS_LIBRARY_SHA256="7088a0b5a26becd28728136dcf5fe2d0ce736914ee112f11ef3bfa7710ed6d6a"
+IOS_SIM_LIBRARY_SHA256="ff7b7e6c47a96d0a53e4ca940b3be1d9bdcdfc7f1975ceb28f6813086f476335"
 LIB_NAME="libq_periapt_ffi_abi2.a"
 
 FINAL_OUT="$ROOT_DIR/Sources/Vendor/qperiapt.xcframework"
 CQPERIAPT_HEADER_OUT="$ROOT_DIR/Sources/CQPeriapt/include/q_periapt.h"
-PROVENANCE_SOURCE="$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2.json"
+PROVENANCE_SOURCE="$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json"
 TRANSACTION_JOURNAL="$ROOT_DIR/.build/qperiapt-vendor-install-transaction"
 
 DOWNLOAD_DIR="$QPERIAPT_BUILD_ROOT/release"
@@ -133,7 +133,7 @@ manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 distribution = json.loads(pathlib.Path(distribution_path).read_text(encoding="utf-8"))
 
 expected_manifest = {
-    "schema_version": 4,
+    "schema_version": 5,
     "version": "0.1.0-alpha.2",
     "git_commit": source_commit,
 }
@@ -148,13 +148,19 @@ if manifest.get("abi", {}).get("contract_sha256") != abi_sha:
     raise SystemExit("MANIFEST.json ABI contract hash mismatch")
 if manifest.get("artifacts", {}).get("xcframework_zip", {}).get("sha256") != zip_sha:
     raise SystemExit("MANIFEST.json XCFramework hash mismatch")
+release_identity = manifest.get("release_identity", {})
+if release_identity.get("tag") != "v0.1.0-alpha.2-r1" or release_identity.get("revision") != "r1":
+    raise SystemExit("MANIFEST.json release identity mismatch")
 
-if distribution.get("schema_version") != 2:
+if distribution.get("schema_version") != 3:
     raise SystemExit("APPLE_DISTRIBUTION.json schema mismatch")
 if distribution.get("source_commit") != source_commit:
     raise SystemExit("APPLE_DISTRIBUTION.json source commit mismatch")
 if distribution.get("artifact", {}).get("sha256") != zip_sha:
     raise SystemExit("APPLE_DISTRIBUTION.json artifact hash mismatch")
+distribution_identity = distribution.get("release_identity", {})
+if distribution_identity.get("tag") != "v0.1.0-alpha.2-r1" or distribution_identity.get("revision") != "r1":
+    raise SystemExit("APPLE_DISTRIBUTION.json release identity mismatch")
 signature = distribution.get("origin_signature", {}).get("signature", {})
 if signature.get("team_id") != team_id or signature.get("strict_verification") is not True:
     raise SystemExit("APPLE_DISTRIBUTION.json signature identity mismatch")
@@ -201,7 +207,7 @@ with zipfile.ZipFile(archive) as bundle:
         missing = sorted(expected.difference(names))
         extra = sorted(set(names).difference(expected))
         raise SystemExit(f"unexpected XCFramework archive shape; missing={missing}, extra={extra}")
-    if sum(entry.file_size for entry in entries) != 90_064_330:
+    if sum(entry.file_size for entry in entries) != 90_070_019:
         raise SystemExit("unexpected XCFramework uncompressed size")
     for entry in entries:
         path = pathlib.PurePosixPath(entry.filename)

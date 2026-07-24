@@ -41,6 +41,7 @@ public final class ConnectionApprovalService: ObservableObject {
 
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "ConnectionApproval")
     private let laContext = LAContext()
+    private var cleanupTask: Task<Void, Never>?
 
     // 回调
     public var onApprovalRequired: ((ConnectionApprovalRequest) -> Void)?
@@ -68,10 +69,15 @@ public final class ConnectionApprovalService: ObservableObject {
         checkBiometricAvailability()
 
         // 定期清理过期请求
-        Task {
-            while true {
-                await cleanupExpiredRequests()
-                try? await Task.sleep(for: .seconds(10))
+        cleanupTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.cleanupExpiredRequests()
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch {
+                    return
+                }
             }
         }
 

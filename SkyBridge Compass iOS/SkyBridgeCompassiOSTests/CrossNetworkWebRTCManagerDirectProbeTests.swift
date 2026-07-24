@@ -6,6 +6,120 @@ import CryptoKit
 final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     private var inboundProbeCounter: UInt64 = 0
 
+    func testStrictWebRTCJoinBootstrapValidatesAndBindsMLDSA87Authority() throws {
+        let remoteDeviceId = "device-\(UUID().uuidString.lowercased())"
+        let publicKey = Data(repeating: 0x87, count: 2_592)
+        let fingerprint = CurrentPathSecurityCompat.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: publicKey
+        )
+        let kemPublicKey = Data(repeating: 0x42, count: 1_216)
+        let payload = WebRTCSignalingEnvelope.Payload(
+            protocolSigningAlgorithm: .mlDSA87,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: publicKey,
+            kemPublicKeys: [
+                .init(suiteWireId: CryptoSuite.xwing.wireId, publicKey: kemPublicKey)
+            ],
+            platform: "iOS",
+            osVersion: "iOS 26.0"
+        )
+
+        let validated = try XCTUnwrap(
+            CrossNetworkWebRTCManager.validatedWebRTCJoinBootstrap(
+                payload,
+                from: remoteDeviceId,
+                expectedAuthority: nil,
+                requiresStrictPQC: true
+            )
+        )
+
+        XCTAssertEqual(validated.authority.deviceId, remoteDeviceId)
+        XCTAssertEqual(validated.authority.protocolSigningAlgorithm, .mlDSA87)
+        XCTAssertEqual(validated.authority.protocolPublicKeyFingerprint, fingerprint)
+        XCTAssertEqual(validated.authority.protocolPublicKeyBytes, publicKey)
+        XCTAssertEqual(validated.kemPublicKeys, [
+            KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwing.wireId, publicKey: kemPublicKey)
+        ])
+    }
+
+    func testStrictWebRTCJoinBootstrapRejectsTamperMismatchAndMissingKEM() throws {
+        let remoteDeviceId = "device-\(UUID().uuidString.lowercased())"
+        let publicKey = Data(repeating: 0x65, count: 1_952)
+        let fingerprint = CurrentPathSecurityCompat.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: publicKey
+        )
+        let validKEM = WebRTCSignalingEnvelope.Payload.BootstrapKEMPublicKey(
+            suiteWireId: CryptoSuite.mlkem768.wireId,
+            publicKey: Data(repeating: 0x24, count: 1_184)
+        )
+        let validPayload = WebRTCSignalingEnvelope.Payload(
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: publicKey,
+            kemPublicKeys: [validKEM],
+            platform: "iOS",
+            osVersion: "iOS 26.0"
+        )
+        let expected = CurrentPathRemoteAuthorityCompat(
+            deviceId: remoteDeviceId,
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: publicKey,
+            deviceName: "Peer"
+        )
+
+        var tamperedKey = publicKey
+        tamperedKey[0] ^= 0x01
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCManager.validatedWebRTCJoinBootstrap(
+                WebRTCSignalingEnvelope.Payload(
+                    protocolSigningAlgorithm: .mlDSA65,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    protocolPublicKeyBytes: tamperedKey,
+                    kemPublicKeys: [validKEM],
+                    platform: "iOS",
+                    osVersion: "iOS 26.0"
+                ),
+                from: remoteDeviceId,
+                expectedAuthority: expected,
+                requiresStrictPQC: true
+            )
+        ) { error in
+            XCTAssertEqual(error as? CurrentPathJoinBootstrapError, .invalidIdentity)
+        }
+
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCManager.validatedWebRTCJoinBootstrap(
+                validPayload,
+                from: "different-\(UUID().uuidString.lowercased())",
+                expectedAuthority: expected,
+                requiresStrictPQC: true
+            )
+        ) { error in
+            XCTAssertEqual(error as? CurrentPathJoinBootstrapError, .authorityMismatch)
+        }
+
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCManager.validatedWebRTCJoinBootstrap(
+                WebRTCSignalingEnvelope.Payload(
+                    protocolSigningAlgorithm: .mlDSA65,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    protocolPublicKeyBytes: publicKey,
+                    kemPublicKeys: [],
+                    platform: "iOS",
+                    osVersion: "iOS 26.0"
+                ),
+                from: remoteDeviceId,
+                expectedAuthority: expected,
+                requiresStrictPQC: true
+            )
+        ) { error in
+            XCTAssertEqual(error as? CurrentPathJoinBootstrapError, .missingKEM)
+        }
+    }
+
     func testControlChannelCodecLabelsBootstrapAppMessageKinds() {
         XCTAssertEqual(
             CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.heartbeat(.init())),
@@ -563,6 +677,29 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     }
 
     @MainActor
+    func testScreenChannelDirectEnvelopeProbeAcceptsNonZeroStartIndexSliceAndRejectsTruncation() {
+        let directEnvelope = Data([0x53, 0x42, 0x52, 0x46, 0x01, 0x02])
+        var storage = Data([0xA0, 0xA1, 0xA2])
+        storage.append(directEnvelope)
+        storage.append(0xA3)
+        let directSlice = storage[3..<(3 + directEnvelope.count)]
+        let truncatedSlice = directSlice.prefix(3)
+        let decoder = CrossNetworkWebRTCManager.ScreenChannelWireDecoder(
+            maxInboundFrameBytes: 8_000_000
+        )
+
+        XCTAssertEqual(directSlice.startIndex, 3)
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.InboundFrameParser.knownDirectEnvelopeName(directSlice),
+            "SBRF"
+        )
+        XCTAssertTrue(decoder.shouldKeepOutOfLengthParser(directSlice))
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.InboundFrameParser.knownDirectEnvelopeName(truncatedSlice)
+        )
+    }
+
+    @MainActor
     func testScreenChannelLengthFramedSBP2PayloadDecodes() throws {
         let keys = makeSessionKeys()
         let ciphertext = try encryptForInboundProbe(makeScreenFrameWirePlaintext(), keys: keys)
@@ -687,6 +824,36 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             try CrossNetworkWebRTCManager.testOnlyDecodeEncryptedScreenChannelPayloadKind(payload, keys: keys),
             "screen"
         )
+    }
+
+    @MainActor
+    func testScreenChannelSBC2DecodersAcceptNonZeroStartIndexSliceAndRejectTruncation() throws {
+        let payload = Data([0x10, 0x20, 0x30, 0x40])
+        let chunk = try XCTUnwrap(
+            makeSBC2Chunks(payload: payload, frameId: 88, maxChunkBytes: 64 * 1_024).first
+        )
+        var storage = Data([0xB0, 0xB1])
+        storage.append(chunk)
+        storage.append(0xB2)
+        let chunkSlice = storage[2..<(2 + chunk.count)]
+        let truncatedSlice = chunkSlice.dropLast()
+
+        XCTAssertEqual(chunkSlice.startIndex, 2)
+        XCTAssertTrue(CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope.startsWithMagic(chunkSlice))
+        let screenChannelEnvelope = try XCTUnwrap(
+            CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope.decode(chunkSlice)
+        )
+        XCTAssertEqual(screenChannelEnvelope.frameId, 88)
+        XCTAssertEqual(screenChannelEnvelope.payload, payload)
+        XCTAssertNil(CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope.decode(truncatedSlice))
+
+        XCTAssertTrue(RemoteDesktopScreenFrameWire.startsWithChunkMagic(chunkSlice))
+        let remoteDesktopEnvelope = try XCTUnwrap(
+            RemoteDesktopScreenFrameWire.decodeChunkEnvelopeIfPresent(chunkSlice)
+        )
+        XCTAssertEqual(remoteDesktopEnvelope.frameId, 88)
+        XCTAssertEqual(remoteDesktopEnvelope.payload, payload)
+        XCTAssertNil(RemoteDesktopScreenFrameWire.decodeChunkEnvelopeIfPresent(truncatedSlice))
     }
 
     @MainActor
@@ -947,6 +1114,107 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             offset = end
         }
         return chunks
+    }
+
+    func testWebRTCAuthorityCommitPrecedesAllInitialAndRekeyStatePublication() throws {
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+
+        let outboundInitialStart = try XCTUnwrap(source.range(of: "func startHandshakeOverWebRTC("))
+        let outboundInitialEnd = try XCTUnwrap(
+            source.range(of: "nonisolated private static func webRTCPQCRekeyProvider", range: outboundInitialStart.lowerBound..<source.endIndex)
+        )
+        let outboundInitial = String(source[outboundInitialStart.lowerBound..<outboundInitialEnd.lowerBound])
+        assertAuthorityCommitPrecedesPublishedSession(
+            in: outboundInitial,
+            sessionKeyNeedle: "self.sessionKeys = keys",
+            connectedNeedle: "self.state = .connected",
+            routeNeedle: "await self.sendLocalAuthenticatedRouteBindings("
+        )
+        XCTAssertTrue(outboundInitial.contains("driver.getAuthenticatedRemoteAuthority()"))
+
+        let inboundRekeyStart = try XCTUnwrap(source.range(of: "private func syncInboundPQCRekeyState("))
+        let inboundRekeyEnd = try XCTUnwrap(
+            source.range(of: "private func syncInboundInitialHandshakeState(", range: inboundRekeyStart.lowerBound..<source.endIndex)
+        )
+        let inboundRekey = String(source[inboundRekeyStart.lowerBound..<inboundRekeyEnd.lowerBound])
+        assertAuthorityCommitPrecedesPublishedSession(
+            in: inboundRekey,
+            sessionKeyNeedle: "sessionKeys = keys",
+            connectedNeedle: "state = .connected",
+            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
+        )
+        XCTAssertTrue(inboundRekey.contains("stage: \"inbound-rekey\""))
+
+        let inboundInitialStart = try XCTUnwrap(source.range(of: "private func syncInboundInitialHandshakeState("))
+        let inboundInitialEnd = try XCTUnwrap(
+            source.range(of: "func sendAppMessageOverWebRTC(", range: inboundInitialStart.lowerBound..<source.endIndex)
+        )
+        let inboundInitial = String(source[inboundInitialStart.lowerBound..<inboundInitialEnd.lowerBound])
+        assertAuthorityCommitPrecedesPublishedSession(
+            in: inboundInitial,
+            sessionKeyNeedle: "sessionKeys = keys",
+            connectedNeedle: "state = .connected",
+            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
+        )
+        XCTAssertTrue(inboundInitial.contains("stage: \"inbound-initial\""))
+
+        let outboundRekeyStart = try XCTUnwrap(source.range(of: "func maybeStartPQCRekeyOverWebRTC("))
+        let outboundRekeyEnd = try XCTUnwrap(
+            source.range(of: "private extension CrossNetworkWebRTCManager", range: outboundRekeyStart.lowerBound..<source.endIndex)
+        )
+        let outboundRekey = String(source[outboundRekeyStart.lowerBound..<outboundRekeyEnd.lowerBound])
+        assertAuthorityCommitPrecedesPublishedSession(
+            in: outboundRekey,
+            sessionKeyNeedle: "sessionKeys = rekeyed",
+            connectedNeedle: "state = .connected",
+            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
+        )
+        XCTAssertTrue(outboundRekey.contains("driver.getAuthenticatedRemoteAuthority()"))
+        XCTAssertTrue(outboundRekey.contains("error is CurrentPathAuthorityCommitError"))
+        XCTAssertTrue(outboundRekey.contains("stage: \"outbound-rekey\""))
+    }
+
+    func testWebRTCAuthorityCommitFailureTerminatesInsteadOfRetainingPostRekeySession() throws {
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func failCurrentPathAuthorityCommit("))
+        let end = try XCTUnwrap(
+            source.range(of: "func authenticatedInboundFileTransferSenderAuthority", range: start.lowerBound..<source.endIndex)
+        )
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("await terminateRemoteDesktopSession("))
+        XCTAssertTrue(body.contains("state = .failed(message)"))
+        XCTAssertTrue(body.contains("readiness = .idle"))
+    }
+
+    private func assertAuthorityCommitPrecedesPublishedSession(
+        in source: String,
+        sessionKeyNeedle: String,
+        connectedNeedle: String,
+        routeNeedle: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let commit = source.range(of: "persistCurrentPathTrust("),
+              let sessionKeys = source.range(of: sessionKeyNeedle),
+              let connected = source.range(of: connectedNeedle),
+              let route = source.range(of: routeNeedle) else {
+            XCTFail("Expected authority commit and publication markers", file: file, line: line)
+            return
+        }
+        XCTAssertLessThan(commit.lowerBound, sessionKeys.lowerBound, file: file, line: line)
+        XCTAssertLessThan(commit.lowerBound, connected.lowerBound, file: file, line: line)
+        XCTAssertLessThan(commit.lowerBound, route.lowerBound, file: file, line: line)
+        if let heartbeat = source.range(of: "startRemotePeer") {
+            XCTAssertLessThan(commit.lowerBound, heartbeat.lowerBound, file: file, line: line)
+        }
+        if let desktopHeartbeat = source.range(of: "startRemoteDesktopHeartbeat()") {
+            XCTAssertLessThan(commit.lowerBound, desktopHeartbeat.lowerBound, file: file, line: line)
+        }
     }
 
     private func makeScreenFrameWirePlaintext() -> Data {

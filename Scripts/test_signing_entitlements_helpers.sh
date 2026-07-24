@@ -408,4 +408,105 @@ fi
 [[ "$(skybridge_read_plist_string "${INFO_PLIST}" "SKYBRIDGE_APPLE_SIGN_IN_MODE")" == "web_session" ]] \
   || fail "forcing web_session mode should update Info.plist Apple Sign In mode"
 
+DEVELOPER_ID_PROFILE="${TMP_DIR}/developer-id-profile.plist"
+DEVELOPER_CERT_SHA1="$(python3 - "${DEVELOPER_ID_PROFILE}" <<'PY'
+import datetime as dt
+import hashlib
+import plistlib
+import sys
+from pathlib import Path
+
+certificate = b"skybridge-test-developer-id-certificate"
+profile = {
+    "Platform": ["OSX"],
+    "ProvisionsAllDevices": True,
+    "ExpirationDate": dt.datetime.now() + dt.timedelta(days=1),
+    "DeveloperCertificates": [certificate],
+    "Entitlements": {},
+}
+Path(sys.argv[1]).write_bytes(plistlib.dumps(profile))
+print(hashlib.sha1(certificate).hexdigest().upper())
+PY
+)"
+
+if ! skybridge_validate_developer_id_distribution_profile_certificate \
+  "${DEVELOPER_ID_PROFILE}" \
+  "${DEVELOPER_CERT_SHA1}"; then
+  fail "current Developer ID distribution profile should accept its embedded certificate fingerprint"
+fi
+
+if skybridge_validate_developer_id_distribution_profile_certificate \
+  "${DEVELOPER_ID_PROFILE}" \
+  "0000000000000000000000000000000000000000"; then
+  fail "Developer ID distribution profile must reject a certificate fingerprint absent from DeveloperCertificates"
+fi
+
+python3 - "${DEVELOPER_ID_PROFILE}" <<'PY'
+import datetime as dt
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile = plistlib.loads(path.read_bytes())
+profile["ExpirationDate"] = dt.datetime.now() - dt.timedelta(days=1)
+path.write_bytes(plistlib.dumps(profile))
+PY
+if skybridge_validate_developer_id_distribution_profile_certificate \
+  "${DEVELOPER_ID_PROFILE}" \
+  "${DEVELOPER_CERT_SHA1}"; then
+  fail "expired Developer ID distribution profile must fail closed"
+fi
+
+python3 - "${DEVELOPER_ID_PROFILE}" <<'PY'
+import datetime as dt
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile = plistlib.loads(path.read_bytes())
+profile["ExpirationDate"] = dt.datetime.now() + dt.timedelta(days=1)
+profile["Entitlements"]["get-task-allow"] = False
+path.write_bytes(plistlib.dumps(profile))
+PY
+if skybridge_validate_developer_id_distribution_profile_certificate \
+  "${DEVELOPER_ID_PROFILE}" \
+  "${DEVELOPER_CERT_SHA1}"; then
+  fail "Developer ID distribution profile must reject any get-task-allow entitlement"
+fi
+
+python3 - "${DEVELOPER_ID_PROFILE}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile = plistlib.loads(path.read_bytes())
+profile["Entitlements"].pop("get-task-allow", None)
+profile["ProvisionedDevices"] = ["test-device"]
+path.write_bytes(plistlib.dumps(profile))
+PY
+if skybridge_validate_developer_id_distribution_profile_certificate \
+  "${DEVELOPER_ID_PROFILE}" \
+  "${DEVELOPER_CERT_SHA1}"; then
+  fail "Developer ID distribution profile must reject a device allow-list"
+fi
+
+OLD_CERT_SHA1="1111111111111111111111111111111111111111"
+NEW_CERT_SHA1="2222222222222222222222222222222222222222"
+selected_hash="$(
+  skybridge_select_unique_profile_bound_codesign_identity_hash \
+    "${OLD_CERT_SHA1}"$'\n'"${NEW_CERT_SHA1}" \
+    "${NEW_CERT_SHA1}"
+)"
+[[ "${selected_hash}" == "${NEW_CERT_SHA1}" ]] \
+  || fail "profile intersection should select the one current certificate among same-authority renewal candidates"
+
+if skybridge_select_unique_profile_bound_codesign_identity_hash \
+  "${OLD_CERT_SHA1}"$'\n'"${NEW_CERT_SHA1}" \
+  "${OLD_CERT_SHA1}"$'\n'"${NEW_CERT_SHA1}"; then
+  fail "profile intersection must reject multiple current same-authority certificates"
+fi
+
 echo "[test] signing entitlements helpers passed"

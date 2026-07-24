@@ -480,6 +480,10 @@ enum WebRTCControlChannelCodec {
             return "protocolIdentityBindingRequest"
         case .signedProtocolIdentityBinding:
             return "signedProtocolIdentityBinding"
+        case .protocolIdentityBindingConfirm:
+            return "protocolIdentityBindingConfirm"
+        case .signedProtocolIdentityBindingFinalAck:
+            return "signedProtocolIdentityBindingFinalAck"
         case .heartbeat:
             return "heartbeat"
         case .authenticatedRouteBinding:

@@ -135,11 +135,18 @@ fn smoke_suite_security_notice_profiles_include_artifact_check() -> Result<()> {
         "security notice profile should not start a second full GUI app while the P2P remote-control session is active"
     );
     assert!(
-        !real_notice_check
+        !real_notice_smoke
+            .env
+            .iter()
+            .any(|(name, _)| name == "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE"),
+        "physical P2P security notice acceptance must require an explicit human decision"
+    );
+    assert!(
+        real_notice_check
             .args
             .iter()
             .any(|arg| arg == "--require-panel"),
-        "LocalLanInteropHost verifies real P2P notice lifecycle; production AppKit panel evidence is covered by local-macos-security-notice-panel"
+        "The physical P2P profile must verify that LocalLanInteropHost presented the explicit AppKit notice panel"
     );
     Ok(())
 }

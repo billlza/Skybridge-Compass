@@ -185,7 +185,7 @@ public struct ClassicCryptoProvider: CryptoProvider, Sendable {
             )
         }
         
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         guard let myPrivateKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keyData) else {
             throw CryptoProviderError.invalidKeyFormat
         }
@@ -243,7 +243,7 @@ public struct ClassicCryptoProvider: CryptoProvider, Sendable {
             )
         }
         
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         guard let myPrivateKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keyData) else {
             throw CryptoProviderError.invalidKeyFormat
         }
@@ -350,7 +350,7 @@ public struct ClassicCryptoProvider: CryptoProvider, Sendable {
             )
         }
         
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         guard let myPrivateKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keyData) else {
             throw CryptoProviderError.invalidKeyFormat
         }
@@ -484,4 +484,3 @@ private extension ClassicCryptoProvider {
     }
     #endif
 }
-

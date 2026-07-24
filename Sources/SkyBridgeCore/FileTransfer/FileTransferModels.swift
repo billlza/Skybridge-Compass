@@ -414,7 +414,7 @@ public class FileTransferSession: ObservableObject, Identifiable {
 // MARK: - 传输类型
 
 /// 传输类型枚举
-public enum TransferType: String, CaseIterable, Codable {
+public enum TransferType: String, CaseIterable, Codable, Sendable {
     case send = "send"      // 发送文件
     case receive = "receive" // 接收文件
     
@@ -549,7 +549,7 @@ public struct FileTransferRequest: Codable, Identifiable {
 // MARK: - 文件传输元数据
 
 /// 文件传输元数据结构
-public struct FileTransferMetadata: Codable {
+public struct FileTransferMetadata: Codable, Sendable {
     public let transferId: String
     public let fileName: String
     public let fileSize: Int64
@@ -617,7 +617,7 @@ public struct FileTransferMetadata: Codable {
 // MARK: - 文件数据块包
 
 /// 文件数据块包结构
-public struct FileChunkPacket: Codable {
+public struct FileChunkPacket: Codable, Sendable {
     public let transferId: String
     public let chunkIndex: Int
     public let totalChunks: Int
@@ -672,7 +672,7 @@ public struct FileChunkPacket: Codable {
 // MARK: - 传输记录
 
 /// 文件传输历史记录
-public struct FileTransferRecord: Codable, Identifiable {
+public struct FileTransferRecord: Codable, Identifiable, Sendable {
     public let id: String
     public let fileName: String
     public let fileSize: Int64

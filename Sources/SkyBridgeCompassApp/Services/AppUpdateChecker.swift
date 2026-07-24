@@ -101,14 +101,27 @@ struct SkyBridgeAppUpdateChecker: Sendable {
     init(
         manifestURL: URL = Self.defaultManifestURL(),
         fetcher: any SkyBridgeAppUpdateManifestFetching = URLSessionSkyBridgeAppUpdateManifestFetcher(),
-        trustedSigningKeys: [SkyBridgeAppUpdateTrustedSigningKey] = Self.defaultTrustedSigningKeys(),
         sequenceStore: any SkyBridgeAppUpdateSequenceStoring = UserDefaultsSkyBridgeAppUpdateSequenceStore()
+    ) {
+        self.manifestURL = manifestURL
+        self.fetcher = fetcher
+        self.trustedSigningKeys = Self.defaultTrustedSigningKeys()
+        self.sequenceStore = sequenceStore
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    init(
+        manifestURL: URL,
+        fetcher: any SkyBridgeAppUpdateManifestFetching,
+        trustedSigningKeys: [SkyBridgeAppUpdateTrustedSigningKey],
+        sequenceStore: any SkyBridgeAppUpdateSequenceStoring
     ) {
         self.manifestURL = manifestURL
         self.fetcher = fetcher
         self.trustedSigningKeys = trustedSigningKeys
         self.sequenceStore = sequenceStore
     }
+    #endif
 
     func check() async -> SkyBridgeAppUpdateCheckOutcome {
         await Task.detached(priority: .utility) {
@@ -142,17 +155,19 @@ struct SkyBridgeAppUpdateChecker: Sendable {
     }
 
     static func defaultManifestURL(bundle: Bundle = .main) -> URL {
+        #if DEBUG || SKYBRIDGE_TESTING
         if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_UPDATE_MANIFEST_URL"],
            let url = URL(string: raw),
            url.scheme?.lowercased() == "https" {
             return url
         }
+        #endif
         if let raw = bundle.object(forInfoDictionaryKey: "SKYBRIDGE_UPDATE_MANIFEST_URL") as? String,
            let url = URL(string: raw),
            url.scheme?.lowercased() == "https" {
             return url
         }
-        return URL(string: "https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json")!
+        return URL(string: "https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json")!
     }
 
     static func defaultTrustedSigningKeys(bundle: Bundle = .main) -> [SkyBridgeAppUpdateTrustedSigningKey] {
@@ -163,11 +178,15 @@ struct SkyBridgeAppUpdateChecker: Sendable {
             return bundleKeys
         }
 
+        #if DEBUG || SKYBRIDGE_TESTING
         let environment = ProcessInfo.processInfo.environment
         guard environment["SKYBRIDGE_ALLOW_UPDATE_TRUST_OVERRIDE"] == "1" else {
             return []
         }
         return parseTrustedSigningKeys(raw: environment["SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS"])
+        #else
+        return []
+        #endif
     }
 
     private static func parseTrustedSigningKeys(raw: String?) -> [SkyBridgeAppUpdateTrustedSigningKey] {

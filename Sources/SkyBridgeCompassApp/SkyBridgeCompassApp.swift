@@ -4,10 +4,14 @@ import UserNotifications
 import OSLog
 import AppKit
 import Darwin
+import CryptoKit
 import SkyBridgeCore
+#if DEBUG || SKYBRIDGE_TESTING
 import SkyBridgeSmokeSupport
+#endif
 import SkyBridgeUI
 
+#if DEBUG || SKYBRIDGE_TESTING
 private let remoteControlNoticePanelProbeLogger = Logger(
     subsystem: "com.skybridge.compass",
     category: "RemoteControlNoticePanelProbe"
@@ -92,6 +96,7 @@ private enum MacOnlineIPadSmokeBootMarker {
         )
     }
 }
+#endif
 
 private enum VolatileSwiftUIAutosaveDefaultsPruner {
     private static let keyPrefixes = [
@@ -134,7 +139,9 @@ private enum VolatileSwiftUIAutosaveDefaultsPruner {
 @available(macOS 14.0, *)
 @main
 struct SkyBridgeCompassApp: App {
+#if DEBUG || SKYBRIDGE_TESTING
     private let macOnlineSmokeBootMarker: Void = MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: "app-init-pre-state")
+#endif
 
  /// 启动协调器 - 管理分阶段加载
     @StateObject private var startupCoordinator = StartupCoordinator.shared
@@ -146,10 +153,20 @@ struct SkyBridgeCompassApp: App {
 
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
+#if DEBUG || SKYBRIDGE_TESTING
     private let remoteControlNoticePanelProbeHarness = RemoteControlNoticePanelProbeHarness()
     private let localWebRTCSmokeHarness = LocalWebRTCSmokeHarness()
     private let localP2PFileTransferSmokeHarness = LocalP2PFileTransferSmokeHarness()
     private let macOnlineIPadSmokeHarness = MacOnlineIPadSmokeHarness()
+#endif
+
+    private var shouldPresentRootContent: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isLaunchSettled
+#else
+        startupCoordinator.isLaunchSettled
+#endif
+    }
 
     var body: some Scene {
         WindowGroup(localizationManager.localizedString("app.name"), id: "main") {
@@ -157,12 +174,18 @@ struct SkyBridgeCompassApp: App {
                 if let _ = renderConfig {
                     Color.clear
                         .frame(width: 1, height: 1)
-                } else if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isLaunchSettled {
+                } else if shouldPresentRootContent {
  // 启动完成后显示主界面
-                    RootAppServicesContainer(
-                        iconApplied: iconApplied,
-                        localWebRTCSmokeHarness: localWebRTCSmokeHarness
-                    )
+                    Group {
+#if DEBUG || SKYBRIDGE_TESTING
+                        RootAppServicesContainer(
+                            iconApplied: iconApplied,
+                            localWebRTCSmokeHarness: localWebRTCSmokeHarness
+                        )
+#else
+                        RootAppServicesContainer(iconApplied: iconApplied)
+#endif
+                    }
                         .environmentObject(localizationManager)
                         .environment(\.iconMissingHint, !iconApplied)
                         .environment(\.locale, localizationManager.locale)
@@ -204,6 +227,7 @@ struct SkyBridgeCompassApp: App {
                     await MainActor.run {
                         RemoteControlSecurityNoticePanelController.shared.start()
                     }
+#if DEBUG || SKYBRIDGE_TESTING
                     macOnlineIPadSmokeHarness.appendAppBootIfNeeded()
 
                     if remoteControlNoticePanelProbeHarness.isEnabledForCurrentEnvironment {
@@ -220,6 +244,7 @@ struct SkyBridgeCompassApp: App {
                         localWebRTCSmokeHarness.startIfNeeded()
                         return
                     }
+#endif
 
  // 开始协调启动流程
                     await startupCoordinator.startCoordinatedLaunch()
@@ -289,11 +314,20 @@ struct SkyBridgeCompassApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
  // 🆕 SSH 终端窗口
-        WindowGroup(id: "ssh-terminal") {
-            SSHTerminalView()
-                .environmentObject(SSHLaunchContext.shared)
+        WindowGroup(id: "ssh-terminal", for: UUID.self) { $requestID in
+            if let requestID {
+                SSHTerminalView(launchRequestID: requestID)
+                    .environmentObject(SSHLaunchContext.shared)
+                    .frame(minWidth: 800, minHeight: 600)
+                    .preferredColorScheme(.dark)
+            } else {
+                ContentUnavailableView(
+                    "SSH request unavailable",
+                    systemImage: "lock.slash",
+                    description: Text("Open an SSH connection from Remote Desktop.")
+                )
                 .frame(minWidth: 800, minHeight: 600)
-                .preferredColorScheme(.dark)
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -325,7 +359,7 @@ struct SkyBridgeCompassApp: App {
     private var startupLoadingView: some View {
         ZStack {
  // 启动页使用轻量静态背景，避免首帧前拉起天气/鼠标追踪/动态背景链路。
-            StartupLoadingBackground()
+            LaunchTransitionBackground()
                 .ignoresSafeArea(.all)
 
             VStack(spacing: 32) {
@@ -424,23 +458,29 @@ struct SkyBridgeCompassApp: App {
             DMGBackgroundRenderer.renderAndTerminate(config: renderConfig)
             return
         }
+#if DEBUG || SKYBRIDGE_TESTING
         macOnlineIPadSmokeHarness.appendAppBootIfNeeded(uiRole: "app-init")
+#endif
         VolatileSwiftUIAutosaveDefaultsPruner.schedule()
         #if os(macOS)
         OperatorControlServerBootstrap.shared.startIfNeeded()
         #endif
 
+#if DEBUG || SKYBRIDGE_TESTING
         Self.runTrafficPaddingBootSelfTestIfRequested()
+#endif
 
         let applied = Self.applyAppIconIfAvailable()
         self.iconApplied = applied
 
+#if DEBUG || SKYBRIDGE_TESTING
         if localP2PFileTransferSmokeHarness.isEnabledForCurrentEnvironment {
             let smokeHarness = localP2PFileTransferSmokeHarness
             Task { @MainActor in
                 await smokeHarness.startIfNeeded()
             }
         }
+#endif
 
         Self.schedulePostLaunchAppServices()
 
@@ -756,42 +796,25 @@ struct SkyBridgeCompassApp: App {
         return identifier
     }
 
+    #if DEBUG || SKYBRIDGE_TESTING
     private static func runTrafficPaddingBootSelfTestIfRequested() {
-        #if DEBUG
-        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
-        Task(priority: .utility) {
-            try? await TrafficPaddingStats.shared.flushToCSV()
-        }
-        #else
+        #if !DEBUG
         let environment = ProcessInfo.processInfo.environment
         let shouldRun = environment["SKYBRIDGE_BOOT_TRAFFIC_PADDING_SELF_TEST"] == "1"
             || environment["SKYBRIDGE_SMOKE_TRAFFIC_PADDING_BOOT_SELF_TEST"] == "1"
-
         guard shouldRun else { return }
+        #endif
+
         _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
         Task(priority: .utility) {
             try? await TrafficPaddingStats.shared.flushToCSV()
         }
-        #endif
     }
+    #endif
 
 }
 
 @available(macOS 14.0, *)
-private struct StartupLoadingBackground: View {
-    var body: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.01, green: 0.01, blue: 0.08),
-                Color(red: 0.03, green: 0.04, blue: 0.15),
-                Color(red: 0.07, green: 0.08, blue: 0.22)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-}
-
 // MARK: - 根容器视图
 
 @available(macOS 14.0, *)
@@ -801,7 +824,9 @@ private struct RootAppServicesContainer: View {
     @Environment(\.iconMissingHint) private var iconMissingHint
 
     let iconApplied: Bool
+#if DEBUG || SKYBRIDGE_TESTING
     let localWebRTCSmokeHarness: LocalWebRTCSmokeHarness
+#endif
 
     @StateObject private var appModel = DashboardViewModel()
     @StateObject private var authModel = AuthenticationViewModel()
@@ -847,7 +872,9 @@ private struct RootAppServicesContainer: View {
                 configureRemoteControlSecurityNoticeServices()
                 appModel.bootstrapConnectionPresentationBindings()
                 configureSupabaseModeIfAvailable()
+#if DEBUG || SKYBRIDGE_TESTING
                 localWebRTCSmokeHarness.startIfNeeded()
+#endif
             }
     }
 
@@ -904,10 +931,18 @@ private struct RootContainerView: View {
     @Environment(\.iconMissingHint) private var iconMissingHint
     @StateObject private var performanceHUD = MetalPerformanceHUD.shared
 
+    private var shouldUseMacOnlineIPadSmokeUI: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment
+#else
+        false
+#endif
+    }
+
     var body: some View {
  // 移除调试日志以减少重复渲染的日志噪音
         Group {
-            if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment {
+            if shouldUseMacOnlineIPadSmokeUI {
                 DashboardView(initialNavigation: .deviceManagement)
                     .onAppear {
                         SkyBridgeLogger.ui.debugOnly("📱 [RootContainerView] mac-online-ipad smoke DashboardView 出现")
@@ -944,13 +979,12 @@ private struct RootContainerView: View {
         }
         .task(id: authModel.currentSession) {
             await StartupCoordinator.shared.waitUntilLaunchSettled()
-            if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment {
+            if shouldUseMacOnlineIPadSmokeUI {
                 await dashboardModel.start()
             } else {
                 await dashboardModel.updateAuthentication(session: authModel.currentSession)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
         .alert("无法退出登录", isPresented: $authModel.showSignOutError) {
             Button("确定", role: .cancel) {
                 authModel.showSignOutError = false
@@ -1028,6 +1062,7 @@ private extension EnvironmentValues {
     }
 }
 
+#if DEBUG || SKYBRIDGE_TESTING
 @available(macOS 14.0, *)
 private final class MacOnlineIPadSmokeHarness {
     private var appendedBootRoles = Set<String>()
@@ -1134,6 +1169,7 @@ private final class RemoteControlNoticePanelProbeHarness {
 @available(macOS 14.0, *)
 @MainActor
 private final class LocalWebRTCSmokeHarness {
+    private static let productAcceptanceMarker = "SkyBridge-WebRTC-Product-Acceptance-V3"
     private var didStart = false
 
     private var role: String {
@@ -1157,26 +1193,48 @@ private final class LocalWebRTCSmokeHarness {
         guard isEnabled, !didStart else { return }
         didStart = true
 
+        let outputFiles: WebRTCProductSmokeOutputFiles
+        do {
+            outputFiles = try Self.validatedProductOutputFiles()
+        } catch {
+            Logger(subsystem: "com.skybridge.compass", category: "WebRTCProductSmoke")
+                .error("WebRTC product smoke output boundary rejected")
+            self.terminateIfNeeded()
+            return
+        }
+
         let expectsPQCRekey = self.expectsPQCRekey
         let requiresStreamEvidence = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_STREAM"] == "1"
         let requiresDirectPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_DIRECT"] == "1"
-        let statusURL = self.statusURL()
-        let codeURL = self.codeURL()
+        let statusURL = outputFiles.statusURL
+        let evidenceReader = WebRTCSmokeEvidenceReader(statusURL: statusURL)
 
         Task { @MainActor in
             let reporter = SmokeStatusReporter(statusURL: statusURL)
             reporter.reset()
             reporter.append("boot role=mac-host")
 
+            do {
+                try await self.prepareProductHost(
+                    reporter: reporter,
+                    outputFiles: outputFiles
+                )
+            } catch {
+                reporter.append("failed stage=product-host-prepare error=\(Self.sanitize(error.localizedDescription))")
+                self.terminateIfNeeded()
+                return
+            }
+
             let manager = CrossNetworkConnectionManager.shared
             await manager.disconnect()
 
             do {
                 let code = try await manager.generateConnectionCode()
-                if let codeURL {
-                    try Self.writeText(code, to: codeURL)
-                }
-                reporter.append("code \(code)")
+                try LocalP2PSmokeFiles.overwritePrecreatedPrivateData(
+                    Data(code.appending("\n").utf8),
+                    at: outputFiles.codeURL
+                )
+                reporter.append("code <redacted>")
             } catch {
                 reporter.append("failed stage=generate error=\(Self.sanitize(error.localizedDescription))")
                 self.terminateIfNeeded()
@@ -1206,7 +1264,11 @@ private final class LocalWebRTCSmokeHarness {
                 let rekeyDescription = manager.lastRekeyEvent ?? ""
                 if rekeyDescription != lastRekeyEvent, !rekeyDescription.isEmpty {
                     lastRekeyEvent = rekeyDescription
-                    reporter.append("rekey \(Self.sanitize(rekeyDescription))")
+                    if case .handshakeComplete(let sessionId, _) = manager.readiness {
+                        reporter.append("rekey session=\(sessionId) \(Self.sanitize(rekeyDescription))")
+                    } else {
+                        reporter.append("rekey-pending \(Self.sanitize(rekeyDescription))")
+                    }
                 }
 
                 if case .failed(let message) = manager.connectionStatus {
@@ -1225,7 +1287,14 @@ private final class LocalWebRTCSmokeHarness {
 
                     let suiteName = negotiatedSuite.uppercased()
                     let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
-                    let evidence = Self.smokeEvidence(statusURL: statusURL)
+                    let evidence: WebRTCSmokeEvidence
+                    do {
+                        evidence = try await evidenceReader.poll()
+                    } catch {
+                        reporter.append("failed stage=status-evidence error=bounded_incremental_read_failed")
+                        self.terminateIfNeeded()
+                        return
+                    }
                     let streamSatisfied = !requiresStreamEvidence || evidence.hasStream
                     let directSatisfied = !requiresDirectPath || evidence.hasDirectPath
                     if (!expectsPQCRekey || !isClassicBootstrap) && streamSatisfied && directSatisfied {
@@ -1245,48 +1314,300 @@ private final class LocalWebRTCSmokeHarness {
         }
     }
 
+    private func prepareProductHost(
+        reporter: SmokeStatusReporter,
+        outputFiles: WebRTCProductSmokeOutputFiles
+    ) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKYBRIDGE_SMOKE_KEYCHAIN_MODE"] == "system",
+              environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] != "1" else {
+            throw WebRTCProductSmokeError.systemKeychainRequired
+        }
+        guard let supabaseConfiguration = SupabaseService.Configuration.fromProductBundle() else {
+            throw WebRTCProductSmokeError.supabaseConfigurationMissing
+        }
+
+        let authentication = AuthenticationService.shared
+        authentication.enableSupabaseMode(supabaseConfig: supabaseConfiguration)
+        guard let persistedSession = try await KeychainManager.shared.loadAuthSessionStrict(),
+              persistedSession.isAuthenticatedForProtectedServices else {
+            throw WebRTCProductSmokeError.productSessionMissing
+        }
+        try await authentication.updateSession(persistedSession)
+        guard try await authentication.validAccessToken() != nil,
+              let currentSession = authentication.currentSessionSnapshot(),
+              currentSession.isAuthenticatedForProtectedServices else {
+            throw WebRTCProductSmokeError.productSessionInvalid
+        }
+        let effectiveTenantID = try CrossNetworkConnectionManager.resolveTenantIdentifier(
+            accessToken: currentSession.accessToken,
+            explicitTenantID: nil,
+            sessionTenantID: currentSession.nebulaId,
+            sessionUserIdentifier: currentSession.userIdentifier
+        )
+        guard !effectiveTenantID.isEmpty else {
+            throw WebRTCProductSmokeError.productSessionInvalid
+        }
+        let actualBindingDigest = Self.authBindingDigest(
+            subject: currentSession.userIdentifier,
+            effectiveTenantID: effectiveTenantID
+        )
+        guard Self.constantTimeEqual(actualBindingDigest, outputFiles.expectedAuthBindingDigest) else {
+            throw WebRTCProductSmokeError.authBindingMismatch
+        }
+        await TenantAccessController.shared.bindAuthentication(session: currentSession)
+
+        let displayName = currentSession.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let account = displayName.isEmpty ? currentSession.userIdentifier : displayName
+        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider {
+            RemoteControlSecurityIdentity(
+                accountDisplayName: account,
+                nebulaId: effectiveTenantID,
+                deviceId: nil,
+                deviceName: Host.current().localizedName
+            )
+        }
+        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+
+        _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
+        try await SelfIdentityProvider.shared.loadOrCreate()
+        try await exportProductPQCIdentity(
+            reporter: reporter,
+            reportURL: outputFiles.pqcReportURL
+        )
+        reporter.append(
+            "keychain-proof platform=mac mode=system auth=existing-product-session identity=system authBinding=verified productBundle=true marker=\(Self.productAcceptanceMarker)"
+        )
+    }
+
+    private func exportProductPQCIdentity(
+        reporter: SmokeStatusReporter,
+        reportURL: URL
+    ) async throws {
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let deviceID = try await DeviceIdentityKeyManager.shared.getDeviceId()
+        let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(using: provider)
+        let report = LocalP2PSmokePQCReport(
+            deviceId: deviceID,
+            keys: keys.map {
+                LocalP2PSmokePQCReport.PublicKeyEntry(
+                    suiteWireId: $0.suiteWireId,
+                    publicKeyBase64: $0.publicKey.base64EncodedString()
+                )
+            }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try LocalP2PSmokeFiles.overwritePrecreatedPrivateData(
+            encoder.encode(report),
+            at: reportURL
+        )
+        reporter.append("pqc-report device=<redacted> keys=\(report.keys.count) file=\(Self.sanitize(reportURL.lastPathComponent))")
+    }
+
+    private static func validatedProductOutputFiles() throws -> WebRTCProductSmokeOutputFiles {
+        func requiredURL(_ name: String) throws -> URL {
+            guard let raw = ProcessInfo.processInfo.environment[name],
+                  !raw.isEmpty,
+                  raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+                  raw.hasPrefix("/") else {
+                throw WebRTCProductSmokeError.privateOutputBoundaryInvalid
+            }
+            let url = URL(fileURLWithPath: raw, isDirectory: false)
+            try LocalP2PSmokeFiles.validatePrecreatedPrivateFile(url)
+            return url
+        }
+
+        guard let expectedDigest = ProcessInfo.processInfo.environment[
+            "SKYBRIDGE_SMOKE_EXPECTED_AUTH_BINDING_SHA256"
+        ], expectedDigest.count == 64,
+           expectedDigest.allSatisfy({ $0.isNumber || ("a"..."f").contains(String($0)) }) else {
+            throw WebRTCProductSmokeError.authBindingMissing
+        }
+
+        return WebRTCProductSmokeOutputFiles(
+            statusURL: try requiredURL("SKYBRIDGE_SMOKE_STATUS_FILE"),
+            codeURL: try requiredURL("SKYBRIDGE_SMOKE_CODE_FILE"),
+            pqcReportURL: try requiredURL("SKYBRIDGE_SMOKE_PQC_REPORT_FILE"),
+            expectedAuthBindingDigest: expectedDigest
+        )
+    }
+
     private func terminateIfNeeded() {
         guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_EXIT"] == "1" else { return }
         NSApp.terminate(nil)
     }
 
-    private func statusURL() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return nil
-        }
-        return URL(fileURLWithPath: raw)
+    private static func authBindingDigest(subject: String, effectiveTenantID: String) -> String {
+        var material = Data("skybridge-webrtc-auth-binding-v1\0".utf8)
+        material.append(Data(subject.utf8))
+        material.append(0)
+        material.append(Data(effectiveTenantID.utf8))
+        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func codeURL() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CODE_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return nil
+    private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsBytes = Array(lhs.utf8)
+        let rhsBytes = Array(rhs.utf8)
+        guard lhsBytes.count == rhsBytes.count else { return false }
+        var difference: UInt8 = 0
+        for index in lhsBytes.indices {
+            difference |= lhsBytes[index] ^ rhsBytes[index]
         }
-        return URL(fileURLWithPath: raw)
-    }
-
-    private static func writeText(_ text: String, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try text.appending("\n").write(to: url, atomically: true, encoding: .utf8)
+        return difference == 0
     }
 
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
+}
 
-    private static func smokeEvidence(statusURL: URL?) -> (hasStream: Bool, hasDirectPath: Bool) {
-        guard let statusURL,
-              let contents = try? String(contentsOf: statusURL, encoding: .utf8) else {
-            return (false, false)
+private struct WebRTCProductSmokeOutputFiles: Sendable {
+    let statusURL: URL
+    let codeURL: URL
+    let pqcReportURL: URL
+    let expectedAuthBindingDigest: String
+}
+
+private struct WebRTCSmokeEvidence: Sendable {
+    let hasStream: Bool
+    let hasDirectPath: Bool
+}
+
+/// Incrementally reads a bounded status-file tail off the main actor. Reopening with O_NOFOLLOW
+/// avoids retaining a descriptor across cleanup while preventing symlink substitution.
+private actor WebRTCSmokeEvidenceReader {
+    private struct ReadChunk: Sendable {
+        let bytes: Data
+        let nextOffset: Int64
+        let didReset: Bool
+    }
+
+    private static let maximumFileBytes: Int64 = 8 * 1_024 * 1_024
+    private static let maximumChunkBytes = 64 * 1_024
+    private let statusURL: URL
+    private var offset: Int64 = 0
+    private var carry = ""
+    private var sawStream = false
+    private var sawStreamPath = false
+    private var sawDirectPath = false
+
+    init(statusURL: URL) {
+        self.statusURL = statusURL
+    }
+
+    func poll() async throws -> WebRTCSmokeEvidence {
+        let readOffset = offset
+        let url = statusURL
+        let chunk = try await Task.detached(priority: .utility) {
+            try Self.readChunk(from: url, offset: readOffset)
+        }.value
+
+        if chunk.didReset {
+            carry = ""
+            sawStream = false
+            sawStreamPath = false
+            sawDirectPath = false
         }
-        let hasStream = contents.contains("stream-format ")
-            || contents.contains("stream-stats ")
-        let hasDirectPath = contents.contains("stream-path ")
-            && contents.contains("path=direct")
-        return (hasStream, hasDirectPath)
+        offset = chunk.nextOffset
+        let decoded = carry + String(decoding: chunk.bytes, as: UTF8.self)
+        sawStream = sawStream
+            || decoded.contains("stream-format ")
+            || decoded.contains("stream-stats ")
+        sawStreamPath = sawStreamPath || decoded.contains("stream-path ")
+        sawDirectPath = sawDirectPath || decoded.contains("path=direct")
+        carry = String(decoded.suffix(128))
+        return WebRTCSmokeEvidence(
+            hasStream: sawStream,
+            hasDirectPath: sawStreamPath && sawDirectPath
+        )
+    }
+
+    private nonisolated static func readChunk(from url: URL, offset: Int64) throws -> ReadChunk {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw posixError(path: url.path)
+        }
+        defer { _ = Darwin.close(descriptor) }
+
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else {
+            throw posixError(path: url.path)
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_uid == Darwin.geteuid(),
+              metadata.st_nlink == 1,
+              metadata.st_mode & mode_t(0o777) == mode_t(0o600),
+              metadata.st_size >= 0,
+              metadata.st_size <= maximumFileBytes else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EACCES),
+                userInfo: [NSFilePathErrorKey: url.path]
+            )
+        }
+
+        let didReset = metadata.st_size < offset
+        let effectiveOffset = didReset ? 0 : offset
+        let available = Int(metadata.st_size - effectiveOffset)
+        let requested = min(available, maximumChunkBytes)
+        guard requested > 0 else {
+            return ReadChunk(bytes: Data(), nextOffset: effectiveOffset, didReset: didReset)
+        }
+
+        var data = Data(count: requested)
+        let bytesRead = try data.withUnsafeMutableBytes { buffer -> Int in
+            guard let baseAddress = buffer.baseAddress else { return 0 }
+            while true {
+                let result = Darwin.pread(descriptor, baseAddress, requested, off_t(effectiveOffset))
+                if result >= 0 { return result }
+                if errno == EINTR { continue }
+                throw posixError(path: url.path)
+            }
+        }
+        data.removeSubrange(bytesRead..<data.count)
+        return ReadChunk(
+            bytes: data,
+            nextOffset: effectiveOffset + Int64(bytesRead),
+            didReset: didReset
+        )
+    }
+
+    private nonisolated static func posixError(path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errno),
+            userInfo: [NSFilePathErrorKey: path]
+        )
+    }
+}
+
+private enum WebRTCProductSmokeError: LocalizedError {
+    case systemKeychainRequired
+    case supabaseConfigurationMissing
+    case productSessionMissing
+    case productSessionInvalid
+    case privateOutputBoundaryInvalid
+    case authBindingMissing
+    case authBindingMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .systemKeychainRequired:
+            return "physical WebRTC product acceptance requires the system Keychain"
+        case .supabaseConfigurationMissing:
+            return "physical WebRTC product acceptance requires Supabase configuration"
+        case .productSessionMissing:
+            return "the signed product has no persisted authenticated session in the system Keychain"
+        case .productSessionInvalid:
+            return "the persisted product session could not be validated or refreshed"
+        case .privateOutputBoundaryInvalid:
+            return "the WebRTC smoke output boundary is not a pre-created 0700/0600 private path"
+        case .authBindingMissing:
+            return "the WebRTC smoke expected authentication binding is missing or malformed"
+        case .authBindingMismatch:
+            return "the system-Keychain product identity does not match the verified smoke authority"
+        }
     }
 }
 
@@ -1314,3 +1635,4 @@ private struct SmokeStatusReporter {
         )
     }
 }
+#endif

@@ -194,6 +194,7 @@
 "settings.general.exportSettings" = "設定をエクスポート";
 "settings.general.importSettings" = "設定をインポート";
 "settings.general.resetSettings" = "デフォルトにリセット";
+"settings.general.deduplicateKeychain" = "キーチェーンの重複を整理";
 
 /* Units */
 "unit.seconds.15" = "15秒";
@@ -477,7 +478,9 @@
 "settings.advanced.pqc.preferXWing.help" = "起動時に ML-KEM-768 と X-Wing の両方を宣言し、このスイッチは優先順位のみを変更します。";
 "settings.advanced.pqc.preferXWing.caption" = "有効時は X-Wing を優先し、無効時は ML-KEM-768 を優先します（どちらも宣言は維持）。";
 "settings.advanced.pqc.signatureAlgorithm" = "署名アルゴリズム:";
-"settings.advanced.pqc.note" = "現在の X-Wing と ML-DSA-65 はソフトウェア鍵を使用し、Secure Enclave 保護を標榜しません。可用性は実際に選択されたランタイムプロバイダーに基づきます。";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSAにSecure Enclaveを使用";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEMにSecure Enclaveを使用";
+"settings.advanced.pqc.note" = "X-Wing（ハイブリッド）と ML-KEM-768（純PQC）は macOS 26+（CryptoKit）で利用可能で、Secure Enclave PQC も同条件で有効です。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
 
 "settings.advanced.smoothing.title" = "デバイス信号スムージング";
 "settings.advanced.smoothing.alpha" = "スムージング係数（EMA）";
@@ -496,6 +499,8 @@
 "settings.fileTransfer.rateLimit.unlimited" = "無制限";
 "settings.fileTransfer.pathFallback.title" = "保存先を更新しました";
 "settings.fileTransfer.pathFallback.message" = "設定されたパスが利用できないため、次のパスへ自動変更しました: %@";
+"settings.fileTransfer.pathFailure.title" = "ファイル受信フォルダを設定できません";
+"settings.fileTransfer.pathFailure.message" = "フォルダの権限を確認するか、書き込み可能な別の場所を選択してください。従来の受信フォルダは変更されません。";
 "settings.fileTransfer.options.title" = "転送オプション";
 "settings.fileTransfer.options.showNotification" = "転送完了時に通知を表示";
 "settings.fileTransfer.options.autoRetryFailed" = "失敗した転送を自動再試行";
@@ -504,6 +509,8 @@
 "settings.fileTransfer.options.keepAwake" = "転送中にシステムをスリープさせない";
 "settings.fileTransfer.security.title" = "セキュリティ設定";
 "settings.fileTransfer.security.enableEncrypt" = "転送暗号化を有効化";
+"settings.fileTransfer.security.encryption.alwaysOn" = "ファイル転送の暗号化は常に有効です";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "従来の転送プロトコルは AES-256-GCM を必須とし、平文へのダウングレードはできません。";
 "settings.security.certificateValidation.alwaysOn" = "証明書検証は常に有効です";
 "settings.security.certificateValidation.alwaysOn.detail" = "このバージョンでは厳格な証明書検証を常時適用します。";
 "settings.fileTransfer.security.verifyIntegrity" = "ファイル整合性を検証";
@@ -618,15 +625,13 @@
 "fileTransfer.history.clear" = "履歴をクリア";
 "fileTransfer.history.emptyTitle" = "転送履歴はありません";
 "fileTransfer.history.emptySubtitle" = "完了した転送がここに表示されます";
-"fileTransfer.debug.title" = "デバッグパネル";
-"fileTransfer.debug.hmacTagHex" = "HMACタグ（16進）";
-"fileTransfer.debug.signatureResult" = "ファイル署名検証結果";
 "common.none" = "なし";
 "action.preview" = "プレビュー";
 "transferStatus.preparing" = "準備中";
 "transferStatus.transferring" = "転送中";
 "transferStatus.paused" = "一時停止";
 "transferStatus.completed" = "完了";
+"fileTransfer.receiptDeliveryUnknown" = "ファイルは保存されましたが、送信側の確認状態は不明です。自動再送しないでください。";
 "transferStatus.failed" = "失敗";
 "transferStatus.cancelled" = "キャンセル済み";
 "action.close" = "閉じる";
@@ -1038,8 +1043,8 @@
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";
 "remoteControl.securityNotice.transport" = "転送";
-"remoteControl.securityNotice.account" = "アカウント";
-"remoteControl.securityNotice.nebulaID" = "Nebula ID";
+"remoteControl.securityNotice.account" = "デバイス申告アカウント";
+"remoteControl.securityNotice.nebulaID" = "デバイス申告 Nebula ID";
 "remoteControl.securityNotice.device" = "デバイス";
 "remoteControl.securityNotice.pqc" = "PQC スイート";
 "remoteControl.securityNotice.approve" = "承認";
@@ -1079,3 +1084,17 @@
 "topbar.network.latency.help.ready" = "SkyBridge Web エントリへの HTTPS 応答遅延: %@ ms";
 "topbar.network.latency.help.failedUnavailable" = "パブリックネットワーク遅延を利用できません";
 "topbar.network.latency.help.failed" = "パブリックネットワーク遅延のプローブに失敗: %@";
+
+/* ローカルカメラストリーミング */
+"remote.camera.connect" = "ローカルカメラに接続";
+"remote.camera.defaultName" = "ローカルカメラ";
+"remote.camera.name" = "カメラ名（任意）";
+"remote.camera.endpoint" = "正確な RTSP/RTSPS URL";
+"remote.camera.contract" = "プライベート IP リテラルと正確なストリームパスを入力してください。現行版は H.264 と RTSP インターリーブ TCP 映像のみ対応し、パス推測やベンダークラウド中継は行いません。";
+"remote.camera.plaintextAcknowledgement" = "RTSP の制御データと映像が転送時に暗号化されないことを理解しています。";
+"remote.camera.tlsNotice" = "RTSPS はシステム証明書の信頼とホスト検証を使用し、無効または自己署名の証明書を拒否します。";
+"remote.camera.protocol" = "ローカルカメラ（RTSP）";
+"remote.camera.rendererUnavailable" = "映像レンダラーを初期化できません。";
+"remote.camera.feedUnavailable.title" = "映像を利用できません";
+"remote.camera.feedUnavailable.failed" = "カメラストリームが失敗し、資格情報と通信リソースは解放されました。正確な URL、資格情報、H.264 プロファイル、ローカルネットワークを確認して再接続してください。";
+"remote.camera.feedUnavailable.released" = "セッションのレンダリングリソースは解放されました。再接続してください。";

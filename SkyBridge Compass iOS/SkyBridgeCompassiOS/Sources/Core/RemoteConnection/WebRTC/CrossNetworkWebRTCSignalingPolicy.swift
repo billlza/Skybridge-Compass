@@ -360,6 +360,6 @@ extension CrossNetworkWebRTCManager {
               !sessionId.isEmpty else {
             return "-"
         }
-        return SkyBridgeTraceRedaction.stableReference(sessionId)
+        return SkyBridgeDiagnosticReference.stableReference(sessionId)
     }
 }

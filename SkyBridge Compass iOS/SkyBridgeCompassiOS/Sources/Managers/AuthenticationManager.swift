@@ -9,6 +9,11 @@ public struct RemoteControlSecurityIdentityMetadata: Sendable, Equatable {
     public let nebulaId: String?
 }
 
+struct CurrentPathAuthenticationPrincipal: Sendable, Equatable {
+    let userID: String
+    let tenantID: String
+}
+
 /// 认证管理器 - 管理用户认证和会话
 @MainActor
 public class AuthenticationManager: ObservableObject {
@@ -21,6 +26,7 @@ public class AuthenticationManager: ObservableObject {
     @Published public var isGuestMode: Bool = false
     @Published public var showCaptchaChallenge: Bool = false
     @Published public private(set) var appleAuthorizationState: ASAuthorizationAppleIDProvider.CredentialState = .notFound
+    @Published public private(set) var isRestoringSession: Bool = true
 
     private var session: AuthSession?
     private var didLogSupabaseConfigMissing = false
@@ -38,6 +44,7 @@ public class AuthenticationManager: ObservableObject {
         let deviceFingerprint: String
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private static var shouldResetStateForUITests: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_RESET_STATE")
     }
@@ -45,14 +52,9 @@ public class AuthenticationManager: ObservableObject {
     private static var shouldAutoAuthenticateAsGuestForUITests: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_AUTH_GUEST")
     }
+#endif
 
-    private static var shouldUseSmokeRemoteDesktopSession: Bool {
-        let environment = ProcessInfo.processInfo.environment
-        return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client"
-            && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
-            && environment["SKYBRIDGE_ACCESS_TOKEN"]?.isEmpty == false
-    }
-
+#if DEBUG || SKYBRIDGE_TESTING
     private static var shouldAutoAuthenticateAsGuestForP2PSmoke: Bool {
         let environment = ProcessInfo.processInfo.environment
         return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-p2p-client"
@@ -60,6 +62,7 @@ public class AuthenticationManager: ObservableObject {
             && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
             && environment["SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW"] == "1"
     }
+#endif
 
     private static var appleSignInLaunchReady: Bool {
         if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_SIGN_IN"]?
@@ -75,7 +78,28 @@ public class AuthenticationManager: ObservableObject {
         Self.appleSignInLaunchReady
     }
 
+    var currentPathAuthenticationPrincipal: CurrentPathAuthenticationPrincipal? {
+        guard isAuthenticated, !isGuestMode, !isRestoringSession else { return nil }
+        let sessionUserID = Self.normalizedIdentityValue(session?.userIdentifier)
+        let displayedUserID = Self.normalizedIdentityValue(currentUser?.id)
+        if let sessionUserID, let displayedUserID, sessionUserID != displayedUserID {
+            return nil
+        }
+        guard let userID = sessionUserID ?? displayedUserID else { return nil }
+
+        let sessionTenantID = Self.normalizedIdentityValue(session?.nebulaId)
+        let displayedTenantID = Self.normalizedIdentityValue(currentUser?.nebulaId)
+        if let sessionTenantID,
+           let displayedTenantID,
+           sessionTenantID != displayedTenantID {
+            return nil
+        }
+        guard let tenantID = sessionTenantID ?? displayedTenantID else { return nil }
+        return CurrentPathAuthenticationPrincipal(userID: userID, tenantID: tenantID)
+    }
+
     public var remoteControlSecurityIdentityMetadata: RemoteControlSecurityIdentityMetadata {
+#if DEBUG || SKYBRIDGE_TESTING
         let environment = ProcessInfo.processInfo.environment
         let isSmoke = environment["SKYBRIDGE_SMOKE_ROLE"] != nil
         let smokeAccount = isSmoke
@@ -101,6 +125,16 @@ public class AuthenticationManager: ObservableObject {
         let nebulaId = smokeNebulaId
             ?? Self.normalizedIdentityValue(currentUser?.nebulaId)
             ?? Self.normalizedIdentityValue(session?.nebulaId)
+#else
+        let account = Self.normalizedIdentityValue(currentUser?.displayName)
+            ?? Self.normalizedIdentityValue(session?.displayName)
+            ?? Self.normalizedIdentityValue(currentUser?.email)
+            ?? Self.normalizedIdentityValue(session?.email)
+            ?? Self.normalizedIdentityValue(currentUser?.id)
+            ?? Self.normalizedIdentityValue(session?.userIdentifier)
+        let nebulaId = Self.normalizedIdentityValue(currentUser?.nebulaId)
+            ?? Self.normalizedIdentityValue(session?.nebulaId)
+#endif
         return RemoteControlSecurityIdentityMetadata(
             accountDisplayName: account,
             nebulaId: nebulaId
@@ -127,28 +161,66 @@ public class AuthenticationManager: ObservableObject {
             }
         }
     }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    enum SmokeRemoteDesktopSessionError: LocalizedError {
+        case disabled
+        case invalidCredentials
+
+        var errorDescription: String? {
+            switch self {
+            case .disabled:
+                return "real-device smoke authentication bootstrap is not enabled for this launch"
+            case .invalidCredentials:
+                return "real-device smoke authentication credentials are invalid"
+            }
+        }
+    }
+#endif
     
     private init() {
-        if Self.shouldResetStateForUITests {
-            clearSession()
-        }
-        if Self.shouldAutoAuthenticateAsGuestForUITests {
+#if DEBUG || SKYBRIDGE_TESTING
+        if SkyBridgeRuntimeEnvironment.isUITesting,
+           Self.shouldAutoAuthenticateAsGuestForUITests {
             applyUITestGuestSession()
+            isRestoringSession = false
             return
         }
-        if Self.shouldUseSmokeRemoteDesktopSession {
-            applySmokeRemoteDesktopSession()
-            return
-        }
+#endif
+#if DEBUG || SKYBRIDGE_TESTING
         if Self.shouldAutoAuthenticateAsGuestForP2PSmoke {
             applyP2PSmokeGuestSession()
+            isRestoringSession = false
             return
         }
-        if Self.shouldResetStateForUITests {
+#endif
+#if DEBUG || SKYBRIDGE_TESTING
+        let shouldResetState = SkyBridgeRuntimeEnvironment.isUITesting
+            && Self.shouldResetStateForUITests
+#else
+        let shouldResetState = false
+#endif
+        Task { [weak self] in
+            await self?.restoreInitialAuthenticationState(resetPersistedSession: shouldResetState)
+        }
+    }
+
+    private func restoreInitialAuthenticationState(resetPersistedSession: Bool) async {
+#if DEBUG || SKYBRIDGE_TESTING
+        if resetPersistedSession {
+            do {
+                try await clearSession()
+            } catch {
+                SkyBridgeLogger.shared.error("❌ UI 测试登录态清理失败: \(error.localizedDescription)")
+            }
+            isRestoringSession = false
             return
         }
-        checkAppleIDCredentialState()
-        loadSession()
+#endif
+
+        await loadSession()
+        isRestoringSession = false
+        await checkAppleIDCredentialState()
     }
 
     private func registrationDeviceFingerprint() async throws -> String {
@@ -401,10 +473,10 @@ public class AuthenticationManager: ObservableObject {
                 nonce: rawNonce,
                 captchaToken: captchaToken
             )
-            try? KeychainManager.shared.storeAppleUserID(credential.user)
+            try await KeychainManager.shared.storeAppleUserID(credential.user)
             let enrichedSession = await persistAppleProfileIfNeeded(from: credential, session: session)
             let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
-            try applySession(
+            try await applySession(
                 hydratedSession,
                 emailFallback: credential.email ?? hydratedSession.email ?? "\(credential.user)@appleid.local"
             )
@@ -511,7 +583,7 @@ public class AuthenticationManager: ObservableObject {
         )
 
         let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
-        try applySession(hydratedSession, emailFallback: email)
+        try await applySession(hydratedSession, emailFallback: email)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -555,7 +627,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        try applySession(hydratedSession, emailFallback: email)
+        try await applySession(hydratedSession, emailFallback: email)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -665,7 +737,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        try applySession(hydratedSession, emailFallback: phoneNumber)
+        try await applySession(hydratedSession, emailFallback: phoneNumber)
         await recordRegistrationAttempt(
             identifier: phoneNumber,
             identifierType: .phone,
@@ -694,7 +766,7 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        try applySession(session, emailFallback: email)
+        try await applySession(session, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器登录成功: \(displayName)")
     }
 
@@ -714,7 +786,7 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        try applySession(session, emailFallback: email)
+        try await applySession(session, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器注册成功: \(displayName)")
     }
 
@@ -724,7 +796,9 @@ public class AuthenticationManager: ObservableObject {
     }
     
     /// 游客模式登录
-    public func signInAsGuest() async {
+    public func signInAsGuest() async throws {
+        try await clearSession()
+
         let guestUser = User(
             id: "guest-\(UUID().uuidString)",
             email: "guest@skybridge.local",
@@ -740,38 +814,31 @@ public class AuthenticationManager: ObservableObject {
     }
     
     /// 退出登录
-    public func signOut() async {
-        if let session {
-            do {
-                try await revokeRemoteSession(session)
-            } catch {
-                SkyBridgeLogger.shared.warning("⚠️ 远端会话撤销失败，本地仍将退出: \(error.localizedDescription)")
-            }
-        }
+    public func signOut() async throws {
+        let sessionToRevoke = session
+        try await clearSession()
+
         currentUser = nil
         isAuthenticated = false
         isGuestMode = false
         session = nil
-        clearSession()
-        
+
+        if let sessionToRevoke {
+            do {
+                try await revokeRemoteSession(sessionToRevoke)
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ 远端会话撤销失败，本地仍将退出: \(error.localizedDescription)")
+            }
+        }
+
         SkyBridgeLogger.shared.info("👋 已退出登录")
-    }
-    
-    /// 模拟认证（用于预览）
-    public func mockAuthentication(userID: String) {
-        currentUser = User(
-            id: userID,
-            email: "preview@skybridge.local",
-            displayName: "Preview User"
-        )
-        isAuthenticated = true
     }
     
     // MARK: - Private Methods
     
-    private func loadSession() {
+    private func loadSession() async {
         do {
-            guard let session = try KeychainManager.shared.loadAuthSessionStrict() else {
+            guard let session = try await KeychainManager.shared.loadAuthSessionStrict() else {
                 return
             }
             applyPersistedSession(session)
@@ -784,13 +851,111 @@ public class AuthenticationManager: ObservableObject {
         }
     }
     
-    private func persistSession(_ session: AuthSession) throws {
-        try KeychainManager.shared.storeAuthSession(session)
+    private func persistSession(_ session: AuthSession) async throws {
+        try await KeychainManager.shared.storeAuthSession(session)
     }
     
-    private func clearSession() {
-        KeychainManager.shared.deleteAuthSession()
+    private func clearSession() async throws {
+        try await KeychainManager.shared.deleteAuthSession()
     }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    func installSmokeRemoteDesktopSession(
+        accessToken: String,
+        effectiveTenantID: String
+    ) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client",
+              environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1",
+              environment["SKYBRIDGE_SMOKE_BOOTSTRAP_RUN_ID"]?.isEmpty == false else {
+            throw SmokeRemoteDesktopSessionError.disabled
+        }
+
+        let normalizedAccessToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEffectiveTenantID = effectiveTenantID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard normalizedAccessToken == accessToken,
+              !normalizedAccessToken.isEmpty,
+              normalizedEffectiveTenantID == effectiveTenantID,
+              !normalizedEffectiveTenantID.isEmpty,
+              normalizedEffectiveTenantID.utf8.count <= 256,
+              !normalizedEffectiveTenantID.unicodeScalars.contains(
+                where: CharacterSet.controlCharacters.contains
+              ) else {
+            throw SmokeRemoteDesktopSessionError.invalidCredentials
+        }
+        let identity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: normalizedAccessToken
+        )
+        guard identity.effectiveTenantID == normalizedEffectiveTenantID else {
+            throw SmokeRemoteDesktopSessionError.invalidCredentials
+        }
+
+        try Task.checkCancellation()
+        let displayName = "Smoke Remote Viewer"
+        let smokeSession = AuthSession(
+            accessToken: normalizedAccessToken,
+            refreshToken: nil,
+            userIdentifier: identity.subject,
+            displayName: displayName,
+            email: "smoke@skybridge.local",
+            nebulaId: identity.explicitTenantID,
+            issuedAt: Date()
+        )
+        try await persistSession(smokeSession)
+
+        // Persistence is the commit point. Once it succeeds, synchronously publish the matching
+        // in-memory state so UI and signaling cannot observe different authentication identities.
+        session = smokeSession
+        currentUser = User(
+            id: identity.subject,
+            email: "smoke@skybridge.local",
+            displayName: displayName,
+            nebulaId: identity.effectiveTenantID
+        )
+        isAuthenticated = true
+        isGuestMode = false
+        isRestoringSession = false
+        SkyBridgeLogger.shared.info("🧪 One-time real-device smoke authentication session installed")
+    }
+
+    /// Verifies that a physical acceptance run is using the already-persisted product session.
+    /// The bootstrap token is authority material for comparison only; it is never written into the
+    /// system Keychain, so a smoke run cannot replace the user's product login state.
+    func validateSystemSmokeRemoteDesktopSession(
+        accessToken: String,
+        effectiveTenantID: String
+    ) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client",
+              environment["SKYBRIDGE_SMOKE_KEYCHAIN_MODE"] == "system",
+              environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] != "1",
+              environment["SKYBRIDGE_SMOKE_BOOTSTRAP_RUN_ID"]?.isEmpty == false else {
+            throw SmokeRemoteDesktopSessionError.disabled
+        }
+
+        let bootstrapIdentity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: accessToken
+        )
+        guard bootstrapIdentity.effectiveTenantID == effectiveTenantID,
+              let persistedSession = try await KeychainManager.shared.loadAuthSessionStrict() else {
+            throw SmokeRemoteDesktopSessionError.invalidCredentials
+        }
+        let persistedIdentity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: persistedSession.accessToken
+        )
+        guard persistedIdentity.subject == bootstrapIdentity.subject,
+              persistedIdentity.effectiveTenantID == bootstrapIdentity.effectiveTenantID else {
+            throw SmokeRemoteDesktopSessionError.invalidCredentials
+        }
+
+        try Task.checkCancellation()
+        applyPersistedSession(persistedSession)
+        isRestoringSession = false
+        SkyBridgeLogger.shared.info("🧪 Real-device smoke verified the existing system-Keychain product session")
+    }
+#endif
 
     private func revokeRemoteSession(_ session: AuthSession) async throws {
         let accessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -810,6 +975,7 @@ public class AuthenticationManager: ObservableObject {
         }
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private func applyUITestGuestSession() {
         currentUser = User(
             id: "uitest-guest",
@@ -820,7 +986,9 @@ public class AuthenticationManager: ObservableObject {
         isGuestMode = true
         session = nil
     }
+#endif
 
+#if DEBUG || SKYBRIDGE_TESTING
     private func applyP2PSmokeGuestSession() {
         currentUser = User(
             id: "p2p-smoke-guest",
@@ -832,37 +1000,7 @@ public class AuthenticationManager: ObservableObject {
         session = nil
         SkyBridgeLogger.shared.info("🧪 P2P smoke guest session installed for visible RemoteDesktopView path")
     }
-
-    private func applySmokeRemoteDesktopSession() {
-        let environment = ProcessInfo.processInfo.environment
-        let deviceID = environment["SKYBRIDGE_DEVICE_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let userIdentifier = deviceID?.isEmpty == false ? deviceID! : "smoke-ios-viewer"
-        let accessToken = environment["SKYBRIDGE_ACCESS_TOKEN"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "smoke_access_token"
-        let tenantID = environment["SKYBRIDGE_TENANT_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayName = "Smoke Remote Viewer"
-
-        currentUser = User(
-            id: userIdentifier,
-            email: "smoke@skybridge.local",
-            displayName: displayName,
-            nebulaId: tenantID?.isEmpty == false ? tenantID : nil
-        )
-        session = AuthSession(
-            accessToken: accessToken,
-            refreshToken: nil,
-            userIdentifier: userIdentifier,
-            displayName: displayName,
-            email: "smoke@skybridge.local",
-            nebulaId: tenantID?.isEmpty == false ? tenantID : nil,
-            issuedAt: Date()
-        )
-        isAuthenticated = true
-        isGuestMode = false
-        SkyBridgeLogger.shared.info("🧪 Smoke remote desktop session installed for real Dashboard path")
-    }
+#endif
 
     private func applyPersistedSession(_ session: AuthSession) {
         self.session = session
@@ -886,8 +1024,8 @@ public class AuthenticationManager: ObservableObject {
         }
     }
 
-    private func applySession(_ session: AuthSession, emailFallback: String) throws {
-        try persistSession(session)
+    private func applySession(_ session: AuthSession, emailFallback: String) async throws {
+        try await persistSession(session)
         self.session = session
         let displayName = session.displayName.isEmpty ? (emailFallback.components(separatedBy: "@").first ?? "用户") : session.displayName
         let avatarURL = session.avatarURL.flatMap(URL.init(string:))
@@ -909,9 +1047,10 @@ public class AuthenticationManager: ObservableObject {
     }
 
     private func hydrateSessionProfileIfPossible(_ session: AuthSession) async -> AuthSession {
+        let isSupabaseConfigured = await hasSupabaseConfiguration()
         guard Self.shouldAttemptSupabaseProfileHydration(
             session: session,
-            isSupabaseConfigured: SupabaseService.shared.isConfigured
+            isSupabaseConfigured: isSupabaseConfigured
         ) else {
             return session
         }
@@ -939,7 +1078,7 @@ public class AuthenticationManager: ObservableObject {
     private func refreshProfileIfPossible() async {
         guard isAuthenticated, !isGuestMode else { return }
         guard let session, session.accessToken != "pending_verification" else { return }
-        guard SupabaseService.shared.isConfigured else {
+        guard await hasSupabaseConfiguration() else {
             // 配置缺失时不刷屏：只提示一次即可
             if !didLogSupabaseConfigMissing {
                 didLogSupabaseConfigMissing = true
@@ -956,19 +1095,34 @@ public class AuthenticationManager: ObservableObject {
 
         do {
             let profile = try await SupabaseService.shared.fetchCurrentUserProfile(accessToken: session.accessToken)
-            applyRemoteProfile(profile)
+            await applyRemoteProfile(profile)
         } catch {
             // 若是 token 过期，尝试 refresh_token 后重试一次
             if await tryRefreshTokenIfNeeded(because: error) {
                 if let updated = self.session {
-                    let profile = try? await SupabaseService.shared.fetchCurrentUserProfile(accessToken: updated.accessToken)
-                    if let profile { applyRemoteProfile(profile) }
+                    do {
+                        let profile = try await SupabaseService.shared.fetchCurrentUserProfile(
+                            accessToken: updated.accessToken
+                        )
+                        await applyRemoteProfile(profile)
+                    } catch {
+                        SkyBridgeLogger.shared.debug("ℹ️ 刷新令牌后的资料加载失败: \(error.localizedDescription)")
+                    }
                 }
                 return
             }
 
             // 网络/配置失败不影响主流程
             SkyBridgeLogger.shared.debug("ℹ️ 账号资料刷新失败（忽略）：\(error.localizedDescription)")
+        }
+    }
+
+    private func hasSupabaseConfiguration() async -> Bool {
+        do {
+            return try await SupabaseService.shared.availableConfiguration(logIfMissing: false) != nil
+        } catch {
+            SkyBridgeLogger.shared.error("❌ Supabase 安全配置读取失败: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -997,7 +1151,7 @@ public class AuthenticationManager: ObservableObject {
                 nebulaId: session.nebulaId,
                 issuedAt: Date()
             )
-            try persistSession(merged)
+            try await persistSession(merged)
             self.session = merged
             SkyBridgeLogger.shared.info("🔄 Supabase access token 已刷新")
             return true
@@ -1023,7 +1177,7 @@ public class AuthenticationManager: ObservableObject {
         return msg.contains("bad_jwt") || msg.contains("token is expired") || msg.contains("expired")
     }
 
-    private func applyRemoteProfile(_ profile: SupabaseService.RemoteUserProfile) {
+    private func applyRemoteProfile(_ profile: SupabaseService.RemoteUserProfile) async {
         guard let session else { return }
 
         // 更新 session（写入 Keychain 持久化）
@@ -1038,7 +1192,7 @@ public class AuthenticationManager: ObservableObject {
             issuedAt: session.issuedAt
         )
         do {
-            try persistSession(updatedSession)
+            try await persistSession(updatedSession)
         } catch {
             SkyBridgeLogger.shared.error("❌ 远端账号资料持久化失败: \(error.localizedDescription)")
             return
@@ -1072,26 +1226,35 @@ public class AuthenticationManager: ObservableObject {
         return UUID(uuidString: session.userIdentifier) != nil
     }
 
-    private func checkAppleIDCredentialState() {
-        guard Self.appleSignInLaunchReady,
-              let userID = KeychainManager.shared.retrieveAppleUserID() else {
+    private func checkAppleIDCredentialState() async {
+        guard Self.appleSignInLaunchReady else {
             appleAuthorizationState = .notFound
             return
         }
 
-        let provider = ASAuthorizationAppleIDProvider()
-        provider.getCredentialState(forUserID: userID) { [weak self] state, error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if error != nil {
-                    self.appleAuthorizationState = .notFound
-                    return
-                }
-                self.appleAuthorizationState = state
-                if state == .revoked || state == .notFound {
-                    KeychainManager.shared.deleteAppleUserID()
-                }
+        let userID: String
+        do {
+            guard let persistedUserID = try await KeychainManager.shared.retrieveAppleUserID() else {
+                appleAuthorizationState = .notFound
+                return
             }
+            userID = persistedUserID
+        } catch {
+            appleAuthorizationState = .notFound
+            SkyBridgeLogger.shared.error("❌ Apple 登录标识读取失败: \(error.localizedDescription)")
+            return
+        }
+
+        let provider = ASAuthorizationAppleIDProvider()
+        do {
+            let state = try await provider.credentialState(forUserID: userID)
+            appleAuthorizationState = state
+            if state == .revoked || state == .notFound {
+                try await KeychainManager.shared.deleteAppleUserID()
+            }
+        } catch {
+            appleAuthorizationState = .notFound
+            SkyBridgeLogger.shared.error("❌ Apple 凭据状态检查失败: \(error.localizedDescription)")
         }
     }
 

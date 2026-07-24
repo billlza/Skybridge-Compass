@@ -2,10 +2,19 @@ import Foundation
 
 enum RemoteControlSOABindingPolicy {
     static var allowsInsecureLegacyRemoteControl: Bool {
-        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ALLOW_INSECURE_REMOTE_CONTROL"]?
+        allowsInsecureLegacyRemoteControl(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func allowsInsecureLegacyRemoteControl(environment: [String: String]) -> Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
+        let raw = environment["SKYBRIDGE_ALLOW_INSECURE_REMOTE_CONTROL"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return raw == "1" || raw == "true" || raw == "yes"
+        #else
+        // A launch environment must never weaken authenticated-channel binding in a product build.
+        return false
+        #endif
     }
 
     @available(macOS 14.0, iOS 17.0, *)

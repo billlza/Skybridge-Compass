@@ -1,6 +1,8 @@
 import SwiftUI
 import SkyBridgeCore
+#if DEBUG || SKYBRIDGE_TESTING
 import SkyBridgeSmokeSupport
+#endif
 import os
 
 /// 增强版设备发现视图 - 整合三种连接方式
@@ -959,11 +961,15 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     @State private var selectedTrustedGroupSelection: TrustedGroupSelection?
     @StateObject private var trustedBonjourMetadata = TrustedBonjourMetadataStore()
+#if DEBUG || SKYBRIDGE_TESTING
     @State private var didAppendMacOnlineIPadSmokeBoot = false
+#endif
     @State private var cachedTrustedRecordGroups: [TrustRecordDisplayGroup] = []
     @State private var cachedPresentationSnapshot: DeviceDiscoveryPresentationSnapshot = .empty
     @State private var cachedTrustedBonjourRefreshKey = ""
+#if DEBUG || SKYBRIDGE_TESTING
     @State private var lastMacOnlineIPadSmokeDiscoveryDiagnosticKey = ""
+#endif
     @State private var presentationRefreshGeneration: UInt64 = 0
     @State private var presentationRefreshTask: Task<Void, Never>?
 
@@ -995,14 +1001,18 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
         .navigationTitle(LocalizationManager.shared.localizedString("discovery.title"))
         .task {
+#if DEBUG || SKYBRIDGE_TESTING
             if isMacOnlineIPadSmokeClient {
                 unifiedDeviceManager.startDiscovery()
                 unifiedDeviceManager.refreshDevices()
             }
             appendMacOnlineIPadSmokeRowsIfNeeded()
+#endif
         }
         .onChange(of: smokeOnlineDeviceSnapshotKey) { _, _ in
+#if DEBUG || SKYBRIDGE_TESTING
             appendMacOnlineIPadSmokeRowsIfNeeded()
+#endif
         }
         .sheet(isPresented: $showManualConnectSheet) {
             VStack(alignment: .leading, spacing: 12) {
@@ -1135,7 +1145,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             }
 
                             for id in disconnectCandidateIds {
-                                didDisconnect = p2pDiscoveryService.disconnectFromDevice(id) || didDisconnect
+                                didDisconnect = await p2pDiscoveryService.disconnectFromDevice(id) || didDisconnect
                             }
 
                             if didDisconnect {
@@ -1153,12 +1163,23 @@ public struct EnhancedDeviceDiscoveryView: View {
                         Task { @MainActor in
                             let idsToForget = Array(Set(idsToRevoke + [declaredDeviceId].compactMap { $0 }))
                             // Clear policy first so future requests prompt again.
-                            if let declaredDeviceId {
-                                PairingTrustApprovalService.shared.clearPolicy(for: declaredDeviceId)
+                            if let declaredDeviceId,
+                               !(await PairingTrustApprovalService.shared.clearPolicy(for: declaredDeviceId)) {
+                                SkyBridgeLogger.security.error(
+                                    "Trust removal stopped because pairing policy persistence failed"
+                                )
+                                return
                             }
                             // Revoke all related ids (canonical + alias).
                             for id in idsToForget {
-                                try? await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
+                                do {
+                                    try await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
+                                } catch {
+                                    SkyBridgeLogger.security.error(
+                                        "Trust removal failed; retaining local trust material. errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                                    )
+                                    return
+                                }
                             }
                             await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: idsToForget)
                             // Close sheet
@@ -2507,6 +2528,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private var smokeOnlineDeviceSnapshotKey: String {
+#if DEBUG || SKYBRIDGE_TESTING
         guard isMacOnlineIPadSmokeClient else { return "" }
         let deviceSummary = unifiedDeviceManager.onlineDevices
             .filter { !$0.isLocalDevice }
@@ -2544,23 +2566,35 @@ public struct EnhancedDeviceDiscoveryView: View {
             .sorted()
             .joined(separator: "\n")
         return "\(deviceSummary)\npresence:\(presenceSummary)"
+#else
+        ""
+#endif
     }
 
     private var isMacOnlineIPadSmokeClient: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client"
+#else
+        false
+#endif
     }
 
     private var macOnlineIPadSmokeTargetIdentity: String? {
+#if DEBUG || SKYBRIDGE_TESTING
         guard let value = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_IDENTITY"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
             return nil
         }
         return value
+#else
+        nil
+#endif
     }
 
     private var macOnlineIPadSmokeConnectTarget: OnlineDevice? {
+#if DEBUG || SKYBRIDGE_TESTING
         guard isMacOnlineIPadSmokeClient else { return nil }
         let candidates = filteredOnlineDevicesNonLocal.filter { device in
             appleMobilePresentationFamily(for: device) == "ipad"
@@ -2587,6 +2621,9 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
             return lhs.name < rhs.name
         }.first
+#else
+        nil
+#endif
     }
 
     private func macOnlineIPadSmokeDevice(_ device: OnlineDevice, matches targetIdentity: String) -> Bool {
@@ -2619,12 +2656,16 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private var smokeStatusURL: URL? {
+#if DEBUG || SKYBRIDGE_TESTING
         guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
             return nil
         }
         return URL(fileURLWithPath: raw)
+#else
+        nil
+#endif
     }
 
     private struct MacOnlineIPadSmokeVisibleRow {
@@ -2633,6 +2674,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func appendMacOnlineIPadSmokeRowsIfNeeded() {
+#if DEBUG || SKYBRIDGE_TESTING
         guard isMacOnlineIPadSmokeClient,
               let statusURL = smokeStatusURL else {
             return
@@ -2661,10 +2703,11 @@ public struct EnhancedDeviceDiscoveryView: View {
         for row in rows {
             appendSmokeStatusLine(smokeOnlineDeviceStatusLine(for: row.device, surface: row.surface), to: statusURL)
         }
+#endif
     }
 
     private func appendMacOnlineIPadSmokeDiscoveryDiagnosticsIfNeeded(to statusURL: URL) {
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
         let diagnostics = unifiedDeviceManager.smokeDiscoveryDiagnostics(limit: 16)
         let diagnosticKeyBody = diagnostics.map { diagnostic in
             [
@@ -2947,6 +2990,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func appendSmokeStatusLine(_ line: String, to statusURL: URL) {
+#if DEBUG || SKYBRIDGE_TESTING
         let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         let data = Data(rendered.utf8)
         MacSmokeStatusFailClosedWriter.append(
@@ -2954,6 +2998,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             to: statusURL,
             context: "mac-online-ipad device-management smoke"
         )
+#endif
     }
 
     private func appendMacOnlineIPadConnectAppActionIfNeeded(
@@ -2961,6 +3006,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         device: OnlineDevice,
         error: Error? = nil
     ) {
+#if DEBUG || SKYBRIDGE_TESTING
         guard isMacOnlineIPadSmokeClient,
               let statusURL = smokeStatusURL else {
             return
@@ -2985,6 +3031,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             fields.append("error=\(smokeFieldValue(error.localizedDescription))")
         }
         appendSmokeStatusLine(fields.joined(separator: " "), to: statusURL)
+#endif
     }
 
     private func smokeResolvedSource(for device: OnlineDevice) -> String {

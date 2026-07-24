@@ -33,6 +33,7 @@ const FINISHED_R2I_INFO: &[u8] = b"SkyBridge-FINISHED|R2I|";
 const IDENTITY_ALGORITHM_ED25519: u8 = 0x01;
 const IDENTITY_ALGORITHM_MLDSA65: u8 = 0x02;
 const IDENTITY_ALGORITHM_P256: u8 = 0x03;
+const IDENTITY_ALGORITHM_MLDSA87: u8 = 0x04;
 type ClassicKem = X25519HkdfSha256;
 type ClassicAead = ChaCha20Poly1305;
 type ClassicKdf = HkdfSha256;
@@ -673,6 +674,7 @@ fn encode_identity_public_key(
     let algorithm_byte = match algorithm {
         ProtocolSigningAlgorithm::Ed25519 => IDENTITY_ALGORITHM_ED25519,
         ProtocolSigningAlgorithm::MlDsa65 => IDENTITY_ALGORITHM_MLDSA65,
+        ProtocolSigningAlgorithm::MlDsa87 => IDENTITY_ALGORITHM_MLDSA87,
     };
     let mut encoded = Vec::new();
     encoded.push(algorithm_byte);
@@ -694,6 +696,7 @@ fn decode_identity_public_key(data: &[u8]) -> Result<DecodedIdentityPublicKey> {
     let algorithm = match data[0] {
         IDENTITY_ALGORITHM_ED25519 => ProtocolSigningAlgorithm::Ed25519,
         IDENTITY_ALGORITHM_MLDSA65 => ProtocolSigningAlgorithm::MlDsa65,
+        IDENTITY_ALGORITHM_MLDSA87 => ProtocolSigningAlgorithm::MlDsa87,
         IDENTITY_ALGORITHM_P256 => {
             bail!("p256 identities are not supported in classic rust initiator")
         }
@@ -705,11 +708,15 @@ fn decode_identity_public_key(data: &[u8]) -> Result<DecodedIdentityPublicKey> {
     let has_secure_enclave = *data
         .get(offset)
         .ok_or_else(|| anyhow!("missing secure enclave identity flag"))?;
+    offset += 1;
     if has_secure_enclave != 0x00 {
         bail!("secure enclave identity keys are not supported in classic rust initiator");
     }
     if algorithm != ProtocolSigningAlgorithm::Ed25519 || key_len != 32 {
         bail!("unsupported identity public key length");
+    }
+    if offset != data.len() {
+        bail!("unexpected trailing bytes in identity public key payload");
     }
     let mut public_key = [0u8; 32];
     public_key.copy_from_slice(key_bytes);

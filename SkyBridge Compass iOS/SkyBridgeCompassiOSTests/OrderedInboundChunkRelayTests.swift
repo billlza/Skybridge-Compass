@@ -6,19 +6,19 @@ final class OrderedInboundChunkRelayTests: XCTestCase {
         let relay = OrderedInboundChunkRelay()
         let recorder = RelayEventRecorder()
 
-        relay.submit {
+        XCTAssertTrue(relay.submit(byteCount: 1) {
             await recorder.record("first-start")
             try? await Task.sleep(for: .milliseconds(60))
             await recorder.record("first-end")
-        }
-        relay.submit {
+        })
+        XCTAssertTrue(relay.submit(byteCount: 1) {
             await recorder.record("second")
-        }
-        relay.submit {
+        })
+        XCTAssertTrue(relay.submit(byteCount: 1) {
             await recorder.record("third-start")
             try? await Task.sleep(for: .milliseconds(10))
             await recorder.record("third-end")
-        }
+        })
 
         try? await Task.sleep(for: .milliseconds(200))
         relay.cancel()
@@ -28,6 +28,21 @@ final class OrderedInboundChunkRelayTests: XCTestCase {
             events,
             ["first-start", "first-end", "second", "third-start", "third-end"]
         )
+    }
+
+    func testSubmitFailsClosedAfterCapacityViolationAndAfterCancel() async {
+        let relay = OrderedInboundChunkRelay(maxPendingOperations: 1, maxPendingBytes: 4)
+        let gate = RelaySuspensionGate()
+
+        XCTAssertTrue(relay.submit(byteCount: 4) {
+            await gate.wait()
+        })
+        XCTAssertFalse(relay.submit(byteCount: 1) {})
+        XCTAssertFalse(relay.submit(byteCount: 1) {})
+
+        await gate.release()
+        relay.cancel()
+        XCTAssertFalse(relay.submit(byteCount: 1) {})
     }
 }
 
@@ -40,5 +55,23 @@ private actor RelayEventRecorder {
 
     func snapshot() -> [String] {
         events
+    }
+}
+
+private actor RelaySuspensionGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
     }
 }

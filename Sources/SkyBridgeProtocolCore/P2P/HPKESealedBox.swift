@@ -26,6 +26,10 @@ public struct HPKESealedBox: Sendable {
     }
 
     public init(combined: Data, isHandshake: Bool = true) throws {
+        // The sealed box is bounded (64 KiB during handshake, 256 KiB after
+        // authentication). Normalize a possible Data slice once so the wire
+        // offsets below are valid collection indices.
+        let combined = Data(combined)
         guard combined.count >= Self.headerSize else {
             throw CryptoProviderError.invalidSealedBox("Data too short for header")
         }
@@ -55,10 +59,14 @@ public struct HPKESealedBox: Sendable {
                 throw CryptoProviderError.invalidTagLength(tagLen)
             }
         } else {
-            guard nonceLen == 0 || nonceLen == Self.expectedNonceLen else {
+            // v2 is the native-HPKE form: nonce/tag are carried inside its
+            // ciphertext and therefore both outer fields must be absent.
+            // A v2 header with v1 lengths is an encoding alias and must not be
+            // accepted then normalized to v1 in a signed transcript.
+            guard nonceLen == 0 else {
                 throw CryptoProviderError.invalidNonceLength(nonceLen)
             }
-            guard tagLen == 0 || tagLen == Self.expectedTagLen else {
+            guard tagLen == 0 else {
                 throw CryptoProviderError.invalidTagLength(tagLen)
             }
         }
@@ -84,13 +92,13 @@ public struct HPKESealedBox: Sendable {
         }
 
         var offset = Self.headerSize
-        self.encapsulatedKey = combined[offset..<(offset + encLen)]
+        self.encapsulatedKey = Data(combined[offset..<(offset + encLen)])
         offset += encLen
-        self.nonce = combined[offset..<(offset + nonceLen)]
+        self.nonce = Data(combined[offset..<(offset + nonceLen)])
         offset += nonceLen
-        self.ciphertext = combined[offset..<(offset + ctLen)]
+        self.ciphertext = Data(combined[offset..<(offset + ctLen)])
         offset += ctLen
-        self.tag = combined[offset..<(offset + tagLen)]
+        self.tag = Data(combined[offset..<(offset + tagLen)])
     }
 
     public var combined: Data {

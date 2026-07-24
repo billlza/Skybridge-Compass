@@ -28,7 +28,14 @@ final class PQCP2PIntegrationTests: XCTestCase {
         let deviceIdentity = try DeviceIdentityKeychainTestContext()
         self.deviceIdentity = deviceIdentity
         crypto = EnhancedPostQuantumCrypto(
-            deviceIdentityKeyManager: deviceIdentity.manager
+            deviceIdentityKeyManager: deviceIdentity.manager,
+            committedLocalIdentityLoader: {
+                try await CommittedLocalProtocolIdentitySnapshot.load(
+                    algorithm: .mlDSA65,
+                    protection: .softwareKeychain,
+                    keyManager: deviceIdentity.manager
+                )
+            }
         )
         keyManager = EnhancedQuantumKeyManager()
         
@@ -461,8 +468,8 @@ final class PQCP2PIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(
             normalized,
-            ["ML-DSA-65", "ML-DSA-65"],
-            "Production settings must never advertise an algorithm outside the handshake trust model"
+            ["ML-DSA-87", "ML-DSA-65"],
+            "Production settings must retain implemented ML-DSA-87 while rejecting unknown algorithms"
         )
     }
 

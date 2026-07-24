@@ -70,6 +70,7 @@ public actor SecurityEventEmitter {
         self.recordsToAuditTrail = recordsToAuditTrail
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     // MARK: - Test Helpers
 
     /// Create an emitter instance for unit tests with custom queue limits.
@@ -85,6 +86,7 @@ public actor SecurityEventEmitter {
             recordsToAuditTrail: false
         )
     }
+#endif
     
  // MARK: - Public API
     
@@ -192,6 +194,7 @@ public actor SecurityEventEmitter {
         subscribers.count
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     /// Reset emitter state for unit tests (clears queue, subscribers, and overflow counters).
     internal func resetForTesting() {
         queuedEvents.removeAll()
@@ -200,6 +203,7 @@ public actor SecurityEventEmitter {
         lastOverflowMetaEventTime = nil
         Self.hasSubscribersFlag.store(false, ordering: .relaxed)
     }
+#endif
 
     
  // MARK: - Internal Methods
@@ -254,16 +258,6 @@ public actor SecurityEventEmitter {
         await deliverToAllSubscribersDirect(metaEvent)
     }
     
- /// Clear all queued events (for testing)
-    internal func clearQueue() {
-        queuedEvents.removeAll()
-        droppedSinceLastMetaEvent = 0
-    }
-    
- /// Clear all subscribers (for testing)
-    internal func clearSubscribers() {
-        subscribers.removeAll()
-    }
 }
 
 // MARK: - SubscriberActor
@@ -382,16 +376,3 @@ internal actor SubscriberActor {
 
 // SecurityEventEmitter is an actor, so it's implicitly Sendable
 // SubscriberActor is an actor, so it's implicitly Sendable
-
-// MARK: - Testing Support
-
-#if DEBUG
-extension SecurityEventEmitter {
- /// Reset the shared instance state (for testing)
-    public func resetForTesting() async {
-        clearQueue()
-        clearSubscribers()
-        lastOverflowMetaEventTime = nil
-    }
-}
-#endif

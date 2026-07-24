@@ -70,12 +70,13 @@ platform :mac do
 
     connectivity_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"]
     p2p_remote_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR"]
+    webrtc_remote_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR"]
     file_transfer_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR"]
     p2p_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR"]
     webrtc_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR"]
     notice_panel_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR"]
-    if connectivity_artifact_dir.to_s.empty? || p2p_remote_artifact_dir.to_s.empty? || file_transfer_artifact_dir.to_s.empty? || p2p_notice_artifact_dir.to_s.empty? || webrtc_notice_artifact_dir.to_s.empty? || notice_panel_artifact_dir.to_s.empty?
-      UI.user_error!("最终发布必须显式传入 SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR")
+    if connectivity_artifact_dir.to_s.empty? || p2p_remote_artifact_dir.to_s.empty? || webrtc_remote_artifact_dir.to_s.empty? || file_transfer_artifact_dir.to_s.empty? || p2p_notice_artifact_dir.to_s.empty? || webrtc_notice_artifact_dir.to_s.empty? || notice_panel_artifact_dir.to_s.empty?
+      UI.user_error!("最终发布必须显式传入 SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR")
     end
 
     release_args = [
@@ -94,6 +95,7 @@ platform :mac do
       "--require-notarization",
       "--connectivity-artifact-dir #{Shellwords.escape(connectivity_artifact_dir)}",
       "--p2p-remote-artifact-dir #{Shellwords.escape(p2p_remote_artifact_dir)}",
+      "--webrtc-remote-artifact-dir #{Shellwords.escape(webrtc_remote_artifact_dir)}",
       "--file-transfer-artifact-dir #{Shellwords.escape(file_transfer_artifact_dir)}",
       "--p2p-notice-artifact-dir #{Shellwords.escape(p2p_notice_artifact_dir)}",
       "--webrtc-notice-artifact-dir #{Shellwords.escape(webrtc_notice_artifact_dir)}",
@@ -102,11 +104,9 @@ platform :mac do
     sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh #{readiness_args.join(' ')}")
 
     if ENV["SKYBRIDGE_PUBLISH_UPDATE_RELEASE"] == "1"
-      update_key_id = ENV["SKYBRIDGE_UPDATE_MANIFEST_KEY_ID"]
-      if update_key_id.to_s.empty?
-        UI.user_error!("发布 GitHub stable 更新必须设置 SKYBRIDGE_UPDATE_MANIFEST_KEY_ID")
-      end
-      sh("cd .. && ./Scripts/publish_macos_update_release.sh --key-id #{Shellwords.escape(update_key_id)}")
+      UI.user_error!(
+        "远程发布只允许由受保护的 macos-release-readiness GitHub Actions workflow 执行；Fastlane 仅构建、签名、公证并校验本地候选物。"
+      )
     end
 
     UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")

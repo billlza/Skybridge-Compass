@@ -16,6 +16,9 @@ import Security
 
 /// 加密提供者层级
 public enum CryptoTier: String, Sendable, Codable, Equatable {
+    /// Q-Periapt ABI2 authenticated policy-bound hybrid KEM
+    case qperiaptPQC = "qperiaptPQC"
+
     /// Apple 原生 PQC（macOS 26+/iOS 26+）
     case nativePQC = "nativePQC"
     
@@ -42,7 +45,9 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     /// Q-Periapt ABI 1 ContextBound（仅保留历史 wire 解析）
     case qperiaptContextBound
 
-    /// Q-Periapt ABI 2 authenticated-policy/application-context-bound hybrid KEM
+    /// Q-Periapt ABI 2 authenticated-policy/application-context-bound hybrid KEM.
+    /// The suite identifier is negotiable only through a provider backed by an
+    /// activated immutable runtime session; wire recognition alone is not admission.
     case qperiaptABI2PolicyBound
     
     /// X25519 + Ed25519（经典）
@@ -148,13 +153,18 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         return true
     }
 
-    /// Historical suites remain wire-decodable but cannot enter new negotiation.
+    /// 历史 ABI 1 套件仅可解析，禁止进入新协商或信任存储。
     public var isLegacyOnly: Bool {
         self == .qperiaptContextBound
     }
 
+    /// Historical suites which this target parses but must never execute.
+    public var isDecodeOnly: Bool {
+        self == .qperiaptContextBound
+    }
+
     public var isNegotiable: Bool {
-        isKnown && !isLegacyOnly
+        isKnown && !isDecodeOnly
     }
     
     /// 是否是 PQC 套件
@@ -187,9 +197,10 @@ public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
         [.mlkem768, .mlkem768fs, .xwing]
     }
 
-    /// 显式 beta PQC 套件。ABI 1 标识不进入任何可通告列表。
+    /// Beta suites are never inserted into a static global offer. Q-Periapt is
+    /// exposed dynamically only by a signed-policy-admitted provider/session.
     public static var explicitBetaPQCSuites: [CryptoSuite] {
-        [.qperiaptABI2PolicyBound]
+        return []
     }
     
     /// 所有 Classic 套件
@@ -320,6 +331,13 @@ public struct KeyMaterial: Sendable {
         case .secure(let secure): return secure.data
         }
     }
+
+    /// Internal ownership-preserving access for persistence boundaries that
+    /// must not materialize an additional private-key `Data` copy.
+    var secureBytesReference: SecureBytes? {
+        guard case .secure(let secure) = storage else { return nil }
+        return secure
+    }
 }
 
 // MARK: - HPKESealedBox
@@ -360,6 +378,9 @@ public struct HPKESealedBox: Sendable {
     /// 从带 header 的合并格式解析
     /// - Parameter isHandshake: true = 握手阶段（64KB 限制），false = 鉴权后（256KB 限制）
     public init(combined: Data, isHandshake: Bool = true) throws {
+        // This control-plane payload is bounded. Rebase possible Data slices
+        // once so all protocol-relative offsets below are valid indices.
+        let combined = Data(combined)
         guard combined.count >= Self.headerSize else {
             throw HPKESealedBoxParseError.invalidSealedBox("Data too short for header")
         }
@@ -386,8 +407,11 @@ public struct HPKESealedBox: Sendable {
             guard nonceLen == Self.expectedNonceLen else { throw HPKESealedBoxParseError.invalidNonceLength(nonceLen) }
             guard tagLen == Self.expectedTagLen else { throw HPKESealedBoxParseError.invalidTagLength(tagLen) }
         } else {
-            guard nonceLen == 0 || nonceLen == Self.expectedNonceLen else { throw HPKESealedBoxParseError.invalidNonceLength(nonceLen) }
-            guard tagLen == 0 || tagLen == Self.expectedTagLen else { throw HPKESealedBoxParseError.invalidTagLength(tagLen) }
+            // Native HPKE keeps nonce/tag inside its ciphertext. Requiring both
+            // outer lengths to be zero prevents v2 aliases that would later be
+            // rewritten as v1 while constructing a signed transcript.
+            guard nonceLen == 0 else { throw HPKESealedBoxParseError.invalidNonceLength(nonceLen) }
+            guard tagLen == 0 else { throw HPKESealedBoxParseError.invalidTagLength(tagLen) }
         }
         
         let maxCtLen = isHandshake ? Self.maxCtLenHandshake : Self.maxCtLenPostAuth
@@ -410,13 +434,13 @@ public struct HPKESealedBox: Sendable {
         }
         
         var offset = Self.headerSize
-        self.encapsulatedKey = combined[offset..<(offset + encLen)]
+        self.encapsulatedKey = Data(combined[offset..<(offset + encLen)])
         offset += encLen
-        self.nonce = combined[offset..<(offset + nonceLen)]
+        self.nonce = Data(combined[offset..<(offset + nonceLen)])
         offset += nonceLen
-        self.ciphertext = combined[offset..<(offset + ctLen)]
+        self.ciphertext = Data(combined[offset..<(offset + ctLen)])
         offset += ctLen
-        self.tag = combined[offset..<(offset + tagLen)]
+        self.tag = Data(combined[offset..<(offset + tagLen)])
     }
     
     /// 无 header 的合并格式（用于内部拼接）: enc || nonce || ct || tag
@@ -496,12 +520,50 @@ public final class SecureBytes: @unchecked Sendable {
     
     private let pointer: UnsafeMutableRawPointer
     private let count: Int
-    
-    nonisolated(unsafe) public static var wipingFunction: (UnsafeMutableRawPointer, Int) -> Void = { ptr, len in
-        secureZeroMemory(ptr, len)
+    private let accessLock = NSRecursiveLock()
+
+    public typealias WipingFunction = @Sendable (UnsafeMutableRawPointer, Int) -> Void
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private final class WipingFunctionStorage: @unchecked Sendable {
+        private let lock = NSLock()
+        private var function: WipingFunction
+
+        init(function: @escaping WipingFunction) {
+            self.function = function
+        }
+
+        func load() -> WipingFunction {
+            lock.lock()
+            defer { lock.unlock() }
+            return function
+        }
+
+        func store(_ function: @escaping WipingFunction) {
+            lock.lock()
+            self.function = function
+            lock.unlock()
+        }
     }
+
+    private static let wipingFunctionStorage = WipingFunctionStorage { pointer, count in
+        secureZeroMemory(pointer, count)
+    }
+
+    /// Test-only zeroization probe. The storage is synchronized for concurrent tests.
+    public static var wipingFunction: WipingFunction {
+        get { wipingFunctionStorage.load() }
+        set { wipingFunctionStorage.store(newValue) }
+    }
+#else
+    /// Immutable production zeroization entry point.
+    internal static let wipingFunction: WipingFunction = { pointer, count in
+        secureZeroMemory(pointer, count)
+    }
+#endif
     
     public init(count: Int) {
+        precondition(count >= 0, "SecureBytes count must not be negative")
         self.count = count
         let allocSize = max(count, 1)
         self.pointer = UnsafeMutableRawPointer.allocate(
@@ -554,28 +616,35 @@ public final class SecureBytes: @unchecked Sendable {
     public var isEmpty: Bool { count == 0 }
     
     public var data: Data {
+        copyData()
+    }
+
+    /// Returns a Data value with storage independent of this SecureBytes instance.
+    public func copyData() -> Data {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         guard count > 0 else { return Data() }
         return Data(bytes: pointer, count: count)
     }
     
-    public func noCopyData() -> Data {
-        guard count > 0 else { return Data() }
-        return Data(bytesNoCopy: pointer, count: count, deallocator: .none)
-    }
-    
-    public func unsafeRawBytes() -> Data { data }
-    public func copyData() -> Data { data }
-    public var bytes: Data { data }
+    public func unsafeRawBytes() -> Data { copyData() }
+    public var bytes: Data { copyData() }
     
     public func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
-        try body(UnsafeRawBufferPointer(start: pointer, count: count))
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return try body(UnsafeRawBufferPointer(start: pointer, count: count))
     }
     
     public func withUnsafeMutableBytes<R>(_ body: (UnsafeMutableRawBufferPointer) throws -> R) rethrows -> R {
-        try body(UnsafeMutableRawBufferPointer(start: pointer, count: count))
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return try body(UnsafeMutableRawBufferPointer(start: pointer, count: count))
     }
     
     public func zeroize() {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         if count > 0 {
             Self.wipingFunction(pointer, count)
         }
@@ -590,17 +659,42 @@ extension SecureBytes: ContiguousBytes {}
 import Darwin
 
 private typealias ExplicitBzeroFn = @convention(c) (UnsafeMutableRawPointer?, Int) -> Void
+private typealias MemsetSFn = @convention(c) (UnsafeMutableRawPointer?, Int, Int32, Int) -> Int32
 
-private func loadExplicitBzero() -> ExplicitBzeroFn? {
-    guard let symbol = dlsym(dlopen(nil, RTLD_NOW), "explicit_bzero") else {
-        return nil
+/// Resolve secure-zero functions once and retain the process-image handle for the
+/// process lifetime instead of repeatedly acquiring a handle for every wipe.
+private final class SecureZeroSymbols: @unchecked Sendable {
+    static let shared = SecureZeroSymbols()
+
+    let explicitBzero: ExplicitBzeroFn?
+    let memsetS: MemsetSFn?
+    private let processHandle: UnsafeMutableRawPointer?
+
+    private init() {
+        let handle = dlopen(nil, RTLD_NOW)
+        processHandle = handle
+        if let handle {
+            explicitBzero = dlsym(handle, "explicit_bzero").map {
+                unsafeBitCast($0, to: ExplicitBzeroFn.self)
+            }
+            memsetS = dlsym(handle, "memset_s").map {
+                unsafeBitCast($0, to: MemsetSFn.self)
+            }
+        } else {
+            explicitBzero = nil
+            memsetS = nil
+        }
     }
-    return unsafeBitCast(symbol, to: ExplicitBzeroFn.self)
 }
 
 private func secureZeroMemory(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
-    if let fn = loadExplicitBzero() {
+    let symbols = SecureZeroSymbols.shared
+    if let fn = symbols.explicitBzero {
         fn(ptr, count)
+        return
+    }
+    if let fn = symbols.memsetS {
+        _ = fn(ptr, count, 0, count)
         return
     }
     let bytes = ptr.assumingMemoryBound(to: UInt8.self)

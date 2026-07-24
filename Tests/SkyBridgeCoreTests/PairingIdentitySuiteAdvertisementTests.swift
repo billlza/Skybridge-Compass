@@ -22,12 +22,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         let provider = MockCryptoProvider(
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
-            supportedSuites: [
-                .qperiaptContextBound,
-                .qperiaptABI2PolicyBound,
-                .mlkem768MLDSA65FS,
-                .mlkem768MLDSA65
-            ]
+            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
         )
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
@@ -68,16 +63,26 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         let disabled = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
             using: provider,
             appleXWingAvailable: false,
-            qPeriaptEnabled: false
+            qPeriaptEnabled: false,
+            activeProtocolSigningAlgorithm: .mlDSA65
         )
         XCTAssertEqual(disabled.map(\.wireId), [0x0101, 0x0102])
 
         let enabled = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
             using: provider,
             appleXWingAvailable: false,
-            qPeriaptEnabled: true
+            qPeriaptEnabled: true,
+            activeProtocolSigningAlgorithm: .mlDSA65
         )
         XCTAssertEqual(enabled.map(\.wireId), [0x0012, 0x0101, 0x0102])
+
+        let activeMLDSA87 = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: false,
+            qPeriaptEnabled: true,
+            activeProtocolSigningAlgorithm: .mlDSA87
+        )
+        XCTAssertEqual(activeMLDSA87.map(\.wireId), [0x0101, 0x0102])
     }
 
     func testKEMPublicKeyInfoAcceptsOnlyNegotiableABI2QPeriaptBootstrapKey() {
@@ -135,6 +140,12 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: nil, osVersion: "26.0"))
         XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: nil, osVersion: "iOS 26.0"))
         XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Windows", osVersion: "Windows 26"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "iOS", osVersion: "prefix iOS 26.0"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "iOS", osVersion: "iOS 26.0 build 23A"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "macOS", osVersion: "proxy macOS 26.0"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "Android 16 API 36 suffix"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "Android", osVersion: "16"))
+        XCTAssertFalse(QPeriaptPlatformPolicy.isPeerAppPlatformEligible(platform: "iOS", osVersion: "macOS 26.0"))
     }
 
     func testQPeriaptHandshakePeerPolicyFailsClosedWithoutAdmittedRuntimeSession() {
@@ -235,6 +246,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
     func testPairingIdentityCarriesCanonicalProtocolIdentityFingerprints() throws {
         let ed25519PublicKey = Data(repeating: 0x11, count: 32)
         let mlDSAPublicKey = Data(repeating: 0x22, count: 1952)
+        let mlDSA87PublicKey = Data(repeating: 0x23, count: 2_592)
         let protocolKeys = [
             AppMessage.ProtocolIdentityPublicKeyInfo(
                 protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
@@ -243,6 +255,10 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
             AppMessage.ProtocolIdentityPublicKeyInfo(
                 protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
                 publicKey: mlDSAPublicKey
+            ),
+            AppMessage.ProtocolIdentityPublicKeyInfo(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA87.rawValue,
+                publicKey: mlDSA87PublicKey
             )
         ]
 
@@ -263,10 +279,44 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
             ProtocolIdentityPublicKeys(protocolPublicKey: ed25519PublicKey, protocolAlgorithm: .ed25519)
                 .authoritativeFingerprint,
             ProtocolIdentityPublicKeys(protocolPublicKey: mlDSAPublicKey, protocolAlgorithm: .mlDSA65)
+                .authoritativeFingerprint,
+            ProtocolIdentityPublicKeys(protocolPublicKey: mlDSA87PublicKey, protocolAlgorithm: .mlDSA87)
                 .authoritativeFingerprint
         ])
         XCTAssertEqual(fingerprints, expected)
     }
+
+#if os(macOS)
+    func testLocalProtocolIdentityAdvertisementValidatesExactAlgorithmLengths() throws {
+        try LocalProtocolIdentityAdvertisement.validate(
+            publicKey: Data(repeating: 0x11, count: 32),
+            algorithm: .ed25519
+        )
+        try LocalProtocolIdentityAdvertisement.validate(
+            publicKey: Data(repeating: 0x65, count: 1_952),
+            algorithm: .mlDSA65
+        )
+        try LocalProtocolIdentityAdvertisement.validate(
+            publicKey: Data(repeating: 0x87, count: 2_592),
+            algorithm: .mlDSA87
+        )
+
+        XCTAssertThrowsError(
+            try LocalProtocolIdentityAdvertisement.validate(
+                publicKey: Data(repeating: 0x87, count: 2_591),
+                algorithm: .mlDSA87
+            )
+        ) { error in
+            guard let advertisementError = error as? LocalProtocolIdentityAdvertisementError,
+                  case .invalidPublicKey(let algorithm, let actualLength) = advertisementError else {
+                XCTFail("Expected exact-length validation failure, got \(error)")
+                return
+            }
+            XCTAssertEqual(algorithm, .mlDSA87)
+            XCTAssertEqual(actualLength, 2_591)
+        }
+    }
+#endif
 }
 
 @available(macOS 14.0, iOS 17.0, *)

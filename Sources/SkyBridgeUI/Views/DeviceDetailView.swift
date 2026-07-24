@@ -11,12 +11,11 @@ public struct DeviceDetailView: View {
     let device: DiscoveredDevice
     @StateObject private var hardwareController = HardwareRemoteController()
     @ObservedObject private var securityManager = DeviceSecurityManager.shared
-    @StateObject private var fileTransferEngine: FileTransferEngine
+    @StateObject private var fileTransferManager = FileTransferManager.shared
+    @State private var fileTransferErrorMessage: String?
     
     public init(device: DiscoveredDevice) {
         self.device = device
- // 初始化文件传输引擎
-        _fileTransferEngine = StateObject(wrappedValue: FileTransferEngine())
     }
     
     public var body: some View {
@@ -41,7 +40,14 @@ public struct DeviceDetailView: View {
  // DeviceSecurityManager 继承自 BaseManager，在 init 时自动初始化
  // 等待初始化完成
             while !securityManager.isInitialized {
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05秒
+                do {
+                    try await Task.sleep(nanoseconds: 50_000_000) // 0.05秒
+                } catch is CancellationError {
+                    return
+                } catch {
+                    SkyBridgeLogger.ui.error("等待设备安全管理器初始化失败")
+                    return
+                }
             }
         }
     }
@@ -206,22 +212,22 @@ public struct DeviceDetailView: View {
             HStack {
                 Text("传输速度:")
                     .fontWeight(.medium)
-                Text(formatTransferSpeed(fileTransferEngine.transferSpeed))
+                Text(formatTransferSpeed(aggregateTransferSpeed))
                     .foregroundColor(.secondary)
             }
             
-            if !fileTransferEngine.activeTransfers.isEmpty {
+            if !fileTransferManager.activeTransfers.isEmpty {
                 Text("活跃传输:")
                     .fontWeight(.medium)
                 
-                ForEach(Array(fileTransferEngine.activeTransfers.values), id: \.id) { session in
+                ForEach(Array(fileTransferManager.activeTransfers.values), id: \.id) { transfer in
                     HStack {
-                        Text(session.fileName)
+                        Text(transfer.fileName)
                             .lineLimit(1)
                         Spacer()
-                        ProgressView(value: session.progress)
+                        ProgressView(value: transfer.progress)
                             .frame(width: 100)
-                        Text(String(format: "%.1f%%", session.progress * 100))
+                        Text(String(format: "%.1f%%", transfer.progress * 100))
                             .foregroundColor(.secondary)
                             .frame(width: 50, alignment: .trailing)
                     }
@@ -230,6 +236,13 @@ public struct DeviceDetailView: View {
                 Text("暂无活跃传输")
                     .foregroundColor(.secondary)
                     .font(.caption)
+            }
+
+            if let fileTransferErrorMessage {
+                Text(fileTransferErrorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .textSelection(.enabled)
             }
             
             HStack {
@@ -253,7 +266,13 @@ public struct DeviceDetailView: View {
         .cornerRadius(8)
     }
     
- // MARK: - 辅助方法
+    // MARK: - 辅助方法
+
+    private var aggregateTransferSpeed: Double {
+        fileTransferManager.activeTransfers.values.reduce(0) { partialResult, transfer in
+            partialResult + transfer.transferSpeed
+        }
+    }
     
     private func formatTransferSpeed(_ bytesPerSecond: Double) -> String {
         if bytesPerSecond >= 1_000_000_000 {
@@ -277,14 +296,16 @@ public struct DeviceDetailView: View {
         
         panel.begin { response in
             if response == .OK, let url = panel.url {
-                Task {
+                Task { @MainActor in
+                    fileTransferErrorMessage = nil
                     do {
-                        _ = try await fileTransferEngine.sendFile(
+                        try await fileTransferManager.sendFileToActivePeer(
                             at: url,
-                            to: device.id.uuidString
+                            matchingPeerIds: device.connectionRouteCandidates,
+                            preferredDeviceName: device.name
                         )
                     } catch {
- // 文件传输引擎内部会处理错误
+                        fileTransferErrorMessage = error.localizedDescription
                     }
                 }
             }

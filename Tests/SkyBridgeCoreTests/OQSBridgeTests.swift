@@ -3,7 +3,7 @@ import XCTest
 
 #if canImport(liboqs)
 final class OQSBridgeTests: XCTestCase {
-    func testMLDSA65SignVerify() async throws {
+    func testMLDSA65VerificationRequiresExplicitAuthenticatedPublicKey() async throws {
         let keychain = PQCKeychainTestContext()
         let peer = "test-peer-\(UUID().uuidString)"
         try registerCleanup(
@@ -26,7 +26,17 @@ final class OQSBridgeTests: XCTestCase {
             publicKey: result.publicKey,
             algorithm: .mldsa65
         )
+        let peerIdOnlyVerified = await OQSBridge.verify(
+            msg,
+            signature: result.signature,
+            peerId: peer,
+            algorithm: .mldsa65
+        )
         XCTAssertTrue(ok)
+        XCTAssertFalse(
+            peerIdOnlyVerified,
+            "A locally persisted public key must never become authenticated remote trust"
+        )
     }
     func testMLKEM768EncDec() async throws {
         let keychain = PQCKeychainTestContext()

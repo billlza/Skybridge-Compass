@@ -1,9 +1,12 @@
 import Foundation
+#if DEBUG || SKYBRIDGE_TESTING
 import Dispatch
 import Darwin
 import SkyBridgeSmokeSupport
+#endif
 
 enum RemoteControlSmokeStatusWriter {
+#if DEBUG || SKYBRIDGE_TESTING
     private final class WriterState: @unchecked Sendable {
         private let timestampFormatter: ISO8601DateFormatter = {
             let formatter = ISO8601DateFormatter()
@@ -21,8 +24,10 @@ enum RemoteControlSmokeStatusWriter {
         qos: .utility
     )
     private static let writerState = WriterState()
+#endif
 
     static func append(_ line: String) {
+#if DEBUG || SKYBRIDGE_TESTING
         guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
         guard let statusURL = smokeStatusURL() else { return }
 
@@ -35,8 +40,21 @@ enum RemoteControlSmokeStatusWriter {
                 failStatusWrite(line: line, statusURL: statusURL, error: error)
             }
         }
+#endif
     }
 
+    static func fieldValue(_ raw: String?) -> String {
+        guard let raw else { return "missing" }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".:-_"))
+        let sanitized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .unicodeScalars
+            .map { allowed.contains($0) ? $0.description : "_" }
+            .joined()
+        return sanitized.isEmpty ? "missing" : sanitized
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
     private static func smokeStatusURL() -> URL? {
         guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -66,4 +84,5 @@ enum RemoteControlSmokeStatusWriter {
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
     }
+#endif
 }

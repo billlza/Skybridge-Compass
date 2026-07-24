@@ -14,6 +14,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case kemRefreshFailure(KEMRefreshFailurePayload)
     case protocolIdentityBindingRequest(ProtocolIdentityBindingRequestPayload)
     case signedProtocolIdentityBinding(SignedProtocolIdentityBindingPayload)
+    case protocolIdentityBindingConfirm(ProtocolIdentityBindingConfirmPayload)
+    case signedProtocolIdentityBindingFinalAck(SignedProtocolIdentityBindingFinalAckPayload)
     case heartbeat(HeartbeatPayload)
     case authenticatedRouteBinding(AuthenticatedRouteBindingPayload)
     case peerDisconnecting(PeerDisconnectingPayload)
@@ -187,7 +189,6 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case missingKEMPublicKey
         case unknownSuite(wireId: UInt16)
         case legacySuiteRejected(wireId: UInt16)
-        case qPeriaptPlatformMetadataUnavailable(wireId: UInt16)
         case classicSuiteRejected(wireId: UInt16)
         case invalidKEMPublicKeyLength(wireId: UInt16, expected: Int, actual: Int)
         case invalidKeyId
@@ -219,13 +220,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .invalidRequestNonce: return "SKR-1 request nonce is missing or too short"
             case .missingKEMPublicKey: return "SKR-1 response does not contain a KEM public key"
             case .unknownSuite(let wireId): return String(format: "SKR-1 rejected unknown suite wireId=0x%04X", wireId)
-            case .legacySuiteRejected(let wireId):
-                return String(format: "SKR-1 rejected legacy suite wireId=0x%04X", wireId)
-            case .qPeriaptPlatformMetadataUnavailable(let wireId):
-                return String(
-                    format: "SKR-1 rejected Q-Periapt suite without signed platform metadata wireId=0x%04X",
-                    wireId
-                )
+            case .legacySuiteRejected(let wireId): return String(format: "SKR-1 rejected legacy suite wireId=0x%04X", wireId)
             case .classicSuiteRejected(let wireId): return String(format: "SKR-1 rejected classic suite wireId=0x%04X", wireId)
             case .invalidKEMPublicKeyLength(let wireId, let expected, let actual):
                 return String(format: "SKR-1 KEM key length mismatch wireId=0x%04X expected=%d actual=%d", wireId, expected, actual)
@@ -348,14 +343,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             let suites = requestedSuiteWireIds.map(CryptoSuite.init(wireId:))
             for suite in suites {
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: suite.wireId) }
-                guard !suite.isLegacyOnly else {
-                    throw KEMRefreshValidationError.legacySuiteRejected(wireId: suite.wireId)
-                }
-                guard suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId else {
-                    throw KEMRefreshValidationError.qPeriaptPlatformMetadataUnavailable(
-                        wireId: suite.wireId
-                    )
-                }
+                guard !suite.isLegacyOnly else { throw KEMRefreshValidationError.legacySuiteRejected(wireId: suite.wireId) }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: suite.wireId) }
             }
             return suites
@@ -423,6 +411,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case invalidDeviceId
         case missingRequesterProtocolIdentity
         case invalidRequesterProtocolIdentity
+        case missingRequestedProtocolSigningAlgorithms
+        case invalidRequestedProtocolSigningAlgorithm
+        case duplicateRequestedProtocolSigningAlgorithm
+        case unrequestedResponseProtocolSigningAlgorithm
         case invalidProtocolIdentityPublicKey
         case invalidProtocolIdentityFingerprint
         case invalidSignatureAlgorithm
@@ -436,6 +428,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case missingSignature
         case requestNonceMismatch
         case requestHashMismatch
+        case transactionMismatch
+        case candidateHashMismatch
+        case transcriptHashMismatch
+        case confirmationHashMismatch
 
         public var errorDescription: String? {
             switch self {
@@ -443,6 +439,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .invalidDeviceId: return "PIB-1 device id is missing or invalid"
             case .missingRequesterProtocolIdentity: return "PIB-1 requester protocol identity is missing"
             case .invalidRequesterProtocolIdentity: return "PIB-1 requester protocol identity is invalid"
+            case .missingRequestedProtocolSigningAlgorithms: return "PIB-1 requested protocol signing algorithms are missing"
+            case .invalidRequestedProtocolSigningAlgorithm: return "PIB-1 requested protocol signing algorithm is unknown or non-canonical"
+            case .duplicateRequestedProtocolSigningAlgorithm: return "PIB-1 requested protocol signing algorithms contain a duplicate"
+            case .unrequestedResponseProtocolSigningAlgorithm: return "PIB-1 response selected an unrequested protocol signing algorithm"
             case .invalidProtocolIdentityPublicKey: return "PIB-1 protocol identity public key is missing or invalid"
             case .invalidProtocolIdentityFingerprint: return "PIB-1 protocol identity fingerprint is invalid"
             case .invalidSignatureAlgorithm: return "PIB-1 signature algorithm is unsupported"
@@ -456,6 +456,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .missingSignature: return "PIB-1 signature is missing"
             case .requestNonceMismatch: return "PIB-1 request nonce mismatch"
             case .requestHashMismatch: return "PIB-1 request hash mismatch"
+            case .transactionMismatch: return "PIB-1 transaction mismatch"
+            case .candidateHashMismatch: return "PIB-1 candidate hash mismatch"
+            case .transcriptHashMismatch: return "PIB-1 SAS transcript hash mismatch"
+            case .confirmationHashMismatch: return "PIB-1 confirmation hash mismatch"
             }
         }
     }
@@ -465,9 +469,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
     /// still imported exclusively through SKR-1 after the user accepts the SAS.
     public struct ProtocolIdentityBindingRequestPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-PIB-1-Request"
-        public static let currentVersion = 2
+        public static let currentVersion = 3
 
         public let version: Int
+        public let transactionId: UUID
         public let requesterDeviceId: String
         public let targetDeviceId: String
         public let requestedProtocolSigningAlgorithms: [String]
@@ -484,6 +489,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         public init(
             version: Int = Self.currentVersion,
+            transactionId: UUID = UUID(),
             requesterDeviceId: String,
             targetDeviceId: String,
             requestedProtocolSigningAlgorithms: [String],
@@ -499,6 +505,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             sentAt: Date = Date()
         ) {
             self.version = version
+            self.transactionId = transactionId
             self.requesterDeviceId = requesterDeviceId
             self.targetDeviceId = targetDeviceId
             self.requestedProtocolSigningAlgorithms = requestedProtocolSigningAlgorithms
@@ -555,6 +562,26 @@ public enum AppMessage: Codable, Sendable, Equatable {
             return identity
         }
 
+        public func validatedRequestedProtocolSigningAlgorithms() throws -> [ProtocolSigningAlgorithm] {
+            guard !requestedProtocolSigningAlgorithms.isEmpty else {
+                throw ProtocolIdentityBindingValidationError.missingRequestedProtocolSigningAlgorithms
+            }
+            var seen = Set<ProtocolSigningAlgorithm>()
+            var validated: [ProtocolSigningAlgorithm] = []
+            validated.reserveCapacity(requestedProtocolSigningAlgorithms.count)
+            for rawAlgorithm in requestedProtocolSigningAlgorithms {
+                guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawAlgorithm),
+                      rawAlgorithm == algorithm.rawValue else {
+                    throw ProtocolIdentityBindingValidationError.invalidRequestedProtocolSigningAlgorithm
+                }
+                guard seen.insert(algorithm).inserted else {
+                    throw ProtocolIdentityBindingValidationError.duplicateRequestedProtocolSigningAlgorithm
+                }
+                validated.append(algorithm)
+            }
+            return validated
+        }
+
         public var canonicalPreimage: Data {
             let algorithms = requestedProtocolSigningAlgorithms
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -568,6 +595,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             let fields: [(String, String)] = [
                 ("domain", Self.domainSeparator),
                 ("version", String(version)),
+                ("transactionId", transactionId.uuidString.lowercased()),
                 ("requesterDeviceId", AppMessage.normalizedToken(requesterDeviceId)),
                 ("targetDeviceId", AppMessage.normalizedToken(targetDeviceId)),
                 ("requestedProtocolSigningAlgorithms", algorithms),
@@ -587,9 +615,12 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
     public struct SignedProtocolIdentityBindingPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-PIB-1-SignedProtocolIdentityBinding"
-        public static let currentVersion = 1
+        public static let currentVersion = 2
+        public static let maximumValidityWindow: TimeInterval = 300
+        public static let maximumAcceptedFutureSkew: TimeInterval = 30
 
         public let version: Int
+        public let transactionId: UUID
         public let deviceId: String
         public let aliases: [String]
         public let protocolSigningAlgorithm: String
@@ -608,6 +639,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         public init(
             version: Int = Self.currentVersion,
+            transactionId: UUID,
             deviceId: String,
             aliases: [String] = [],
             protocolSigningAlgorithm: String,
@@ -625,6 +657,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             signature: Data
         ) {
             self.version = version
+            self.transactionId = transactionId
             self.deviceId = deviceId
             self.aliases = aliases
             self.protocolSigningAlgorithm = protocolSigningAlgorithm
@@ -657,6 +690,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             }
             return .init(
                 version: version,
+                transactionId: transactionId,
                 deviceId: deviceId,
                 aliases: AppMessage.normalizedUniqueTokens(aliases),
                 protocolSigningAlgorithm: rawAlgorithm,
@@ -681,6 +715,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             let fields: [(String, String)] = [
                 ("domain", Self.domainSeparator),
                 ("version", String(payload.version)),
+                ("transactionId", payload.transactionId.uuidString.lowercased()),
                 ("deviceId", AppMessage.normalizedToken(payload.deviceId)),
                 ("aliases", AppMessage.normalizedUniqueTokens(payload.aliases).joined(separator: ",")),
                 ("protocolSigningAlgorithm", payload.protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -703,10 +738,16 @@ public enum AppMessage: Codable, Sendable, Equatable {
             request: ProtocolIdentityBindingRequestPayload,
             now: Date = Date()
         ) throws -> SignedProtocolIdentityBindingPayload {
-            guard version == Self.currentVersion else { throw ProtocolIdentityBindingValidationError.invalidVersion }
+            guard version == Self.currentVersion,
+                  request.version == ProtocolIdentityBindingRequestPayload.currentVersion else {
+                throw ProtocolIdentityBindingValidationError.invalidVersion
+            }
             let rawAlgorithm = protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawAlgorithm) else {
                 throw ProtocolIdentityBindingValidationError.invalidSignatureAlgorithm
+            }
+            guard try request.validatedRequestedProtocolSigningAlgorithms().contains(algorithm) else {
+                throw ProtocolIdentityBindingValidationError.unrequestedResponseProtocolSigningAlgorithm
             }
             guard !protocolIdentityPublicKey.isEmpty else {
                 throw ProtocolIdentityBindingValidationError.invalidProtocolIdentityPublicKey
@@ -729,10 +770,17 @@ public enum AppMessage: Codable, Sendable, Equatable {
             guard payload.routeScope == "lan" else { throw ProtocolIdentityBindingValidationError.invalidRouteScope }
             guard payload.requestNonce.count >= 16 else { throw ProtocolIdentityBindingValidationError.invalidRequestNonce }
             guard !payload.signature.isEmpty else { throw ProtocolIdentityBindingValidationError.missingSignature }
-            guard payload.expiresAt > payload.sentAt else { throw ProtocolIdentityBindingValidationError.invalidValidityWindow }
+            guard payload.expiresAt > payload.sentAt,
+                  payload.expiresAt.timeIntervalSince(payload.sentAt) <= Self.maximumValidityWindow,
+                  payload.sentAt.timeIntervalSince(now) <= Self.maximumAcceptedFutureSkew else {
+                throw ProtocolIdentityBindingValidationError.invalidValidityWindow
+            }
             guard payload.expiresAt > now else { throw ProtocolIdentityBindingValidationError.expired }
             guard payload.requestNonce == request.nonce else {
                 throw ProtocolIdentityBindingValidationError.requestNonceMismatch
+            }
+            guard payload.transactionId == request.transactionId else {
+                throw ProtocolIdentityBindingValidationError.transactionMismatch
             }
             guard payload.requestHashHex?.lowercased() == request.canonicalRequestHashHex else {
                 throw ProtocolIdentityBindingValidationError.requestHashMismatch
@@ -750,16 +798,301 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public func shortAuthenticationCode(
             request: ProtocolIdentityBindingRequestPayload
         ) -> String {
+            let digest = SHA256.hash(data: sasTranscriptMaterial(request: request))
+            let raw = digest.withUnsafeBytes { ptr -> UInt32 in
+                ptr.loadUnaligned(as: UInt32.self).bigEndian
+            }
+            return String(format: "%06d", Int(raw % 1_000_000))
+        }
+
+        public var canonicalCandidateHashHex: String {
+            var material = signaturePreimage
+            material.append(signature)
+            return AppMessage.sha256Hex(material)
+        }
+
+        public func sasTranscriptHashHex(request: ProtocolIdentityBindingRequestPayload) -> String {
+            AppMessage.sha256Hex(sasTranscriptMaterial(request: request))
+        }
+
+        private func sasTranscriptMaterial(request: ProtocolIdentityBindingRequestPayload) -> Data {
             var material = Data("SkyBridge-PIB-1-SAS\n".utf8)
             material.append(request.canonicalPreimage)
             material.append(request.requesterSignature ?? Data())
             material.append(signaturePreimage)
             material.append(signature)
-            let digest = SHA256.hash(data: material)
-            let raw = digest.withUnsafeBytes { ptr -> UInt32 in
-                ptr.loadUnaligned(as: UInt32.self).bigEndian
+            return material
+        }
+    }
+
+    public struct ProtocolIdentityBindingConfirmPayload: Codable, Sendable, Equatable {
+        public static let domainSeparator = "SkyBridge-PIB-1-V3-Confirm"
+        public static let currentVersion = 3
+        public static let maximumValidityWindow: TimeInterval = 300
+        public static let maximumAcceptedFutureSkew: TimeInterval = 30
+
+        public let version: Int
+        public let transactionId: UUID
+        public let requesterDeviceId: String
+        public let responderDeviceId: String
+        public let requesterProtocolIdentityFingerprint: String
+        public let responderProtocolIdentityFingerprint: String
+        public let requestNonce: Data
+        public let requestHashHex: String
+        public let candidateHashHex: String
+        public let sasTranscriptHashHex: String
+        public let confirmationNonce: Data
+        public let sentAt: Date
+        public let expiresAt: Date
+        public let policyRequirePQC: Bool
+        public let policyAllowClassicFallback: Bool
+        public let routeScope: String
+        public let requesterSignature: Data
+
+        public init(
+            version: Int = Self.currentVersion,
+            transactionId: UUID,
+            requesterDeviceId: String,
+            responderDeviceId: String,
+            requesterProtocolIdentityFingerprint: String,
+            responderProtocolIdentityFingerprint: String,
+            requestNonce: Data,
+            requestHashHex: String,
+            candidateHashHex: String,
+            sasTranscriptHashHex: String,
+            confirmationNonce: Data,
+            sentAt: Date = Date(),
+            expiresAt: Date,
+            policyRequirePQC: Bool = true,
+            policyAllowClassicFallback: Bool = false,
+            routeScope: String = "lan",
+            requesterSignature: Data
+        ) {
+            self.version = version
+            self.transactionId = transactionId
+            self.requesterDeviceId = requesterDeviceId
+            self.responderDeviceId = responderDeviceId
+            self.requesterProtocolIdentityFingerprint = requesterProtocolIdentityFingerprint
+            self.responderProtocolIdentityFingerprint = responderProtocolIdentityFingerprint
+            self.requestNonce = requestNonce
+            self.requestHashHex = requestHashHex
+            self.candidateHashHex = candidateHashHex
+            self.sasTranscriptHashHex = sasTranscriptHashHex
+            self.confirmationNonce = confirmationNonce
+            self.sentAt = sentAt
+            self.expiresAt = expiresAt
+            self.policyRequirePQC = policyRequirePQC
+            self.policyAllowClassicFallback = policyAllowClassicFallback
+            self.routeScope = routeScope
+            self.requesterSignature = requesterSignature
+        }
+
+        public var signaturePreimage: Data {
+            AppMessage.canonicalLineEncoding([
+                ("domain", Self.domainSeparator),
+                ("version", String(version)),
+                ("transactionId", transactionId.uuidString.lowercased()),
+                ("requesterDeviceId", AppMessage.normalizedToken(requesterDeviceId)),
+                ("responderDeviceId", AppMessage.normalizedToken(responderDeviceId)),
+                ("requesterProtocolIdentityFingerprint", AppMessage.normalizedFingerprint(requesterProtocolIdentityFingerprint) ?? ""),
+                ("responderProtocolIdentityFingerprint", AppMessage.normalizedFingerprint(responderProtocolIdentityFingerprint) ?? ""),
+                ("requestNonce", requestNonce.base64EncodedString()),
+                ("requestHashHex", AppMessage.normalizedHex(requestHashHex, exactCount: 64) ?? ""),
+                ("candidateHashHex", AppMessage.normalizedHex(candidateHashHex, exactCount: 64) ?? ""),
+                ("sasTranscriptHashHex", AppMessage.normalizedHex(sasTranscriptHashHex, exactCount: 64) ?? ""),
+                ("confirmationNonce", confirmationNonce.base64EncodedString()),
+                ("sentAtMs", String(AppMessage.millisecondsSinceEpoch(sentAt))),
+                ("expiresAtMs", String(AppMessage.millisecondsSinceEpoch(expiresAt))),
+                ("policyRequirePQC", policyRequirePQC ? "1" : "0"),
+                ("policyAllowClassicFallback", policyAllowClassicFallback ? "1" : "0"),
+                ("routeScope", routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            ])
+        }
+
+        public var canonicalConfirmHashHex: String {
+            var material = signaturePreimage
+            material.append(requesterSignature)
+            return AppMessage.sha256Hex(material)
+        }
+
+        public func validatedForCandidate(
+            request: ProtocolIdentityBindingRequestPayload,
+            candidate: SignedProtocolIdentityBindingPayload,
+            now: Date = Date()
+        ) throws -> ProtocolIdentityBindingConfirmPayload {
+            guard version == Self.currentVersion else { throw ProtocolIdentityBindingValidationError.invalidVersion }
+            guard transactionId == request.transactionId, transactionId == candidate.transactionId else {
+                throw ProtocolIdentityBindingValidationError.transactionMismatch
             }
-            return String(format: "%06d", Int(raw % 1_000_000))
+            guard requestHashHex.lowercased() == request.canonicalRequestHashHex else {
+                throw ProtocolIdentityBindingValidationError.requestHashMismatch
+            }
+            guard AppMessage.normalizedHex(candidateHashHex, exactCount: 64) == candidate.canonicalCandidateHashHex else {
+                throw ProtocolIdentityBindingValidationError.candidateHashMismatch
+            }
+            guard sasTranscriptHashHex.lowercased() == candidate.sasTranscriptHashHex(request: request) else {
+                throw ProtocolIdentityBindingValidationError.transcriptHashMismatch
+            }
+            guard requestNonce == request.nonce, confirmationNonce.count >= 16 else {
+                throw ProtocolIdentityBindingValidationError.invalidRequestNonce
+            }
+            guard requesterDeviceId == request.requesterDeviceId,
+                  responderDeviceId == candidate.deviceId,
+                  requesterProtocolIdentityFingerprint.lowercased() == request.requesterProtocolIdentityFingerprint?.lowercased(),
+                  responderProtocolIdentityFingerprint.lowercased() == candidate.protocolIdentityFingerprint.lowercased() else {
+                throw ProtocolIdentityBindingValidationError.invalidProtocolIdentityFingerprint
+            }
+            guard policyRequirePQC, !policyAllowClassicFallback,
+                  routeScope.lowercased() == "lan" else {
+                throw ProtocolIdentityBindingValidationError.policyMismatch
+            }
+            guard !requesterSignature.isEmpty else {
+                throw ProtocolIdentityBindingValidationError.missingRequesterSignature
+            }
+            guard expiresAt > sentAt,
+                  expiresAt.timeIntervalSince(sentAt) <= Self.maximumValidityWindow,
+                  sentAt.timeIntervalSince(now) <= Self.maximumAcceptedFutureSkew else {
+                throw ProtocolIdentityBindingValidationError.invalidValidityWindow
+            }
+            guard expiresAt > now else { throw ProtocolIdentityBindingValidationError.expired }
+            return self
+        }
+    }
+
+    public struct SignedProtocolIdentityBindingFinalAckPayload: Codable, Sendable, Equatable {
+        public static let domainSeparator = "SkyBridge-PIB-1-V3-SignedFinalAck"
+        public static let currentVersion = 3
+        public static let maximumValidityWindow: TimeInterval = 300
+        public static let maximumAcceptedFutureSkew: TimeInterval = 30
+
+        public let version: Int
+        public let transactionId: UUID
+        public let requesterDeviceId: String
+        public let responderDeviceId: String
+        public let requesterProtocolIdentityFingerprint: String
+        public let responderProtocolIdentityFingerprint: String
+        public let requestNonce: Data
+        public let confirmationNonce: Data
+        public let requestHashHex: String
+        public let candidateHashHex: String
+        public let sasTranscriptHashHex: String
+        public let confirmHashHex: String
+        public let accepted: Bool
+        public let sentAt: Date
+        public let expiresAt: Date
+        public let policyRequirePQC: Bool
+        public let policyAllowClassicFallback: Bool
+        public let routeScope: String
+        public let responderSignature: Data
+
+        public init(
+            version: Int = Self.currentVersion,
+            transactionId: UUID,
+            requesterDeviceId: String,
+            responderDeviceId: String,
+            requesterProtocolIdentityFingerprint: String,
+            responderProtocolIdentityFingerprint: String,
+            requestNonce: Data,
+            confirmationNonce: Data,
+            requestHashHex: String,
+            candidateHashHex: String,
+            sasTranscriptHashHex: String,
+            confirmHashHex: String,
+            accepted: Bool,
+            sentAt: Date = Date(),
+            expiresAt: Date,
+            policyRequirePQC: Bool = true,
+            policyAllowClassicFallback: Bool = false,
+            routeScope: String = "lan",
+            responderSignature: Data
+        ) {
+            self.version = version
+            self.transactionId = transactionId
+            self.requesterDeviceId = requesterDeviceId
+            self.responderDeviceId = responderDeviceId
+            self.requesterProtocolIdentityFingerprint = requesterProtocolIdentityFingerprint
+            self.responderProtocolIdentityFingerprint = responderProtocolIdentityFingerprint
+            self.requestNonce = requestNonce
+            self.confirmationNonce = confirmationNonce
+            self.requestHashHex = requestHashHex
+            self.candidateHashHex = candidateHashHex
+            self.sasTranscriptHashHex = sasTranscriptHashHex
+            self.confirmHashHex = confirmHashHex
+            self.accepted = accepted
+            self.sentAt = sentAt
+            self.expiresAt = expiresAt
+            self.policyRequirePQC = policyRequirePQC
+            self.policyAllowClassicFallback = policyAllowClassicFallback
+            self.routeScope = routeScope
+            self.responderSignature = responderSignature
+        }
+
+        public var signaturePreimage: Data {
+            AppMessage.canonicalLineEncoding([
+                ("domain", Self.domainSeparator),
+                ("version", String(version)),
+                ("transactionId", transactionId.uuidString.lowercased()),
+                ("requesterDeviceId", AppMessage.normalizedToken(requesterDeviceId)),
+                ("responderDeviceId", AppMessage.normalizedToken(responderDeviceId)),
+                ("requesterProtocolIdentityFingerprint", AppMessage.normalizedFingerprint(requesterProtocolIdentityFingerprint) ?? ""),
+                ("responderProtocolIdentityFingerprint", AppMessage.normalizedFingerprint(responderProtocolIdentityFingerprint) ?? ""),
+                ("requestNonce", requestNonce.base64EncodedString()),
+                ("confirmationNonce", confirmationNonce.base64EncodedString()),
+                ("requestHashHex", AppMessage.normalizedHex(requestHashHex, exactCount: 64) ?? ""),
+                ("candidateHashHex", AppMessage.normalizedHex(candidateHashHex, exactCount: 64) ?? ""),
+                ("confirmHashHex", AppMessage.normalizedHex(confirmHashHex, exactCount: 64) ?? ""),
+                ("sasTranscriptHashHex", AppMessage.normalizedHex(sasTranscriptHashHex, exactCount: 64) ?? ""),
+                ("accepted", accepted ? "1" : "0"),
+                ("sentAtMs", String(AppMessage.millisecondsSinceEpoch(sentAt))),
+                ("expiresAtMs", String(AppMessage.millisecondsSinceEpoch(expiresAt))),
+                ("policyRequirePQC", policyRequirePQC ? "1" : "0"),
+                ("policyAllowClassicFallback", policyAllowClassicFallback ? "1" : "0"),
+                ("routeScope", routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            ])
+        }
+
+        public func validatedForFinalization(
+            request: ProtocolIdentityBindingRequestPayload,
+            candidate: SignedProtocolIdentityBindingPayload,
+            confirm: ProtocolIdentityBindingConfirmPayload,
+            now: Date = Date()
+        ) throws -> SignedProtocolIdentityBindingFinalAckPayload {
+            guard version == Self.currentVersion else {
+                throw ProtocolIdentityBindingValidationError.invalidVersion
+            }
+            guard accepted, policyRequirePQC, !policyAllowClassicFallback else {
+                throw ProtocolIdentityBindingValidationError.policyMismatch
+            }
+            guard routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "lan" else {
+                throw ProtocolIdentityBindingValidationError.invalidRouteScope
+            }
+            guard transactionId == request.transactionId,
+                  transactionId == candidate.transactionId,
+                  transactionId == confirm.transactionId else {
+                throw ProtocolIdentityBindingValidationError.transactionMismatch
+            }
+            guard requestHashHex.lowercased() == request.canonicalRequestHashHex,
+                  candidateHashHex.lowercased() == candidate.canonicalCandidateHashHex,
+                  sasTranscriptHashHex.lowercased() == candidate.sasTranscriptHashHex(request: request) else {
+                throw ProtocolIdentityBindingValidationError.transcriptHashMismatch
+            }
+            guard confirmHashHex.lowercased() == confirm.canonicalConfirmHashHex else {
+                throw ProtocolIdentityBindingValidationError.confirmationHashMismatch
+            }
+            guard requestNonce == request.nonce,
+                  confirmationNonce == confirm.confirmationNonce,
+                  requesterDeviceId == request.requesterDeviceId,
+                  responderDeviceId == candidate.deviceId,
+                  requesterProtocolIdentityFingerprint.lowercased() == confirm.requesterProtocolIdentityFingerprint.lowercased(),
+                  responderProtocolIdentityFingerprint.lowercased() == candidate.protocolIdentityFingerprint.lowercased(),
+                  !responderSignature.isEmpty,
+                  expiresAt > sentAt,
+                  expiresAt.timeIntervalSince(sentAt) <= Self.maximumValidityWindow,
+                  sentAt.timeIntervalSince(now) <= Self.maximumAcceptedFutureSkew else {
+                throw ProtocolIdentityBindingValidationError.invalidValidityWindow
+            }
+            guard expiresAt > now else { throw ProtocolIdentityBindingValidationError.expired }
+            return self
         }
     }
 
@@ -943,14 +1276,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             for key in payload.kemPublicKeys {
                 let suite = CryptoSuite(wireId: key.suiteWireId)
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId) }
-                guard !suite.isLegacyOnly else {
-                    throw KEMRefreshValidationError.legacySuiteRejected(wireId: key.suiteWireId)
-                }
-                guard suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId else {
-                    throw KEMRefreshValidationError.qPeriaptPlatformMetadataUnavailable(
-                        wireId: key.suiteWireId
-                    )
-                }
+                guard !suite.isLegacyOnly else { throw KEMRefreshValidationError.legacySuiteRejected(wireId: key.suiteWireId) }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: key.suiteWireId) }
                 guard let expected = KEMIdentityKeyLengthContract.publicKeyLength(suite: suite) else {
                     throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId)
@@ -1215,6 +1541,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case kemRefreshFailure
         case protocolIdentityBindingRequest
         case signedProtocolIdentityBinding
+        case protocolIdentityBindingConfirm
+        case signedProtocolIdentityBindingFinalAck
         case heartbeat
         case authenticatedRouteBinding
         case peerDisconnecting
@@ -1259,6 +1587,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
         }
         if let payload = try? container.decode(SignedProtocolIdentityBindingPayload.self, forKey: .signedProtocolIdentityBinding) {
             self = .signedProtocolIdentityBinding(payload)
+            return
+        }
+        if let payload = try? container.decode(ProtocolIdentityBindingConfirmPayload.self, forKey: .protocolIdentityBindingConfirm) {
+            self = .protocolIdentityBindingConfirm(payload)
+            return
+        }
+        if let payload = try? container.decode(SignedProtocolIdentityBindingFinalAckPayload.self, forKey: .signedProtocolIdentityBindingFinalAck) {
+            self = .signedProtocolIdentityBindingFinalAck(payload)
             return
         }
         if let payload = try? container.decode(HeartbeatPayload.self, forKey: .heartbeat) {
@@ -1358,6 +1694,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .protocolIdentityBindingRequest)
         case .signedProtocolIdentityBinding(let payload):
             try container.encode(payload, forKey: .signedProtocolIdentityBinding)
+        case .protocolIdentityBindingConfirm(let payload):
+            try container.encode(payload, forKey: .protocolIdentityBindingConfirm)
+        case .signedProtocolIdentityBindingFinalAck(let payload):
+            try container.encode(payload, forKey: .signedProtocolIdentityBindingFinalAck)
         case .heartbeat(let payload):
             try container.encode(payload, forKey: .heartbeat)
         case .authenticatedRouteBinding(let payload):
@@ -1457,4 +1797,5 @@ public enum AppMessage: Codable, Sendable, Equatable {
         }
         return bySuite.keys.sorted().compactMap { bySuite[$0] }
     }
+
 }

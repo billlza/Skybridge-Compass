@@ -23,6 +23,18 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
+    private var identityContext: DeviceIdentityKeychainTestContext!
+
+    override func setUpWithError() throws {
+        identityContext = try DeviceIdentityKeychainTestContext()
+    }
+
+    override func tearDownWithError() throws {
+        if let identityContext {
+            try identityContext.reset()
+        }
+        identityContext = nil
+    }
     
  // MARK: - Test Configuration
     
@@ -40,10 +52,8 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  ///
  /// **Validates: Requirements 1.1, 1.4**
     func testProperty1_ProtocolSigningKeyAlgorithmConsistency() async throws {
-        let deviceIdentity = try DeviceIdentityKeychainTestContext()
-        defer { XCTAssertNoThrow(try deviceIdentity.reset()) }
-        let manager = deviceIdentity.manager
-        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65]
+        let manager = identityContext.manager
+        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65, .mlDSA87]
         
         for iteration in 0..<Self.minIterations {
  // Pick algorithm based on iteration (alternating)
@@ -87,6 +97,23 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  // Callback is acceptable for ML-DSA-65
                     break
                 }
+
+            case .mlDSA87:
+                switch keyHandle {
+                case .softwareKey(let privateKey):
+ // ML-DSA-87 uses a 64-byte seed or a 4,896-byte expanded OQS key.
+                    XCTAssertTrue(
+                        privateKey.count == 64 || privateKey.count == 4_896,
+                        "ML-DSA-87 key should be 64 or 4896 bytes, got \(privateKey.count) at iteration \(iteration)"
+                    )
+                #if canImport(Security)
+                case .secureEnclaveRef:
+                    XCTFail("ML-DSA-87 must not use the P-256 Secure Enclave handle at iteration \(iteration)")
+                #endif
+                case .callback:
+ // Callback is the expected handle for native Secure Enclave ML-DSA-87.
+                    break
+                }
             }
         }
     }
@@ -99,10 +126,8 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  ///
  /// **Validates: Requirements 1.1, 1.4**
     func testProperty1_2_KeyHandleCanSign() async throws {
-        let deviceIdentity = try DeviceIdentityKeychainTestContext()
-        defer { XCTAssertNoThrow(try deviceIdentity.reset()) }
-        let manager = deviceIdentity.manager
-        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65]
+        let manager = identityContext.manager
+        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65, .mlDSA87]
         
         for iteration in 0..<Self.minIterations {
             let algorithm = algorithms[iteration % algorithms.count]
@@ -138,7 +163,7 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  ///
  /// **Validates: Requirements 2.1, 2.3**
     func testProperty2_IdentityPublicKeysWireRoundTrip() async throws {
-        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65]
+        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65, .mlDSA87]
         
         for iteration in 0..<Self.minIterations {
             let algorithm = algorithms[iteration % algorithms.count]
@@ -150,6 +175,8 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
                 protocolPublicKeySize = 32
             case .mlDSA65:
                 protocolPublicKeySize = 1952
+            case .mlDSA87:
+                protocolPublicKeySize = 2592
             }
             
             var protocolPublicKey = Data(count: protocolPublicKeySize)

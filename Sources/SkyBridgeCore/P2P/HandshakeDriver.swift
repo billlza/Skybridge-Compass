@@ -21,10 +21,80 @@ import CryptoKit
 public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
     public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
     public let protocolPublicKeyFingerprint: String
+    public let protocolPublicKey: Data?
 
-    public init(protocolSigningAlgorithm: ProtocolSigningAlgorithm, protocolPublicKeyFingerprint: String) {
+    public init(
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        protocolPublicKey: Data? = nil
+    ) {
         self.protocolSigningAlgorithm = protocolSigningAlgorithm
         self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+        self.protocolPublicKey = protocolPublicKey
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+enum HandshakeIdentityPinningPolicy {
+    static func validate(
+        identityKeys: IdentityPublicKeys,
+        exactAuthorities: [TrustedProtocolIdentityRawKey],
+        trustedFingerprints: Set<String>,
+        requiresPinnedIdentity: Bool
+    ) throws {
+        guard let actualAlgorithm = ProtocolSigningAlgorithm(from: identityKeys.protocolAlgorithm) else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: "supported_protocol_identity_algorithm",
+                actual: identityKeys.protocolAlgorithm.rawValue
+            ))
+        }
+
+        let algorithmAuthorities = exactAuthorities.filter {
+            $0.algorithm == actualAlgorithm
+        }
+        let distinctExactKeys = Set(algorithmAuthorities.map(\.publicKey))
+        if distinctExactKeys.count > 1 {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: "single_exact_\(actualAlgorithm.rawValue)_authority",
+                actual: "conflicting_raw_key_authorities"
+            ))
+        }
+        if let expectedRawKey = distinctExactKeys.first {
+            guard expectedRawKey == identityKeys.protocolPublicKey else {
+                throw HandshakeError.failed(.identityMismatch(
+                    expected: "exact_\(actualAlgorithm.rawValue)_raw_key",
+                    actual: "different_raw_key"
+                ))
+            }
+            return
+        }
+        if actualAlgorithm == .mlDSA87 {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: "exact_ml-dsa-87_raw_key",
+                actual: "fingerprint_only_or_missing"
+            ))
+        }
+
+        let normalizedFingerprints = Set(trustedFingerprints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty })
+        guard !normalizedFingerprints.isEmpty else {
+            if requiresPinnedIdentity {
+                throw HandshakeError.failed(.identityMismatch(
+                    expected: "pinned_protocol_identity",
+                    actual: "missing"
+                ))
+            }
+            return
+        }
+
+        let actualFingerprint = try identityKeys.authoritativeProtocolFingerprint().lowercased()
+        guard normalizedFingerprints.contains(actualFingerprint) else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: normalizedFingerprints.sorted().joined(separator: ","),
+                actual: actualFingerprint
+            ))
+        }
     }
 }
 
@@ -188,17 +258,28 @@ public actor HandshakeDriver {
     ) throws {
  // 5.1: 初始化时 throw 校验
 
+        var identityBoundOfferedSuites = offeredSuites.filter { suite in
+            sigAAlgorithm == .mlDSA65
+                || suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId
+        }
+        if identityBoundOfferedSuites.contains(.qperiaptABI2PolicyBound) {
+            identityBoundOfferedSuites = [.qperiaptABI2PolicyBound]
+        }
+
  // 1. offeredSuites 非空
-        guard !offeredSuites.isEmpty else {
+        guard !identityBoundOfferedSuites.isEmpty else {
             throw HandshakeError.emptyOfferedSuites
         }
 
-        guard offeredSuites.allSatisfy(\.isNegotiable) else {
+        guard identityBoundOfferedSuites.allSatisfy(\.isNegotiable) else {
             throw HandshakeError.failed(.suiteNotSupported)
         }
 
  // 2. offeredSuites 同质性验证
-        try Self.validateSuiteHomogeneity(offeredSuites: offeredSuites, sigAAlgorithm: sigAAlgorithm)
+        try Self.validateSuiteHomogeneity(
+            offeredSuites: identityBoundOfferedSuites,
+            sigAAlgorithm: sigAAlgorithm
+        )
 
  // 3. provider.signatureAlgorithm == sigAAlgorithm
         guard protocolSignatureProvider.signatureAlgorithm == sigAAlgorithm else {
@@ -222,7 +303,7 @@ public actor HandshakeDriver {
         self.sigAAlgorithm = sigAAlgorithm.wire
         self.policy = policy
         self.cryptoPolicy = cryptoPolicy
-        self.offeredSuites = offeredSuites
+        self.offeredSuites = identityBoundOfferedSuites
         self.timeout = timeout
         self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
@@ -300,12 +381,12 @@ public actor HandshakeDriver {
         sigAAlgorithm: ProtocolSigningAlgorithm
     ) throws {
         switch sigAAlgorithm {
-        case .mlDSA65:
- // ML-DSA-65 → ALL suites 必须是 PQC 组
+        case .mlDSA65, .mlDSA87:
+ // ML-DSA → ALL suites 必须是 PQC 组
             let nonPQCSuites = offeredSuites.filter { !$0.isPQCGroup }
             guard nonPQCSuites.isEmpty else {
                 throw HandshakeError.homogeneityViolation(
-                    message: "sigAAlgorithm=ML-DSA-65 but offeredSuites contains non-PQC suites: \(nonPQCSuites.map { $0.rawValue })"
+                    message: "sigAAlgorithm=\(sigAAlgorithm.rawValue) but offeredSuites contains non-PQC suites: \(nonPQCSuites.map { $0.rawValue })"
                 )
             }
         case .ed25519:
@@ -346,13 +427,22 @@ public actor HandshakeDriver {
                         keyHandleType: "softwareKey(\(data.count) bytes), expected 64 or 4032 bytes for ML-DSA-65"
                     )
                 }
+            case .mlDSA87:
+ // ML-DSA-87 私钥：64 bytes (Apple seed) 或 4896 bytes (liboqs full)
+                guard data.count == 64 || data.count == 4_896 else {
+                    throw HandshakeError.signatureAlgorithmMismatch(
+                        algorithm: algorithm.rawValue,
+                        keyHandleType: "softwareKey(\(data.count) bytes), expected 64 or 4896 bytes for ML-DSA-87"
+                    )
+                }
             }
         #if canImport(Security)
         case .secureEnclaveRef:
- // Secure Enclave 只支持 P-256，不支持 Ed25519 或 ML-DSA-65
+ // This SecKey-backed case is the legacy P-256 handle. CryptoKit ML-DSA
+ // Secure Enclave identities use the typed callback case instead.
             throw HandshakeError.signatureAlgorithmMismatch(
                 algorithm: algorithm.rawValue,
-                keyHandleType: "secureEnclaveRef (Secure Enclave only supports P-256, not \(algorithm.rawValue))"
+                keyHandleType: "secureEnclaveRef is a P-256 SecKey handle, not a protocol \(algorithm.rawValue) key"
             )
         #endif
         case .callback:
@@ -524,6 +614,9 @@ public actor HandshakeDriver {
  // 创建握手上下文
  // 5.3: 传递分流的签名 provider
         let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
+        let activeProtocolSigningAlgorithm = resolvedIdentity.sigAAlgorithm
+            .flatMap(ProtocolSigningAlgorithm.init(from:))
+            ?? sigAAlgorithm.flatMap(ProtocolSigningAlgorithm.init(from:))
         let ctx = try await HandshakeContext.create(
             role: .initiator,
             cryptoProvider: cryptoProvider,
@@ -532,7 +625,9 @@ public actor HandshakeDriver {
             sePoPSignatureProvider: sePoPSignatureProvider,
             cryptoPolicy: cryptoPolicy,
             kemIdentityStore: kemIdentityStore,
-            peerKEMPublicKeys: peerKEMPublicKeys
+            peerKEMPublicKeys: peerKEMPublicKeys,
+            offeredSuites: offeredSuites,
+            activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
         )
         context = ctx
 
@@ -640,8 +735,13 @@ public actor HandshakeDriver {
                         )
  // 超时触发
                         await self.handleTimeout()
+                    } catch is CancellationError {
+                        return
                     } catch {
- // 被取消（正常退出，不做任何事）
+                        SkyBridgeLogger.p2p.error(
+                            "Handshake MessageB timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                        )
+                        await self.handleTimeout()
                     }
                 }
             }
@@ -808,6 +908,9 @@ public actor HandshakeDriver {
  // 这样握手响应不会依赖 MainActor 上的信任记录 UI 快照。
             let peerKEMPublicKeys: [CryptoSuite: Data] = [:]
             RemoteControlSmokeStatusWriter.append("mac-handshake trust-loaded peer=\(peer.deviceId) kemKeys=0 source=responder-not-required")
+            let activeProtocolSigningAlgorithm = resolvedIdentity.sigAAlgorithm
+                .flatMap(ProtocolSigningAlgorithm.init(from:))
+                ?? sigAAlgorithm.flatMap(ProtocolSigningAlgorithm.init(from:))
             let ctx = try await HandshakeContext.create(
                 role: .responder,
                 cryptoProvider: cryptoProvider,
@@ -816,7 +919,9 @@ public actor HandshakeDriver {
                 sePoPSignatureProvider: sePoPSignatureProvider,
                 cryptoPolicy: cryptoPolicy,
                 kemIdentityStore: kemIdentityStore,
-                peerKEMPublicKeys: peerKEMPublicKeys
+                peerKEMPublicKeys: peerKEMPublicKeys,
+                offeredSuites: offeredSuites,
+                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
             )
             RemoteControlSmokeStatusWriter.append("mac-handshake context-created peer=\(peer.deviceId)")
             context = ctx
@@ -838,7 +943,6 @@ public actor HandshakeDriver {
                     pinnedSEPublicKey = nil
                     RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-skipped peer=\(peer.deviceId) reason=not-required")
                 }
-                let rawSignaturePreimage = try? HandshakeMessageA.rawSignaturePreimage(from: data)
                 RemoteControlSmokeStatusWriter.append("mac-handshake processA-call-start peer=\(peer.deviceId)")
                 try await ctx.processMessageA(
                     messageA,
@@ -849,8 +953,7 @@ public actor HandshakeDriver {
                             identityKeys: identityKeys
                         )
                     },
-                    secureEnclavePublicKey: pinnedSEPublicKey,
-                    rawSignaturePreimage: rawSignaturePreimage
+                    secureEnclavePublicKey: pinnedSEPublicKey
                 )
                 SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA done peer=\(peer.deviceId, privacy: .public)")
                 RemoteControlSmokeStatusWriter.append("mac-handshake messageA-processed peer=\(peer.deviceId)")
@@ -928,15 +1031,18 @@ public actor HandshakeDriver {
                 RemoteControlSmokeStatusWriter.append("mac-handshake messageB-build-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
                 return
             }
+            defer { messageBSecret.zeroize() }
 
  // 发送 MessageB（失败时必须 zeroize - 11.5）
             do {
                 let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+#if DEBUG || SKYBRIDGE_TESTING
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] == "mac-host" {
                     SkyBridgeLogger.p2p.info(
                         "📤 Handshake MessageB: total=\(padded.count) bytes, suite=\(messageB.selectedSuite.rawValue)"
                     )
                 }
+#endif
                 SkyBridgeLogger.p2p.info("🧪 mac handleMessageA sendMessageB peer=\(peer.deviceId, privacy: .public) bytes=\(padded.count, privacy: .public)")
                 try await transport.send(to: peer, data: padded)
                 RemoteControlSmokeStatusWriter.append("mac-handshake messageB-sent peer=\(peer.deviceId) bytes=\(padded.count)")
@@ -978,7 +1084,13 @@ public actor HandshakeDriver {
                         clock: clock
                     )
                     await self.handleTimeout()
+                } catch is CancellationError {
+                    return
                 } catch {
+                    SkyBridgeLogger.p2p.error(
+                        "Handshake responder timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                    )
+                    await self.handleTimeout()
                 }
             }
 
@@ -1022,10 +1134,6 @@ public actor HandshakeDriver {
 
         do {
             let messageB = try HandshakeMessageB.decode(from: data)
-
-            // Reject legacy-only, unoffered, or share-less selections before
-            // consulting trust state or entering any signature verification.
-            try await ctx.validateMessageBAdmission(messageB)
 
  // 9.1: 验证 selectedSuite 与 sigA 算法的兼容性
  // Requirements: 1.1, 1.2
@@ -1105,7 +1213,13 @@ public actor HandshakeDriver {
                         clock: clock
                     )
                     await self.handleTimeout()
+                } catch is CancellationError {
+                    return
                 } catch {
+                    SkyBridgeLogger.p2p.error(
+                        "Handshake initiator timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                    )
+                    await self.handleTimeout()
                 }
             }
 
@@ -1309,20 +1423,20 @@ public actor HandshakeDriver {
  /// - 使用 finishOnce 统一收敛
  /// - 记录到 DiscoveryDiagnosticsService 以便用户可见
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
-        if let pairKey = soaPairKey {
-            await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
-        }
+        let contextToInvalidate = context
+        context = nil
+        pendingFinished = nil
         clearAuthenticatedRemoteAuthority()
         state = .failed(reason: reason)
 
+        let contextSuite = await contextToInvalidate?.invalidateAndTakeNegotiatedSuite()
+        if let pairKey = soaPairKey {
+            await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+        }
+
  // 记录失败指标
         metricsCollector.recordFinish()
-        let suite: CryptoSuite?
-        if let negotiatedSuite {
-            suite = negotiatedSuite
-        } else {
-            suite = await context?.negotiatedSuite
-        }
+        let suite = negotiatedSuite ?? contextSuite
         let isFallback = suite.map { cryptoProvider.activeSuite.isPQC && !$0.isPQC }
         lastMetrics = metricsCollector.buildMetrics(
             cryptoSuite: suite,
@@ -1472,32 +1586,21 @@ public actor HandshakeDriver {
     }
 
     private func enforceIdentityPinning(deviceId: String, identityKeys: IdentityPublicKeys) async throws {
-        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+        let exactAuthorities: [TrustedProtocolIdentityRawKey]
+        if let exactProvider = trustProvider as? any ExactProtocolIdentityHandshakeTrustProvider {
+            exactAuthorities = await exactProvider.trustedProtocolIdentityRawKeys(for: deviceId)
+        } else {
+            exactAuthorities = []
+        }
+        let trustedFingerprints = Set(await trustProvider.trustedFingerprintSet(for: deviceId)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
-        guard !trustedFingerprints.isEmpty else {
-            if await trustProvider.requiresPinnedProtocolIdentity(for: deviceId) {
-                throw HandshakeError.failed(.identityMismatch(
-                    expected: "pinned_protocol_identity",
-                    actual: "missing"
-                ))
-            }
-            return
-        }
-
-        let actualFingerprint = try authoritativeFingerprint(for: identityKeys).lowercased()
-        if trustedFingerprints.contains(actualFingerprint) {
-            return
-        }
-
-        throw HandshakeError.failed(.identityMismatch(
-            expected: trustedFingerprints.sorted().joined(separator: ","),
-            actual: actualFingerprint
-        ))
-    }
-
-    private func authoritativeFingerprint(for identityKeys: IdentityPublicKeys) throws -> String {
-        try identityKeys.authoritativeProtocolFingerprint()
+            .filter { !$0.isEmpty })
+        try HandshakeIdentityPinningPolicy.validate(
+            identityKeys: identityKeys,
+            exactAuthorities: exactAuthorities,
+            trustedFingerprints: trustedFingerprints,
+            requiresPinnedIdentity: await trustProvider.requiresPinnedProtocolIdentity(for: deviceId)
+        )
     }
 
     private func resolveIdentity() async throws -> ResolvedHandshakeIdentity {

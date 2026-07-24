@@ -85,7 +85,6 @@ public enum P2PConnectionStatus: String, Codable {
 @available(macOS 14.0, iOS 17.0, *)
 public enum P2PSessionAssuranceLevel: String, Codable, Sendable {
     case pqcStrict = "pqc_strict"
-    case pqcNegotiated = "pqc_negotiated"
     case bootstrapAssisted = "bootstrap_assisted"
     case legacyClassic = "legacy_classic"
     case unknown = "unknown"
@@ -94,8 +93,6 @@ public enum P2PSessionAssuranceLevel: String, Codable, Sendable {
         switch self {
         case .pqcStrict:
             return "PQC严格模式"
-        case .pqcNegotiated:
-            return "PQC协商模式"
         case .bootstrapAssisted:
             return "引导恢复模式"
         case .legacyClassic:

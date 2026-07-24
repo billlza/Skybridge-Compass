@@ -366,6 +366,19 @@ public actor ScanHistoryStore {
  /// Details directory name
     private static let detailsDirectoryName = "ScanDetails"
 
+    private struct DetailsStorageUnavailableError: Error, LocalizedError, Sendable {
+        let reason: String
+
+        var errorDescription: String? {
+            "Scan detail storage is unavailable: \(reason)"
+        }
+    }
+
+    private enum DetailsDirectoryState: Sendable {
+        case available(URL)
+        case unavailable(DetailsStorageUnavailableError)
+    }
+
  // MARK: - Properties
 
     private let logger = Logger(subsystem: "com.skybridge.security", category: "ScanHistory")
@@ -382,8 +395,11 @@ public actor ScanHistoryStore {
  /// Namespaced storage key for summaries
     private let summariesStorageKey: String
 
- /// Optional details directory override for testing
-    private let detailsDirectoryOverride: URL?
+    /// Resolved once during initialization. A failure remains explicit for the
+    /// store lifetime and never redirects sensitive scan details to /tmp.
+    private let detailsDirectoryState: DetailsDirectoryState
+
+    private var didLogDetailsStorageUnavailable = false
 
  /// 内存缓存 (legacy entries)
     private var entries: [ScanHistoryEntry] = []
@@ -394,16 +410,24 @@ public actor ScanHistoryStore {
  /// 是否已加载
     private var isLoaded = false
 
- /// Details directory URL
-    private var detailsDirectory: URL {
-        if let detailsDirectoryOverride {
-            return detailsDirectoryOverride
-        }
-
+    private static func resolveProductionDetailsDirectory() -> DetailsDirectoryState {
         let fm = FileManager.default
-        let appSupport = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)) ?? fm.temporaryDirectory
-        let bundleId = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
-        return appSupport.appendingPathComponent(bundleId).appendingPathComponent(Self.detailsDirectoryName)
+        do {
+            let appSupport = try fm.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let bundleId = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+            return .available(
+                appSupport
+                    .appendingPathComponent(bundleId, isDirectory: true)
+                    .appendingPathComponent(Self.detailsDirectoryName, isDirectory: true)
+            )
+        } catch {
+            return .unavailable(DetailsStorageUnavailableError(reason: error.localizedDescription))
+        }
     }
 
  /// 共享实例
@@ -411,27 +435,57 @@ public actor ScanHistoryStore {
 
  // MARK: - Initialization
 
+    public init(limits: SecurityLimits = .default) {
+        self.limits = limits
+        self.userDefaults = .standard
+        self.detailsDirectoryState = Self.resolveProductionDetailsDirectory()
+
+        let keys = Self.storageKeys(namespace: nil)
+        self.storageKey = keys.entries
+        self.summariesStorageKey = keys.summaries
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
     public init(
-        limits: SecurityLimits = .default,
-        userDefaultsSuiteName: String? = nil,
-        storageNamespace: String? = nil,
-        detailsDirectoryOverride: URL? = nil
+        limits: SecurityLimits,
+        userDefaultsSuiteName: String?,
+        storageNamespace: String?,
+        detailsDirectoryOverride: URL?,
+        simulateDetailsDirectoryResolutionFailure: Bool = false
     ) {
         self.limits = limits
-        if let userDefaultsSuiteName, let suiteDefaults = UserDefaults(suiteName: userDefaultsSuiteName) {
+        if let userDefaultsSuiteName {
+            guard let suiteDefaults = UserDefaults(suiteName: userDefaultsSuiteName) else {
+                preconditionFailure("Unable to create isolated ScanHistoryStore UserDefaults suite")
+            }
             self.userDefaults = suiteDefaults
         } else {
             self.userDefaults = .standard
         }
-        self.detailsDirectoryOverride = detailsDirectoryOverride
-
-        if let storageNamespace, !storageNamespace.isEmpty {
-            self.storageKey = "\(Self.defaultStorageKey).\(storageNamespace)"
-            self.summariesStorageKey = "\(Self.defaultSummariesStorageKey).\(storageNamespace)"
+        if simulateDetailsDirectoryResolutionFailure {
+            self.detailsDirectoryState = .unavailable(
+                DetailsStorageUnavailableError(reason: "injected Application Support resolution failure")
+            )
+        } else if let detailsDirectoryOverride {
+            self.detailsDirectoryState = .available(detailsDirectoryOverride)
         } else {
-            self.storageKey = Self.defaultStorageKey
-            self.summariesStorageKey = Self.defaultSummariesStorageKey
+            self.detailsDirectoryState = Self.resolveProductionDetailsDirectory()
         }
+
+        let keys = Self.storageKeys(namespace: storageNamespace)
+        self.storageKey = keys.entries
+        self.summariesStorageKey = keys.summaries
+    }
+#endif
+
+    private static func storageKeys(namespace: String?) -> (entries: String, summaries: String) {
+        guard let namespace, !namespace.isEmpty else {
+            return (defaultStorageKey, defaultSummariesStorageKey)
+        }
+        return (
+            "\(defaultStorageKey).\(namespace)",
+            "\(defaultSummariesStorageKey).\(namespace)"
+        )
     }
 
  // MARK: - Public Methods
@@ -699,7 +753,10 @@ public actor ScanHistoryStore {
         }
 
  // Check if file exists and hash matches
-        let detailURL = detailFileURL(for: id)
+        guard let detailsDirectory = availableDetailsDirectory(operation: "check detail availability") else {
+            return false
+        }
+        let detailURL = detailFileURL(for: id, in: detailsDirectory)
         guard FileManager.default.fileExists(atPath: detailURL.path) else {
             return false
         }
@@ -770,7 +827,8 @@ public actor ScanHistoryStore {
 
  // Add detail files size
         let fm = FileManager.default
-        if fm.fileExists(atPath: detailsDirectory.path) {
+        if let detailsDirectory = availableDetailsDirectory(operation: "measure detail storage"),
+           fm.fileExists(atPath: detailsDirectory.path) {
             if let enumerator = fm.enumerator(at: detailsDirectory, includingPropertiesForKeys: [.fileSizeKey]) {
                 while let fileURL = enumerator.nextObject() as? URL {
  // Skip .tmp files
@@ -841,8 +899,9 @@ public actor ScanHistoryStore {
  /// 4. Rename to final path
  /// 5. Return detailHash for summary storage
     private func writeDetailAtomically(_ detail: ScanHistoryDetail) async throws -> String {
+        let detailsDirectory = try requireDetailsDirectory()
  // Ensure details directory exists
-        try ensureDetailsDirectoryExists()
+        try ensureDetailsDirectoryExists(detailsDirectory)
 
  // 1. Encode detail to JSON Data
         let encoder = JSONEncoder()
@@ -854,7 +913,7 @@ public actor ScanHistoryStore {
         let detailHash = computeSHA256(jsonData)
 
  // 3. Write to temp file
-        let finalURL = detailFileURL(for: detail.id)
+        let finalURL = detailFileURL(for: detail.id, in: detailsDirectory)
         let tempURL = finalURL.appendingPathExtension("tmp")
 
         try jsonData.write(to: tempURL, options: .atomic)
@@ -883,7 +942,10 @@ public actor ScanHistoryStore {
  /// 3. Compare with summary.detailHash
  /// 4. Only decode to ScanHistoryDetail if hash matches
     private func verifyAndLoadDetail(for id: UUID, expectedHash: String) async -> ScanHistoryDetail? {
-        let detailURL = detailFileURL(for: id)
+        guard let detailsDirectory = availableDetailsDirectory(operation: "load scan detail") else {
+            return nil
+        }
+        let detailURL = detailFileURL(for: id, in: detailsDirectory)
 
  // 1. Read raw bytes
         guard let fileData = try? Data(contentsOf: detailURL) else {
@@ -931,7 +993,10 @@ public actor ScanHistoryStore {
  /// - Parameter id: Summary ID
  /// - Requirements: 3.7
     private func deleteDetailFile(for id: UUID) async {
-        let detailURL = detailFileURL(for: id)
+        guard let detailsDirectory = availableDetailsDirectory(operation: "delete scan detail") else {
+            return
+        }
+        let detailURL = detailFileURL(for: id, in: detailsDirectory)
         let fm = FileManager.default
 
         guard fm.fileExists(atPath: detailURL.path) else { return }
@@ -945,15 +1010,37 @@ public actor ScanHistoryStore {
     }
 
  /// Get detail file URL for an ID
-    private func detailFileURL(for id: UUID) -> URL {
+    private func detailFileURL(for id: UUID, in detailsDirectory: URL) -> URL {
         detailsDirectory.appendingPathComponent("\(id.uuidString).json")
     }
 
  /// Ensure details directory exists
-    private func ensureDetailsDirectoryExists() throws {
+    private func ensureDetailsDirectoryExists(_ detailsDirectory: URL) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: detailsDirectory.path) {
             try fm.createDirectory(at: detailsDirectory, withIntermediateDirectories: true)
+        }
+    }
+
+    private func requireDetailsDirectory() throws -> URL {
+        switch detailsDirectoryState {
+        case .available(let directory):
+            return directory
+        case .unavailable(let error):
+            throw error
+        }
+    }
+
+    private func availableDetailsDirectory(operation: String) -> URL? {
+        switch detailsDirectoryState {
+        case .available(let directory):
+            return directory
+        case .unavailable(let error):
+            if !didLogDetailsStorageUnavailable {
+                logger.error("Detail storage unavailable during \(operation, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                didLogDetailsStorageUnavailable = true
+            }
+            return nil
         }
     }
 
@@ -984,14 +1071,17 @@ public actor ScanHistoryStore {
         summaries.sort { $0.timestamp < $1.timestamp }
 
         var currentSize = totalSize
+        let detailsDirectory = availableDetailsDirectory(operation: "enforce detail storage limits")
 
  // Remove oldest entries until under limit
         while currentSize > limits.maxTotalHistoryBytes && !summaries.isEmpty {
             let oldest = summaries.removeFirst()
 
  // Delete detail file if exists and hash matches
-            if oldest.hasDetails, let expectedHash = oldest.detailHash {
-                let detailURL = detailFileURL(for: oldest.id)
+            if oldest.hasDetails,
+               let expectedHash = oldest.detailHash,
+               let detailsDirectory {
+                let detailURL = detailFileURL(for: oldest.id, in: detailsDirectory)
                 if let fileData = try? Data(contentsOf: detailURL) {
                     let actualHash = computeSHA256(fileData)
                     if actualHash == expectedHash {
@@ -1022,6 +1112,9 @@ public actor ScanHistoryStore {
  /// Cleanup orphaned detail files (files without matching summary)
     private func cleanupOrphanedDetailFiles() async {
         let fm = FileManager.default
+        guard let detailsDirectory = availableDetailsDirectory(operation: "clean orphaned scan details") else {
+            return
+        }
         guard fm.fileExists(atPath: detailsDirectory.path) else { return }
 
         let summaryIds = Set(summaries.map { $0.id })
@@ -1137,6 +1230,7 @@ public actor ScanHistoryStore {
         return totalSize
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
  // MARK: - Testing Support
 
  /// 重置存储（仅用于测试）
@@ -1149,8 +1243,13 @@ public actor ScanHistoryStore {
 
  // Clean up detail files
         let fm = FileManager.default
-        if fm.fileExists(atPath: detailsDirectory.path) {
-            try? fm.removeItem(at: detailsDirectory)
+        if let detailsDirectory = availableDetailsDirectory(operation: "reset scan history"),
+           fm.fileExists(atPath: detailsDirectory.path) {
+            do {
+                try fm.removeItem(at: detailsDirectory)
+            } catch {
+                logger.error("Failed to remove scan detail directory during reset: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -1170,11 +1269,15 @@ public actor ScanHistoryStore {
 
  /// Get details directory URL (for testing only)
     internal func getDetailsDirectory() -> URL {
-        detailsDirectory
+        guard case .available(let detailsDirectory) = detailsDirectoryState else {
+            preconditionFailure("Scan detail storage is unavailable")
+        }
+        return detailsDirectory
     }
 
  /// Create store with custom limits (for testing)
     public static func createForTesting(limits: SecurityLimits) -> ScanHistoryStore {
         ScanHistoryStore(limits: limits)
     }
+#endif
 }

@@ -71,6 +71,7 @@ public struct SymlinkResolver: Sendable {
         self.limits = limits
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     // MARK: - Test Helpers
 
     /// Create a resolver with custom limits for unit tests.
@@ -120,6 +121,7 @@ public struct SymlinkResolver: Sendable {
         )
         return SymlinkResolver(limits: limits)
     }
+#endif
     
  /// Resolve a symbolic link with security checks.
  ///

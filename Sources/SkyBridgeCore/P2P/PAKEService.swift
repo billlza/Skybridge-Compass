@@ -417,19 +417,19 @@ actor PAKERateLimiter {
 /// 使用方式：
 /// ```swift
 /// // Initiator
-/// let initiatorDeviceId = try await SelfIdentityProvider.shared
+/// let responderDeviceId = try await SelfIdentityProvider.shared
 ///     .protocolIdentityDeviceId(allowCreate: true)
-/// let initiator = try PAKEService(localDeviceId: initiatorDeviceId)
-/// let messageA = try await initiator.initiateExchange(password: "123456", peerId: "device-123")
+/// let service = try PAKEService(localDeviceId: responderDeviceId)
+/// let messageA = try await service.initiateExchange(password: "123456", peerId: "device-123")
 /// // 发送 messageA 给 responder...
 /// // 收到 messageB 后
-/// let sharedSecret = try await initiator.completeExchange(messageB: messageB, peerId: "device-123")
+/// let sharedSecret = try await service.completeExchange(messageB: messageB, peerId: "device-123")
 ///
 /// // Responder
 /// let responderDeviceId = try await SelfIdentityProvider.shared
 ///     .protocolIdentityDeviceId(allowCreate: true)
-/// let responder = try PAKEService(localDeviceId: responderDeviceId)
-/// let (messageB, sharedSecret) = try await responder.respondToExchange(
+/// let service = try PAKEService(localDeviceId: responderDeviceId)
+/// let (messageB, sharedSecret) = try await service.respondToExchange(
 /// messageA: messageA,
 /// password: "123456",
 /// peerId: "device-456"

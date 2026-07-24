@@ -81,6 +81,65 @@ assert_not_contains() {
   fi
 }
 
+for safe_run_id in \
+  "20260710T181500" \
+  "release-device_01.2" \
+  "a$(printf 'b%.0s' {1..63})"
+do
+  if ! skybridge_smoke_require_safe_run_id "$safe_run_id" TEST_RUN_ID >/dev/null 2>&1; then
+    echo "Expected safe smoke run ID to be accepted: $safe_run_id" >&2
+    exit 1
+  fi
+done
+
+for unsafe_run_id in \
+  "" \
+  "." \
+  "-leading-option" \
+  "../escape" \
+  "nested/path" \
+  "contains space" \
+  $'contains\ttab' \
+  $'contains\nnewline' \
+  "unicode-设备" \
+  "a$(printf 'b%.0s' {1..64})"
+do
+  if skybridge_smoke_require_safe_run_id "$unsafe_run_id" TEST_RUN_ID >/dev/null 2>&1; then
+    echo "Expected unsafe smoke run ID to be rejected: $unsafe_run_id" >&2
+    exit 1
+  fi
+done
+
+assert_unsafe_run_id_fails_before_smoke_setup() {
+  local script_path="$1"
+  local variable_name="$2"
+  local output
+  local status
+
+  set +e
+  output="$(env "${variable_name}=../escape" bash "$script_path" 2>&1)"
+  status=$?
+  set -e
+
+  if [[ "$status" -ne 2 ]]; then
+    echo "Expected $script_path to reject an unsafe run ID with exit 2; got $status" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"$variable_name must be 1-64 characters"* ]]; then
+    echo "Expected $script_path to report the rejected run-ID variable" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+}
+
+assert_unsafe_run_id_fails_before_smoke_setup \
+  "$ROOT_DIR/Scripts/run_real_device_webrtc_smoke.sh" \
+  SKYBRIDGE_SMOKE_WEBRTC_RUN_ID
+assert_unsafe_run_id_fails_before_smoke_setup \
+  "$ROOT_DIR/Scripts/run_real_device_file_transfer_smoke.sh" \
+  SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID
+
 assert_contains "<ios-device-$DEVICE_LABEL>"
 assert_contains "<repo>"
 assert_contains "<applications>/Xcode-beta.app/Contents/Developer"
@@ -125,6 +184,7 @@ mkdir -p "$RAW_ARTIFACT_DIR/nested/session"
 cat >"$RAW_ARTIFACT_DIR/mac.status.log" <<EOF
 2026-06-14T00:00:00Z identityKey=$DEVICE_ID targetDeviceId=raw-ipad-id peerId=raw-peer-id deviceId=raw-device-id p2pDeviceId=raw-p2p-id cloudDeviceId=raw-cloud-id pubKeyFP=raw-pubkey-fp fingerprint=8A6E7D5C4B3A29108A6E7D5C4B3A2910 code=123456
 session=raw-session-id sessionId=raw-json-session-id trackId=raw-track-id connect ABC123 code 654321 reason=privateReasonToken
+release-session-binding sessionRef=abcdefabcdefabcdefabcdef release_session_ref=abcdefabcdefabcdefabcdef
 skybridge://connect?token=public-artifact-secret-token
 SKYBRIDGE_API_TOKEN=public-artifact-api-token PRIVATE_KEY=public-artifact-private-key
 path=$ROOT_DIR/Artifacts/private-smoke path2=$TMP_DIR/private-cache app=/Applications/Xcode-beta.app/Contents/Developer volume=/Volumes/PrivateBuilds
@@ -136,6 +196,11 @@ v=0
 a=ice-ufrag:raw-ice-ufrag-line
 a=ice-pwd:raw-ice-pwd-line
 a=candidate:1 1 UDP 2122252543 10.20.30.42 54321 typ host
+remote-control-notice-identity account=Bill Public Artifact nebula=nebula-direct-secret device=device-direct-secret
+noticeAccount=notice-account-secret noticeNebula=notice-nebula-secret remoteAccount=remote-account-secret remoteNebula=remote-nebula-secret localAccount=local-account-secret localNebula=local-nebula-secret
+stable-identities device=Bill's Office iPad dedupeKey=dedupe-secret declaredDeviceId=declared-device-secret stablePeer=stable-peer-secret peer=peer-secret keyId=key-id-secret uniqueIdentifier=unique-id-secret requesterProtocolIdentity=requester-identity-secret pinnedProtocolIdentity=pinned-identity-secret remoteIP=203.0.113.42
+peerPublicKey=short-peer-public-key-secret publicKey=short-public-key-secret kemPublicKey=short-kem-public-key-secret
+signingFingerprint=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef signingIdentity=Developer-ID provisioningProfile=private-profile provisioningProfileUUID=private-profile-uuid teamIdentifier=PRIVATE-TEAM-ID
 EOF
 cat >"$RAW_ARTIFACT_DIR/nested/session/ios.assignment.jsonl" <<EOF
 {"tenantId":"tenant-secret","userIdentifier":"user-secret","userId":"user-id-secret","sub":"subject-secret","nebulaId":"nebula-secret","displayName":"Bill Device","accountDisplayName":"Bill Account","routeIdentifier":"route-secret","bonjourServiceName":"_skybridge._tcp.local.","endpointHost":"10.20.30.40","controlEndpoint":"https://control.example.invalid/private?token=secret","relay":"turn.example.invalid","endpoint":"https://endpoint.example.invalid/path","host":"host.example.invalid","ip":"10.20.30.41","address":"192.168.40.41","sessionId":"nested-session-secret","trackId":"nested-track-secret","reason":"Bearer nested-reason-token privateKey=/Users/bill/private.key","xwingPublicKey":"$LONG_BASE64URL","mlkemPublicKey":"$LONG_BASE64URL","authorization":"Bearer nested-secret-token","token":"nested-json-token","url":"https://url.example.invalid/private"}
@@ -143,8 +208,18 @@ EOF
 cat >"$RAW_ARTIFACT_DIR/nested/session/mac.trace.log" <<EOF
 Authorization: Bearer nested-bearer-token tenantId=tenant-secret userIdentifier=user-secret nebulaId=nebula-secret routeIdentifier=route-secret bonjourServiceName=_skybridge._tcp.local. endpointHost=10.20.30.40 controlEndpoint=https://control.example.invalid/private relay=turn.example.invalid endpoint=https://endpoint.example.invalid/path host=host.example.invalid ip=10.20.30.41 address=192.168.40.41 session=trace-session-secret trackId=trace-track-secret connect ZXCVBN code 111222 reason=traceReasonSecret xwingPublicKey=$LONG_BASE64URL mlkemPublicKey=$LONG_BASE64URL
 EOF
+cat >"$RAW_ARTIFACT_DIR/nested/session/multi.assignment.jsonl" <<'EOF'
+{"account":"jsonl-account-secret","device":"jsonl-device-secret","dedupeKey":"jsonl-dedupe-secret"}
+{"nebula":"jsonl-nebula-secret","remoteAccount":"jsonl-remote-account-secret","localNebulaId":"jsonl-local-nebula-secret","uniqueIdentifier":"jsonl-unique-secret","peer":"jsonl-peer-secret"}
+EOF
 cat >"$RAW_ARTIFACT_DIR/device-info.json" <<EOF
-{"identifier":"$DEVICE_ID","deviceName":"Bill's iPad","deviceId":"raw-device-id","p2pDeviceId":"raw-p2p-id","pubKeyFP":"raw-pubkey-fp","fingerprint":"8A6E7D5C4B3A29108A6E7D5C4B3A2910","accessToken":"public-artifact-access-token","access_token":"public-artifact-snake-access-token","apiKey":"public-artifact-api-key","publicKeyBase64":"$LONG_BASE64URL","sdp":"v=0\na=ice-pwd:raw-json-ice-pwd\na=ice-ufrag:raw-json-ice-ufrag","icePwd":"raw-json-ice-pwd","ice_pwd":"raw-json-snake-ice-pwd","iceUfrag":"raw-json-ice-ufrag","iceCandidate":"candidate:1 1 UDP 2122252543 10.20.30.43 54322 typ host","local_endpoint":"10.20.30.45:7000","SelectedCandidatePair":"10.20.30.45:7000 -> 10.20.30.46:7001"}
+{"identifier":"$DEVICE_ID","deviceName":"Bill's iPad","deviceId":"raw-device-id","p2pDeviceId":"raw-p2p-id","pubKeyFP":"raw-pubkey-fp","fingerprint":"8A6E7D5C4B3A29108A6E7D5C4B3A2910","accessToken":"public-artifact-access-token","access_token":"public-artifact-snake-access-token","apiKey":"public-artifact-api-key","publicKey":"short-json-public-key-secret","publicKeyBase64":"$LONG_BASE64URL","account":"json-account-secret","nebula":"json-nebula-secret","signingFingerprint":"json-signing-fingerprint-secret","provisioningProfile":"json-profile-secret","sdp":"v=0\na=ice-pwd:raw-json-ice-pwd\na=ice-ufrag:raw-json-ice-ufrag","icePwd":"raw-json-ice-pwd","ice_pwd":"raw-json-snake-ice-pwd","iceUfrag":"raw-json-ice-ufrag","iceCandidate":"candidate:1 1 UDP 2122252543 10.20.30.43 54322 typ host","local_endpoint":"10.20.30.45:7000","SelectedCandidatePair":"10.20.30.45:7000 -> 10.20.30.46:7001"}
+EOF
+cat >"$RAW_ARTIFACT_DIR/ios-launch.json" <<'EOF'
+{"result":{"process":{"processIdentifier":4242,"auditToken":[1,2,3,4,5,6,7,8]},"environmentVariables":{"SKYBRIDGE_ACCESS_TOKEN":"raw-prefixed-access-token","SKYBRIDGE_DEVICE_ID":"raw-prefixed-device-id","SKYBRIDGE_NEBULA_ID":"raw-prefixed-nebula-id"}}}
+EOF
+cat >"$RAW_ARTIFACT_DIR/host.auth-session.json" <<'EOF'
+{"accessToken":"private-host-access-token","refreshToken":"private-host-refresh-token","userIdentifier":"private-host-user"}
 EOF
 printf 'raw binary should not be copied %s\n' "$DEVICE_ID" >"$RAW_ARTIFACT_DIR/frame.png"
 printf 'unsupported artifact should fail %s\n' "$DEVICE_ID" >"$RAW_ARTIFACT_DIR/unsupported.blob"
@@ -178,19 +253,57 @@ if skybridge_smoke_check_public_artifacts "$RAW_ARTIFACT_DIR" "$DEVICE_ID" >/dev
   exit 1
 fi
 
+PREFIXED_ENV_PUBLIC_DIR="$TMP_DIR/prefixed-env-public"
+mkdir -p "$PREFIXED_ENV_PUBLIC_DIR"
+cp "$RAW_ARTIFACT_DIR/ios-launch.json" "$PREFIXED_ENV_PUBLIC_DIR/ios-launch.json"
+if skybridge_smoke_check_public_artifacts "$PREFIXED_ENV_PUBLIC_DIR" >/dev/null 2>&1; then
+  echo "Expected public artifact scanner to reject prefixed secret and identity JSON keys" >&2
+  exit 1
+fi
+
+MALFORMED_JSON_PUBLIC_DIR="$TMP_DIR/malformed-json-public"
+mkdir -p "$MALFORMED_JSON_PUBLIC_DIR"
+printf '%s\n' '{"result":"truncated"' >"$MALFORMED_JSON_PUBLIC_DIR/ios-launch.json"
+if skybridge_smoke_check_public_artifacts "$MALFORMED_JSON_PUBLIC_DIR" >/dev/null 2>&1; then
+  echo "Expected public artifact scanner to reject malformed structured JSON" >&2
+  exit 1
+fi
+
 if skybridge_smoke_materialize_public_artifacts "$DEVICE_LABEL" "$RAW_ARTIFACT_DIR" "$TMP_DIR/public-artifacts-with-unsupported-file" "$DEVICE_ID" >/dev/null 2>&1; then
   echo "Expected public artifact materializer to fail on unsupported file extensions" >&2
   exit 1
 fi
 rm -f "$RAW_ARTIFACT_DIR/unsupported.blob"
 
+FORBIDDEN_AUTH_PUBLIC_DIR="$TMP_DIR/forbidden-auth-public"
+mkdir -p "$FORBIDDEN_AUTH_PUBLIC_DIR"
+cat >"$FORBIDDEN_AUTH_PUBLIC_DIR/host.auth-session.json" <<'EOF'
+{"accessToken":"<redacted-secret>"}
+EOF
+if skybridge_smoke_check_public_artifacts "$FORBIDDEN_AUTH_PUBLIC_DIR" >/dev/null 2>&1; then
+  echo "Expected public artifact scanner to reject auth-session containers by filename" >&2
+  exit 1
+fi
+
+RAW_IDENTITY_PUBLIC_DIR="$TMP_DIR/raw-identity-public"
+mkdir -p "$RAW_IDENTITY_PUBLIC_DIR"
+cat >"$RAW_IDENTITY_PUBLIC_DIR/identity.log" <<'EOF'
+device=Personal iPad dedupeKey=raw-dedupe uniqueIdentifier=raw-unique remoteIP=203.0.113.99
+EOF
+if skybridge_smoke_check_public_artifacts "$RAW_IDENTITY_PUBLIC_DIR" >/dev/null 2>&1; then
+  echo "Expected public artifact scanner to reject device labels and stable identifiers" >&2
+  exit 1
+fi
+
 skybridge_smoke_materialize_public_artifacts "$DEVICE_LABEL" "$RAW_ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"
 
 PUBLIC_STATUS="$PUBLIC_ARTIFACT_DIR/mac.status.log"
 PUBLIC_DEVICE_JSON="$PUBLIC_ARTIFACT_DIR/device-info.json"
+PUBLIC_LAUNCH_JSON="$PUBLIC_ARTIFACT_DIR/ios-launch.json"
 PUBLIC_NESTED_ASSIGNMENT="$PUBLIC_ARTIFACT_DIR/nested/session/ios.assignment.jsonl"
 PUBLIC_NESTED_TRACE="$PUBLIC_ARTIFACT_DIR/nested/session/mac.trace.log"
+PUBLIC_MULTI_ASSIGNMENT="$PUBLIC_ARTIFACT_DIR/nested/session/multi.assignment.jsonl"
 assert_contains "identityKey=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "targetDeviceId=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "peerId=<redacted-identity>" "$PUBLIC_STATUS"
@@ -200,6 +313,8 @@ assert_contains "cloudDeviceId=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "pubKeyFP=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "session=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "sessionId=<redacted-identity>" "$PUBLIC_STATUS"
+assert_contains "sessionRef=abcdefabcdefabcdefabcdef" "$PUBLIC_STATUS"
+assert_contains "release_session_ref=abcdefabcdefabcdefabcdef" "$PUBLIC_STATUS"
 assert_contains "trackId=<redacted-identity>" "$PUBLIC_STATUS"
 assert_contains "connect <redacted-sas-code>" "$PUBLIC_STATUS"
 assert_contains "code <redacted-sas-code>" "$PUBLIC_STATUS"
@@ -214,6 +329,22 @@ assert_contains "<redacted-sdp>" "$PUBLIC_STATUS"
 assert_contains "a=ice-pwd:<redacted>" "$PUBLIC_STATUS"
 assert_contains "a=ice-ufrag:<redacted>" "$PUBLIC_STATUS"
 assert_contains "a=candidate:<redacted>" "$PUBLIC_STATUS"
+assert_contains "account=<redacted-public-artifact-value> nebula=<redacted-public-artifact-value> device=<redacted-identity>" "$PUBLIC_STATUS"
+assert_contains "noticeAccount=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "noticeNebula=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "remoteAccount=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "remoteNebula=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "localAccount=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "localNebula=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "device=<redacted-identity> dedupeKey=<redacted-identity> declaredDeviceId=<redacted-identity> stablePeer=<redacted-identity> peer=<redacted-identity> keyId=<redacted-identity> uniqueIdentifier=<redacted-identity> requesterProtocolIdentity=<redacted-identity> pinnedProtocolIdentity=<redacted-identity> remoteIP=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "peerPublicKey=<redacted-secret>" "$PUBLIC_STATUS"
+assert_contains "publicKey=<redacted-secret>" "$PUBLIC_STATUS"
+assert_contains "kemPublicKey=<redacted-secret>" "$PUBLIC_STATUS"
+assert_contains "signingFingerprint=<redacted-signing-metadata>" "$PUBLIC_STATUS"
+assert_contains "signingIdentity=<redacted-signing-metadata>" "$PUBLIC_STATUS"
+assert_contains "provisioningProfile=<redacted-signing-metadata>" "$PUBLIC_STATUS"
+assert_contains "provisioningProfileUUID=<redacted-signing-metadata>" "$PUBLIC_STATUS"
+assert_contains "teamIdentifier=<redacted-signing-metadata>" "$PUBLIC_STATUS"
 assert_contains "<redacted-connect-link>" "$PUBLIC_STATUS"
 assert_contains "SKYBRIDGE_API_TOKEN=<redacted>" "$PUBLIC_STATUS"
 assert_contains "PRIVATE_KEY=<redacted>" "$PUBLIC_STATUS"
@@ -222,6 +353,12 @@ assert_contains '"accessToken": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"access_token": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"apiKey": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"publicKeyBase64": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"publicKey": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"account": "<redacted-public-artifact-value>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"nebula": "<redacted-public-artifact-value>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"signingFingerprint": "<redacted-signing-metadata>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"provisioningProfile": "<redacted-signing-metadata>"' "$PUBLIC_DEVICE_JSON"
+assert_contains '"auditToken": "<redacted-identity>"' "$PUBLIC_LAUNCH_JSON"
 assert_contains '"sdp": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"icePwd": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"ice_pwd": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
@@ -229,15 +366,15 @@ assert_contains '"iceUfrag": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"iceCandidate": "<redacted-secret>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"local_endpoint": "<redacted-public-artifact-value>"' "$PUBLIC_DEVICE_JSON"
 assert_contains '"SelectedCandidatePair": "<redacted-public-artifact-value>"' "$PUBLIC_DEVICE_JSON"
-assert_contains '"tenantId": "<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"routeIdentifier": "<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"endpointHost": "<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"sessionId": "<redacted-identity>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"trackId": "<redacted-identity>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"reason": "<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"xwingPublicKey": "<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"mlkemPublicKey": "<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
-assert_contains '"authorization": "<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"tenantId":"<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"routeIdentifier":"<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"endpointHost":"<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"sessionId":"<redacted-identity>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"trackId":"<redacted-identity>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"reason":"<redacted-public-artifact-value>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"xwingPublicKey":"<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"mlkemPublicKey":"<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
+assert_contains '"authorization":"<redacted-secret>"' "$PUBLIC_NESTED_ASSIGNMENT"
 assert_contains "Authorization: Bearer <redacted>" "$PUBLIC_NESTED_TRACE"
 assert_contains "tenantId=<redacted-public-artifact-value>" "$PUBLIC_NESTED_TRACE"
 assert_contains "routeIdentifier=<redacted-public-artifact-value>" "$PUBLIC_NESTED_TRACE"
@@ -247,11 +384,27 @@ assert_contains "trackId=<redacted-identity>" "$PUBLIC_NESTED_TRACE"
 assert_contains "connect <redacted-sas-code>" "$PUBLIC_NESTED_TRACE"
 assert_contains "code <redacted-sas-code>" "$PUBLIC_NESTED_TRACE"
 assert_contains "reason=<redacted-public-artifact-value>" "$PUBLIC_NESTED_TRACE"
+assert_contains '"account":"<redacted-public-artifact-value>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"device":"<redacted-identity>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"dedupeKey":"<redacted-identity>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"nebula":"<redacted-public-artifact-value>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"remoteAccount":"<redacted-public-artifact-value>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"localNebulaId":"<redacted-public-artifact-value>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"uniqueIdentifier":"<redacted-identity>"' "$PUBLIC_MULTI_ASSIGNMENT"
+assert_contains '"peer":"<redacted-identity>"' "$PUBLIC_MULTI_ASSIGNMENT"
+if [[ "$(wc -l <"$PUBLIC_MULTI_ASSIGNMENT" | tr -d ' ')" -ne 2 ]]; then
+  echo "Expected public JSONL redaction to preserve one JSON object per line" >&2
+  exit 1
+fi
 [[ ! -f "$PUBLIC_ARTIFACT_DIR/frame.png" ]] || {
   echo "Expected public materializer output to exclude unsupported artifact" >&2
   exit 1
 }
-[[ -f "$PUBLIC_NESTED_ASSIGNMENT" && -f "$PUBLIC_NESTED_TRACE" ]] || {
+[[ ! -f "$PUBLIC_ARTIFACT_DIR/host.auth-session.json" ]] || {
+  echo "Expected public materializer output to exclude private auth-session artifacts" >&2
+  exit 1
+}
+[[ -f "$PUBLIC_NESTED_ASSIGNMENT" && -f "$PUBLIC_NESTED_TRACE" && -f "$PUBLIC_MULTI_ASSIGNMENT" ]] || {
   echo "Expected public materializer to preserve nested scan-eligible artifacts" >&2
   exit 1
 }
@@ -325,12 +478,56 @@ for secret in \
   "trace-track-secret" \
   "ZXCVBN" \
   "111222" \
-  "traceReasonSecret"
+  "traceReasonSecret" \
+  "Bill Public Artifact" \
+  "nebula-direct-secret" \
+  "device-direct-secret" \
+  "notice-account-secret" \
+  "notice-nebula-secret" \
+  "remote-account-secret" \
+  "remote-nebula-secret" \
+  "local-account-secret" \
+  "local-nebula-secret" \
+  "short-peer-public-key-secret" \
+  "short-public-key-secret" \
+  "short-kem-public-key-secret" \
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
+  "Developer-ID" \
+  "private-profile" \
+  "private-profile-uuid" \
+  "PRIVATE-TEAM-ID" \
+  "short-json-public-key-secret" \
+  "json-account-secret" \
+  "json-nebula-secret" \
+  "json-signing-fingerprint-secret" \
+  "json-profile-secret" \
+  "private-host-access-token" \
+  "private-host-refresh-token" \
+  "private-host-user" \
+  "Bill's Office iPad" \
+  "dedupe-secret" \
+  "declared-device-secret" \
+  "stable-peer-secret" \
+  "peer-secret" \
+  "key-id-secret" \
+  "unique-id-secret" \
+  "requester-identity-secret" \
+  "pinned-identity-secret" \
+  "203.0.113.42" \
+  "jsonl-account-secret" \
+  "jsonl-device-secret" \
+  "jsonl-dedupe-secret" \
+  "jsonl-nebula-secret" \
+  "jsonl-remote-account-secret" \
+  "jsonl-local-nebula-secret" \
+  "jsonl-unique-secret" \
+  "jsonl-peer-secret"
 do
   assert_not_contains "$secret" "$PUBLIC_STATUS"
   assert_not_contains "$secret" "$PUBLIC_DEVICE_JSON"
   assert_not_contains "$secret" "$PUBLIC_NESTED_ASSIGNMENT"
   assert_not_contains "$secret" "$PUBLIC_NESTED_TRACE"
+  assert_not_contains "$secret" "$PUBLIC_MULTI_ASSIGNMENT"
 done
 
 echo "real-device smoke redaction fixture passed"

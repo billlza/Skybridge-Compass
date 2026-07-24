@@ -222,10 +222,12 @@ public actor SignatureDatabaseLoader {
         currentVersion
     }
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 重置版本（仅用于测试）
     internal func resetVersion() {
         currentVersion = 0
     }
+#endif
 }
 
 // MARK: - SignatureDatabaseError

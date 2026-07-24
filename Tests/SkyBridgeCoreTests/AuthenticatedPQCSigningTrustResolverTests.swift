@@ -28,6 +28,18 @@ final class AuthenticatedPQCSigningTrustResolverTests: XCTestCase {
             publicKey
         )
 
+        let conflictingRawAuthority = AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKey: Data(repeating: 0x32, count: 1_952)
+        )
+        XCTAssertNil(
+            AuthenticatedProtocolIdentityBinding.matchingPublicKey(
+                in: payload,
+                authority: conflictingRawAuthority
+            )
+        )
+
         let mismatchedFingerprint = AuthenticatedRemoteAuthority(
             protocolSigningAlgorithm: .mlDSA65,
             protocolPublicKeyFingerprint: String(repeating: "0", count: 64)

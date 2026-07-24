@@ -84,7 +84,12 @@ pub(crate) async fn device_approve(
         pending_algorithm,
         match pending_algorithm {
             ProtocolSigningAlgorithm::Ed25519 => vec![0_u8; 32],
-            ProtocolSigningAlgorithm::MlDsa65 => vec![1_u8],
+            ProtocolSigningAlgorithm::MlDsa65 => {
+                vec![0_u8; skybridge_core::MLDSA65_PUBLIC_KEY_BYTES]
+            }
+            ProtocolSigningAlgorithm::MlDsa87 => {
+                vec![0_u8; skybridge_core::MLDSA87_PUBLIC_KEY_BYTES]
+            }
         },
         Some(args.pending_fingerprint.clone()),
     )?;

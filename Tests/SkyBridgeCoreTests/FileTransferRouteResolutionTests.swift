@@ -1,8 +1,134 @@
 import XCTest
+import Network
 @testable import SkyBridgeCore
 
 @MainActor
 final class FileTransferRouteResolutionTests: XCTestCase {
+    func testRouteRetryPolicyRequiresExactlyOneNormalizedTarget() {
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.hasSingleTarget(
+                deviceIDs: [" Peer-A ", "peer-a", "PEER-A"]
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.hasSingleTarget(
+                deviceIDs: ["peer-a", "peer-b"]
+            )
+        )
+        XCTAssertFalse(ClassicTransferRouteRetryPolicy.hasSingleTarget(deviceIDs: []))
+        XCTAssertFalse(ClassicTransferRouteRetryPolicy.hasSingleTarget(deviceIDs: ["  "]))
+    }
+
+    func testRouteRetryPolicyOnlyAllowsConnectionStageFailures() {
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: NWError.posix(.ECONNREFUSED)
+            )
+        )
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferError.timeout
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferError.receiverRejected
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferError.integrityCheckFailed
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferError.secureSessionRequired
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferError.transferCancelled
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: NWError.posix(.ECANCELED)
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: NWError.posix(.EACCES)
+            )
+        )
+    }
+
+    func testReceiptTimeoutIsDeliveryAmbiguityNotARouteRetrySignal() {
+        let error = FileTransferError.receiptWaitFailed(
+            stage: .headerTimeout,
+            details: nil
+        )
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.deliveryConfirmationIsUnknown(after: error)
+        )
+        XCTAssertFalse(ClassicTransferRouteRetryPolicy.shouldTryNextRoute(after: error))
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.deliveryConfirmationIsUnknown(
+                after: FileTransferError.receiptWaitFailed(
+                    stage: .receiverRejected,
+                    details: "rejected"
+                )
+            )
+        )
+    }
+
+    func testDiscoveredDeviceConnectionRouteCandidatesUseRealPeerAliasesOnly() {
+        let localRecordID = UUID()
+        let device = DiscoveredDevice(
+            id: localRecordID,
+            name: "Camera Mac",
+            ipv4: " 192.168.1.9 ",
+            ipv6: "fe80::1",
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            uniqueIdentifier: "bonjour-instance",
+            routeIdentifiers: [" route-a ", "BONJOUR-INSTANCE", "route-a"],
+            deviceId: "peer-device"
+        )
+
+        XCTAssertEqual(
+            device.connectionRouteCandidates,
+            ["peer-device", "bonjour-instance", "route-a", "192.168.1.9", "fe80::1"]
+        )
+        XCTAssertFalse(device.connectionRouteCandidates.contains(localRecordID.uuidString))
+    }
+
+    func testPublicClassicTransferRejectsInvalidPortBeforeCreatingTransferState() async throws {
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(
+                path: "FileTransferRouteTests/\(UUID().uuidString).json"
+            ),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(historyStore: historyStore)
+        do {
+            try await manager.sendFile(
+                at: URL(fileURLWithPath: "/does/not/exist"),
+                to: "peer",
+                deviceName: "Peer",
+                ipAddress: "127.0.0.1",
+                port: 65_536
+            )
+            XCTFail("Expected invalid port to fail closed")
+        } catch let error as FileTransferError {
+            guard case .invalidPort = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertTrue(manager.activeTransfers.isEmpty)
+        XCTAssertFalse(manager.isTransferring)
+    }
+
     func testResolveActivePeerRoutesPrefersPublishedPresenceRouteDescriptor() async throws {
         let manager = FileTransferManager()
         let peerId = "route-priority-\(UUID().uuidString)"
@@ -379,8 +505,12 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("removeInboundControlSession"))
         XCTAssertTrue(source.contains("refreshInboundControlSessionAliases"))
         XCTAssertTrue(source.contains("let inboundSessionsToDisconnect = inboundControlSessions.filter"))
+        XCTAssertTrue(source.contains("session.task?.cancel()"))
         XCTAssertTrue(source.contains("session.connection.cancel()"))
-        XCTAssertTrue(source.contains("self?.removeInboundControlSession(id: inboundControlSessionId)"))
+        XCTAssertTrue(source.contains("await session.task?.value"))
+        XCTAssertTrue(source.contains("await runSession()"))
+        XCTAssertTrue(source.contains("await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)"))
+        XCTAssertTrue(source.contains("self.removeInboundControlSession(id: inboundControlSessionId)"))
     }
 
     func testInboundPresenceResolverPrefersRouteCompleteTransferCandidate() throws {
@@ -550,7 +680,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         XCTAssertTrue(source.contains("FileTransferConstants.defaultPort"))
         XCTAssertTrue(source.contains("cancelPeerProtectionRoots(for: runtimePeerId)"))
-        XCTAssertTrue(source.contains("pathRecoveryTasks[key]?.cancel()"))
+        XCTAssertTrue(source.contains("cancelPathRecoveryTask(deviceId: key)"))
+        XCTAssertTrue(source.contains("pathRecoveryTasks.removeValue(forKey: deviceId)?.cancel()"))
         XCTAssertTrue(source.contains("bootstrapRekeyTasks[key]?.cancel()"))
     }
 
@@ -565,7 +696,7 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("latestPeerFileTransferPort = payload.fileTransferPort"))
-        XCTAssertTrue(source.contains("capabilities.append(\"fileTransferPort=\\(port)\")"))
+        XCTAssertTrue(source.contains("ClassicTransferCapability.normalizedRemoteCapabilities"))
         XCTAssertTrue(source.contains("await publishInboundClassicTransferSession(keys: keys)"))
         XCTAssertTrue(source.contains("refreshed inbound file-transfer route from pairing identity"))
     }
@@ -852,10 +983,11 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(handler.contains("isPairingIdentityBoundToAuthenticatedAuthority(payload)"))
         XCTAssertTrue(handler.contains("persistedPolicyDecision(for: request)"))
         XCTAssertTrue(handler.contains("pairingIdentityExchange accepted on authenticated protocol-identity channel"))
-        XCTAssertTrue(source.contains("protocolIdentityPublicKeys: await Self.localProtocolIdentityPublicKeysForPairing()"))
+        XCTAssertTrue(source.contains("protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()"))
+        XCTAssertTrue(source.contains("protocolIdentityPublicKeys: protocolIdentityPublicKeys"))
     }
 
-    func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() throws {
+    func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() async throws {
         let service = PairingTrustApprovalService.shared
         let deviceId = "policy-reject-\(UUID().uuidString)"
         let fingerprint = String(repeating: "a", count: 64)
@@ -877,12 +1009,32 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             kemKeyCount: 2
         )
 
-        service.clearPolicy(for: deviceId)
-        defer { service.clearPolicy(for: deviceId) }
+        let clearedBeforeTest = await service.clearPolicy(for: deviceId)
+        XCTAssertTrue(clearedBeforeTest)
 
-        XCTAssertNil(service.persistedPolicyDecision(for: request))
+        let initialPolicy = await service.persistedPolicyDecision(for: request)
+        XCTAssertNil(initialPolicy)
+        let decisionTask = Task { @MainActor in
+            await service.decide(for: request)
+        }
+        let pendingRequestDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while service.pendingRequest?.id != request.id,
+              ContinuousClock.now < pendingRequestDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard service.pendingRequest?.id == request.id else {
+            decisionTask.cancel()
+            let clearedAfterTimeout = await service.clearPolicy(for: deviceId)
+            XCTAssertTrue(clearedAfterTimeout)
+            return XCTFail("Timed out waiting for the pairing approval request")
+        }
         service.resolve(request, decision: .reject)
-        XCTAssertEqual(service.persistedPolicyDecision(for: request), .reject)
+        let decision = await decisionTask.value
+        XCTAssertEqual(decision, .reject)
+        let persistedPolicy = await service.persistedPolicyDecision(for: request)
+        XCTAssertEqual(persistedPolicy, .reject)
+        let clearedAfterTest = await service.clearPolicy(for: deviceId)
+        XCTAssertTrue(clearedAfterTest)
     }
 
     func testTrustBridgeKeychainInteractionFailureUsesProtectedLocalMirror() throws {
@@ -921,6 +1073,91 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("Mac 重连后的首选文件路由仍是旧 inbound presence"))
         XCTAssertFalse(source.contains("[\n            peer.deviceId,"))
         XCTAssertFalse(source.contains("sendFileToFirstActivePeer(at: outboundURL)"))
+    }
+
+    func testProductionFileTransferCallersUseCanonicalAuthenticatedManager() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let deviceDetail = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeUI/Views/DeviceDetailView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(deviceDetail.contains("FileTransferManager.shared"))
+        XCTAssertTrue(deviceDetail.contains("sendFileToActivePeer"))
+        XCTAssertFalse(
+            deviceDetail.contains("FileTransferEngine"),
+            "Production callers must not write the legacy wire format onto the authenticated P2P control connection."
+        )
+        XCTAssertTrue(deviceDetail.contains("fileTransferErrorMessage = error.localizedDescription"))
+        XCTAssertTrue(deviceDetail.contains("device.connectionRouteCandidates"))
+        let transferFunctionStart = try XCTUnwrap(
+            deviceDetail.range(of: "private func selectAndTransferFile()")
+        )
+        let transferFunctionSource = String(deviceDetail[transferFunctionStart.lowerBound...])
+        XCTAssertFalse(transferFunctionSource.contains("device.id.uuidString"))
+    }
+
+    func testLegacyFileTransferImplementationsHaveNoApplicationProductionEntrypoint() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let legacyEngineDefinition = "Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift"
+        let resumableDefinition = "Sources/SkyBridgeCore/FileTransfer/ResumableTransferManager.swift"
+        let dormantQueueView = "Sources/SkyBridgeCore/FileTransfer/TransferQueueView.swift"
+        let sourceRoots = [
+            root.appendingPathComponent("Sources", isDirectory: true),
+            root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources",
+                isDirectory: true
+            )
+        ]
+        let symbolAllowlists: [(symbol: String, paths: Set<String>)] = [
+            ("FileTransferEngine", [legacyEngineDefinition]),
+            ("ResumableTransferManager", [resumableDefinition, dormantQueueView]),
+            ("TransferQueueView", [dormantQueueView])
+        ]
+        var violations: [String] = []
+
+        for sourceRoot in sourceRoots {
+            let enumerator = try XCTUnwrap(
+                FileManager.default.enumerator(
+                    at: sourceRoot,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ),
+                "Missing production source root: \(sourceRoot.path)"
+            )
+
+            for case let fileURL as URL in enumerator where fileURL.pathExtension == "swift" {
+                let relativePath = fileURL.path.replacingOccurrences(of: root.path + "/", with: "")
+                let source = try String(contentsOf: fileURL, encoding: .utf8)
+                let sourceWithoutLineComments = source.replacingOccurrences(
+                    of: #"(?m)^[\t ]*//.*$"#,
+                    with: "",
+                    options: .regularExpression
+                )
+
+                for rule in symbolAllowlists where !rule.paths.contains(relativePath) {
+                    let escapedSymbol = NSRegularExpression.escapedPattern(for: rule.symbol)
+                    if sourceWithoutLineComments.range(
+                        of: #"\b"# + escapedSymbol + #"\b"#,
+                        options: .regularExpression
+                    ) != nil {
+                        violations.append("\(rule.symbol): \(relativePath)")
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(
+            violations.sorted(),
+            [],
+            "Legacy file-transfer types must remain confined to their explicit definitions/dormant view in both app source trees."
+        )
     }
 
     func testP2PReconnectPreservesSuppliedStrongIdentityWhenRefreshingDiscoverySnapshot() throws {

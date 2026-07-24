@@ -84,33 +84,78 @@ enum WebRTCPeerConnectionFactoryProvider {
 }
 
 actor WebRTCOutboundFrameGate {
-    private var isLocked = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    enum GateError: LocalizedError, Equatable, Sendable {
+        case waiterLimitExceeded(maximum: Int)
 
-    func run<T>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
-        await acquire()
-        defer { release() }
+        var errorDescription: String? {
+            switch self {
+            case .waiterLimitExceeded(let maximum):
+                return "WebRTC outbound frame waiter limit exceeded: maximum=\(maximum)"
+            }
+        }
+    }
+
+    private struct Waiter {
+        let token: UUID
+        let continuation: CheckedContinuation<UUID, Error>
+    }
+
+    private let maximumWaiters: Int
+    private var ownerToken: UUID?
+    private var waiters: [Waiter] = []
+
+    init(maximumWaiters: Int = 64) {
+        precondition(maximumWaiters >= 0, "maximumWaiters must not be negative")
+        self.maximumWaiters = maximumWaiters
+    }
+
+    func run<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+        let token = try await acquire()
+        defer { release(token: token) }
+        try Task.checkCancellation()
         return try await operation()
     }
 
-    private func acquire() async {
-        if !isLocked {
-            isLocked = true
-            return
+    /// Internal diagnostics used by concurrency tests and release telemetry.
+    var pendingWaiterCount: Int { waiters.count }
+
+    private func acquire() async throws -> UUID {
+        try Task.checkCancellation()
+        let token = UUID()
+        if ownerToken == nil {
+            ownerToken = token
+            return token
         }
 
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        guard waiters.count < maximumWaiters else {
+            try Task.checkCancellation()
+            throw GateError.waiterLimitExceeded(maximum: maximumWaiters)
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiters.append(Waiter(token: token, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(token: token) }
         }
     }
 
-    private func release() {
+    private func cancelWaiter(token: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func release(token: UUID) {
+        precondition(ownerToken == token, "Only the active WebRTC frame-gate owner may release it")
         if waiters.isEmpty {
-            isLocked = false
+            ownerToken = nil
             return
         }
         let next = waiters.removeFirst()
-        next.resume()
+        ownerToken = next.token
+        next.continuation.resume(returning: next.token)
     }
 }
 #endif

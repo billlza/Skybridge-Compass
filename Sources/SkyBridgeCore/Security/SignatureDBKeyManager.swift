@@ -323,7 +323,7 @@ extension Data {
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension SignatureDBKeyManager {
  /// Create a test database signed with development key
  /// - Returns: A test SignatureDatabase

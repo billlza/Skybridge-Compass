@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -21,8 +21,9 @@ use skybridge_core::{
     RemoteDesktopControlRequestRegistry, RemoteDesktopObservedMode, RemoteDesktopResolutionRequest,
     RuntimeSessionRecord, RuntimeSessionState, RuntimeSessionTransportEvent,
     RustPqcIdentityMaterial, SessionReadiness, SessionRegistry, SignalingLifecycleEvent,
-    mldsa65_generate_keypair, mldsa65_sign_detached, remote_desktop_fps_request_supported,
-    remote_desktop_resolution_preset_matches, should_refresh_access_token, xwing_generate_keypair,
+    mldsa_generate_keypair, mldsa_sign_detached, mldsa_verify_detached,
+    remote_desktop_fps_request_supported, remote_desktop_resolution_preset_matches,
+    should_refresh_access_token, xwing_generate_keypair,
 };
 use time::OffsetDateTime;
 use tokio::fs;
@@ -44,6 +45,10 @@ pub enum ProtocolSigningKeyMaterial {
         public_key: Vec<u8>,
         secret_key: Vec<u8>,
     },
+    MlDsa87 {
+        public_key: Vec<u8>,
+        secret_key: Vec<u8>,
+    },
 }
 
 impl ProtocolSigningKeyMaterial {
@@ -51,27 +56,35 @@ impl ProtocolSigningKeyMaterial {
         match self {
             Self::Ed25519(_) => ProtocolSigningAlgorithm::Ed25519,
             Self::MlDsa65 { .. } => ProtocolSigningAlgorithm::MlDsa65,
+            Self::MlDsa87 { .. } => ProtocolSigningAlgorithm::MlDsa87,
         }
     }
 
     pub fn public_key_bytes(&self) -> Vec<u8> {
         match self {
             Self::Ed25519(signing_key) => signing_key.verifying_key().to_bytes().to_vec(),
-            Self::MlDsa65 { public_key, .. } => public_key.clone(),
+            Self::MlDsa65 { public_key, .. } | Self::MlDsa87 { public_key, .. } => {
+                public_key.clone()
+            }
         }
     }
 
     pub fn sign(&self, payload: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::Ed25519(signing_key) => Ok(signing_key.sign(payload).to_bytes().to_vec()),
-            Self::MlDsa65 { secret_key, .. } => mldsa65_sign_detached(payload, secret_key),
+            Self::MlDsa65 { secret_key, .. } => {
+                mldsa_sign_detached(ProtocolSigningAlgorithm::MlDsa65, payload, secret_key)
+            }
+            Self::MlDsa87 { secret_key, .. } => {
+                mldsa_sign_detached(ProtocolSigningAlgorithm::MlDsa87, payload, secret_key)
+            }
         }
     }
 
     pub fn ed25519_secret_key_bytes(&self) -> Option<Vec<u8>> {
         match self {
             Self::Ed25519(signing_key) => Some(signing_key.to_bytes().to_vec()),
-            Self::MlDsa65 { .. } => None,
+            Self::MlDsa65 { .. } | Self::MlDsa87 { .. } => None,
         }
     }
 
@@ -79,6 +92,16 @@ impl ProtocolSigningKeyMaterial {
         match self {
             Self::Ed25519(_) => None,
             Self::MlDsa65 { secret_key, .. } => Some(secret_key.clone()),
+            Self::MlDsa87 { .. } => None,
+        }
+    }
+
+    pub fn ml_dsa_secret_key_bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Ed25519(_) => None,
+            Self::MlDsa65 { secret_key, .. } | Self::MlDsa87 { secret_key, .. } => {
+                Some(secret_key.clone())
+            }
         }
     }
 }
@@ -110,24 +133,34 @@ impl StoredKemIdentityKey {
 
 pub async fn ensure_device_identity(paths: &AgentPaths) -> Result<DeviceIdentityMaterial> {
     ensure_identity_layout(paths).await?;
-    let requested_algorithm = requested_protocol_signing_algorithm();
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    let requested_algorithm = requested_protocol_signing_algorithm()?;
     let identity = crate::runtime::load_identity_state(paths)
         .await?
         .unwrap_or_else(|| LocalIdentityState::placeholder(current_hostname(), new_device_id()));
     let desired_algorithm =
         requested_algorithm.unwrap_or(identity.device.protocol_signing_algorithm);
     let stored_key = load_signing_key(paths).await?;
+    if let Some(stored_key) = stored_key.as_ref() {
+        validate_stored_signing_key_metadata(stored_key)?;
+    }
     let signing_key = match stored_key {
         Some(stored_key) if stored_key.algorithm == desired_algorithm => {
             decode_signing_key(&stored_key)?
         }
         None => {
-            let signing_key = generate_signing_key(desired_algorithm)?;
+            let signing_key = load_or_generate_signing_key_slot(paths, desired_algorithm).await?;
             store_signing_key(paths, &signing_key).await?;
             signing_key
         }
-        Some(_) => {
-            let signing_key = generate_signing_key(desired_algorithm)?;
+        Some(stored_key) => {
+            let previous_signing_key = decode_signing_key(&stored_key)?;
+            store_signing_key_at(
+                &signing_key_slot_file(paths, previous_signing_key.algorithm()),
+                &previous_signing_key,
+            )
+            .await?;
+            let signing_key = load_or_generate_signing_key_slot(paths, desired_algorithm).await?;
             store_signing_key(paths, &signing_key).await?;
             signing_key
         }
@@ -155,20 +188,37 @@ pub fn signing_signature(identity: &DeviceIdentityMaterial, payload: &[u8]) -> R
 }
 
 pub async fn ensure_rust_pqc_identity(paths: &AgentPaths) -> Result<RustPqcIdentityMaterial> {
+    ensure_rust_pqc_identity_for_algorithm(paths, ProtocolSigningAlgorithm::MlDsa65).await
+}
+
+pub async fn ensure_rust_pqc_identity_for_algorithm(
+    paths: &AgentPaths,
+    signing_algorithm: ProtocolSigningAlgorithm,
+) -> Result<RustPqcIdentityMaterial> {
+    if !signing_algorithm.is_ml_dsa() {
+        bail!("Rust PQC identity requires an ML-DSA signing algorithm");
+    }
     ensure_identity_layout(paths).await?;
-    let protocol_signing = ensure_mldsa65_signing_key(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    let protocol_signing = ensure_mldsa_signing_key(paths, signing_algorithm).await?;
     let mlkem_identity = ensure_kem_identity_key(paths, 0x0101).await?;
     let xwing_identity = ensure_kem_identity_key(paths, 0x0001).await?;
+    #[cfg(feature = "q-periapt")]
+    let qperiapt_identity = ensure_kem_identity_key(paths, 0x0011).await?;
     Ok(RustPqcIdentityMaterial {
-        signing_algorithm: ProtocolSigningAlgorithm::MlDsa65,
+        signing_algorithm,
         signing_public_key: protocol_signing.public_key_bytes(),
         signing_secret_key: protocol_signing
-            .mldsa65_secret_key_bytes()
-            .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key"))?,
+            .ml_dsa_secret_key_bytes()
+            .ok_or_else(|| anyhow!("missing {signing_algorithm} signing secret key"))?,
         mlkem768_public_key: mlkem_identity.0,
         mlkem768_secret_key: mlkem_identity.1,
         xwing_public_key: xwing_identity.0,
         xwing_secret_key: xwing_identity.1,
+        #[cfg(feature = "q-periapt")]
+        qperiapt_public_key: qperiapt_identity.0,
+        #[cfg(feature = "q-periapt")]
+        qperiapt_secret_key: qperiapt_identity.1,
     })
 }
 
@@ -979,6 +1029,10 @@ async fn store_signing_key(
     paths: &AgentPaths,
     signing_key: &ProtocolSigningKeyMaterial,
 ) -> Result<()> {
+    store_signing_key_at(&signing_key_file(paths), signing_key).await
+}
+
+async fn store_signing_key_at(path: &Path, signing_key: &ProtocolSigningKeyMaterial) -> Result<()> {
     let stored = match signing_key {
         ProtocolSigningKeyMaterial::Ed25519(signing_key) => StoredSigningKey {
             schema_version: StoredSigningKey::SCHEMA_VERSION,
@@ -995,11 +1049,21 @@ async fn store_signing_key(
             public_key_base64: Some(STANDARD.encode(public_key)),
             secret_key_base64: STANDARD.encode(secret_key),
         },
+        ProtocolSigningKeyMaterial::MlDsa87 {
+            public_key,
+            secret_key,
+        } => StoredSigningKey {
+            schema_version: StoredSigningKey::SCHEMA_VERSION,
+            algorithm: ProtocolSigningAlgorithm::MlDsa87,
+            public_key_base64: Some(STANDARD.encode(public_key)),
+            secret_key_base64: STANDARD.encode(secret_key),
+        },
     };
-    write_json(&signing_key_file(paths), &stored).await
+    write_json_atomic_private(path, &stored).await
 }
 
 fn decode_signing_key(stored_key: &StoredSigningKey) -> Result<ProtocolSigningKeyMaterial> {
+    validate_stored_signing_key_metadata(stored_key)?;
     let secret_bytes = STANDARD.decode(stored_key.secret_key_base64.as_bytes())?;
     match stored_key.algorithm {
         ProtocolSigningAlgorithm::Ed25519 => {
@@ -1015,12 +1079,50 @@ fn decode_signing_key(stored_key: &StoredSigningKey) -> Result<ProtocolSigningKe
                 .public_key_base64
                 .as_deref()
                 .ok_or_else(|| anyhow!("missing ML-DSA-65 public key in stored signing key"))?;
+            let public_key = STANDARD.decode(public_key.as_bytes())?;
+            validate_ml_dsa_keypair(stored_key.algorithm, &public_key, &secret_bytes)?;
             Ok(ProtocolSigningKeyMaterial::MlDsa65 {
-                public_key: STANDARD.decode(public_key.as_bytes())?,
+                public_key,
+                secret_key: secret_bytes,
+            })
+        }
+        ProtocolSigningAlgorithm::MlDsa87 => {
+            let public_key = stored_key
+                .public_key_base64
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing ML-DSA-87 public key in stored signing key"))?;
+            let public_key = STANDARD.decode(public_key.as_bytes())?;
+            validate_ml_dsa_keypair(stored_key.algorithm, &public_key, &secret_bytes)?;
+            Ok(ProtocolSigningKeyMaterial::MlDsa87 {
+                public_key,
                 secret_key: secret_bytes,
             })
         }
     }
+}
+
+fn validate_stored_signing_key_metadata(stored_key: &StoredSigningKey) -> Result<()> {
+    if stored_key.schema_version != StoredSigningKey::SCHEMA_VERSION {
+        bail!(
+            "unsupported signing key schema version {}; expected {}",
+            stored_key.schema_version,
+            StoredSigningKey::SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+fn validate_ml_dsa_keypair(
+    algorithm: ProtocolSigningAlgorithm,
+    public_key: &[u8],
+    secret_key: &[u8],
+) -> Result<()> {
+    ProtocolIdentityBinding::validate_key_encoding(public_key, algorithm)?;
+    const KEYPAIR_SELF_TEST_DOMAIN: &[u8] = b"SkyBridge-Rust-MLDSA-Keypair-Self-Test-v1";
+    let signature = mldsa_sign_detached(algorithm, KEYPAIR_SELF_TEST_DOMAIN, secret_key)?;
+    mldsa_verify_detached(algorithm, KEYPAIR_SELF_TEST_DOMAIN, &signature, public_key).with_context(
+        || format!("stored {algorithm} public and secret keys do not form a valid pair"),
+    )
 }
 
 fn sync_identity_binding(
@@ -1037,10 +1139,27 @@ fn sync_identity_binding(
     identity
 }
 
-fn requested_protocol_signing_algorithm() -> Option<ProtocolSigningAlgorithm> {
-    std::env::var("SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM")
-        .ok()
-        .and_then(|value| value.parse().ok())
+fn requested_protocol_signing_algorithm() -> Result<Option<ProtocolSigningAlgorithm>> {
+    match std::env::var("SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM") {
+        Ok(value) => parse_optional_protocol_signing_algorithm(Some(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM is not valid Unicode")
+        }
+    }
+}
+
+fn parse_optional_protocol_signing_algorithm(
+    raw: Option<&str>,
+) -> Result<Option<ProtocolSigningAlgorithm>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        bail!("SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM must not be empty when set");
+    }
+    value.parse().map(Some).map_err(anyhow::Error::from)
 }
 
 fn generate_signing_key(algorithm: ProtocolSigningAlgorithm) -> Result<ProtocolSigningKeyMaterial> {
@@ -1049,8 +1168,15 @@ fn generate_signing_key(algorithm: ProtocolSigningAlgorithm) -> Result<ProtocolS
             SigningKey::generate(&mut OsRng),
         )),
         ProtocolSigningAlgorithm::MlDsa65 => {
-            let (public_key, secret_key) = mldsa65_generate_keypair();
+            let (public_key, secret_key) = mldsa_generate_keypair(algorithm)?;
             Ok(ProtocolSigningKeyMaterial::MlDsa65 {
+                public_key,
+                secret_key,
+            })
+        }
+        ProtocolSigningAlgorithm::MlDsa87 => {
+            let (public_key, secret_key) = mldsa_generate_keypair(algorithm)?;
+            Ok(ProtocolSigningKeyMaterial::MlDsa87 {
                 public_key,
                 secret_key,
             })
@@ -1058,18 +1184,41 @@ fn generate_signing_key(algorithm: ProtocolSigningAlgorithm) -> Result<ProtocolS
     }
 }
 
-async fn ensure_mldsa65_signing_key(paths: &AgentPaths) -> Result<ProtocolSigningKeyMaterial> {
-    let stored_key = load_signing_key(paths).await?;
-    match stored_key {
-        Some(stored_key) if stored_key.algorithm == ProtocolSigningAlgorithm::MlDsa65 => {
-            decode_signing_key(&stored_key)
-        }
-        _ => {
-            let signing_key = generate_signing_key(ProtocolSigningAlgorithm::MlDsa65)?;
-            store_signing_key(paths, &signing_key).await?;
-            Ok(signing_key)
+async fn ensure_mldsa_signing_key(
+    paths: &AgentPaths,
+    algorithm: ProtocolSigningAlgorithm,
+) -> Result<ProtocolSigningKeyMaterial> {
+    if !algorithm.is_ml_dsa() {
+        bail!("PQC signing key requires an ML-DSA algorithm");
+    }
+    if let Some(stored_key) = load_signing_key(paths).await? {
+        validate_stored_signing_key_metadata(&stored_key)?;
+        if stored_key.algorithm == algorithm {
+            return decode_signing_key(&stored_key);
         }
     }
+
+    load_or_generate_signing_key_slot(paths, algorithm).await
+}
+
+async fn load_or_generate_signing_key_slot(
+    paths: &AgentPaths,
+    algorithm: ProtocolSigningAlgorithm,
+) -> Result<ProtocolSigningKeyMaterial> {
+    let path = signing_key_slot_file(paths, algorithm);
+    if let Some(stored_key) = load_json::<StoredSigningKey>(&path).await? {
+        if stored_key.algorithm != algorithm {
+            bail!(
+                "signing key slot for {algorithm} contains {} material",
+                stored_key.algorithm
+            );
+        }
+        return decode_signing_key(&stored_key);
+    }
+
+    let signing_key = generate_signing_key(algorithm)?;
+    store_signing_key_at(&path, &signing_key).await?;
+    Ok(signing_key)
 }
 
 async fn ensure_kem_identity_key(
@@ -1078,24 +1227,71 @@ async fn ensure_kem_identity_key(
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let path = kem_identity_key_file(paths, suite_wire_id);
     if let Some(stored) = load_json::<StoredKemIdentityKey>(&path).await? {
+        if stored.schema_version != StoredKemIdentityKey::SCHEMA_VERSION {
+            bail!(
+                "unsupported KEM identity schema version {}; expected {}",
+                stored.schema_version,
+                StoredKemIdentityKey::SCHEMA_VERSION
+            );
+        }
+        if stored.suite_wire_id != suite_wire_id {
+            bail!(
+                "stored KEM identity suite {:#06x} does not match requested suite {suite_wire_id:#06x}",
+                stored.suite_wire_id
+            );
+        }
         let public_key = STANDARD.decode(stored.public_key_base64.as_bytes())?;
         let secret_key = STANDARD.decode(stored.secret_key_base64.as_bytes())?;
+        validate_kem_identity_lengths(suite_wire_id, &public_key, &secret_key)?;
         return Ok((public_key, secret_key));
     }
 
     let (public_key, secret_key) = match suite_wire_id {
         0x0101 => skybridge_core::mlkem768_generate_keypair(),
         0x0001 => xwing_generate_keypair(),
+        #[cfg(feature = "q-periapt")]
+        0x0011 => skybridge_core::qperiapt_contextbound_generate_keypair(),
         _ => bail!("unsupported KEM identity suite {suite_wire_id:#06x}"),
     };
+    validate_kem_identity_lengths(suite_wire_id, &public_key, &secret_key)?;
     let stored = StoredKemIdentityKey {
         schema_version: StoredKemIdentityKey::SCHEMA_VERSION,
         suite_wire_id,
         public_key_base64: STANDARD.encode(&public_key),
         secret_key_base64: STANDARD.encode(&secret_key),
     };
-    write_json(&path, &stored).await?;
+    write_json_atomic_private(&path, &stored).await?;
     Ok((public_key, secret_key))
+}
+
+fn validate_kem_identity_lengths(
+    suite_wire_id: u16,
+    public_key: &[u8],
+    secret_key: &[u8],
+) -> Result<()> {
+    let expected = match suite_wire_id {
+        0x0101 => (
+            skybridge_core::MLKEM768_PUBLIC_KEY_BYTES,
+            skybridge_core::MLKEM768_SECRET_KEY_BYTES,
+        ),
+        0x0001 => (
+            skybridge_core::XWING_PUBLIC_KEY_BYTES,
+            skybridge_core::XWING_SECRET_KEY_BYTES,
+        ),
+        #[cfg(feature = "q-periapt")]
+        0x0011 if !public_key.is_empty() && !secret_key.is_empty() => return Ok(()),
+        _ => bail!("unsupported KEM identity suite {suite_wire_id:#06x}"),
+    };
+    if public_key.len() != expected.0 || secret_key.len() != expected.1 {
+        bail!(
+            "invalid KEM identity lengths for suite {suite_wire_id:#06x}: expected public={} secret={}, got public={} secret={}",
+            expected.0,
+            expected.1,
+            public_key.len(),
+            secret_key.len()
+        );
+    }
+    Ok(())
 }
 
 async fn persist_identity(paths: &AgentPaths, identity: &LocalIdentityState) -> Result<()> {
@@ -1115,6 +1311,25 @@ async fn ensure_identity_layout(paths: &AgentPaths) -> Result<()> {
         restrict_dir_permissions(directory).await?;
     }
     Ok(())
+}
+
+async fn acquire_protocol_identity_lock(paths: &AgentPaths) -> Result<std::fs::File> {
+    let lock_path = paths.identity_dir.join("protocol-identity.lock");
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open identity lock {}", lock_path.display()))?;
+        restrict_file_permissions_blocking(&lock_path)?;
+        file.lock()
+            .with_context(|| format!("failed to lock identity state {}", lock_path.display()))?;
+        Ok(file)
+    })
+    .await
+    .context("protocol identity lock task panicked")?
 }
 
 fn lock_session_registry_process() -> Result<std::sync::MutexGuard<'static, ()>> {
@@ -1923,6 +2138,75 @@ where
     restrict_file_permissions(path).await
 }
 
+async fn write_json_atomic_private<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let body = serde_json::to_vec_pretty(value).context("failed to encode private json")?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_private_file_atomically(&path, &body))
+        .await
+        .context("private JSON persistence task panicked")?
+}
+
+fn write_private_file_atomically(path: &Path, body: &[u8]) -> Result<()> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("private JSON path missing filename"))?
+        .to_string_lossy();
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::now_v7()));
+
+    let write_result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        file.write_all(body)
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+        restrict_file_permissions_blocking(&temp_path)?;
+
+        std::fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to persist {}", path.display()))?;
+        restrict_file_permissions_blocking(path)?;
+
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow!("private JSON path missing parent directory"))?;
+            std::fs::File::open(parent)
+                .with_context(|| format!("failed to open {} for sync", parent.display()))?
+                .sync_all()
+                .with_context(|| format!("failed to sync {}", parent.display()))?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        match std::fs::remove_file(&temp_path) {
+            Ok(()) => return Err(error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(error);
+            }
+            Err(cleanup_error) => {
+                return Err(error.context(format!(
+                    "also failed to remove temporary private file {}: {cleanup_error}",
+                    temp_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn load_json<T>(path: &Path) -> Result<Option<T>>
 where
     T: for<'de> Deserialize<'de>,
@@ -1944,6 +2228,16 @@ fn auth_session_file(paths: &AgentPaths) -> std::path::PathBuf {
 
 fn signing_key_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.identity_dir.join("protocol-signing-key.json")
+}
+
+fn signing_key_slot_file(
+    paths: &AgentPaths,
+    algorithm: ProtocolSigningAlgorithm,
+) -> std::path::PathBuf {
+    paths.identity_dir.join(format!(
+        "protocol-signing-key-{:04x}.json",
+        algorithm.wire_code()
+    ))
 }
 
 fn kem_identity_key_file(paths: &AgentPaths, suite_wire_id: u16) -> std::path::PathBuf {
@@ -2021,6 +2315,109 @@ mod tests {
             uuid::Uuid::now_v7()
         ))))
         .expect("temporary paths should resolve")
+    }
+
+    #[test]
+    fn protocol_signing_algorithm_config_rejects_empty_and_unknown_values() {
+        assert_eq!(
+            parse_optional_protocol_signing_algorithm(Some("ML-DSA-87")).unwrap(),
+            Some(ProtocolSigningAlgorithm::MlDsa87)
+        );
+        assert!(parse_optional_protocol_signing_algorithm(Some(" ")).is_err());
+        assert!(parse_optional_protocol_signing_algorithm(Some("ML-DSA-99")).is_err());
+        assert_eq!(
+            parse_optional_protocol_signing_algorithm(None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn stored_mldsa87_key_decodes_only_with_exact_schema_and_matching_keypair() {
+        let signing_key =
+            generate_signing_key(ProtocolSigningAlgorithm::MlDsa87).expect("generate ML-DSA-87");
+        let (public_key, secret_key) = match signing_key {
+            ProtocolSigningKeyMaterial::MlDsa87 {
+                public_key,
+                secret_key,
+            } => (public_key, secret_key),
+            _ => panic!("expected ML-DSA-87 material"),
+        };
+        let stored = StoredSigningKey {
+            schema_version: StoredSigningKey::SCHEMA_VERSION,
+            algorithm: ProtocolSigningAlgorithm::MlDsa87,
+            public_key_base64: Some(STANDARD.encode(&public_key)),
+            secret_key_base64: STANDARD.encode(&secret_key),
+        };
+        assert!(matches!(
+            decode_signing_key(&stored).unwrap(),
+            ProtocolSigningKeyMaterial::MlDsa87 { .. }
+        ));
+
+        let mut wrong_schema = stored.clone();
+        wrong_schema.schema_version += 1;
+        assert!(decode_signing_key(&wrong_schema).is_err());
+
+        let (other_public_key, _) = skybridge_core::mldsa87_generate_keypair();
+        let mut mismatched = stored;
+        mismatched.public_key_base64 = Some(STANDARD.encode(other_public_key));
+        assert!(decode_signing_key(&mismatched).is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_mldsa_slot_never_overwrites_primary_protocol_identity() {
+        let paths = test_paths("bridge-mldsa-slot");
+        ensure_identity_layout(&paths)
+            .await
+            .expect("identity layout should exist");
+        let primary = generate_signing_key(ProtocolSigningAlgorithm::Ed25519)
+            .expect("generate primary Ed25519 identity");
+        store_signing_key(&paths, &primary)
+            .await
+            .expect("store primary identity");
+        let primary_before = tokio::fs::read(signing_key_file(&paths))
+            .await
+            .expect("read primary identity");
+
+        let bridge = ensure_mldsa_signing_key(&paths, ProtocolSigningAlgorithm::MlDsa87)
+            .await
+            .expect("create isolated ML-DSA-87 bridge identity");
+        assert_eq!(bridge.algorithm(), ProtocolSigningAlgorithm::MlDsa87);
+        let primary_after = tokio::fs::read(signing_key_file(&paths))
+            .await
+            .expect("read primary identity after bridge creation");
+        assert_eq!(primary_before, primary_after);
+        assert!(signing_key_slot_file(&paths, ProtocolSigningAlgorithm::MlDsa87).exists());
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_mldsa87_identity_initialization_returns_one_persisted_identity() {
+        let paths = test_paths("concurrent-mldsa87-identity");
+        let first_paths = paths.clone();
+        let second_paths = paths.clone();
+        let (first, second) = tokio::join!(
+            ensure_rust_pqc_identity_for_algorithm(&first_paths, ProtocolSigningAlgorithm::MlDsa87,),
+            ensure_rust_pqc_identity_for_algorithm(
+                &second_paths,
+                ProtocolSigningAlgorithm::MlDsa87,
+            )
+        );
+        let first = first.expect("first identity initialization");
+        let second = second.expect("second identity initialization");
+        assert_eq!(first, second);
+
+        let stored = load_json::<StoredSigningKey>(&signing_key_slot_file(
+            &paths,
+            ProtocolSigningAlgorithm::MlDsa87,
+        ))
+        .await
+        .expect("load persisted ML-DSA-87 slot")
+        .expect("persisted ML-DSA-87 slot should exist");
+        let stored = decode_signing_key(&stored).expect("persisted slot should validate");
+        assert_eq!(stored.public_key_bytes(), first.signing_public_key);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     async fn seed_session(paths: &AgentPaths, session_id: &str, state: RuntimeSessionState) {

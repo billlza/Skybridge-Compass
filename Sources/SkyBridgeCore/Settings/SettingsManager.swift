@@ -4,6 +4,7 @@ import Combine
 import UserNotifications
 import AppKit
 import os.log
+import SkyBridgeProtocolCore
 
 /// 设置导出数据结构
 public struct SettingsExportData: Codable {
@@ -72,9 +73,64 @@ public struct SettingsExportData: Codable {
 
 public enum SettingsStorageKeys {
     public static let preferXWingHybrid = "Settings.PreferXWingHybrid"
-    /// Experimental (beta): prefer the Q-Periapt ABI2 PolicyBound hybrid suite. The persisted
-    /// request remains dormant until an authenticated signed-policy runtime session is installed.
+    public static let protocolIdentityConfigurationV2 = "Settings.ProtocolIdentityConfiguration.v2"
+    // Read-only migration inputs. New writes use the single v2 value above.
+    public static let protocolSigningAlgorithmV1 = "Settings.ProtocolIdentityConfiguration.v1.algorithm"
+    public static let protocolSigningKeyProtectionV1 = "Settings.ProtocolIdentityConfiguration.v1.protection"
+    /// Experimental (beta): prefer Q-Periapt ABI2 PolicyBound only after an
+    /// authenticated policy session has been admitted locally.
     public static let preferQPeriaptBeta = "Settings.PreferQPeriaptBeta"
+}
+
+public struct ProtocolIdentityConfigurationRecord: Codable, Sendable, Equatable {
+    public static let currentVersion = 2
+
+    public let version: Int
+    public let algorithm: ProtocolSigningAlgorithm
+    public let protection: ProtocolSigningKeyProtection
+
+    public init(
+        version: Int = Self.currentVersion,
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) {
+        self.version = version
+        self.algorithm = algorithm
+        self.protection = protection
+    }
+
+    public var isValidAuthoritySelection: Bool {
+        version == Self.currentVersion && algorithm != .ed25519
+    }
+}
+
+struct PreparedProtocolIdentityConfiguration: Sendable {
+    let configuration: ProtocolIdentityConfigurationRecord
+    let publicKey: Data
+    let keyHandle: SigningKeyHandle
+    fileprivate let requestGeneration: UInt64
+}
+
+struct ProtocolIdentityConfigurationRequestGate: Sendable {
+    private(set) var currentGeneration: UInt64 = 0
+
+    mutating func begin() -> UInt64 {
+        currentGeneration &+= 1
+        return currentGeneration
+    }
+
+    func accepts(_ generation: UInt64) -> Bool {
+        generation == currentGeneration
+    }
+}
+
+public enum ProtocolIdentityConfigurationState: String, Sendable, Equatable {
+    case active
+    case provisioning
+    case waitingForPeerRepin
+    case requiresExplicitConfirmation
+    case unavailable
+    case failed
 }
 
 /// 设置错误类型
@@ -236,24 +292,29 @@ public class SettingsManager: ObservableObject, Sendable {
  /// 量子安全：启用后量子密码（应用层）尝试；真实 PQC 状态仍以协商套件和 runtime proof 为准
  /// 🔧 优化：默认开启 PQC-capable 路径，但不得把开关本身当成量子安全证明
     @Published public var enablePQC: Bool = true
- /// 量子安全：生产协议身份签名算法。当前信任记录与握手只绑定 ML-DSA-65。
+ /// 量子安全：请求的生产协议身份签名算法。运行时只使用已完成本机
+ /// provisioning 且满足对端 pin 的 `activeProtocolSigningAlgorithm`。
     @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65" {
         didSet {
             let normalized = Self.normalizedPQCSignatureAlgorithm(pqcSignatureAlgorithm)
             guard normalized != pqcSignatureAlgorithm else { return }
             logger.notice(
-                "Rejected unsupported production PQC signature setting; enforcing protocol-bound ML-DSA-65"
+                "Rejected unsupported production PQC signature setting"
             )
             pqcSignatureAlgorithm = normalized
         }
     }
+    @Published public private(set) var activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    @Published public private(set) var activeProtocolSigningKeyProtection: ProtocolSigningKeyProtection = .softwareKeychain
+    @Published public private(set) var protocolIdentityConfigurationState: ProtocolIdentityConfigurationState = .provisioning
+    @Published public private(set) var protocolIdentityConfigurationError: String?
  /// 量子安全：是否启用TLS混合协商（视系统支持而定）
     @Published public var enablePQCHybridTLS: Bool = false
  /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
     @Published public var preferXWingHybrid: Bool = false
- /// 量子安全（beta）：是否优先协商 Q-Periapt ABI2 PolicyBound 混合套件；
- /// 未安装并验证签名策略与信任根时保持关闭。
+ /// 量子安全（beta）：是否优先协商 Q-Periapt ABI2 PolicyBound；没有已认证策略 session 时保持禁用。
     @Published public var preferQPeriaptBeta: Bool = false
+    @Published public private(set) var qPeriaptRuntimeSupported: Bool = false
 
  // MARK: - 系统监控设置
     @Published public var systemMonitorRefreshInterval: Double = 1.0
@@ -298,8 +359,14 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var showMonitorNetwork: Bool = true
 
  // MARK: - 文件传输设置
+    public static let defaultMaxConcurrentFileTransfers = 3
+    public static let maximumConcurrentFileTransfers = ClassicTransferInboundPolicy.maximumConcurrentConnections
+    public static let defaultTransferBufferSize = 128 * 1_024
+    public static let maximumTransferSpeedLimitMBps = 500.0
+
     @Published public var defaultTransferPath: String = "~/Downloads"
-    @Published public var transferBufferSize: Int = 131072  // 128KB
+    @Published public var maxConcurrentFileTransfers: Int = SettingsManager.defaultMaxConcurrentFileTransfers
+    @Published public var transferBufferSize: Int = SettingsManager.defaultTransferBufferSize
     @Published public var autoRetryFailedTransfers: Bool = true
     @Published public var keepTransferHistory: Bool = true
     @Published public var keepSystemAwakeDuringTransfer: Bool = false
@@ -316,18 +383,29 @@ public class SettingsManager: ObservableObject, Sendable {
  // MARK: - 私有属性
     private let userDefaults = UserDefaults.standard
     private var settingsCancellables = Set<AnyCancellable>()
+    private var fileTransferSettingsApplyTask: Task<Void, Never>?
+    private var protocolIdentityConfigurationRequestGate = ProtocolIdentityConfigurationRequestGate()
+    private var protocolIdentityRestorationTask: Task<Void, Never>?
+    private var hasCommittedProtocolIdentityConfiguration = false
 
  // MARK: - 初始化
     private init() {
         loadSettings()
         setupObservers()
         applyRuntimeSettingsSnapshot()
+        Task { @MainActor [weak self] in
+            await self?.prepareQPeriaptRuntimeSupport()
+        }
+        protocolIdentityRestorationTask = Task { @MainActor [weak self] in
+            await self?.restoreProtocolIdentityConfiguration()
+        }
     }
 
  // MARK: - 生命周期管理方法
 
  /// 启动设置管理器
     public func start() async throws {
+        _ = try await committedProtocolIdentityConfiguration()
         logger.info("⚙️ 设置管理器已启动")
     }
 
@@ -414,7 +492,7 @@ public class SettingsManager: ObservableObject, Sendable {
         enableHandshakeDiagnostics = false
         // 默认启用应用层 PQC（与属性默认值/注释保持一致）
         enablePQC = true
-        pqcSignatureAlgorithm = "ML-DSA-65"
+        pqcSignatureAlgorithm = activeProtocolSigningAlgorithm.rawValue
         enablePQCHybridTLS = false
         preferXWingHybrid = false
         strictModeForSensitiveGroups = false
@@ -435,7 +513,8 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 文件传输设置
         defaultTransferPath = "~/Downloads"
-        transferBufferSize = 131072
+        maxConcurrentFileTransfers = Self.defaultMaxConcurrentFileTransfers
+        transferBufferSize = Self.defaultTransferBufferSize
         autoRetryFailedTransfers = true
         keepTransferHistory = true
         keepSystemAwakeDuringTransfer = false
@@ -534,8 +613,12 @@ public class SettingsManager: ObservableObject, Sendable {
     }
 
     private func scheduleFileTransferSettingsApply() {
-        Task { @MainActor in
+        fileTransferSettingsApplyTask?.cancel()
+        fileTransferSettingsApplyTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
             FileTransferSettingsBridge.shared.apply()
+            self?.fileTransferSettingsApplyTask = nil
         }
     }
 
@@ -613,9 +696,275 @@ public class SettingsManager: ObservableObject, Sendable {
         switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
             return "ML-DSA-65"
+        case "ML-DSA-87", "MLDSA-87":
+            return "ML-DSA-87"
         default:
             return "ML-DSA-65"
         }
+    }
+
+    /// Provisions and self-tests a candidate without changing the committed
+    /// local authority. A remote rotation coordinator must call this first,
+    /// then commit only after the server transaction succeeds.
+    func prepareProtocolIdentityConfiguration(
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> PreparedProtocolIdentityConfiguration {
+        await protocolIdentityRestorationTask?.value
+        let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
+        guard algorithm != .ed25519 else {
+            throw SettingsError.validationFailed(
+                "Ed25519 is not a PQC identity selection"
+            )
+        }
+
+        protocolIdentityConfigurationState = .provisioning
+        protocolIdentityConfigurationError = nil
+        do {
+            let identity = try await DeviceIdentityKeyManager.shared
+                .getProtocolSigningIdentity(for: algorithm, protection: protection)
+            try await validateProtocolSigningIdentity(
+                identity,
+                algorithm: algorithm,
+                protection: protection
+            )
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else {
+                throw SettingsError.validationFailed(
+                    "Protocol identity configuration was superseded by a newer request"
+                )
+            }
+            return PreparedProtocolIdentityConfiguration(
+                configuration: ProtocolIdentityConfigurationRecord(
+                    algorithm: algorithm,
+                    protection: protection
+                ),
+                publicKey: identity.publicKey,
+                keyHandle: identity.keyHandle,
+                requestGeneration: requestGeneration
+            )
+        } catch {
+            if protocolIdentityConfigurationRequestGate.accepts(requestGeneration) {
+                protocolIdentityConfigurationState = .failed
+                protocolIdentityConfigurationError = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    /// Publishes one already self-tested candidate. This function contains no
+    /// suspension point so persistence and runtime activation remain one local
+    /// transaction after the remote CAS has committed.
+    func commitPreparedProtocolIdentityConfiguration(
+        _ prepared: PreparedProtocolIdentityConfiguration
+    ) throws {
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration was superseded by a newer request"
+            )
+        }
+        try persistProtocolIdentityConfiguration(prepared.configuration)
+        activateProtocolIdentityConfiguration(
+            algorithm: prepared.configuration.algorithm,
+            protection: prepared.configuration.protection
+        )
+        clearCryptoProviderCacheForSettingsChange()
+    }
+
+    func markProtocolIdentityConfigurationFailed(
+        _ error: Error,
+        for prepared: PreparedProtocolIdentityConfiguration
+    ) {
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else { return }
+        protocolIdentityConfigurationState = .failed
+        protocolIdentityConfigurationError = error.localizedDescription
+    }
+
+    func abandonPreparedProtocolIdentityConfiguration(
+        _ prepared: PreparedProtocolIdentityConfiguration
+    ) {
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else { return }
+        _ = protocolIdentityConfigurationRequestGate.begin()
+        protocolIdentityConfigurationState = (
+            activeProtocolSigningAlgorithm == .mlDSA65
+                && activeProtocolSigningKeyProtection == .softwareKeychain
+        ) ? .active : .waitingForPeerRepin
+        protocolIdentityConfigurationError = nil
+    }
+
+    /// Returns the last fully provisioned and durably persisted protocol
+    /// authority. Security-sensitive consumers must use this barrier instead of
+    /// reading the published fields during asynchronous startup restoration.
+    public func committedProtocolIdentityConfiguration() async throws
+        -> ProtocolIdentityConfigurationRecord {
+        await protocolIdentityRestorationTask?.value
+        guard hasCommittedProtocolIdentityConfiguration else {
+            throw SettingsError.validationFailed(
+                protocolIdentityConfigurationError
+                    ?? "Protocol identity configuration has not been restored"
+            )
+        }
+        return ProtocolIdentityConfigurationRecord(
+            algorithm: activeProtocolSigningAlgorithm,
+            protection: activeProtocolSigningKeyProtection
+        )
+    }
+
+    private func restoreProtocolIdentityConfiguration() async {
+        let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
+        let storedRecord: ProtocolIdentityConfigurationRecord
+        let shouldProvisionDefault: Bool
+
+        if let encoded = userDefaults.data(forKey: SettingsStorageKeys.protocolIdentityConfigurationV2) {
+            do {
+                let decoded = try JSONDecoder().decode(
+                    ProtocolIdentityConfigurationRecord.self,
+                    from: encoded
+                )
+                guard decoded.isValidAuthoritySelection else {
+                    throw SettingsError.validationFailed("Stored protocol identity configuration is invalid")
+                }
+                storedRecord = decoded
+                shouldProvisionDefault = false
+            } catch {
+                guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError = "Stored protocol identity configuration is malformed or unsupported"
+                return
+            }
+        } else {
+            let legacyAlgorithmRaw = userDefaults.string(
+                forKey: SettingsStorageKeys.protocolSigningAlgorithmV1
+            )
+            let legacyProtectionRaw = userDefaults.string(
+                forKey: SettingsStorageKeys.protocolSigningKeyProtectionV1
+            )
+            switch (legacyAlgorithmRaw, legacyProtectionRaw) {
+            case (nil, nil):
+                storedRecord = ProtocolIdentityConfigurationRecord(
+                    algorithm: .mlDSA65,
+                    protection: .softwareKeychain
+                )
+                shouldProvisionDefault = true
+            case (.some(let algorithmRaw), .some(let protectionRaw)):
+                guard let algorithm = ProtocolSigningAlgorithm(rawValue: algorithmRaw),
+                      algorithm != .ed25519,
+                      let protection = ProtocolSigningKeyProtection(rawValue: protectionRaw) else {
+                    guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                    protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                    protocolIdentityConfigurationError = "Legacy protocol identity configuration is invalid"
+                    return
+                }
+                storedRecord = ProtocolIdentityConfigurationRecord(
+                    algorithm: algorithm,
+                    protection: protection
+                )
+                shouldProvisionDefault = false
+            default:
+                guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError = "Legacy protocol identity configuration is incomplete"
+                return
+            }
+        }
+
+        do {
+            let restoredIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)
+            if shouldProvisionDefault {
+                restoredIdentity = try await DeviceIdentityKeyManager.shared.getProtocolSigningIdentity(
+                    for: storedRecord.algorithm,
+                    protection: storedRecord.protection
+                )
+            } else {
+                guard let existingIdentity = try await DeviceIdentityKeyManager.shared
+                    .existingProtocolSigningIdentity(
+                        for: storedRecord.algorithm,
+                        protection: storedRecord.protection
+                    ) else {
+                    guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                    protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                    protocolIdentityConfigurationError = "Stored intent has no matching protocol identity authority"
+                    return
+                }
+                restoredIdentity = existingIdentity
+            }
+            try await validateProtocolSigningIdentity(
+                restoredIdentity,
+                algorithm: storedRecord.algorithm,
+                protection: storedRecord.protection
+            )
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+            try persistProtocolIdentityConfiguration(storedRecord)
+            activateProtocolIdentityConfiguration(
+                algorithm: storedRecord.algorithm,
+                protection: storedRecord.protection
+            )
+        } catch {
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+            protocolIdentityConfigurationState = .failed
+            protocolIdentityConfigurationError = error.localizedDescription
+        }
+    }
+
+    private func validateProtocolSigningIdentity(
+        _ identity: (publicKey: Data, keyHandle: SigningKeyHandle),
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws {
+        let probe = Data(
+            [
+                "SkyBridge-Protocol-Identity-Self-Test-v1",
+                algorithm.rawValue,
+                protection.rawValue,
+            ].joined(separator: "\n").utf8
+        )
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: algorithm)
+        let signature = try await signatureProvider.sign(probe, key: identity.keyHandle)
+        guard try await signatureProvider.verify(
+            probe,
+            signature: signature,
+            publicKey: identity.publicKey
+        ) else {
+            throw SettingsError.validationFailed(
+                "Protocol identity failed its signing self-test"
+            )
+        }
+    }
+
+    private func persistProtocolIdentityConfiguration(
+        _ record: ProtocolIdentityConfigurationRecord
+    ) throws {
+        guard record.isValidAuthoritySelection else {
+            throw SettingsError.validationFailed("Protocol identity configuration is invalid")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let encoded = try encoder.encode(record)
+        userDefaults.set(encoded, forKey: SettingsStorageKeys.protocolIdentityConfigurationV2)
+        guard userDefaults.data(forKey: SettingsStorageKeys.protocolIdentityConfigurationV2) == encoded else {
+            throw SettingsError.validationFailed("Protocol identity configuration persistence verification failed")
+        }
+        userDefaults.removeObject(forKey: SettingsStorageKeys.protocolSigningAlgorithmV1)
+        userDefaults.removeObject(forKey: SettingsStorageKeys.protocolSigningKeyProtectionV1)
+    }
+
+    private func activateProtocolIdentityConfiguration(
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) {
+        pqcSignatureAlgorithm = algorithm.rawValue
+        activeProtocolSigningAlgorithm = algorithm
+        activeProtocolSigningKeyProtection = protection
+        hasCommittedProtocolIdentityConfiguration = true
+        protocolIdentityConfigurationState = (
+            algorithm == .mlDSA65 && protection == .softwareKeychain
+        ) ? .active : .waitingForPeerRepin
+        protocolIdentityConfigurationError = nil
     }
 
     private static func applyQPeriaptEnvironmentPreference(_ enabled: Bool) {
@@ -633,6 +982,29 @@ public class SettingsManager: ObservableObject, Sendable {
         if ProcessInfo.processInfo.environment[betaGateKey] == "1" {
             unsetenv(betaGateKey)
         }
+    }
+
+    private func prepareQPeriaptRuntimeSupport() async {
+        let supported = await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+        guard !Task.isCancelled else { return }
+        qPeriaptRuntimeSupported = supported
+
+        guard preferQPeriaptBeta else {
+            Self.applyQPeriaptEnvironmentPreference(false)
+            clearCryptoProviderCacheForSettingsChange()
+            return
+        }
+        guard supported else {
+            userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+            Self.applyQPeriaptEnvironmentPreference(false)
+            clearCryptoProviderCacheForSettingsChange()
+            preferQPeriaptBeta = false
+            return
+        }
+
+        userDefaults.set(true, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+        Self.applyQPeriaptEnvironmentPreference(true)
+        clearCryptoProviderCacheForSettingsChange()
     }
 
     private func applyWeatherRuntimeSetting(_ enabled: Bool) {
@@ -738,7 +1110,6 @@ public class SettingsManager: ObservableObject, Sendable {
             "pqcSignatureAlgorithm": pqcSignatureAlgorithm,
             "enablePQCHybridTLS": enablePQCHybridTLS,
             "preferXWingHybrid": preferXWingHybrid,
-
  // 系统监控设置
             "systemMonitorRefreshInterval": systemMonitorRefreshInterval,
             "enableSystemNotifications": enableSystemNotifications,
@@ -768,6 +1139,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 文件传输设置
             "defaultTransferPath": defaultTransferPath,
+            "maxConcurrentFileTransfers": maxConcurrentFileTransfers,
             "transferBufferSize": transferBufferSize,
             "autoRetryFailedTransfers": autoRetryFailedTransfers,
             "keepTransferHistory": keepTransferHistory,
@@ -857,7 +1229,7 @@ public class SettingsManager: ObservableObject, Sendable {
         try validateLegacyImportedSettings(settings)
 
  // 应用旧格式设置
-        await applyLegacyImportedSettings(settings)
+        try await applyLegacyImportedSettings(settings)
 
         SkyBridgeLogger.ui.debugOnly("📥 设置已从文件导入: \(url.lastPathComponent)")
 
@@ -900,11 +1272,28 @@ public class SettingsManager: ObservableObject, Sendable {
                 throw SettingsError.validationFailed("文件传输仅支持 AES-256-GCM 加密")
             }
         }
+
+        if let value = settings["maxConcurrentFileTransfers"] as? Int,
+           !(1...ClassicTransferInboundPolicy.maximumConcurrentConnections).contains(value) {
+            throw SettingsError.validationFailed("文件传输并发数超出支持范围")
+        }
+        if let value = settings["transferBufferSize"] as? Int,
+           !(ClassicTransferInboundPolicy.minimumDeclaredChunkSizeBytes...ClassicTransferInboundPolicy.maximumDeclaredChunkSizeBytes).contains(value) {
+            throw SettingsError.validationFailed("文件传输分片大小超出支持范围")
+        }
+        let importedSpeedLimit = (settings["transferSpeedLimitMBps"] as? Double)
+            ?? (settings["transferSpeedLimitMBps"] as? Int).map(Double.init)
+        if let importedSpeedLimit,
+           (!importedSpeedLimit.isFinite
+            || importedSpeedLimit < 0
+            || importedSpeedLimit > Self.maximumTransferSpeedLimitMBps) {
+            throw SettingsError.validationFailed("文件传输限速必须位于 0...500 MB/s")
+        }
     }
 
  /// 应用旧格式导入的设置
     @MainActor
-    private func applyLegacyImportedSettings(_ settings: [String: Any]) async {
+    private func applyLegacyImportedSettings(_ settings: [String: Any]) async throws {
  // 通用设置
         if let value = settings["autoScanOnStartup"] as? Bool { autoScanOnStartup = value }
         if let value = settings["showSystemNotifications"] as? Bool { showSystemNotifications = value }
@@ -989,7 +1378,6 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["pqcSignatureAlgorithm"] as? String { pqcSignatureAlgorithm = value }
         if let value = settings["enablePQCHybridTLS"] as? Bool { enablePQCHybridTLS = value }
         if let value = settings["preferXWingHybrid"] as? Bool { preferXWingHybrid = value }
-
  // 系统监控设置
         if let value = settings["systemMonitorRefreshInterval"] as? Double { systemMonitorRefreshInterval = value }
         if let value = settings["enableSystemNotifications"] as? Bool { enableSystemNotifications = value }
@@ -1025,6 +1413,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 文件传输设置
         if let value = settings["defaultTransferPath"] as? String { defaultTransferPath = value }
+        if let value = settings["maxConcurrentFileTransfers"] as? Int { maxConcurrentFileTransfers = value }
         if let value = settings["transferBufferSize"] as? Int { transferBufferSize = value }
         if let value = settings["autoRetryFailedTransfers"] as? Bool { autoRetryFailedTransfers = value }
         if let value = settings["keepTransferHistory"] as? Bool { keepTransferHistory = value }
@@ -1032,9 +1421,8 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["scanTransferFilesForVirus"] as? Bool { scanTransferFilesForVirus = value }
         if let value = settings["transferSpeedLimitMBps"] as? Double { transferSpeedLimitMBps = value }
         if let value = settings["transferSpeedLimitMBps"] as? Int { transferSpeedLimitMBps = Double(value) }
-        if let value = settings["encryptionAlgorithm"] as? String,
-           let algorithm = try? FileTransferEncryptionAlgorithm(persistedValue: value) {
-            encryptionAlgorithm = algorithm
+        if let value = settings["encryptionAlgorithm"] as? String {
+            encryptionAlgorithm = try FileTransferEncryptionAlgorithm(persistedValue: value)
         }
         if let value = settings["scanLevel"] as? String, let level = FileScanService.ScanLevel(rawValue: value) { scanLevel = level }
 
@@ -1539,23 +1927,16 @@ public class SettingsManager: ObservableObject, Sendable {
         // PQC settings (previously not persisted)
         enablePQC = true
         userDefaults.set(true, forKey: "Settings.EnablePQC")
-        let storedPQCSignatureAlgorithm = userDefaults.string(forKey: "Settings.PQCSignatureAlgorithm")
-            ?? "ML-DSA-65"
-        pqcSignatureAlgorithm = Self.normalizedPQCSignatureAlgorithm(storedPQCSignatureAlgorithm)
-        if pqcSignatureAlgorithm != storedPQCSignatureAlgorithm {
-            logger.notice(
-                "Migrated unsupported production PQC signature setting to the protocol-bound ML-DSA-65 algorithm"
-            )
-            userDefaults.set(pqcSignatureAlgorithm, forKey: "Settings.PQCSignatureAlgorithm")
-        }
+        // The versioned protocol-identity record is restored asynchronously as
+        // one authority transaction. Never project either half of the legacy
+        // two-key record into runtime state here.
+        pqcSignatureAlgorithm = "ML-DSA-65"
         enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
         preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
         preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
-        if preferQPeriaptBeta && !QPeriaptPlatformPolicy.isLocalRuntimeSupported {
-            preferQPeriaptBeta = false
-            userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-        }
-        Self.applyQPeriaptEnvironmentPreference(preferQPeriaptBeta)
+        // The expensive KEM round-trip probe runs off the main actor. Routing
+        // remains disabled until it completes, without erasing user intent.
+        Self.applyQPeriaptEnvironmentPreference(false)
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
         aqiThresholdCautionUrban = userDefaults.integer(forKey: "Settings.AQIThresholdCautionUrban", defaultValue: 100)
         aqiThresholdSensitiveUrban = userDefaults.integer(forKey: "Settings.AQIThresholdSensitiveUrban", defaultValue: 150)
@@ -1598,12 +1979,51 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 文件传输设置
         defaultTransferPath = userDefaults.string(forKey: "Settings.DefaultTransferPath") ?? "~/Downloads"
-        transferBufferSize = userDefaults.integer(forKey: "Settings.TransferBufferSize", defaultValue: 131072)
+        let persistedConcurrentFileTransfers = userDefaults.integer(
+            forKey: "Settings.MaxConcurrentFileTransfers",
+            defaultValue: Self.defaultMaxConcurrentFileTransfers
+        )
+        if (1...ClassicTransferInboundPolicy.maximumConcurrentConnections)
+            .contains(persistedConcurrentFileTransfers) {
+            maxConcurrentFileTransfers = persistedConcurrentFileTransfers
+        } else {
+            maxConcurrentFileTransfers = Self.defaultMaxConcurrentFileTransfers
+            userDefaults.set(
+                maxConcurrentFileTransfers,
+                forKey: "Settings.MaxConcurrentFileTransfers"
+            )
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输并发数已重置")
+        }
+
+        let persistedTransferBufferSize = userDefaults.integer(
+            forKey: "Settings.TransferBufferSize",
+            defaultValue: Self.defaultTransferBufferSize
+        )
+        if (ClassicTransferInboundPolicy.minimumDeclaredChunkSizeBytes...ClassicTransferInboundPolicy.maximumDeclaredChunkSizeBytes)
+            .contains(persistedTransferBufferSize) {
+            transferBufferSize = persistedTransferBufferSize
+        } else {
+            transferBufferSize = Self.defaultTransferBufferSize
+            userDefaults.set(transferBufferSize, forKey: "Settings.TransferBufferSize")
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输分片大小已重置")
+        }
         autoRetryFailedTransfers = userDefaults.bool(forKey: "Settings.AutoRetryFailedTransfers", defaultValue: true)
         keepTransferHistory = userDefaults.bool(forKey: "Settings.KeepTransferHistory", defaultValue: true)
         keepSystemAwakeDuringTransfer = userDefaults.bool(forKey: "Settings.KeepSystemAwakeDuringTransfer", defaultValue: false)
         scanTransferFilesForVirus = userDefaults.bool(forKey: "Settings.ScanTransferFilesForVirus", defaultValue: false)
-        transferSpeedLimitMBps = userDefaults.double(forKey: "Settings.TransferSpeedLimitMBps", defaultValue: 0)
+        let persistedTransferSpeedLimit = userDefaults.double(
+            forKey: "Settings.TransferSpeedLimitMBps",
+            defaultValue: 0
+        )
+        if persistedTransferSpeedLimit.isFinite,
+           persistedTransferSpeedLimit >= 0,
+           persistedTransferSpeedLimit <= Self.maximumTransferSpeedLimitMBps {
+            transferSpeedLimitMBps = persistedTransferSpeedLimit
+        } else {
+            transferSpeedLimitMBps = 0
+            userDefaults.set(0, forKey: "Settings.TransferSpeedLimitMBps")
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输限速已重置")
+        }
         let persistedFileTransferAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? FileTransferEncryptionAlgorithm.aes256GCM.rawValue
         encryptionAlgorithm = (try? FileTransferEncryptionAlgorithm(persistedValue: persistedFileTransferAlgorithm)) ?? .aes256GCM
         userDefaults.set(encryptionAlgorithm.rawValue, forKey: "Settings.EncryptionAlgorithm")
@@ -1703,6 +2123,11 @@ public class SettingsManager: ObservableObject, Sendable {
             self?.userDefaults.set(value, forKey: "Settings.DefaultTransferPath")
         }.store(in: &settingsCancellables)
 
+        $maxConcurrentFileTransfers.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentFileTransfers")
+            self?.scheduleFileTransferSettingsApply()
+        }.store(in: &settingsCancellables)
+
         $transferBufferSize.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.TransferBufferSize")
             self?.scheduleFileTransferSettingsApply()
@@ -1729,7 +2154,18 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
 
         $transferSpeedLimitMBps.sink { [weak self] value in
-            self?.userDefaults.set(max(0, value), forKey: "Settings.TransferSpeedLimitMBps")
+            guard value.isFinite,
+                  value >= 0,
+                  value <= Self.maximumTransferSpeedLimitMBps else {
+                SkyBridgeLogger.fileTransfer.error("拒绝持久化无效的文件传输限速")
+                NotificationCenter.default.post(
+                    name: Notification.Name("FileTransferSettingsValidationFailure"),
+                    object: nil,
+                    userInfo: ["code": "invalid_transfer_speed_limit"]
+                )
+                return
+            }
+            self?.userDefaults.set(value, forKey: "Settings.TransferSpeedLimitMBps")
             self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
@@ -1797,12 +2233,10 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $retryCount.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
-            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $enableConnectionEncryption.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
-            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $verifyCertificates.sink { [weak self] value in
@@ -1909,7 +2343,6 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $maxConcurrentConnections.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
-            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $enableIPv6Support.sink { [weak self] value in
@@ -2000,7 +2433,12 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
         $pqcSignatureAlgorithm.sink { [weak self] value in
             guard let self else { return }
-            self.userDefaults.set(value, forKey: "Settings.PQCSignatureAlgorithm")
+            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
+            guard normalized == value else {
+                self.pqcSignatureAlgorithm = normalized
+                return
+            }
+            self.userDefaults.set(normalized, forKey: "Settings.PQCSignatureAlgorithm")
             self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $enablePQCHybridTLS.sink { [weak self] value in
@@ -2013,18 +2451,15 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
         $preferQPeriaptBeta.sink { [weak self] value in
             guard let self else { return }
-            guard !value || QPeriaptPlatformPolicy.isLocalRuntimeSupported else {
+            guard value else {
                 self.userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
                 Self.applyQPeriaptEnvironmentPreference(false)
                 self.clearCryptoProviderCacheForSettingsChange()
-                if self.preferQPeriaptBeta {
-                    self.preferQPeriaptBeta = false
-                }
                 return
             }
-            self.userDefaults.set(value, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-            Self.applyQPeriaptEnvironmentPreference(value)
-            self.clearCryptoProviderCacheForSettingsChange()
+            Task { @MainActor [weak self] in
+                await self?.prepareQPeriaptRuntimeSupport()
+            }
         }.store(in: &settingsCancellables)
  // 系统监控设置观察者
         $systemMonitorRefreshInterval.sink { [weak self] value in

@@ -217,6 +217,7 @@
 "settings.general.exportSettings" = "Export settings";
 "settings.general.importSettings" = "Import settings";
 "settings.general.resetSettings" = "Reset to defaults";
+"settings.general.deduplicateKeychain" = "Deduplicate Keychain items";
 
 /* Units */
 "unit.seconds.15" = "15 seconds";
@@ -506,7 +507,9 @@
 "settings.advanced.pqc.preferXWing.help" = "Keep both ML-KEM-768 and X-Wing advertised at startup; this switch only changes suite priority.";
 "settings.advanced.pqc.preferXWing.caption" = "When enabled, X-Wing is prioritized; when disabled, ML-KEM-768 is prioritized (both are still advertised).";
 "settings.advanced.pqc.signatureAlgorithm" = "Signature Algorithm:";
-"settings.advanced.pqc.note" = "X-Wing and ML-DSA-65 use software key material in the current runtime. Secure Enclave is not claimed for these paths. Availability is reported from the selected runtime provider.";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "Use Secure Enclave for ML-DSA";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "Use Secure Enclave for ML-KEM";
+"settings.advanced.pqc.note" = "X-Wing (hybrid) and ML-KEM-768 (pure PQC) are available on macOS 26+ (CryptoKit), where Secure Enclave PQC is also available. macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
 
 "settings.advanced.smoothing.title" = "Device Signal Smoothing";
 "settings.advanced.smoothing.alpha" = "Smoothing Factor (EMA)";
@@ -525,6 +528,8 @@
 "settings.fileTransfer.rateLimit.unlimited" = "Unlimited";
 "settings.fileTransfer.pathFallback.title" = "Default save path updated";
 "settings.fileTransfer.pathFallback.message" = "The configured path is unavailable. Fallback path: %@";
+"settings.fileTransfer.pathFailure.title" = "Could not configure the receive folder";
+"settings.fileTransfer.pathFailure.message" = "Check the folder permissions or select another writable location. The previous receive folder remains unchanged.";
 "settings.fileTransfer.options.title" = "Transfer Options";
 "settings.fileTransfer.options.showNotification" = "Show notification when transfer completes";
 "settings.fileTransfer.options.autoRetryFailed" = "Auto retry failed transfers";
@@ -533,6 +538,8 @@
 "settings.fileTransfer.options.keepAwake" = "Keep system awake during transfer";
 "settings.fileTransfer.security.title" = "Security Settings";
 "settings.fileTransfer.security.enableEncrypt" = "Enable transfer encryption";
+"settings.fileTransfer.security.encryption.alwaysOn" = "File transfer encryption is always on";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "The classic transfer protocol requires AES-256-GCM and cannot be downgraded to plaintext.";
 "settings.security.certificateValidation.alwaysOn" = "Certificate validation is always enabled";
 "settings.security.certificateValidation.alwaysOn.detail" = "This version always enforces strict certificate validation.";
 "settings.fileTransfer.security.verifyIntegrity" = "Verify file integrity";
@@ -647,15 +654,13 @@
 "fileTransfer.history.clear" = "Clear History";
 "fileTransfer.history.emptyTitle" = "No transfer history";
 "fileTransfer.history.emptySubtitle" = "Completed transfers will appear here";
-"fileTransfer.debug.title" = "Debug Panel";
-"fileTransfer.debug.hmacTagHex" = "HMAC Tag (Hex)";
-"fileTransfer.debug.signatureResult" = "File Signature Verification Result";
 "common.none" = "None";
 "action.preview" = "Preview";
 "transferStatus.preparing" = "Preparing";
 "transferStatus.transferring" = "Transferring";
 "transferStatus.paused" = "Paused";
 "transferStatus.completed" = "Completed";
+"fileTransfer.receiptDeliveryUnknown" = "File saved, but sender confirmation is unknown. Do not retransmit automatically.";
 "transferStatus.failed" = "Failed";
 "transferStatus.cancelled" = "Cancelled";
 "action.close" = "Close";
@@ -1163,8 +1168,8 @@
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";
 "remoteControl.securityNotice.transport" = "Transport";
-"remoteControl.securityNotice.account" = "Account";
-"remoteControl.securityNotice.nebulaID" = "Nebula ID";
+"remoteControl.securityNotice.account" = "Device-reported account";
+"remoteControl.securityNotice.nebulaID" = "Device-reported Nebula ID";
 "remoteControl.securityNotice.device" = "Device";
 "remoteControl.securityNotice.pqc" = "PQC Suite";
 "remoteControl.securityNotice.approve" = "Approve";
@@ -1204,3 +1209,17 @@
 "topbar.network.latency.help.ready" = "HTTPS response latency to the SkyBridge web entry: %@ ms";
 "topbar.network.latency.help.failedUnavailable" = "Public network latency unavailable";
 "topbar.network.latency.help.failed" = "Public network latency probe failed: %@";
+
+/* Local camera streaming */
+"remote.camera.connect" = "Connect Local Camera";
+"remote.camera.defaultName" = "Local Camera";
+"remote.camera.name" = "Camera name (optional)";
+"remote.camera.endpoint" = "Exact RTSP/RTSPS URL";
+"remote.camera.contract" = "Enter a private IP literal and the exact stream path. This release supports H.264 video over RTSP interleaved TCP only; it does not guess paths or use vendor cloud relays.";
+"remote.camera.plaintextAcknowledgement" = "I understand that RTSP sends control data and video without transport encryption.";
+"remote.camera.tlsNotice" = "RTSPS uses system certificate trust and host verification. Invalid or self-signed certificates are rejected.";
+"remote.camera.protocol" = "Local Camera (RTSP)";
+"remote.camera.rendererUnavailable" = "Unable to initialize the video renderer.";
+"remote.camera.feedUnavailable.title" = "Video unavailable";
+"remote.camera.feedUnavailable.failed" = "The camera stream failed and its credentials and transport were released. Verify the exact URL, credentials, H.264 profile, and local network, then reconnect.";
+"remote.camera.feedUnavailable.released" = "The session renderer has been released. Reconnect to continue.";

@@ -111,13 +111,44 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
     
     private let logger = Logger(subsystem: "com.skybridge.quantum", category: "EnhancedPostQuantumCrypto")
     private let deviceIdentityKeyManager: DeviceIdentityKeyManager
+    private let committedLocalIdentityLoader: @Sendable () async throws -> CommittedLocalProtocolIdentitySnapshot
+    private let pqcEnabledLoader: @Sendable () async -> Bool
 
     public init() {
-        deviceIdentityKeyManager = .shared
+        let keyManager = DeviceIdentityKeyManager.shared
+        deviceIdentityKeyManager = keyManager
+        committedLocalIdentityLoader = {
+            try await CommittedLocalProtocolIdentitySnapshot.loadActive(
+                keyManager: keyManager
+            )
+        }
+        pqcEnabledLoader = {
+            await MainActor.run { SettingsManager.shared.enablePQC }
+        }
     }
 
     init(deviceIdentityKeyManager: DeviceIdentityKeyManager) {
         self.deviceIdentityKeyManager = deviceIdentityKeyManager
+        committedLocalIdentityLoader = {
+            try await CommittedLocalProtocolIdentitySnapshot.loadActive(
+                keyManager: deviceIdentityKeyManager
+            )
+        }
+        pqcEnabledLoader = {
+            await MainActor.run { SettingsManager.shared.enablePQC }
+        }
+    }
+
+    init(
+        deviceIdentityKeyManager: DeviceIdentityKeyManager,
+        committedLocalIdentityLoader: @escaping @Sendable () async throws -> CommittedLocalProtocolIdentitySnapshot,
+        pqcEnabledLoader: @escaping @Sendable () async -> Bool = {
+            await MainActor.run { SettingsManager.shared.enablePQC }
+        }
+    ) {
+        self.deviceIdentityKeyManager = deviceIdentityKeyManager
+        self.committedLocalIdentityLoader = committedLocalIdentityLoader
+        self.pqcEnabledLoader = pqcEnabledLoader
     }
     
  // MARK: - 并发安全的状态管理
@@ -230,10 +261,9 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
  /// - peerId: 对等节点ID（用于密钥管理）
  /// - Returns: 签名数据
     public func sign(_ data: Data, for peerId: String) async throws -> Data {
-        let settings = await Self.configuredPQCSigningSettings()
-        if settings.enabled {
-            let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
-            return try await signWithProtocolIdentity(data, algorithm: algorithm)
+        if await pqcEnabledLoader() {
+            let identity = try await committedLocalIdentityLoader()
+            return try await signWithProtocolIdentity(data, identity: identity)
         }
 
         logger.debug("✍️ PQC 已显式关闭；使用 P256 ECDSA 签名")
@@ -263,19 +293,17 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         _ data: Data,
         for peerId: String
     ) async throws -> PQCRequiredSignature {
-        let settings = await Self.configuredPQCSigningSettings()
-
-        guard settings.enabled else {
+        guard await pqcEnabledLoader() else {
             logger.error("❌ Strict-PQC 签名失败：PQC 已被本地设置关闭")
             throw EnhancedPostQuantumCryptoError.pqcDisabled
         }
 
-        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
-        let signature = try await signWithProtocolIdentity(
-            data,
-            algorithm: algorithm
+        let identity = try await committedLocalIdentityLoader()
+        let signature = try await signWithProtocolIdentity(data, identity: identity)
+        return PQCRequiredSignature(
+            bytes: signature,
+            algorithm: identity.algorithm.rawValue
         )
-        return PQCRequiredSignature(bytes: signature, algorithm: algorithm)
     }
 
     /// Strict-PQC verification path for production data-transfer metadata.
@@ -286,13 +314,12 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         for peerId: String,
         algorithm rawAlgorithm: String?
     ) async throws -> Bool {
-        let settings = await Self.configuredPQCSigningSettings()
-        guard settings.enabled else {
+        guard await pqcEnabledLoader() else {
             logger.error("❌ Strict-PQC 验签失败：PQC 已被本地设置关闭")
             throw EnhancedPostQuantumCryptoError.pqcDisabled
         }
 
-        let algorithm = try Self.requiredPQCSignatureAlgorithm(rawAlgorithm)
+        let algorithm = try Self.requiredPQCProtocolSigningAlgorithm(rawAlgorithm)
 
         let verified = try await verifyWithAuthenticatedProtocolIdentity(
             data,
@@ -301,23 +328,25 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             algorithm: algorithm
         )
         if verified {
-            logger.info("✅ Strict-PQC 验签成功: \(algorithm)")
+            logger.info("✅ Strict-PQC 验签成功: \(algorithm.rawValue, privacy: .public)")
         } else {
-            logger.error("❌ Strict-PQC 验签失败: \(algorithm)")
+            logger.error("❌ Strict-PQC 验签失败: \(algorithm.rawValue, privacy: .public)")
         }
         return verified
     }
 
     private func signWithProtocolIdentity(
         _ data: Data,
-        algorithm: String
+        identity: CommittedLocalProtocolIdentitySnapshot
     ) async throws -> Data {
-        guard algorithm == "ML-DSA-65" else {
-            throw EnhancedPostQuantumCryptoError.productionSignatureAlgorithmUnsupported(algorithm)
+        guard identity.algorithm == .mlDSA65 || identity.algorithm == .mlDSA87 else {
+            throw EnhancedPostQuantumCryptoError.productionSignatureAlgorithmUnsupported(
+                identity.algorithm.rawValue
+            )
         }
         do {
-            let keyHandle = try await deviceIdentityKeyManager.getProtocolSigningKeyHandle(for: .mlDSA65)
-            return try await PQCSignatureProvider().sign(data, key: keyHandle)
+            return try await PQCSignatureProvider(algorithm: identity.algorithm)
+                .sign(data, key: identity.keyHandle)
         } catch let error as EnhancedPostQuantumCryptoError {
             throw error
         } catch {
@@ -325,7 +354,9 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             logger.error(
                 "❌ Protocol-identity PQC signing failed: domain=\(nsError.domain, privacy: .public) code=\(nsError.code)"
             )
-            throw EnhancedPostQuantumCryptoError.pqcSigningFailed(algorithm: algorithm)
+            throw EnhancedPostQuantumCryptoError.pqcSigningFailed(
+                algorithm: identity.algorithm.rawValue
+            )
         }
     }
 
@@ -333,14 +364,19 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         _ data: Data,
         signature: Data,
         peerId: String,
-        algorithm: String
+        algorithm: ProtocolSigningAlgorithm
     ) async throws -> Bool {
-        guard algorithm == "ML-DSA-65" else {
-            throw EnhancedPostQuantumCryptoError.productionSignatureAlgorithmUnsupported(algorithm)
+        guard algorithm == .mlDSA65 || algorithm == .mlDSA87 else {
+            throw EnhancedPostQuantumCryptoError.productionSignatureAlgorithmUnsupported(
+                algorithm.rawValue
+            )
         }
-        let publicKey = try await authenticatedRemoteProtocolSigningKey(for: peerId)
+        let publicKey = try await authenticatedRemoteProtocolSigningKey(
+            for: peerId,
+            algorithm: algorithm
+        )
         do {
-            return try await PQCSignatureProvider().verify(
+            return try await PQCSignatureProvider(algorithm: algorithm).verify(
                 data,
                 signature: signature,
                 publicKey: publicKey
@@ -354,7 +390,10 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         }
     }
 
-    private func authenticatedRemoteProtocolSigningKey(for peerId: String) async throws -> Data {
+    private func authenticatedRemoteProtocolSigningKey(
+        for peerId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async throws -> Data {
         guard let validatedPeerId = try? PQCIdentityToken.validated(peerId) else {
             throw EnhancedPostQuantumCryptoError.authenticatedRemoteSigningKeyUnavailable
         }
@@ -362,7 +401,8 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         let records = await TrustSyncService.shared.getActiveTrustRecords()
         return try Self.validatedAuthenticatedRemoteProtocolSigningKey(
             records: records,
-            peerId: validatedPeerId
+            peerId: validatedPeerId,
+            algorithm: algorithm
         )
     }
 
@@ -370,6 +410,23 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         records: [TrustRecord],
         peerId: String
     ) throws -> Data {
+        try validatedAuthenticatedRemoteProtocolSigningKey(
+            records: records,
+            peerId: peerId,
+            algorithm: .mlDSA65
+        )
+    }
+
+    internal static func validatedAuthenticatedRemoteProtocolSigningKey(
+        records: [TrustRecord],
+        peerId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) throws -> Data {
+        guard algorithm == .mlDSA65 || algorithm == .mlDSA87 else {
+            throw EnhancedPostQuantumCryptoError.productionSignatureAlgorithmUnsupported(
+                algorithm.rawValue
+            )
+        }
         guard let validatedPeerId = try? PQCIdentityToken.validated(peerId) else {
             throw EnhancedPostQuantumCryptoError.authenticatedRemoteSigningKeyUnavailable
         }
@@ -380,48 +437,46 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             )
         )
         let lowercasedCandidates = Set(lookupCandidates.map { $0.lowercased() })
-        let matches = records.filter { record in
+        let matchedKeys = records.compactMap { record -> Data? in
             guard record.isAuthenticationEligible,
-                  record.protocolSigningAlgorithm == .mlDSA65,
-                  let publicKey = record.protocolPublicKey,
-                  publicKey.count == 1_952,
                   PeerTrustLookup.recordMatches(
                     record,
                     candidates: lookupCandidates,
                     candidateLowercased: lowercasedCandidates
                   ) else {
-                return false
+                return nil
+            }
+            if let exactBinding = record.authenticatedProtocolIdentityBinding(for: algorithm) {
+                return exactBinding.publicKey
+            }
+            guard algorithm == .mlDSA65,
+                  record.protocolSigningAlgorithm == .mlDSA65,
+                  let publicKey = record.protocolPublicKey,
+                  publicKey.count == 1_952 else {
+                return nil
             }
             let fingerprint = ProtocolIdentityBinding.computeFingerprint(
                 algorithm: .mlDSA65,
                 publicKeyBytes: publicKey
             )
-            return record.currentPathAuthorityPins.contains { pin in
+            guard record.currentPathAuthorityPins.contains(where: { pin in
                 pin.algorithm == .mlDSA65
                     && pin.fingerprint == fingerprint
                     && pin.source != .legacyMigration
+            }) else {
+                return nil
             }
+            return publicKey
         }
 
-        guard !matches.isEmpty else {
+        let distinctKeys = Set(matchedKeys)
+        guard !distinctKeys.isEmpty else {
             throw EnhancedPostQuantumCryptoError.authenticatedRemoteSigningKeyUnavailable
         }
-        guard matches.count == 1 else {
+        guard distinctKeys.count == 1, let publicKey = distinctKeys.first else {
             throw EnhancedPostQuantumCryptoError.authenticatedRemoteSigningKeyAmbiguous
         }
-        guard let publicKey = matches[0].protocolPublicKey else {
-            throw EnhancedPostQuantumCryptoError.authenticatedRemoteSigningKeyInvalid
-        }
         return publicKey
-    }
-
-    private static func configuredPQCSigningSettings() async -> (enabled: Bool, rawAlgorithm: String) {
-        await MainActor.run {
-            (
-                enabled: SettingsManager.shared.enablePQC,
-                rawAlgorithm: SettingsManager.shared.pqcSignatureAlgorithm
-            )
-        }
     }
 
     /// Canonicalizes the deliberately small set of signature identifiers that
@@ -429,12 +484,20 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
     /// boundary directly even though SettingsManager rejects invalid runtime
     /// assignments before an operation is dispatched.
     internal static func requiredPQCSignatureAlgorithm(_ rawValue: String?) throws -> String {
+        try requiredPQCProtocolSigningAlgorithm(rawValue).rawValue
+    }
+
+    private static func requiredPQCProtocolSigningAlgorithm(
+        _ rawValue: String?
+    ) throws -> ProtocolSigningAlgorithm {
         guard let rawValue else {
             throw EnhancedPostQuantumCryptoError.invalidPQCSignatureAlgorithm("<missing>")
         }
         switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
-            return "ML-DSA-65"
+            return .mlDSA65
+        case "ML-DSA-87", "MLDSA-87":
+            return .mlDSA87
         default:
             throw EnhancedPostQuantumCryptoError.invalidPQCSignatureAlgorithm(rawValue)
         }
@@ -487,16 +550,15 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         }
     }
     
- /// 验证签名。启用 PQC 时绝不回退到 P256。
+    /// 验证签名。启用 PQC 时绝不回退到 P256。
     public func verify(_ data: Data, signature: Data, for peerId: String) async throws -> Bool {
-        let settings = await Self.configuredPQCSigningSettings()
-        if settings.enabled {
-            let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+        if await pqcEnabledLoader() {
+            let identity = try await committedLocalIdentityLoader()
             return try await verifyWithAuthenticatedProtocolIdentity(
                 data,
                 signature: signature,
                 peerId: peerId,
-                algorithm: algorithm
+                algorithm: identity.algorithm
             )
         }
 
@@ -528,13 +590,12 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             return signature.rawRepresentation
         }
         
-        let settings = await Self.configuredPQCSigningSettings()
-        guard settings.enabled else {
+        guard await pqcEnabledLoader() else {
             return (classical: classical, pqc: nil)
         }
 
-        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
-        let pqc = try await signWithProtocolIdentity(data, algorithm: algorithm)
+        let identity = try await committedLocalIdentityLoader()
+        let pqc = try await signWithProtocolIdentity(data, identity: identity)
         logger.info("✅ PQC混合签名成功: 传统(\(classical.count)字节) + PQC(\(pqc.count)字节)")
         return (classical: classical, pqc: pqc)
     }
@@ -557,20 +618,19 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
         
         let classicalValid = try await verify(data, signature: classicalSignature, publicKey: publicKey)
 
-        let settings = await Self.configuredPQCSigningSettings()
-        guard settings.enabled else {
+        guard await pqcEnabledLoader() else {
             return classicalValid
         }
 
         guard let pqcSignature else {
             throw EnhancedPostQuantumCryptoError.pqcSignatureRequired
         }
-        let algorithm = try Self.requiredPQCSignatureAlgorithm(settings.rawAlgorithm)
+        let identity = try await committedLocalIdentityLoader()
         let pqcValid = try await verifyWithAuthenticatedProtocolIdentity(
             data,
             signature: pqcSignature,
             peerId: peerId,
-            algorithm: algorithm
+            algorithm: identity.algorithm
         )
         logger.info("🔍 混合签名验证: 传统=\(classicalValid), PQC=\(pqcValid)")
         return classicalValid && pqcValid

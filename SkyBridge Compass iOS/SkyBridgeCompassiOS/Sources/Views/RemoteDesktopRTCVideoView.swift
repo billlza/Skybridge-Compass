@@ -46,7 +46,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             }
         }
         context.coordinator.bind(track: track, to: view)
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "native-render-view-bound trackId=\(track.trackId) acceptsEvidence=\(acceptsRenderEvidence ? 1 : 0) epoch=\(renderEpoch) source=rtc-mtl-video-view"
         )
         SkyBridgeLogger.shared.info(
@@ -84,7 +84,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
         }
         context.coordinator.bind(track: track, to: uiView)
         if acceptsRenderEvidence {
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-view-updated trackId=\(track.trackId) acceptsEvidence=1 epoch=\(renderEpoch) source=rtc-mtl-video-view"
             )
         }
@@ -114,7 +114,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             boundView = view
             boundRenderer = renderer
             track.add(renderer)
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-track-bound trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0) source=rtc-mtl-video-view renderer=forwarder"
             )
             SkyBridgeLogger.shared.debug(
@@ -157,7 +157,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                     view.setSize(size)
                     view.noteVideoViewSizeEvidence(size)
                     if logState.markFirstSize() {
-                        SkyBridgeSmokeTraceWriter.appendStatus(
+                        SkyBridgeDiagnosticTrace.appendStatus(
                             "native-render-forwarder-size trackId=\(view.diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=rtc-mtl-video-view"
                         )
                     }
@@ -174,7 +174,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                     guard let view else { return }
                     view.renderFrame(frame)
                     if logState.markFirstFrame() {
-                        SkyBridgeSmokeTraceWriter.appendStatus(
+                        SkyBridgeDiagnosticTrace.appendStatus(
                             "native-render-forwarder-frame trackId=\(view.diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=rtc-mtl-video-view"
                         )
                     }
@@ -299,7 +299,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                     "🎬 WebRTC native video visible view-size evidence: trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) nativeRenderEvidenceSource=\(Self.nativeRenderEvidenceSource)"
                 )
             }
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-view-size trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=\(Self.nativeRenderEvidenceSource)"
             )
         }
@@ -325,7 +325,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 visibleRenderFrameWindowStart = now
                 let sessionId = CrossNetworkWebRTCManager.instance.activeRemoteDesktopSessionId?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? "-"
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "visibleNativeRenderFPS",
                         "session": sessionId,
@@ -356,7 +356,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             SkyBridgeLogger.shared.debug(
                 "🎬 WebRTC native video render diagnostic: phase=\(phase) \(details)"
             )
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-diagnostic phase=\(phase) \(details)"
             )
         }

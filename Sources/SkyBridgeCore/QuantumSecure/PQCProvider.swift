@@ -123,6 +123,31 @@ public struct HPKERecipientContext: Sendable {
 @available(macOS 14.0, *)
 public enum PQCProviderFactory {
     private static let logger = Logger(subsystem: "com.skybridge.quantum", category: "PQCProviderFactory")
+
+    /// Read-only migration schedule retained for callers that surface the
+    /// storage transition contract. Key writes themselves remain governed by
+    /// `PQCKeyPairStore` authority, CAS, and scope rules.
+    public struct MigrationPolicy: Sendable, Equatable {
+        public let dualWriteEnabled: Bool
+        public let stopV1WriteVersion: String
+        public let fullRemoveV1TargetVersion: String
+
+        public static let current = MigrationPolicy(
+            dualWriteEnabled: true,
+            stopV1WriteVersion: "3.0",
+            fullRemoveV1TargetVersion: "5.0"
+        )
+
+        private init(
+            dualWriteEnabled: Bool,
+            stopV1WriteVersion: String,
+            fullRemoveV1TargetVersion: String
+        ) {
+            self.dualWriteEnabled = dualWriteEnabled
+            self.stopV1WriteVersion = stopV1WriteVersion
+            self.fullRemoveV1TargetVersion = fullRemoveV1TargetVersion
+        }
+    }
     
     public static func makeProvider() -> PQCProvider? {
         makeProvider(

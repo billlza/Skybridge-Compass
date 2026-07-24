@@ -296,3 +296,26 @@
 "Nebula 标识" = "Nebula ID";
 "设备标识" = "Device ID";
 "MIME 类型" = "MIME Type";
+
+/* Smart camera */
+"智能监控" = "Smart Camera";
+"智能监控 · RTSPS" = "Smart Camera · RTSPS";
+"智能监控 · RTSP（明文）" = "Smart Camera · RTSP (Plaintext)";
+"智能监控已断开" = "Smart Camera Disconnected";
+"好" = "OK";
+"连接智能监控" = "Connect Smart Camera";
+"智能监控为只读画面，不会发送键盘或触控输入" = "Smart Camera is view-only and never sends keyboard or touch input";
+"摄像头流地址" = "Camera Stream URL";
+"显示名称（可选）" = "Display Name (Optional)";
+"请输入摄像头提供的精确 RTSP/RTSPS 地址。首版仅允许本地私网 IP、H.264 与 RTP-over-RTSP TCP；不会猜测路径或连接厂商云服务。" = "Enter the exact RTSP/RTSPS URL provided by the camera. This initial release accepts only private-LAN IP addresses, H.264, and RTP over RTSP/TCP; it does not guess paths or connect to vendor cloud services.";
+"摄像头凭据（可选）" = "Camera Credentials (Optional)";
+"用户名" = "Username";
+"用户名和密码必须同时填写。" = "Username and password must both be entered.";
+"明文传输警告" = "Plaintext Transport Warning";
+"我了解 RTSP 控制信令与视频未加密；仅使用 Digest 认证，绝不允许 Basic 明文认证。" = "I understand that RTSP control signaling and video are unencrypted. Only Digest authentication is allowed; plaintext Basic authentication is never permitted.";
+"RTSPS 使用系统证书信任与主机身份校验；证书错误会直接失败。" = "RTSPS uses the system trust store and verifies the host identity; certificate errors fail the connection.";
+"取消连接" = "Cancel Connection";
+"连接摄像头" = "Connect";
+"摄像头连接失败" = "Camera Connection Failed";
+"fileTransfer.receiptDeliveryUnknown" = "File saved or sent, but delivery confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.committedFileReleaseFailed" = "File was saved, but internal transfer cleanup failed. Restart the app before receiving more files.";

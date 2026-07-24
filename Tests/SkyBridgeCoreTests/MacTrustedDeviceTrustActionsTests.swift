@@ -39,7 +39,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let releaseReadinessScript = try repositorySource("Scripts/check_macos_release_readiness.sh")
         let frameworkHelpers = try repositorySource("Scripts/framework_artifact_helpers.sh")
         let iosP2PSmokeHarnessSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift")
-        let iosSmokeTraceWriterSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/SkyBridgeSmokeTraceWriter.swift")
+        let iosDiagnosticTraceSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/SkyBridgeDiagnosticTrace.swift")
         let rustMacIpadGateSource = try repositorySource("rust/crates/skybridge-cli/src/p2p_remote_performance_evidence/mac_ipad_online.rs")
         let rustMacIpadTestsSource = try repositorySource("rust/crates/skybridge-cli/src/performance_tests/p2p_remote/mac_ipad_online.rs")
         let xcodeProjectSource = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
@@ -245,11 +245,12 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Mac online iPad smoke must prove iOS listener readiness through a small app-authored listener sidecar instead of the high-volume status log."
         )
         XCTAssertTrue(
-            iosSmokeTraceWriterSource.contains("SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME") &&
-            iosSmokeTraceWriterSource.contains("resetListenerStatusIfConfigured") &&
-            iosSmokeTraceWriterSource.contains("isListenerLifecycleStatusLine") &&
-            iosSmokeTraceWriterSource.contains("\"p2p-listener ready\"") &&
-            !iosSmokeTraceWriterSource.contains("\"p2p-listener inbound-ready\""),
+            iosDiagnosticTraceSource.contains("SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME") &&
+            iosDiagnosticTraceSource.contains("resetConfiguredStatusArtifacts") &&
+            iosDiagnosticTraceSource.contains("makeListenerStatusURL") &&
+            iosDiagnosticTraceSource.contains("isListenerLifecycleStatusLine") &&
+            iosDiagnosticTraceSource.contains("\"p2p-listener ready\"") &&
+            !iosDiagnosticTraceSource.contains("\"p2p-listener inbound-ready\""),
             "The iOS smoke trace writer must mirror only listener lifecycle evidence into the sidecar."
         )
         XCTAssertTrue(
@@ -298,18 +299,19 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("MAC_ONLINE_APP_BUNDLE=\"$MAC_ONLINE_PACKAGED_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("ditto \"$debug_app_bundle\" \"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
-            remoteSmokeScript.contains("SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY") &&
             remoteSmokeScript.contains("framework_artifact_helpers.sh") &&
-            remoteSmokeScript.contains("select_macos_online_ipad_debug_signing_identity") &&
             remoteSmokeScript.contains("sign_macos_online_ipad_debug_app") &&
+            remoteSmokeScript.contains("remove_macos_online_ipad_debug_signature_before_binary_mutation") &&
             remoteSmokeScript.contains("normalize_macos_online_ipad_debug_rpaths") &&
             remoteSmokeScript.contains("normalize_macos_online_ipad_debug_frameworks") &&
             remoteSmokeScript.contains("skybridge_normalize_versioned_framework_layout \"$framework\"") &&
             remoteSmokeScript.contains("skybridge_assert_no_nested_framework_versions_payload \"$webrtc_framework\"") &&
             remoteSmokeScript.contains("install_name_tool -delete_rpath \"$rpath\"") &&
-            remoteSmokeScript.contains("-perm -111") &&
-            remoteSmokeScript.contains("/usr/bin/codesign --force --timestamp=none --sign \"$identity\" --entitlements \"$app_entitlements\" \"$MAC_ONLINE_APP_BUNDLE\"") &&
-            remoteSmokeScript.contains("mac-online-app-signing source=debug identityKind=%s entitlements=app-xcent nested=verified") &&
+            remoteSmokeScript.contains("/usr/bin/file -b \"$binary\" | grep -Fq 'Mach-O'") &&
+            remoteSmokeScript.contains("--entitlements \"$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS\"") &&
+            remoteSmokeScript.contains("--entitlements \"$MAC_HOST_PRODUCT_ENTITLEMENTS\"") &&
+            remoteSmokeScript.contains("compare_macos_online_ipad_entitlements_exact") &&
+            remoteSmokeScript.contains("mac-online-app-signing source=debug identityKind=developer-id identitySource=canonical-dist appProfile=exact widgetProfile=exact entitlements=app-widget-exact nested=verified keychainAccess=product preMutationSignature=removed") &&
             remoteSmokeScript.contains("verify_macos_online_ipad_framework_resolution") &&
             remoteSmokeScript.contains("@executable_path/../Frameworks") &&
             remoteSmokeScript.contains("stapler=valid spctl=accepted") &&
@@ -327,6 +329,11 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID") &&
             remoteSmokeScript.contains("wait_for_remote_control_notice_lifecycle") &&
             remoteSmokeScript.contains("remoteControlNoticeShown .*transport=p2p") &&
+            remoteSmokeScript.contains("remoteControlNoticePanelPresented .*transport=p2p .*phase=awaitingApproval") &&
+            remoteSmokeScript.contains("buttons=[^[:space:]]*(approve[^[:space:]]*reject|reject[^[:space:]]*approve)") &&
+            remoteSmokeScript.contains("Waiting for the operator to approve the visible macOS P2P remote-control notice") &&
+            remoteSmokeScript.contains("remoteControlNoticeHumanApproved .*transport=p2p") &&
+            remoteSmokeScript.contains("remoteControlNoticeApproved .*transport=p2p") &&
             remoteSmokeScript.contains("remoteControlNoticeActive .*transport=p2p") &&
             remoteSmokeScript.contains("terminate_ios_remote_smoke_app_for_notice_disconnect") &&
             remoteSmokeScript.contains("remoteControlNoticeDisconnected .*transport=p2p") &&
@@ -334,6 +341,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("source=OnlineDeviceCard"),
             "Real-device P2P remote smoke must launch the Mac UI client, press a real online-device Connect button, record click evidence from outside the app UI, and fail closed instead of silently choosing a non-iPad target."
         )
+        XCTAssertFalse(remoteSmokeScript.contains("SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY"))
+        XCTAssertFalse(remoteSmokeScript.contains("select_macos_online_ipad_debug_signing_identity"))
+        XCTAssertFalse(remoteSmokeScript.contains("macos_online_ipad_debug_entitlements_for"))
         XCTAssertFalse(
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_STATUS_FILE=\"$MAC_ONLINE_STATUS_ARTIFACT\""),
             "The packaged Mac app smoke must not ask LaunchServices-launched app code to open the Desktop artifact path; macOS Desktop privacy can block before boot evidence is emitted."

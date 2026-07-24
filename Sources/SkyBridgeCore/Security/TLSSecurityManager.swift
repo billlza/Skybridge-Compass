@@ -36,73 +36,9 @@ public struct TLSHandshakeDetails: Sendable {
         }
     }
 }
-
-/// Immutable identity binding for one authenticated transport peer. Local and
-/// remote roles never share a storage slot, so concurrent client/server
-/// connections cannot overwrite the identity used by HPKE AAD.
-struct TLSConnectionIdentityContext: Equatable, Sendable {
-    static let maximumDeviceIdUTF8Length = 256
-
-    let localDeviceId: String
-    let remoteDeviceId: String
-
-    init(localDeviceId: String, remoteDeviceId: String) throws {
-        self.localDeviceId = try Self.validatedDeviceId(localDeviceId)
-        self.remoteDeviceId = try Self.validatedDeviceId(remoteDeviceId)
-        guard self.localDeviceId != self.remoteDeviceId else {
-            throw TLSSecurityError.invalidConnectionIdentity
-        }
-    }
-
-    func outboundHybridAAD(profile: String) -> Data {
-        Self.hybridAAD(
-            profile: profile,
-            senderDeviceId: localDeviceId,
-            recipientDeviceId: remoteDeviceId
-        )
-    }
-
-    func inboundHybridAAD(profile: String) -> Data {
-        Self.hybridAAD(
-            profile: profile,
-            senderDeviceId: remoteDeviceId,
-            recipientDeviceId: localDeviceId
-        )
-    }
-
-    static func validatedDeviceId(_ raw: String) throws -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard raw == trimmed,
-              !raw.isEmpty,
-              raw.utf8.count <= maximumDeviceIdUTF8Length,
-              raw.unicodeScalars.allSatisfy({
-                  !CharacterSet.controlCharacters.contains($0)
-              }) else {
-            throw TLSSecurityError.invalidConnectionIdentity
-        }
-        return raw
-    }
-
-    private static func hybridAAD(
-        profile: String,
-        senderDeviceId: String,
-        recipientDeviceId: String
-    ) -> Data {
-        var aad = Data("SkyBridgeTLSAppPayload".utf8)
-        for field in ["v2", profile, senderDeviceId, recipientDeviceId] {
-            let encodedLength = withUnsafeBytes(
-                of: UInt32(field.utf8.count).bigEndian
-            ) { Data($0) }
-            aad.append(encodedLength)
-            aad.append(contentsOf: field.utf8)
-        }
-        return aad
-    }
-}
-
 /// TLS安全管理器 - 负责TLS 1.3加密通信和证书管理；应用层 PQC 只在 HPKE/key material 具备证据时启用
 @MainActor
-public final class TLSSecurityManager: ObservableObject {
+public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // MARK: - 生命周期管理
 
@@ -113,53 +49,37 @@ public final class TLSSecurityManager: ObservableObject {
 
  /// TLS配置
     private let tlsConfiguration: TLSConfiguration
-    private enum Usage {
-        case certificateOnly
-        case transport(localDeviceId: String)
-    }
-    private let usage: Usage
  /// 证书管理器
     private let certificateManager: CertificateManager
-    /// Authenticated, ready connections are private so callers cannot bypass
-    /// the profile/identity policy by sending directly on NWConnection.
-    private var activeConnections: [String: NWConnection] = [:]
-    private var pendingConnections: [String: NWConnection] = [:]
-    private var pendingConnectionTimeoutTasks: [String: Task<Void, Never>] = [:]
-    private var serverListeners: [String: NWListener] = [:]
+ /// 当前TLS连接
+    @Published public private(set) var activeConnections: [String: NWConnection] = [:]
     private var cryptoProfileByDeviceId: [String: CryptoProfile] = [:]
  /// TLS统计信息
     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
-    /// 量子安全加密管理器
+ /// 量子安全加密管理器
     private let quantumCryptoManager: QuantumCryptoManager
+    private let classicQuantumCryptoManager: QuantumCryptoManager
+    private let strictPQCQuantumCryptoManager: QuantumCryptoManager
+ /// TLS量子加密管理器实例
+    private let tlsQuantumCrypto = TLSQuantumCryptoManager()
     private var pqcProviderByDeviceId: [String: PQCProvider] = [:]
     private var hpkeProviderByDeviceId: [String: PQCHPKEProvider] = [:]
-    private var identityContextByRemoteDeviceId: [String: TLSConnectionIdentityContext] = [:]
+    private var localDeviceId: String?
     public enum CryptoProfile: String, Sendable {
         case classicP256
         case pqcMlKemMlDsa
         case hybridXWing
     }
-    private func negotiateProfile(
-        offered: [CryptoProfile],
-        supported: [CryptoProfile]
-    ) -> CryptoProfile? {
+    private func negotiateProfile(offered: [CryptoProfile], supported: [CryptoProfile]) -> CryptoProfile {
         for p in offered { if supported.contains(p) { return p } }
-        return nil
+        return .classicP256
     }
 
-    private func negotiateApplicationCryptoProfile(
-        peerOfferedProfiles: [CryptoProfile]?
-    ) throws -> CryptoProfile {
+    private func negotiateApplicationCryptoProfile(peerOfferedProfiles: [CryptoProfile]?) -> CryptoProfile {
         guard let peerOfferedProfiles, !peerOfferedProfiles.isEmpty else {
             return .classicP256
         }
-        guard let negotiated = negotiateProfile(
-            offered: peerOfferedProfiles,
-            supported: supportedApplicationCryptoProfiles()
-        ) else {
-            throw TLSSecurityError.noMutualCryptoProfile
-        }
-        return negotiated
+        return negotiateProfile(offered: peerOfferedProfiles, supported: supportedApplicationCryptoProfiles())
     }
 
     private func supportedApplicationCryptoProfiles() -> [CryptoProfile] {
@@ -177,35 +97,10 @@ public final class TLSSecurityManager: ObservableObject {
 
     public init(configuration: TLSConfiguration = .default) {
         self.tlsConfiguration = configuration
-        self.usage = .certificateOnly
         self.certificateManager = CertificateManager()
         self.quantumCryptoManager = QuantumCryptoManager()
-    }
-
-    private init(
-        configuration: TLSConfiguration,
-        verifiedLocalDeviceId: String
-    ) throws {
-        let localDeviceId = try TLSConnectionIdentityContext
-            .validatedDeviceId(verifiedLocalDeviceId)
-        self.tlsConfiguration = configuration
-        self.usage = .transport(localDeviceId: localDeviceId)
-        self.certificateManager = CertificateManager()
-        self.quantumCryptoManager = QuantumCryptoManager()
-    }
-
-    /// Creates the transport-capable manager from the immutable protocol
-    /// identity authority. The ordinary initializer remains certificate-only
-    /// for settings/CSR tooling and cannot open connections.
-    public static func makeTransportManager(
-        configuration: TLSConfiguration = .default
-    ) async throws -> TLSSecurityManager {
-        let identity = try await SelfIdentityProvider.shared
-            .snapshotEnsuringProtocolDeviceId(allowCreate: true)
-        return try TLSSecurityManager(
-            configuration: configuration,
-            verifiedLocalDeviceId: identity.deviceId
-        )
+        self.classicQuantumCryptoManager = QuantumCryptoManager(mode: .classicOnly)
+        self.strictPQCQuantumCryptoManager = QuantumCryptoManager(mode: .pqcOnly)
     }
 
  // MARK: - 生命周期管理方法
@@ -220,6 +115,8 @@ public final class TLSSecurityManager: ObservableObject {
 
  /// 停止TLS安全管理器
     public func stop() async {
+        guard isStarted else { return }
+
  // 关闭所有连接
         closeAllConnections()
 
@@ -240,45 +137,16 @@ public final class TLSSecurityManager: ObservableObject {
  // MARK: - TLS连接管理
 
  /// 创建 TLS 1.3 客户端连接；应用层 PQC profile 需要单独的 HPKE/key material 证明
-    public func createClientConnection(
-        to endpoint: NWEndpoint,
-        remoteDeviceId: String
-    ) throws -> NWConnection {
-        guard isStarted else { throw TLSSecurityError.notStarted }
-        guard tlsConfiguration.enableCertificateVerification else {
-            throw TLSSecurityError.peerAuthenticationRequired
-        }
-        let identityContext = try connectionIdentityContext(
-            remoteDeviceId: remoteDeviceId
-        )
-        guard try certificateManager.getIdentity(
-            for: identityContext.localDeviceId
-        ) != nil else {
-            throw TLSSecurityError.localCertificateUnavailable
-        }
-        guard activeConnections[identityContext.remoteDeviceId] == nil,
-              pendingConnections[identityContext.remoteDeviceId] == nil else {
-            throw TLSSecurityError.connectionAlreadyExists
-        }
+    public func createClientConnection(to endpoint: NWEndpoint, deviceId: String) -> NWConnection {
  // 创建 TLS 1.3 选项；传输层 PQC 协商不在此处伪造为已证明状态
-        let tlsOptions = try createQuantumSecureTLSOptions(
-            for: .client,
-            identityContext: identityContext
-        )
+        let tlsOptions = createQuantumSecureTLSOptions(for: .client, deviceId: deviceId)
 
  // 创建TCP选项
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
-        tcpOptions.keepaliveIdle = Int(
-            tlsConfiguration.keepaliveInterval.rounded(.up)
-        )
-        tcpOptions.keepaliveInterval = Int(
-            tlsConfiguration.keepaliveInterval.rounded(.up)
-        )
+        tcpOptions.keepaliveIdle = 30
+        tcpOptions.keepaliveInterval = 10
         tcpOptions.keepaliveCount = 3
-        tcpOptions.connectionTimeout = Int(
-            tlsConfiguration.connectionTimeout.rounded(.up)
-        )
 
  // 创建连接参数
         let parameters = NWParameters(tls: tlsOptions, tcp: tcpOptions)
@@ -289,116 +157,62 @@ public final class TLSSecurityManager: ObservableObject {
         let connection = NWConnection(to: endpoint, using: parameters)
 
  // 设置连接状态监听
+        setupConnectionStateHandler(connection, deviceId: deviceId)
         let profile = CryptoProfile.classicP256
-        guard registerPendingConnection(
-            connection,
-            identityContext: identityContext,
-            profile: profile,
-            logPrefix: "Client"
-        ) else {
-            connection.cancel()
-            throw TLSSecurityError.connectionAlreadyExists
-        }
+        recordCryptoProfile(profile, for: deviceId)
         SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(profile.rawValue)")
 
-        SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 客户端连接: \(identityContext.remoteDeviceId) -> \(String(describing: endpoint)); app-layer PQC profile=\(profile.rawValue)")
+        configurePQCProvider(for: profile, deviceId: deviceId, logPrefix: "Client")
+
+        activeConnections[deviceId] = connection
+
+        SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 客户端连接: \(deviceId) -> \(String(describing: endpoint)); app-layer PQC profile=\(profile.rawValue)")
         return connection
     }
 
- /// 创建只接受一个已授权远端身份的 TLS 1.3 服务器监听器。
- /// 未完成应用握手身份映射的通用多对端 listener 不得进入此 transport API。
-    public func createServerListener(
-        on port: UInt16,
-        expectedRemoteDeviceId: String
-    ) throws -> NWListener {
-        guard isStarted else { throw TLSSecurityError.notStarted }
-        guard tlsConfiguration.requireClientCertificate else {
-            throw TLSSecurityError.peerAuthenticationRequired
-        }
-        let identityContext = try connectionIdentityContext(
-            remoteDeviceId: expectedRemoteDeviceId
-        )
-        guard serverListeners[identityContext.remoteDeviceId] == nil else {
-            throw TLSSecurityError.connectionAlreadyExists
-        }
-        guard try certificateManager.getIdentity(
-            for: identityContext.localDeviceId
-        ) != nil else {
-            throw TLSSecurityError.localCertificateUnavailable
-        }
+ /// 创建 TLS 1.3 服务器监听器；应用层 PQC profile 需要单独的 HPKE/key material 证明
+    public func createServerListener(on port: UInt16, deviceId: String) -> NWListener? {
  // 创建 TLS 1.3 选项；传输层 PQC 协商不在此处伪造为已证明状态
-        let tlsOptions = try createQuantumSecureTLSOptions(
-            for: .server,
-            identityContext: identityContext
-        )
+        let tlsOptions = createQuantumSecureTLSOptions(for: .server, deviceId: deviceId)
 
  // 创建TCP选项
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
-        tcpOptions.keepaliveIdle = Int(
-            tlsConfiguration.keepaliveInterval.rounded(.up)
-        )
-        tcpOptions.keepaliveInterval = Int(
-            tlsConfiguration.keepaliveInterval.rounded(.up)
-        )
-        tcpOptions.connectionTimeout = Int(
-            tlsConfiguration.connectionTimeout.rounded(.up)
-        )
 
  // 创建监听参数
         let parameters = NWParameters(tls: tlsOptions, tcp: tcpOptions)
         parameters.allowLocalEndpointReuse = true
 
+        do {
  // 创建监听器
-        let listener = try NWListener(
-            using: parameters,
-            on: NWEndpoint.Port.validated(port)
-        )
+            let listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(port))
+            self.localDeviceId = deviceId
 
 	 // 设置新连接处理器
-        listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
-                guard let self else {
-                    connection.cancel()
-                    return
-                }
-                let negotiatedProfile: CryptoProfile
-                do {
-                    negotiatedProfile = try self
-                        .negotiateApplicationCryptoProfile(
-                            peerOfferedProfiles: nil
-                        )
-                } catch {
-                    connection.cancel()
-                    SkyBridgeLogger.security.error(
-                        "TLS 应用层 profile 协商失败: \(error.localizedDescription, privacy: .private)"
-                    )
-                    return
-                }
-                self.handleNewConnection(
-                    connection,
-                    identityContext: identityContext,
-                    profile: negotiatedProfile
-                )
-                SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(negotiatedProfile.rawValue)")
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in
+                    let negotiatedProfile = self?.negotiateApplicationCryptoProfile(peerOfferedProfiles: nil) ?? .classicP256
+                    self?.recordCryptoProfile(negotiatedProfile, for: deviceId)
+                    self?.handleNewConnection(connection, deviceId: deviceId)
+                    SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(negotiatedProfile.rawValue)")
+                    self?.configurePQCProvider(for: negotiatedProfile, deviceId: deviceId, logPrefix: "Server")
+			                }
             }
-        }
 
  // 设置状态变化处理器
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            guard let listener else { return }
-            Task { @MainActor in
-                self?.handleListenerStateChange(
-                    state,
-                    listener: listener,
-                    identityContext: identityContext
-                )
+            listener.stateUpdateHandler = { [weak self] state in
+                Task { @MainActor in
+                    self?.handleListenerStateChange(state, deviceId: deviceId)
+                }
             }
-        }
-        serverListeners[identityContext.remoteDeviceId] = listener
 
-        SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 服务器监听器: local=\(identityContext.localDeviceId) expectedRemote=\(identityContext.remoteDeviceId) port=\(port); app-layer PQC profile is negotiated per connection")
-        return listener
+            SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 服务器监听器: \(deviceId) 端口: \(port); app-layer PQC profile is negotiated per connection")
+            return listener
+
+        } catch {
+            SkyBridgeLogger.security.error("❌ 创建TLS监听器失败: \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
     }
 
  /// 发送 TLS 应用层加密数据；只有 hybrid/PQC profile 成功封装后才记录 PQC 指标
@@ -457,16 +271,13 @@ public final class TLSSecurityManager: ObservableObject {
             return
         }
         let profile: CryptoProfile
-        let identityContext: TLSConnectionIdentityContext
         do {
             profile = try cryptoProfile(for: deviceId)
-            identityContext = try requiredIdentityContext(
-                for: deviceId
-            )
         } catch {
             completion(nil, error)
             return
         }
+        let localIdSnapshot = localDeviceId
 
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1048576) { [weak self] data, _, isComplete, error in
             Task { @MainActor in
@@ -480,7 +291,8 @@ public final class TLSSecurityManager: ObservableObject {
                         case .hybridXWing:
                             decryptedData = try strongSelf.openHybridXWingPayload(
                                 encryptedData,
-                                identityContext: identityContext
+                                remoteDeviceId: deviceId,
+                                localDeviceId: localIdSnapshot
                             )
                         case .pqcMlKemMlDsa, .classicP256:
                             // 与 sendSecureData 对称：非 hybrid profile 的旧一次性密钥路径无法
@@ -510,16 +322,16 @@ public final class TLSSecurityManager: ObservableObject {
  /// 获取设备对应的钥匙串身份（SecIdentity）
  /// - 参数 deviceId: 设备唯一标识
  /// - 返回: 若存在则返回SecIdentity，否则为nil
-    public func getIdentity(for deviceId: String) throws -> SecIdentity? {
+    public func getIdentity(for deviceId: String) -> SecIdentity? {
  // 中文说明：对内部CertificateManager的获取方法进行公开包装，便于服务端TLS设置本地身份。
-        try certificateManager.getIdentity(for: deviceId)
+        return certificateManager.getIdentity(for: deviceId)
     }
 
  // MARK: - TLS/设备证书管理
 
  /// 获取设备 TLS 证书
-    public func getDeviceCertificate(for deviceId: String) throws -> SecCertificate? {
-        try certificateManager.getCertificate(for: deviceId)
+    public func getDeviceCertificate(for deviceId: String) -> SecCertificate? {
+        return certificateManager.getCertificate(for: deviceId)
     }
 
  /// 验证对等设备 TLS 证书
@@ -528,102 +340,56 @@ public final class TLSSecurityManager: ObservableObject {
     }
 
  /// 生成本地 P2P 自签名 TLS 证书；证书签名仍是经典 P-256/ECDSA，不作为 PQC 证明。
-    public func generateSelfSignedCertificate(for deviceId: String) throws -> SecCertificate {
-        try certificateManager.generateSelfSignedCertificate(for: deviceId)
+    public nonisolated func generateSelfSignedCertificate(for deviceId: String) -> SecCertificate? {
+        return certificateManager.generateSelfSignedCertificate(for: deviceId)
     }
 
  /// 导入PKCS#12并设置为指定设备的本地身份（服务端/客户端均可复用）
-    public func importIdentityFromPKCS12(
-        _ p12Data: Data,
-        password: String,
-        for deviceId: String
-    ) throws {
-        try certificateManager.importIdentityFromPKCS12(
-            p12Data,
-            password: password,
-            for: deviceId
-        )
+    public nonisolated func importIdentityFromPKCS12(_ p12Data: Data, password: String, for deviceId: String) -> Bool {
+        return certificateManager.importIdentityFromPKCS12(p12Data, password: password, for: deviceId)
     }
 
  /// 生成 PKCS#10 CSR（DER -> PEM）
-    public func generateCSRPEM(
-        for deviceId: String,
-        commonName: String
-    ) throws -> String {
-        try certificateManager.generateCSRPEM(
-            for: deviceId,
-            commonName: commonName,
-            organization: nil,
-            organizationalUnit: nil,
-            sanDNS: [],
-            sanIP: []
-        )
+    public nonisolated func generateCSRPEM(for deviceId: String, commonName: String) -> String? {
+        guard let identity = certificateManager.getIdentity(for: deviceId) else { return nil }
+        var privateKeyRef: SecKey?
+        guard SecIdentityCopyPrivateKey(identity, &privateKeyRef) == errSecSuccess, let priv = privateKeyRef else { return nil }
+        guard let der = certificateManager.generatePKCS10CSRDER(commonName: commonName, organization: nil, organizationalUnit: nil, sanDNS: [], sanIP: [], privateKey: priv) else { return nil }
+        let body = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
+        return "-----BEGIN CERTIFICATE REQUEST-----\n" + body + "\n-----END CERTIFICATE REQUEST-----\n"
     }
 
  /// 生成 CSR（支持 CN/O/OU 与 SAN 扩展），返回 PEM
-    public func generateCSRPEM(
-        for deviceId: String,
-        commonName: String,
-        organization: String?,
-        organizationalUnit: String?,
-        sanDNS: [String],
-        sanIP: [String]
-    ) throws -> String {
-        try certificateManager.generateCSRPEM(
-            for: deviceId,
-            commonName: commonName,
-            organization: organization,
-            organizationalUnit: organizationalUnit,
-            sanDNS: sanDNS,
-            sanIP: sanIP
-        )
+    public nonisolated func generateCSRPEM(for deviceId: String, commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String]) -> String? {
+        guard let identity = certificateManager.getIdentity(for: deviceId) else { return nil }
+        var privateKeyRef: SecKey?
+        guard SecIdentityCopyPrivateKey(identity, &privateKeyRef) == errSecSuccess, let priv = privateKeyRef else { return nil }
+        guard let der = certificateManager.generatePKCS10CSRDER(commonName: commonName, organization: organization, organizationalUnit: organizationalUnit, sanDNS: sanDNS, sanIP: sanIP, privateKey: priv) else { return nil }
+        let body = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
+        return "-----BEGIN CERTIFICATE REQUEST-----\n" + body + "\n-----END CERTIFICATE REQUEST-----\n"
     }
 
     // MARK: - 后台（off-main）封装：把可能耗时的密钥/证书操作移出主线程，避免设置页卡死。
-    // detached 任务内部创建独占的 CertificateManager，只回传 Sendable 结果。
+    // 仅回传 Sendable 结果（Bool / String）。调用方应使用各自新建的 TLSSecurityManager 实例（单一拥有者）。
 
-    /// 后台生成或加载自签证书；不跨域传递非 Sendable 的 SecCertificate。
-    public func ensureSelfSignedCertificateOffMain(for deviceId: String) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            _ = try CertificateManager().generateSelfSignedCertificate(
-                for: deviceId
-            )
+    /// 后台生成自签证书；返回是否成功（不跨域传递非 Sendable 的 SecCertificate）。
+    public nonisolated func generateSelfSignedCertificateSucceedsOffMain(for deviceId: String) async -> Bool {
+        await Task.detached(priority: .userInitiated) { [self] in
+            generateSelfSignedCertificate(for: deviceId) != nil
         }.value
     }
 
-    /// 后台导入 PKCS#12 身份；错误保持 typed 且可观测。
-    public func importIdentityFromPKCS12OffMain(
-        _ p12Data: Data,
-        password: String,
-        for deviceId: String
-    ) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try CertificateManager().importIdentityFromPKCS12(
-                p12Data,
-                password: password,
-                for: deviceId
-            )
+    /// 后台导入 PKCS#12 身份；返回是否成功。
+    public nonisolated func importIdentityFromPKCS12OffMain(_ p12Data: Data, password: String, for deviceId: String) async -> Bool {
+        await Task.detached(priority: .userInitiated) { [self] in
+            importIdentityFromPKCS12(p12Data, password: password, for: deviceId)
         }.value
     }
 
     /// 后台生成 CSR（PEM）。
-    public func generateCSRPEMOffMain(
-        for deviceId: String,
-        commonName: String,
-        organization: String?,
-        organizationalUnit: String?,
-        sanDNS: [String],
-        sanIP: [String]
-    ) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            try CertificateManager().generateCSRPEM(
-                for: deviceId,
-                commonName: commonName,
-                organization: organization,
-                organizationalUnit: organizationalUnit,
-                sanDNS: sanDNS,
-                sanIP: sanIP
-            )
+    public nonisolated func generateCSRPEMOffMain(for deviceId: String, commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String]) async -> String? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            generateCSRPEM(for: deviceId, commonName: commonName, organization: organization, organizationalUnit: organizationalUnit, sanDNS: sanDNS, sanIP: sanIP)
         }.value
     }
 
@@ -635,19 +401,8 @@ public final class TLSSecurityManager: ObservableObject {
             connection.cancel()
             activeConnections.removeValue(forKey: deviceId)
             cryptoProfileByDeviceId.removeValue(forKey: deviceId)
-            identityContextByRemoteDeviceId.removeValue(forKey: deviceId)
             clearPQCProvider(for: deviceId)
         }
-        if let pendingConnection = pendingConnections.removeValue(
-            forKey: deviceId
-        ) {
-            pendingConnectionTimeoutTasks.removeValue(forKey: deviceId)?.cancel()
-            pendingConnection.cancel()
-        }
-    }
-
-    public func closeServerListener(for expectedRemoteDeviceId: String) {
-        serverListeners.removeValue(forKey: expectedRemoteDeviceId)?.cancel()
     }
 
  /// 关闭所有连接
@@ -655,21 +410,8 @@ public final class TLSSecurityManager: ObservableObject {
         for connection in activeConnections.values {
             connection.cancel()
         }
-        for connection in pendingConnections.values {
-            connection.cancel()
-        }
-        for timeoutTask in pendingConnectionTimeoutTasks.values {
-            timeoutTask.cancel()
-        }
-        for listener in serverListeners.values {
-            listener.cancel()
-        }
         activeConnections.removeAll()
-        pendingConnections.removeAll()
-        pendingConnectionTimeoutTasks.removeAll()
-        serverListeners.removeAll()
         cryptoProfileByDeviceId.removeAll()
-        identityContextByRemoteDeviceId.removeAll()
         pqcProviderByDeviceId.removeAll()
         hpkeProviderByDeviceId.removeAll()
     }
@@ -732,37 +474,8 @@ public final class TLSSecurityManager: ObservableObject {
 
  // MARK: - 私有方法
 
-    private func connectionIdentityContext(
-        remoteDeviceId: String
-    ) throws -> TLSConnectionIdentityContext {
-        guard case .transport(let localDeviceId) = usage else {
-            throw TLSSecurityError.transportIdentityUnavailable
-        }
-        return try TLSConnectionIdentityContext(
-            localDeviceId: localDeviceId,
-            remoteDeviceId: remoteDeviceId
-        )
-    }
-
-    private func bind(
-        identityContext: TLSConnectionIdentityContext,
-        profile: CryptoProfile
-    ) {
-        identityContextByRemoteDeviceId[identityContext.remoteDeviceId]
-            = identityContext
-        cryptoProfileByDeviceId[identityContext.remoteDeviceId] = profile
-    }
-
-    private func requiredIdentityContext(
-        for remoteDeviceId: String
-    ) throws -> TLSConnectionIdentityContext {
-        guard let context = identityContextByRemoteDeviceId[remoteDeviceId],
-              context.remoteDeviceId == remoteDeviceId else {
-            throw TLSSecurityError.connectionIdentityMissing(
-                deviceId: remoteDeviceId
-            )
-        }
-        return context
+    private func recordCryptoProfile(_ profile: CryptoProfile, for deviceId: String) {
+        cryptoProfileByDeviceId[deviceId] = profile
     }
 
     private func cryptoProfile(for deviceId: String) throws -> CryptoProfile {
@@ -807,16 +520,15 @@ public final class TLSSecurityManager: ObservableObject {
 
     private func makeHybridXWingPayload(_ data: Data, recipientDeviceId: String) throws -> Data {
         let hp = try requireHPKEProvider(for: recipientDeviceId, operation: "send")
-        let identityContext = try requiredIdentityContext(
-            for: recipientDeviceId
-        )
-        let recipientPublicKey = try requiredAuthenticatedXWingRemotePublicKey(
-            recipientDeviceId: identityContext.remoteDeviceId
+        let service = PQCKeyTags.v2Kem("xwing-mlkem768-x25519")
+        let recipientPublicKey = try requiredPQCKey(
+            service: service,
+            account: recipientDeviceId,
+            operation: "send",
+            reason: "missing_recipient_public_key"
         )
         let ctx = try hp.senderContext(recipientPublicKey: recipientPublicKey, suite: .hybridXWing)
-        let aad = identityContext.outboundHybridAAD(
-            profile: CryptoProfile.hybridXWing.rawValue
-        )
+        let aad = hybridXWingAAD(senderDeviceId: localDeviceId, recipientDeviceId: recipientDeviceId)
         let sealed = try ctx.seal(data, authenticating: aad)
         var header = withUnsafeBytes(of: UInt32(sealed.encapsulatedKey.count).bigEndian) { Data($0) }
         header.append(sealed.encapsulatedKey)
@@ -825,42 +537,54 @@ public final class TLSSecurityManager: ObservableObject {
 
     private func openHybridXWingPayload(
         _ encryptedData: Data,
-        identityContext: TLSConnectionIdentityContext
+        remoteDeviceId: String,
+        localDeviceId: String?
     ) throws -> Data {
-        let hp = try requireHPKEProvider(
-            for: identityContext.remoteDeviceId,
-            operation: "receive"
-        )
+        let hp = try requireHPKEProvider(for: remoteDeviceId, operation: "receive")
+        guard let localDeviceId, !localDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw TLSSecurityError.pqcMaterialUnavailable(
+                profile: CryptoProfile.hybridXWing.rawValue,
+                operation: "receive",
+                reason: "missing_local_device_id"
+            )
+        }
         guard encryptedData.count >= 4 else {
             throw TLSSecurityError.invalidDataFormat
         }
 
-        let encapsulatedKeyLength = encryptedData.prefix(4).reduce(0) {
-            ($0 << 8) | Int($1)
-        }
-        let totalNeeded = 4 + encapsulatedKeyLength
-        guard encapsulatedKeyLength > 0,
-              encryptedData.count >= totalNeeded else {
+        let encLen = encryptedData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let totalNeeded = 4 + Int(encLen)
+        guard encryptedData.count >= totalNeeded else {
             throw TLSSecurityError.invalidDataFormat
         }
 
-        var recipientPrivateKey = try requiredLocalXWingPrivateKey(
-            localDeviceId: identityContext.localDeviceId
+        let service = PQCKeyTags.v2Kem("xwing-mlkem768-x25519")
+        let recipientPrivateKey = try requiredPQCKey(
+            service: service,
+            account: localDeviceId,
+            operation: "receive",
+            reason: "missing_recipient_private_key"
         )
-        defer { PQCKeyPairRecordCodec.wipe(&recipientPrivateKey) }
-        let encapsulatedKey = encryptedData.dropFirst(4).prefix(
-            encapsulatedKeyLength
-        )
+        let encapsulatedKey = encryptedData.dropFirst(4).prefix(Int(encLen))
         let ciphertext = encryptedData.dropFirst(totalNeeded)
         let ctx = try hp.recipientContext(
             recipientPrivateKey: recipientPrivateKey,
             suite: .hybridXWing,
             encapsulatedKey: Data(encapsulatedKey)
         )
-        let aad = identityContext.inboundHybridAAD(
-            profile: CryptoProfile.hybridXWing.rawValue
-        )
+        let aad = hybridXWingAAD(senderDeviceId: remoteDeviceId, recipientDeviceId: localDeviceId)
         return try ctx.open(Data(ciphertext), authenticating: aad)
+    }
+
+    private func hybridXWingAAD(senderDeviceId: String?, recipientDeviceId: String) -> Data {
+        let sender = normalizedDeviceId(senderDeviceId)
+        let recipient = normalizedDeviceId(recipientDeviceId)
+        return Data("SkyBridgeTLSAppPayload|v1|\(CryptoProfile.hybridXWing.rawValue)|sender=\(sender)|recipient=\(recipient)".utf8)
+    }
+
+    private func normalizedDeviceId(_ deviceId: String?) -> String {
+        guard let deviceId else { return "" }
+        return deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func requireHPKEProvider(for deviceId: String, operation: String) throws -> PQCHPKEProvider {
@@ -874,65 +598,24 @@ public final class TLSSecurityManager: ObservableObject {
         return hpkeProvider
     }
 
-    private func requiredAuthenticatedXWingRemotePublicKey(
-        recipientDeviceId: String
+    private func requiredPQCKey(
+        service: String,
+        account: String,
+        operation: String,
+        reason: String
     ) throws -> Data {
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            guard let key = try XWingKeyMaterialStore
-                .loadAuthenticatedRemotePublicKey(
-                    peerId: recipientDeviceId,
-                    authority: .active,
-                    scopeSource: .requiredEntitlement
-                ) else {
-                throw TLSSecurityError.pqcMaterialUnavailable(
-                    profile: CryptoProfile.hybridXWing.rawValue,
-                    operation: "send",
-                    reason: "missing_recipient_public_key"
-                )
-            }
-            return key
+        guard let key = KeychainManager.shared.exportKey(service: service, account: account) else {
+            throw TLSSecurityError.pqcMaterialUnavailable(
+                profile: CryptoProfile.hybridXWing.rawValue,
+                operation: operation,
+                reason: reason
+            )
         }
-        #endif
-        throw TLSSecurityError.pqcMaterialUnavailable(
-            profile: CryptoProfile.hybridXWing.rawValue,
-            operation: "send",
-            reason: "apple_xwing_store_unavailable"
-        )
-    }
-
-    private func requiredLocalXWingPrivateKey(
-        localDeviceId: String
-    ) throws -> Data {
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            guard let key = try XWingKeyMaterialStore
-                .loadLocalPrivateRepresentation(
-                    peerId: localDeviceId,
-                    authority: .active,
-                    scopeSource: .requiredEntitlement
-                ) else {
-                throw TLSSecurityError.pqcMaterialUnavailable(
-                    profile: CryptoProfile.hybridXWing.rawValue,
-                    operation: "receive",
-                    reason: "missing_recipient_private_key"
-                )
-            }
-            return key
-        }
-        #endif
-        throw TLSSecurityError.pqcMaterialUnavailable(
-            profile: CryptoProfile.hybridXWing.rawValue,
-            operation: "receive",
-            reason: "apple_xwing_store_unavailable"
-        )
+        return key
     }
 
  /// 创建 TLS 1.3 选项（多版本兼容：macOS 14.x/15.x）
-    private func createQuantumSecureTLSOptions(
-        for mode: TLSMode,
-        identityContext: TLSConnectionIdentityContext
-    ) throws -> NWProtocolTLS.Options {
+    private func createQuantumSecureTLSOptions(for mode: TLSMode, deviceId: String) -> NWProtocolTLS.Options {
         let tlsOptions = NWProtocolTLS.Options()
 
  // 使用sec_protocol_options配置TLS 1.3
@@ -960,13 +643,6 @@ public final class TLSSecurityManager: ObservableObject {
         switch mode {
         case .client:
  // 客户端配置
-            guard let identity = try certificateManager.getIdentity(
-                for: identityContext.localDeviceId
-            ), CFGetTypeID(identity) == SecIdentityGetTypeID(),
-            let secIdentity = sec_identity_create(identity) else {
-                throw TLSSecurityError.localCertificateUnavailable
-            }
-            sec_protocol_options_set_local_identity(secOptions, secIdentity)
             if tlsConfiguration.enableCertificateVerification {
  // 设置证书验证回调（记录握手协商的版本/套件/ALPN）
                 sec_protocol_options_set_verify_block(secOptions, { [weak self] metadata, trust, complete in
@@ -989,30 +665,23 @@ public final class TLSSecurityManager: ObservableObject {
                             self.tlsStatistics.lastALPN = details.alpn ?? ""
                         }
                     }
-                    let result = self?.verifyCertificateChain(
-                        trust,
-                        for: identityContext.remoteDeviceId,
-                        peerIsServer: true
-                    ) ?? false
+                    let result = self?.verifyCertificateChain(trust, for: deviceId) ?? false
                     complete(result)
                 }, .main)
             }
 
         case .server:
  // 服务器配置
-            guard let identity = try certificateManager.getIdentity(
-                for: identityContext.localDeviceId
-            ), CFGetTypeID(identity) == SecIdentityGetTypeID(),
-            let secIdentity = sec_identity_create(identity) else {
-                throw TLSSecurityError.localCertificateUnavailable
+            if let identity = certificateManager.getIdentity(for: deviceId) {
+                if CFGetTypeID(identity) == SecIdentityGetTypeID() {
+                    let secIdentity = sec_identity_create(identity)
+                    if let secIdentity = secIdentity {
+                        sec_protocol_options_set_local_identity(secOptions, secIdentity)
+                    }
+                }
             }
-            sec_protocol_options_set_local_identity(secOptions, secIdentity)
 
             if tlsConfiguration.requireClientCertificate {
-                sec_protocol_options_set_peer_authentication_required(
-                    secOptions,
-                    true
-                )
                 sec_protocol_options_set_verify_block(secOptions, { [weak self] metadata, trust, complete in
                     if let self = self {
                         let version = sec_protocol_metadata_get_negotiated_tls_protocol_version(metadata)
@@ -1033,11 +702,7 @@ public final class TLSSecurityManager: ObservableObject {
                             self.tlsStatistics.lastALPN = details.alpn ?? ""
                         }
                     }
-                    let result = self?.verifyCertificateChain(
-                        trust,
-                        for: identityContext.remoteDeviceId,
-                        peerIsServer: false
-                    ) ?? false
+                    let result = self?.verifyCertificateChain(trust, for: deviceId) ?? false
                     complete(result)
                 }, .main)
             }
@@ -1046,109 +711,35 @@ public final class TLSSecurityManager: ObservableObject {
         return tlsOptions
     }
 
- /// 在证书验证完成前，连接只存在于 pending 集合；身份上下文和发送 API
- /// 只有在 Network.framework 报告 `.ready` 后才正式发布。
-    @discardableResult
-    private func registerPendingConnection(
-        _ connection: NWConnection,
-        identityContext: TLSConnectionIdentityContext,
-        profile: CryptoProfile,
-        logPrefix: String
-    ) -> Bool {
-        let deviceId = identityContext.remoteDeviceId
-        guard activeConnections[deviceId] == nil,
-              pendingConnections[deviceId] == nil else {
-            return false
-        }
-        pendingConnections[deviceId] = connection
-        schedulePendingConnectionTimeout(
-            connection,
-            deviceId: deviceId
-        )
-        connection.stateUpdateHandler = { [weak self, weak connection] state in
-            guard let connection else { return }
+ /// 设置连接状态处理器
+    private func setupConnectionStateHandler(_ connection: NWConnection, deviceId: String) {
+        connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
-                self?.handleConnectionStateChange(
-                    state,
-                    connection: connection,
-                    identityContext: identityContext,
-                    profile: profile,
-                    logPrefix: logPrefix
-                )
+                self?.handleConnectionStateChange(state, deviceId: deviceId)
             }
-        }
-        return true
-    }
-
-    private func schedulePendingConnectionTimeout(
-        _ connection: NWConnection,
-        deviceId: String
-    ) {
-        let timeoutNanoseconds = UInt64(
-            tlsConfiguration.connectionTimeout * 1_000_000_000
-        )
-        pendingConnectionTimeoutTasks[deviceId]?.cancel()
-        pendingConnectionTimeoutTasks[deviceId] = Task { @MainActor [weak self, weak connection] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch is CancellationError {
-                return
-            } catch {
-                SkyBridgeLogger.security.error(
-                    "TLS pending timeout task failed: \(error.localizedDescription, privacy: .private)"
-                )
-                return
-            }
-            guard let self,
-                  let connection,
-                  self.pendingConnections[deviceId] === connection else {
-                return
-            }
-            self.pendingConnections.removeValue(forKey: deviceId)
-            self.pendingConnectionTimeoutTasks.removeValue(forKey: deviceId)
-            self.tlsStatistics.errorCount += 1
-            connection.cancel()
-            SkyBridgeLogger.security.error(
-                "TLS连接认证超时: \(deviceId, privacy: .private)"
-            )
         }
     }
 
  /// 处理连接状态变化
-    private func handleConnectionStateChange(
-        _ state: NWConnection.State,
-        connection: NWConnection,
-        identityContext: TLSConnectionIdentityContext,
-        profile: CryptoProfile,
-        logPrefix: String
-    ) {
-        let deviceId = identityContext.remoteDeviceId
+    private func handleConnectionStateChange(_ state: NWConnection.State, deviceId: String) {
         switch state {
         case .ready:
-            guard pendingConnections[deviceId] === connection else {
-                connection.cancel()
-                return
-            }
-            pendingConnections.removeValue(forKey: deviceId)
-            pendingConnectionTimeoutTasks.removeValue(forKey: deviceId)?.cancel()
-            activeConnections[deviceId] = connection
-            bind(identityContext: identityContext, profile: profile)
-            configurePQCProvider(
-                for: profile,
-                deviceId: deviceId,
-                logPrefix: logPrefix
-            )
             SkyBridgeLogger.security.debugOnly("✅ TLS连接就绪: \(deviceId)")
             tlsStatistics.connectionsEstablished += 1
 
  // 检测实际使用的算法（macOS 15+）
             if #available(macOS 15.0, *) {
                 tlsStatistics.classicConnections += 1
+                let profile = cryptoProfileByDeviceId[deviceId]
                 if profile == .classicP256 {
                     SkyBridgeLogger.security.debugOnly("   🔐 TLS transport profile: classicP256")
-                } else {
+                } else if let profile {
                     SkyBridgeLogger.security.debugOnly(
                         "   🔐 TLS transport profile: \(profile.rawValue); app-layer PQC payloads require explicit HPKE material and are not counted as negotiated TLS PQC"
+                    )
+                } else {
+                    SkyBridgeLogger.security.debugOnly(
+                        "   🔐 TLS transport profile missing for device; application payload crypto will fail closed"
                     )
                 }
  // 记录握手协商信息（版本/套件/ALPN），便于诊断与统计
@@ -1162,86 +753,40 @@ public final class TLSSecurityManager: ObservableObject {
 
         case .failed(let error):
             SkyBridgeLogger.security.error("❌ TLS连接失败: \(deviceId, privacy: .private), 错误: \(error.localizedDescription, privacy: .private)")
-            removeConnectionState(
-                connection,
-                deviceId: deviceId
-            )
+            activeConnections.removeValue(forKey: deviceId)
+            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
             tlsStatistics.errorCount += 1
 
         case .cancelled:
             SkyBridgeLogger.security.debugOnly("⏹️ TLS连接已取消: \(deviceId)")
-            removeConnectionState(
-                connection,
-                deviceId: deviceId
-            )
+            activeConnections.removeValue(forKey: deviceId)
+            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
 
         default:
             break
         }
     }
 
-    private func removeConnectionState(
-        _ connection: NWConnection,
-        deviceId: String
-    ) {
-        if pendingConnections[deviceId] === connection {
-            pendingConnections.removeValue(forKey: deviceId)
-            pendingConnectionTimeoutTasks.removeValue(forKey: deviceId)?.cancel()
-        }
-        if activeConnections[deviceId] === connection {
-            activeConnections.removeValue(forKey: deviceId)
-            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
-            identityContextByRemoteDeviceId.removeValue(forKey: deviceId)
-            clearPQCProvider(for: deviceId)
-        }
-    }
-
  /// 处理新连接
-    private func handleNewConnection(
-        _ connection: NWConnection,
-        identityContext: TLSConnectionIdentityContext,
-        profile: CryptoProfile
-    ) {
-        guard registerPendingConnection(
-            connection,
-            identityContext: identityContext,
-            profile: profile,
-            logPrefix: "Server"
-        ) else {
-            connection.cancel()
-            SkyBridgeLogger.security.error(
-                "拒绝重复的 TLS 入站身份绑定: \(identityContext.remoteDeviceId, privacy: .private)"
-            )
-            return
-        }
+    private func handleNewConnection(_ connection: NWConnection, deviceId: String) {
+        activeConnections[deviceId] = connection
+        setupConnectionStateHandler(connection, deviceId: deviceId)
         connection.start(queue: .global())
-        SkyBridgeLogger.security.debugOnly("🔗 处理新TLS连接: \(identityContext.remoteDeviceId)")
+        SkyBridgeLogger.security.debugOnly("🔗 处理新TLS连接: \(deviceId)")
     }
 
  /// 处理监听器状态变化
-    private func handleListenerStateChange(
-        _ state: NWListener.State,
-        listener: NWListener,
-        identityContext: TLSConnectionIdentityContext
-    ) {
-        let localDeviceId = identityContext.localDeviceId
-        let remoteDeviceId = identityContext.remoteDeviceId
+    private func handleListenerStateChange(_ state: NWListener.State, deviceId: String) {
         switch state {
         case .ready:
-            SkyBridgeLogger.security.debugOnly("✅ TLS监听器就绪: local=\(localDeviceId) expectedRemote=\(remoteDeviceId)")
+            SkyBridgeLogger.security.debugOnly("✅ TLS监听器就绪: \(deviceId)")
 
         case .failed(let error):
-            if serverListeners[remoteDeviceId] === listener {
-                serverListeners.removeValue(forKey: remoteDeviceId)
-            }
-            SkyBridgeLogger.security.error("❌ TLS监听器失败: local=\(localDeviceId, privacy: .private) expectedRemote=\(remoteDeviceId, privacy: .private), 错误: \(error.localizedDescription, privacy: .private)")
+            SkyBridgeLogger.security.error("❌ TLS监听器失败: \(deviceId, privacy: .private), 错误: \(error.localizedDescription, privacy: .private)")
             tlsStatistics.errorCount += 1
 
         case .cancelled:
-            if serverListeners[remoteDeviceId] === listener {
-                serverListeners.removeValue(forKey: remoteDeviceId)
-            }
-            SkyBridgeLogger.security.debugOnly("⏹️ TLS监听器已取消: local=\(localDeviceId) expectedRemote=\(remoteDeviceId)")
+            SkyBridgeLogger.security.debugOnly("⏹️ TLS监听器已取消: \(deviceId)")
 
         default:
             break
@@ -1249,11 +794,7 @@ public final class TLSSecurityManager: ObservableObject {
     }
 
  /// 验证证书链 - 证书固定、经典密钥强度与信任/有效期检查
-    private func verifyCertificateChain(
-        _ trust: sec_trust_t,
-        for deviceId: String,
-        peerIsServer: Bool
-    ) -> Bool {
+    private func verifyCertificateChain(_ trust: sec_trust_t, for deviceId: String) -> Bool {
  // 将sec_trust_t转换为SecTrust
         let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
 
@@ -1270,11 +811,7 @@ public final class TLSSecurityManager: ObservableObject {
         }
 
  // 3. 证书有效期和撤销状态检查
-        guard validateCertificateValidity(
-            secTrust,
-            for: deviceId,
-            peerIsServer: peerIsServer
-        ) else {
+        guard validateCertificateValidity(secTrust, for: deviceId) else {
             SkyBridgeLogger.security.error("❌ 证书有效性验证失败: \(deviceId, privacy: .private)")
             return false
         }
@@ -1341,29 +878,19 @@ public final class TLSSecurityManager: ObservableObject {
 
  /// 验证证书有效性 - 检查有效期和撤销状态（OCSP）
  /// 在macOS 14+上，使用SecTrustEvaluateWithError并启用网络抓取，可触发系统级OCSP/CRL撤销检查。
-    private func validateCertificateValidity(
-        _ trust: SecTrust,
-        for deviceId: String,
-        peerIsServer: Bool
-    ) -> Bool {
+    private func validateCertificateValidity(_ trust: SecTrust, for deviceId: String) -> Bool {
  // 设置SSL策略以确保使用服务器身份验证策略。
-        let policy = SecPolicyCreateSSL(peerIsServer, nil)
-        guard SecTrustSetPolicies(trust, policy) == errSecSuccess else {
-            SkyBridgeLogger.security.error("❌ 无法安装TLS证书验证策略")
-            return false
-        }
+        let policy = SecPolicyCreateSSL(true, nil)
+        SecTrustSetPolicies(trust, policy)
 
  // 如果证书链长度为1，则视为自签名P2P证书，跳过网络撤销检查但仍进行基本有效期验证。
         let chain = (SecTrustCopyCertificateChain(trust) as? [SecCertificate]) ?? []
 
  // 启用网络抓取以允许系统尝试OCSP/CRL请求（非自签名时）。
-        let allowsNetworkFetch = chain.count > 1
-        guard SecTrustSetNetworkFetchAllowed(
-            trust,
-            allowsNetworkFetch
-        ) == errSecSuccess else {
-            SkyBridgeLogger.security.error("❌ 无法配置TLS证书撤销网络策略")
-            return false
+        if chain.count > 1 {
+            SecTrustSetNetworkFetchAllowed(trust, true)
+        } else {
+            SecTrustSetNetworkFetchAllowed(trust, false)
         }
 
  // 使用现代API进行评估；当启用网络抓取且存在撤销端点时，系统将自动进行OCSP检查。
@@ -1389,11 +916,7 @@ public final class TLSSecurityManager: ObservableObject {
             }
         case .recoverableTrustFailure:
  // 只有已 pin 的单证书本地 P2P 自签证书可以通过重新锚定验证；链不完整或未知自签名仍失败。
-            guard validatePinnedSelfSignedLocalCertificateContract(
-                trust,
-                for: deviceId,
-                peerIsServer: peerIsServer
-            ) else {
+            guard validatePinnedSelfSignedLocalCertificateContract(trust, for: deviceId) else {
                 SkyBridgeLogger.security.error("❌ 可恢复证书信任失败未满足本地P2P自签pin约束: \(deviceId, privacy: .private)")
                 return false
             }
@@ -1419,11 +942,7 @@ public final class TLSSecurityManager: ObservableObject {
         return true
     }
 
-    private func validatePinnedSelfSignedLocalCertificateContract(
-        _ trust: SecTrust,
-        for deviceId: String,
-        peerIsServer: Bool
-    ) -> Bool {
+    private func validatePinnedSelfSignedLocalCertificateContract(_ trust: SecTrust, for deviceId: String) -> Bool {
         guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               chain.count == 1,
               let leafCertificate = chain.first else {
@@ -1438,7 +957,7 @@ public final class TLSSecurityManager: ObservableObject {
             return false
         }
 
-        let policy = SecPolicyCreateSSL(peerIsServer, nil)
+        let policy = SecPolicyCreateSSL(true, nil)
         var pinnedTrust: SecTrust?
         guard SecTrustCreateWithCertificates(leafCertificate, policy, &pinnedTrust) == errSecSuccess,
               let pinnedTrust else {
@@ -1451,12 +970,7 @@ public final class TLSSecurityManager: ObservableObject {
         guard SecTrustSetAnchorCertificatesOnly(pinnedTrust, true) == errSecSuccess else {
             return false
         }
-        guard SecTrustSetNetworkFetchAllowed(
-            pinnedTrust,
-            false
-        ) == errSecSuccess else {
-            return false
-        }
+        SecTrustSetNetworkFetchAllowed(pinnedTrust, false)
 
         var evalError: CFError?
         guard SecTrustEvaluateWithError(pinnedTrust, &evalError) else {
@@ -1502,6 +1016,44 @@ public final class TLSSecurityManager: ObservableObject {
     }
 }
 
+// MARK: - TLS量子加密管理器
+
+/// TLS量子安全加密管理器 - 专门用于TLS连接的量子安全加密
+private class TLSQuantumCryptoManager {
+
+ /// 量子安全加密 - 目前使用AES-256-GCM作为过渡方案
+    func quantumSafeEncrypt(_ data: Data, using key: SymmetricKey) async throws -> Data {
+ // 在真正的量子安全算法可用之前，使用AES-256-GCM
+        let sealedBox = try AES.GCM.seal(data, using: key)
+        return sealedBox.combined!
+    }
+
+ /// 量子安全解密 - 目前使用AES-256-GCM作为过渡方案
+    func quantumSafeDecrypt(_ encryptedData: Data, using key: SymmetricKey) async throws -> Data {
+ // 在真正的量子安全算法可用之前，使用AES-256-GCM
+        let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+        return try AES.GCM.open(sealedBox, using: key)
+    }
+
+ /// 生成量子安全密钥 - 目前使用256位随机密钥
+    func generateQuantumSafeKey() -> SymmetricKey {
+        return SymmetricKey(size: .bits256)
+    }
+
+ /// 密钥派生函数 - 使用HKDF进行密钥派生
+    func deriveKey(from sharedSecret: Data, salt: Data, info: Data) throws -> SymmetricKey {
+        let inputKeyMaterial = SymmetricKey(data: sharedSecret)
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKeyMaterial,
+            salt: salt,
+            info: info,
+            outputByteCount: 32
+        )
+    }
+}
+
+
+
 // MARK: - 配置和数据模型
 
 /// TLS配置
@@ -1520,56 +1072,22 @@ public struct TLSConfiguration: Sendable {
         requireClientCertificate: Bool = false,
         connectionTimeout: TimeInterval = 30,
         keepaliveInterval: TimeInterval = 30
-    ) throws {
-        guard connectionTimeout.isFinite,
-              (1...300).contains(connectionTimeout) else {
-            throw TLSSecurityError.invalidConfiguration(
-                reason: "connectionTimeout must be finite and within 1...300 seconds"
-            )
-        }
-        guard keepaliveInterval.isFinite,
-              (1...300).contains(keepaliveInterval) else {
-            throw TLSSecurityError.invalidConfiguration(
-                reason: "keepaliveInterval must be finite and within 1...300 seconds"
-            )
-        }
-        guard !requireClientCertificate || enableCertificateVerification else {
-            throw TLSSecurityError.invalidConfiguration(
-                reason: "client-certificate authentication requires certificate verification"
-            )
-        }
+    ) {
         self.enableCertificateVerification = enableCertificateVerification
         self.requireClientCertificate = requireClientCertificate
         self.connectionTimeout = connectionTimeout
         self.keepaliveInterval = keepaliveInterval
     }
 
-    private init(
-        validatedEnableCertificateVerification: Bool,
-        validatedRequireClientCertificate: Bool,
-        validatedConnectionTimeout: TimeInterval,
-        validatedKeepaliveInterval: TimeInterval
-    ) {
-        enableCertificateVerification = validatedEnableCertificateVerification
-        requireClientCertificate = validatedRequireClientCertificate
-        connectionTimeout = validatedConnectionTimeout
-        keepaliveInterval = validatedKeepaliveInterval
-    }
-
  /// 默认配置
-    public static let `default` = TLSConfiguration(
-        validatedEnableCertificateVerification: true,
-        validatedRequireClientCertificate: false,
-        validatedConnectionTimeout: 30,
-        validatedKeepaliveInterval: 30
-    )
+    public static let `default` = TLSConfiguration()
 
  /// 高安全性配置
     public static let highSecurity = TLSConfiguration(
-        validatedEnableCertificateVerification: true,
-        validatedRequireClientCertificate: true,
-        validatedConnectionTimeout: 15,
-        validatedKeepaliveInterval: 15
+        enableCertificateVerification: true,
+        requireClientCertificate: true,
+        connectionTimeout: 15,
+        keepaliveInterval: 15
     )
 }
 
@@ -1610,22 +1128,13 @@ public struct TLSStatistics {
 // MARK: - TLS错误
 
 /// TLS安全错误
-public enum TLSSecurityError: Error, LocalizedError, Sendable {
+public enum TLSSecurityError: Error, LocalizedError {
     case connectionNotFound
     case certificateGenerationFailed
     case certificateValidationFailed
     case invalidDataFormat
     case connectionTimeout
     case tlsHandshakeFailed
-    case localCertificateUnavailable
-    case peerAuthenticationRequired
-    case transportIdentityUnavailable
-    case invalidConnectionIdentity
-    case connectionIdentityMissing(deviceId: String)
-    case connectionAlreadyExists
-    case notStarted
-    case noMutualCryptoProfile
-    case invalidConfiguration(reason: String)
     case pqcMaterialUnavailable(profile: String, operation: String, reason: String)
     case cryptoProfileMissing(deviceId: String)
 
@@ -1643,24 +1152,6 @@ public enum TLSSecurityError: Error, LocalizedError, Sendable {
             return "连接超时"
         case .tlsHandshakeFailed:
             return "TLS握手失败"
-        case .localCertificateUnavailable:
-            return "TLS服务器缺少与本机协议身份绑定的本地证书"
-        case .peerAuthenticationRequired:
-            return "TLS transport 身份绑定要求证书验证；未认证连接不能绑定远端设备身份"
-        case .transportIdentityUnavailable:
-            return "TLS transport manager 缺少协议身份 authority；certificate-only 实例不能创建连接"
-        case .invalidConnectionIdentity:
-            return "TLS连接的本机或远端协议身份无效"
-        case .connectionIdentityMissing:
-            return "TLS连接缺少已认证的本机/远端身份绑定"
-        case .connectionAlreadyExists:
-            return "同一远端设备已有 pending 或 active TLS 连接"
-        case .notStarted:
-            return "TLS security manager 尚未启动"
-        case .noMutualCryptoProfile:
-            return "对端提供的应用层加密 profile 与本机没有交集"
-        case .invalidConfiguration(let reason):
-            return "TLS配置无效: \(reason)"
         case .pqcMaterialUnavailable(let profile, let operation, let reason):
             return "PQC TLS材料不可用: profile=\(profile) operation=\(operation) reason=\(reason)"
         case .cryptoProfileMissing:
@@ -1671,459 +1162,442 @@ public enum TLSSecurityError: Error, LocalizedError, Sendable {
 
 // MARK: - 证书管理器
 
-/// 证书管理器 - 负责证书生成与严格的身份存储事务
-private final class CertificateManager {
-    private let keychainStore = TLSCertificateKeychainStore()
+/// 证书管理器 - 负责证书的生成、存储、验证和指纹管理
+// @unchecked Sendable 说明：本类没有共享单例——每个 TLSSecurityManager（及其 CertificateManager）都是
+// 调用方各自新建的实例（见 ManagerFactory 与 SecuritySettingsView 的 `TLSSecurityManager()`）。下方的内存缓存
+// 只会被其唯一拥有者顺序访问；证书/钥匙串底层用的 Sec*/SecItem API 本身线程安全。据此可安全地把 CSR/自签/
+// PKCS#12 等重操作放到后台执行（避免阻塞主线程），不会与他处并发访问同一实例的缓存。
+private final class CertificateManager: @unchecked Sendable {
+
+ /// 设备证书缓存
+    private var certificateCache: [String: SecCertificate] = [:]
+ /// 设备身份缓存
+    private var identityCache: [String: SecIdentity] = [:]
+ /// 证书指纹缓存 - 用于证书固定
+    private var fingerprintCache: [String: String] = [:]
+
+    init() {
+ // 初始化时加载存储的证书指纹
+        loadStoredFingerprints()
+    }
 
  /// 获取设备证书
-    func getCertificate(for deviceId: String) throws -> SecCertificate? {
-        try keychainStore.identity(for: deviceId)?.certificate
+    func getCertificate(for deviceId: String) -> SecCertificate? {
+        if let cachedCertificate = certificateCache[deviceId] {
+            return cachedCertificate
+        }
+
+ // 从钥匙串加载证书
+        let certificate = loadCertificateFromKeychain(deviceId: deviceId)
+        if let certificate = certificate {
+            certificateCache[deviceId] = certificate
+        }
+
+        return certificate
     }
 
  /// 获取设备身份
-    func getIdentity(for deviceId: String) throws -> SecIdentity? {
-        try keychainStore.identity(for: deviceId)?.identity
+    func getIdentity(for deviceId: String) -> SecIdentity? {
+        if let cachedIdentity = identityCache[deviceId] {
+            return cachedIdentity
+        }
+
+ // 从钥匙串加载身份
+        let identity = loadIdentityFromKeychain(deviceId: deviceId)
+        if let identity = identity {
+            identityCache[deviceId] = identity
+        }
+
+        return identity
     }
 
     /// 验证证书
     func validateCertificate(_ certificate: SecCertificate, for deviceId: String) -> Bool {
-        do {
-            guard let known = try keychainStore.identity(for: deviceId) else {
-                SkyBridgeLogger.security.error(
-                    "❌ 缺少 canonical TLS certificate，拒绝隐式信任: \(deviceId, privacy: .private)"
-                )
-                return false
-            }
-            let matches = SecCertificateCopyData(known.certificate) as Data
-                == SecCertificateCopyData(certificate) as Data
+        let certificateDataRef = SecCertificateCopyData(certificate)
+        let certificateData = certificateDataRef as Data
+        guard !certificateData.isEmpty else {
+            return false
+        }
+
+        let digest = SHA256.hash(data: certificateData)
+        let fingerprint = digest.compactMap { String(format: "%02x", $0) }.joined()
+
+ // 优先使用已存指纹做 pinning；没有 pin 的 helper 不允许 silent trust-on-first-use。
+        if let storedFingerprint = getStoredFingerprint(for: deviceId) {
+            let matches = fingerprint == storedFingerprint
             if !matches {
-                SkyBridgeLogger.security.error(
-                    "❌ TLS certificate 与 canonical identity 不匹配: \(deviceId, privacy: .private)"
-                )
+                SkyBridgeLogger.security.error("❌ 证书指纹不匹配: \(deviceId, privacy: .private)")
             }
             return matches
-        } catch {
-            SkyBridgeLogger.security.error(
-                "❌ TLS certificate pinning storage validation failed: \(error.localizedDescription, privacy: .public)"
-            )
-            return false
+        }
+
+ // 若已有本地证书，则要求字节级一致，避免把任意非空证书当成合法证书。
+        if let localCertificate = loadCertificateFromKeychain(deviceId: deviceId) {
+            let localData = SecCertificateCopyData(localCertificate) as Data
+            let matches = localData == certificateData
+            if !matches {
+                SkyBridgeLogger.security.error("❌ 证书与本地已存证书不匹配: \(deviceId, privacy: .private)")
+            }
+            return matches
+        }
+
+        SkyBridgeLogger.security.error("❌ 缺少已知 pin/certificate，拒绝隐式信任对端证书: \(deviceId, privacy: .private)")
+        return false
+    }
+
+ /// 获取存储的证书指纹 - 用于证书固定
+    func getStoredFingerprint(for deviceId: String) -> String? {
+        return fingerprintCache[deviceId]
+    }
+
+ /// 存储证书指纹 - 用于证书固定
+    func storeFingerprint(_ fingerprint: String, for deviceId: String) {
+        fingerprintCache[deviceId] = fingerprint
+
+ // 同时存储到UserDefaults以持久化
+        let key = "CertificateFingerprint_\(deviceId)"
+        UserDefaults.standard.set(fingerprint, forKey: key)
+
+        SkyBridgeLogger.security.debugOnly("📌 证书指纹已存储: \(deviceId) -> \(fingerprint)")
+    }
+
+ /// 从持久化存储加载证书指纹
+    private func loadStoredFingerprints() {
+ // 从UserDefaults加载所有存储的指纹
+        let defaults = UserDefaults.standard
+        let allKeys = defaults.dictionaryRepresentation().keys
+
+        for key in allKeys {
+            if key.hasPrefix("CertificateFingerprint_") {
+                let deviceId = String(key.dropFirst("CertificateFingerprint_".count))
+                if let fingerprint = defaults.string(forKey: key) {
+                    fingerprintCache[deviceId] = fingerprint
+                }
+            }
         }
     }
 
  /// 生成自签名证书
-    func generateSelfSignedCertificate(for deviceId: String) throws -> SecCertificate {
-        let record = try keychainStore.getOrCreateIdentity(for: deviceId) {
-            try self.makeSelfSignedCandidate(deviceId: deviceId)
-        }
-        return record.certificate
-    }
-
-    private func makeSelfSignedCandidate(
-        deviceId: String
-    ) throws -> TLSCertificateCandidate {
- // 生成内存中的 P‑256 candidate；持久化只允许经 create-only 事务完成。
+    func generateSelfSignedCertificate(for deviceId: String) -> SecCertificate? {
+ // 生成 P‑256 密钥对并持久化到钥匙串
         let keyAttrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256
+            kSecAttrKeySizeInBits as String: 256,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: "SkyBridge.\(deviceId)".utf8Data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            ]
         ]
         var err: Unmanaged<CFError>?
-        guard let privateKey = SecKeyCreateRandomKey(
-            keyAttrs as CFDictionary,
-            &err
-        ) else {
-            throw TLSCertificateLifecycleError.keyGenerationFailed
-        }
+        guard let priv = SecKeyCreateRandomKey(keyAttrs as CFDictionary, &err) else { return nil }
+        guard let pub = SecKeyCopyPublicKey(priv) else { return nil }
+        guard let x963 = SecKeyCopyExternalRepresentation(pub, nil) as Data? else { return nil }
 
-        let certificateDER: Data
-        do {
-            let now = Date()
-            certificateDER = try TLSSelfSignedCertificateBuilder
-                .buildCertificateDER(
-                    privateKey: privateKey,
-                    subject: .init(
-                        commonName: "SkyBridge Device \(deviceId)",
-                        organization: "SkyBridge",
-                        organizationalUnit: "Devices"
-                    ),
-                    serialNumber: try TLSSelfSignedCertificateBuilder
-                        .randomSerialNumber(),
-                    notBefore: now.addingTimeInterval(-3_600),
-                    notAfter: now.addingTimeInterval(365 * 24 * 3_600)
-                )
-        } catch {
-            throw TLSCertificateLifecycleError.certificateGenerationFailed
-        }
+ // 构建 TBSCertificate（v3）
+        let serial = withUnsafeBytes(of: UInt64.random(in: 1...UInt64.max).bigEndian) { Data($0) }
+        let versionV3 = derExplicit(tag: 0, content: derInteger(value: 2))
+        let sigAlg = derSequence(derOID(from: "1.2.840.10045.4.3.2"))
+        let name = derSubjectName(cn: "SkyBridge Device \(deviceId)", o: "SkyBridge", ou: "Devices")
+        let validity = derSequence(derGeneralizedTime(Date().addingTimeInterval(-3600)) + derGeneralizedTime(Date().addingTimeInterval(365*24*3600)))
+        let spki = derSubjectPublicKeyInfoECPrime256v1(x963)
+        let ext = derExtensions(basicConstraintsCAFalse: true, keyUsageBits: 0x86, extKeyUsages: ["1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"], sanDNS: [], sanIP: [])
+        let tbs = derSequence(versionV3 + derInteger(data: serial) + sigAlg + name + validity + name + spki + ext)
 
-        guard let certificate = SecCertificateCreateWithData(
-            nil,
-            certificateDER as CFData
-        ) else {
-            throw TLSCertificateLifecycleError.certificateGenerationFailed
+ // 使用 ECDSA+SHA256 对 TBSCertificate 签名
+        guard let signature = SecKeyCreateSignature(priv, SecKeyAlgorithm.ecdsaSignatureMessageX962SHA256, tbs as CFData, nil) as Data? else { return nil }
+        let certDER = derSequence(tbs + sigAlg + derBitString(signature))
+
+ // 创建 SecCertificate 并写入钥匙串，返回证书引用
+        guard let certRef = SecCertificateCreateWithData(nil, certDER as CFData) else { return nil }
+        let addCert: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+            kSecValueRef as String: certRef,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        SecItemDelete(addCert as CFDictionary)
+        _ = SecItemAdd(addCert as CFDictionary, nil)
+        certificateCache[deviceId] = certRef
+ // 缓存身份（钥匙串中已有 key+cert，可通过查询得到 identity）
+        let idQuery: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        if SecItemCopyMatching(idQuery as CFDictionary, &item) == errSecSuccess, let anyItem = item {
+            let identity = unsafeDowncast(anyItem as AnyObject, to: SecIdentity.self)
+            identityCache[deviceId] = identity
         }
-        return TLSCertificateCandidate(
-            certificate: certificate,
-            privateKey: privateKey
-        )
+        return certRef
     }
 
- /// 以内存隔离方式解析 PKCS#12，再通过同一 create-only 事务持久化。
-    func importIdentityFromPKCS12(
-        _ p12Data: Data,
-        password: String,
-        for deviceId: String
-    ) throws {
-        _ = try TLSCertificateKeychainStore.validatedDeviceId(deviceId)
-        guard !p12Data.isEmpty,
-              p12Data.count <= TLSCertificateLifecycleLimits.maximumPKCS12Bytes else {
-            throw TLSCertificateLifecycleError.invalidPKCS12Input(
-                reason: "PKCS#12 payload must contain 1...\(TLSCertificateLifecycleLimits.maximumPKCS12Bytes) bytes"
-            )
-        }
-        guard password.utf8.count
-                <= TLSCertificateLifecycleLimits.maximumPKCS12PasswordUTF8Bytes else {
-            throw TLSCertificateLifecycleError.invalidPKCS12Input(
-                reason: "PKCS#12 password exceeds the UTF-8 size limit"
-            )
-        }
-        var options: [String: Any] = [
-            kSecImportExportPassphrase as String: password
-        ]
-        #if os(macOS)
-        guard #available(macOS 15.0, *) else {
-            throw TLSCertificateLifecycleError.memoryOnlyPKCS12ImportUnavailable
-        }
-        options[kSecImportToMemoryOnly as String] = true
-        #elseif !os(iOS)
-        throw TLSCertificateLifecycleError.memoryOnlyPKCS12ImportUnavailable
-        #endif
-
+ /// 导入PKCS#12并保存到钥匙串，配置为指定设备的本地身份
+    func importIdentityFromPKCS12(_ p12Data: Data, password: String, for deviceId: String) -> Bool {
+        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
         var items: CFArray?
         let status = SecPKCS12Import(p12Data as CFData, options as CFDictionary, &items)
-        guard status == errSecSuccess else {
-            throw TLSCertificateLifecycleError.pkcs12ImportFailed(status: status)
+        guard status == errSecSuccess, let array = items as? [[String: Any]], let first = array.first else {
+            SkyBridgeLogger.security.error("❌ PKCS#12 导入失败: \(status)")
+            return false
         }
-        guard let array = items as? [[String: Any]] else {
-            throw TLSCertificateLifecycleError.invalidPKCS12Container(
-                identityCount: 0
-            )
+        guard let anyIdentity = first[kSecImportItemIdentity as String] else {
+            SkyBridgeLogger.security.error("❌ PKCS#12 中未找到身份")
+            return false
         }
-        let identities = array.compactMap { item -> SecIdentity? in
-            guard let value = item[kSecImportItemIdentity as String],
-                  CFGetTypeID(value as CFTypeRef) == SecIdentityGetTypeID() else {
-                return nil
-            }
-            return unsafeDowncast(value as AnyObject, to: SecIdentity.self)
+        guard CFGetTypeID(anyIdentity as CFTypeRef) == SecIdentityGetTypeID() else {
+            SkyBridgeLogger.security.error("❌ PKCS#12 项类型不是 SecIdentity")
+            return false
         }
-        guard array.count == 1,
-              identities.count == 1,
-              let identity = identities.first else {
-            throw TLSCertificateLifecycleError.invalidPKCS12Container(
-                identityCount: identities.count
-            )
+        let identity = unsafeDowncast(anyIdentity as AnyObject, to: SecIdentity.self)
+ // 保存到缓存并写入钥匙串（便于后续加载）
+        identityCache[deviceId] = identity
+ // 提取证书并缓存
+        var certRef: SecCertificate?
+        if SecIdentityCopyCertificate(identity, &certRef) == errSecSuccess, let cert = certRef {
+            certificateCache[deviceId] = cert
         }
-
-        var certificate: SecCertificate?
-        var privateKey: SecKey?
-        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
-              let certificate,
-              SecIdentityCopyPrivateKey(identity, &privateKey) == errSecSuccess,
-              let privateKey else {
-            throw TLSCertificateLifecycleError.candidateIdentityInvalid
+ // 将身份写入 Keychain（以标签便于后续检索）
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+            kSecValueRef as String: identity,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        SecItemDelete(addQuery as CFDictionary)
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus != errSecSuccess {
+            SkyBridgeLogger.security.error("❌ 身份写入钥匙串失败: \(addStatus)")
+            return false
         }
-        _ = try keychainStore.importIdentity(
-            TLSCertificateCandidate(
-                certificate: certificate,
-                privateKey: privateKey
-            ),
-            for: deviceId
-        )
+        SkyBridgeLogger.security.debugOnly("✅ PKCS#12 身份已导入并配置: \(deviceId)")
+        return true
     }
 
  /// 生成 PKCS#10 CSR（DER 编码）
-    func generateCSRPEM(
-        for deviceId: String,
-        commonName: String,
-        organization: String?,
-        organizationalUnit: String?,
-        sanDNS: [String],
-        sanIP: [String]
-    ) throws -> String {
-        guard let identity = try getIdentity(for: deviceId) else {
-            throw TLSCertificateLifecycleError.identityUnavailable
+    func generatePKCS10CSRDER(commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String], privateKey: SecKey) -> Data? {
+        guard let pubKey = SecKeyCopyPublicKey(privateKey) else { return nil }
+        guard let pubRaw = SecKeyCopyExternalRepresentation(pubKey, nil) as Data? else { return nil }
+        let version = derIntegerZero()
+        let subject = derSubjectName(cn: commonName, o: organization, ou: organizationalUnit)
+        let spki = derSubjectPublicKeyInfoECPrime256v1(pubRaw)
+        let attributes = derCSRAttributesWithExtensions(sanDNS: sanDNS, sanIP: sanIP)
+        let cri = derSequence(version + subject + spki + attributes)
+        guard let sig = SecKeyCreateSignature(privateKey, SecKeyAlgorithm.ecdsaSignatureMessageX962SHA256, cri as CFData, nil) as Data? else { return nil }
+        let sigAlg = derSequence(derOID(from: "1.2.840.10045.4.3.2"))
+        let sigBits = derBitString(sig)
+        return derSequence(cri + sigAlg + sigBits)
+    }
+
+    private func derSequence(_ content: Data) -> Data { var out = Data([0x30]); out.append(derLength(content.count)); out.append(content); return out }
+    private func derSet(_ content: Data) -> Data { var out = Data([0x31]); out.append(derLength(content.count)); out.append(content); return out }
+    private func derIntegerZero() -> Data { Data([0x02, 0x01, 0x00]) }
+    private func derInteger(value: Int) -> Data {
+        var be = withUnsafeBytes(of: Int64(value).bigEndian) { Data($0) }
+        while be.first == 0 { be.removeFirst() }
+        if let first = be.first, (first & 0x80) != 0 { be.insert(0x00, at: 0) }
+        var out = Data([0x02]); out.append(derLength(be.count)); out.append(be); return out
+    }
+    private func derInteger(data: Data) -> Data { var out = Data([0x02]); out.append(derLength(data.count)); out.append(data); return out }
+    private func derOID(from dotted: String) -> Data {
+        let parts = dotted.split(separator: ".").compactMap { Int($0) }
+        guard parts.count >= 2 else { return Data([0x06, 0x01, 0x00]) }
+        var body = Data(); body.append(UInt8(parts[0] * 40 + parts[1]));
+        for p in parts.dropFirst(2) { body.append(contentsOf: derBase128(p)) }
+        var out = Data([0x06]); out.append(derLength(body.count)); out.append(body); return out
+    }
+    private func derBitString(_ bytes: Data) -> Data { var body = Data([0x00]); body.append(bytes); var out = Data([0x03]); out.append(derLength(body.count)); out.append(body); return out }
+    private func derUTF8String(_ s: String) -> Data { let d = Data(s.utf8); var out = Data([0x0C]); out.append(derLength(d.count)); out.append(d); return out }
+    private func derLength(_ n: Int) -> Data { if n < 0x80 { return Data([UInt8(n)]) }; var bytes = withUnsafeBytes(of: UInt32(n).bigEndian) { Data($0) }; while bytes.first == 0 { bytes.removeFirst() }; var out = Data([0x80 | UInt8(bytes.count)]); out.append(bytes); return out }
+    private func derBase128(_ value: Int) -> [UInt8] { var val = value; var bytes: [UInt8] = [UInt8(val & 0x7F)]; val >>= 7; while val > 0 { bytes.insert(UInt8(0x80 | (val & 0x7F)), at: 0); val >>= 7 } ; return bytes }
+    private func derGeneralizedTime(_ date: Date) -> Data {
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents(in: TimeZone(secondsFromGMT: 0)!, from: date)
+        let s = String(format: "%04d%02d%02d%02d%02d%02dZ",
+                       comps.year ?? 1970, comps.month ?? 1, comps.day ?? 1,
+                       comps.hour ?? 0, comps.minute ?? 0, comps.second ?? 0)
+        let d = Data(s.utf8)
+        var out = Data([0x18]); out.append(derLength(d.count)); out.append(d); return out
+    }
+    private func derExplicit(tag: UInt8, content: Data) -> Data { var out = Data([0xA0 | tag]); out.append(derLength(content.count)); out.append(content); return out }
+    private func derSubjectCommonName(_ cn: String) -> Data { let atv = derSequence(derOID(from: "2.5.4.3") + derUTF8String(cn)); let rdn = derSet(atv); return derSequence(rdn) }
+    private func derSubjectName(cn: String, o: String?, ou: String?) -> Data {
+        let cnRDN = derSubjectCommonName(cn)
+        var atvs = Data()
+        if let o = o { atvs.append(derSequence(derOID(from: "2.5.4.10") + derUTF8String(o))) }
+        if let ou = ou { atvs.append(derSequence(derOID(from: "2.5.4.11") + derUTF8String(ou))) }
+        let orgRDN = atvs.isEmpty ? Data() : derSet(atvs)
+        if orgRDN.isEmpty { return cnRDN }
+        return derSequence(cnRDN + orgRDN)
+    }
+    private func derCSRAttributesWithExtensions(sanDNS: [String], sanIP: [String]) -> Data {
+ // Extensions = SEQUENCE { extSubjectAltName }
+        let sanExt = derExtensionSubjectAltName(dns: sanDNS, ip: sanIP)
+        let extensions = derSequence(sanExt)
+ // extensionRequest attribute: SEQUENCE { OID(1.2.840.113549.1.9.14), SET { Extensions } }
+        let attr = derSequence(derOID(from: "1.2.840.113549.1.9.14") + derSet(extensions))
+ // [0] IMPLICIT attributes: A0 <len> content
+        var out = Data([0xA0])
+        out.append(derLength(attr.count))
+        out.append(attr)
+        return out
+    }
+    private func derExtensionSubjectAltName(dns: [String], ip: [String]) -> Data {
+ // OID subjectAltName (2.5.29.17) + OCTET STRING (encoded SAN)
+        let sanSeq = derSANSequence(dns: dns, ip: ip)
+        let sanOctet = derOctetString(sanSeq)
+        return derSequence(derOID(from: "2.5.29.17") + sanOctet)
+    }
+    private func derOctetString(_ d: Data) -> Data { var out = Data([0x04]); out.append(derLength(d.count)); out.append(d); return out }
+    private func derIA5String(_ s: String) -> Data { let d = Data(s.utf8); var out = Data([0x16]); out.append(derLength(d.count)); out.append(d); return out }
+    private func derSANSequence(dns: [String], ip: [String]) -> Data {
+        var content = Data()
+        for host in dns {
+            let ia5 = Data(host.utf8)
+            var gn = Data([0x82]) // [2] dNSName, context-specific primitive
+            gn.append(derLength(ia5.count))
+            gn.append(ia5)
+            content.append(gn)
         }
-        var privateKey: SecKey?
-        guard SecIdentityCopyPrivateKey(identity, &privateKey) == errSecSuccess,
-              let privateKey else {
-            throw TLSCertificateLifecycleError.csrGenerationFailed
-        }
-        let der: Data
-        do {
-            der = try TLSCertificateSigningRequestBuilder.buildDER(
-                commonName: commonName,
-                organization: organization,
-                organizationalUnit: organizationalUnit,
-                sanDNS: sanDNS,
-                sanIP: sanIP,
-                privateKey: privateKey
-            )
-        } catch let error as TLSCertificateSigningRequestBuilder.BuildError {
-            switch error {
-            case .invalidSubject:
-                throw TLSCertificateLifecycleError.invalidCSRInput(
-                    reason: "subject CN/O/OU is empty, aliased, or unbounded"
-                )
-            case .invalidDNSName:
-                throw TLSCertificateLifecycleError.invalidCSRInput(
-                    reason: "subjectAltName contains an invalid DNS name"
-                )
-            case .invalidIPAddress:
-                throw TLSCertificateLifecycleError.invalidCSRInput(
-                    reason: "subjectAltName contains an invalid IP address"
-                )
-            case .invalidPrivateKey, .signingFailed:
-                throw TLSCertificateLifecycleError.csrGenerationFailed
+        for addr in ip {
+            if let bytes = parseIPAddress(addr) {
+                var gn = Data([0x87]) // [7] iPAddress
+                gn.append(derLength(bytes.count))
+                gn.append(bytes)
+                content.append(gn)
             }
         }
-        let body = der.base64EncodedString(
-            options: [.lineLength64Characters, .endLineWithLineFeed]
-        )
-        return "-----BEGIN CERTIFICATE REQUEST-----\n"
-            + body
-            + "\n-----END CERTIFICATE REQUEST-----\n"
+        return derSequence(content)
+    }
+    private func parseIPAddress(_ s: String) -> Data? {
+        if s.contains(":") {
+            var addr6 = in6_addr()
+            let ok = s.withCString { inet_pton(AF_INET6, $0, &addr6) }
+            guard ok == 1 else { return nil }
+            return withUnsafeBytes(of: addr6) { Data($0) }
+        } else {
+            let parts = s.split(separator: ".")
+            guard parts.count == 4 else { return nil }
+            var out = Data()
+            for p in parts { guard let v = UInt8(p) else { return nil }; out.append(v) }
+            return out
+        }
+    }
+    private func derSubjectPublicKeyInfoECPrime256v1(_ x963: Data) -> Data { let alg = derSequence(derOID(from: "1.2.840.10045.2.1") + derOID(from: "1.2.840.10045.3.1.7")); let bit = derBitString(x963); return derSequence(alg + bit) }
+    private func derExtensions(basicConstraintsCAFalse: Bool, keyUsageBits: UInt, extKeyUsages: [String], sanDNS: [String], sanIP: [String]) -> Data {
+        var content = Data()
+        if basicConstraintsCAFalse {
+            let inner = derSequence(Data())
+            content.append(derSequence(derOID(from: "2.5.29.19") + derOctetString(inner)))
+        }
+        let bitString: Data = { let body = Data([0x00, UInt8(keyUsageBits & 0xFF)]); var out = Data([0x03]); out.append(derLength(body.count)); out.append(body); return out }()
+        let ku = derSequence(derOID(from: "2.5.29.15") + Data([0x01, 0x01, 0xFF]) + derOctetString(bitString))
+        content.append(ku)
+        if !extKeyUsages.isEmpty {
+            var ekus = Data(); for oid in extKeyUsages { ekus.append(derOID(from: oid)) }
+            let eku = derSequence(derOID(from: "2.5.29.37") + derOctetString(derSequence(ekus)))
+            content.append(eku)
+        }
+        if !sanDNS.isEmpty || !sanIP.isEmpty {
+            let san = derSequence(derOID(from: "2.5.29.17") + derOctetString(derSANSequence(dns: sanDNS, ip: sanIP)))
+            content.append(san)
+        }
+        return derSequence(content)
     }
 
+ // MARK: - 私有方法
+
+ /// 从钥匙串加载证书
+    private func loadCertificateFromKeychain(deviceId: String) -> SecCertificate? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+            kSecReturnRef as String: true
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let anyItem = result, CFGetTypeID(anyItem) == SecCertificateGetTypeID() else {
+            SkyBridgeLogger.security.error("无法加载证书，status=\(status)")
+            return nil
+        }
+        let cert = unsafeDowncast(anyItem, to: SecCertificate.self)
+        return cert
+    }
+
+ /// 从钥匙串加载身份
+    private func loadIdentityFromKeychain(deviceId: String) -> SecIdentity? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+            kSecReturnRef as String: true
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let anyItem = result, CFGetTypeID(anyItem) == SecIdentityGetTypeID() else {
+            SkyBridgeLogger.security.error("无法加载身份，status=\(status)")
+            return nil
+        }
+        let identity = unsafeDowncast(anyItem, to: SecIdentity.self)
+        return identity
+    }
 }
+ /// 简易 CA 签发工作流
+    public final class CAServiceManager {
+        private let logger = Logger(subsystem: "com.skybridge.tls", category: "CAServiceManager")
+        public init() {}
 
-public enum CAServiceError: Error, LocalizedError, Sendable, Equatable {
-    case invalidHTTPSEndpoint
-    case invalidCSR
-    case invalidRequestId
-    case unexpectedHTTPStatus(Int)
-    case responseTooLarge(maximumBytes: Int)
-    case invalidUTF8Response
-    case invalidResponseBody
+ /// 提交 CSR 到 CA
+        public func submitCSR(_ csrPEM: String, to endpoint: URL) async throws -> String {
+            var req = URLRequest(url: endpoint)
+            req.httpMethod = "POST"
+            req.setValue("application/x-pem-file", forHTTPHeaderField: "Content-Type")
+            req.httpBody = Data(csrPEM.utf8)
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw TLSSecurityError.certificateValidationFailed
+            }
+            let id = String(data: data, encoding: .utf8) ?? UUID().uuidString
+            logger.info("✅ CSR 提交成功，requestId=\(id)")
+            return id
+        }
 
-    public var errorDescription: String? {
-        switch self {
-        case .invalidHTTPSEndpoint:
-            return "CA endpoint must be an HTTPS URL without credentials or a fragment"
-        case .invalidCSR:
-            return "CA request does not contain one bounded PKCS#10 PEM document"
-        case .invalidRequestId:
-            return "CA request ID is empty, unbounded, or contains whitespace/control aliases"
-        case .unexpectedHTTPStatus(let status):
-            return "CA returned unexpected HTTP status \(status)"
-        case .responseTooLarge(let maximumBytes):
-            return "CA response exceeds the \(maximumBytes)-byte limit"
-        case .invalidUTF8Response:
-            return "CA response is not valid UTF-8"
-        case .invalidResponseBody:
-            return "CA response does not match the explicit request-id/pending/certificate contract"
+ /// 轮询证书签发状态（返回 PEM 如已签发）
+        public func pollCertificateStatus(requestId: String, from endpoint: URL) async throws -> (issued: Bool, pem: String?) {
+            var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+            var q = comps?.queryItems ?? []
+            q.append(URLQueryItem(name: "requestId", value: requestId))
+            comps?.queryItems = q
+            guard let url = comps?.url else { throw TLSSecurityError.certificateValidationFailed }
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw TLSSecurityError.certificateValidationFailed
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            let issued = body.contains("BEGIN CERTIFICATE")
+            return (issued, issued ? body : nil)
+        }
+
+ /// 导入已签发证书（PEM），写入钥匙串并缓存
+        public func importIssuedCertificate(_ pem: String, for deviceId: String) -> Bool {
+ // 解析 PEM 去头尾
+            let lines = pem.split(separator: "\n").filter { !$0.hasPrefix("---") }
+            let b64 = lines.joined()
+            guard let der = Data(base64Encoded: b64) else { return false }
+            guard let cert = SecCertificateCreateWithData(nil, der as CFData) else { return false }
+ // 写入钥匙串
+            let addQuery: [String: Any] = [
+                kSecClass as String: kSecClassCertificate,
+                kSecAttrLabel as String: "SkyBridge.\(deviceId)",
+                kSecValueRef as String: cert,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            ]
+            SecItemDelete(addQuery as CFDictionary)
+            let st = SecItemAdd(addQuery as CFDictionary, nil)
+            if st != errSecSuccess { return false }
+            return true
         }
     }
-}
-
-/// Minimal HTTPS CA client. It validates response syntax explicitly and never
-/// turns malformed data into a synthetic request ID or a successful pending state.
-public final class CAServiceManager {
-    private static let maximumCSRBytes = 1_048_576
-    private static let maximumRequestIdBytes = 512
-    private static let maximumCertificateResponseBytes = 2_097_152
-    private let session: URLSession
-
-    public init() {
-        session = .shared
-    }
-
-    init(session: URLSession) {
-        self.session = session
-    }
-
-    /// Submit one PKCS#10 CSR. A successful response must be one strict,
-    /// nonempty opaque request ID; malformed UTF-8 never becomes a UUID fallback.
-    public func submitCSR(_ csrPEM: String, to endpoint: URL) async throws -> String {
-        let endpoint = try Self.validatedEndpoint(endpoint)
-        let csrData = try Self.validatedCSRData(csrPEM)
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue(
-            "application/x-pem-file",
-            forHTTPHeaderField: "Content-Type"
-        )
-        request.httpBody = csrData
-        let (data, response) = try await session.data(for: request)
-        try Self.validate(
-            response: response,
-            maximumBytes: Self.maximumRequestIdBytes,
-            actualBytes: data.count
-        )
-        guard let rawRequestId = String(data: data, encoding: .utf8) else {
-            throw CAServiceError.invalidUTF8Response
-        }
-        return try Self.validatedRequestId(rawRequestId)
-    }
-
-    /// Polling accepts exactly `pending` or one parseable certificate PEM.
-    public func pollCertificateStatus(
-        requestId: String,
-        from endpoint: URL
-    ) async throws -> (issued: Bool, pem: String?) {
-        let requestId = try Self.validatedRequestId(requestId)
-        let endpoint = try Self.validatedEndpoint(endpoint)
-        var components = URLComponents(
-            url: endpoint,
-            resolvingAgainstBaseURL: false
-        )
-        var queryItems = components?.queryItems ?? []
-        queryItems.removeAll { $0.name == "requestId" }
-        queryItems.append(URLQueryItem(name: "requestId", value: requestId))
-        components?.queryItems = queryItems
-        guard let url = components?.url else {
-            throw CAServiceError.invalidHTTPSEndpoint
-        }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 30
-        let (data, response) = try await session.data(for: request)
-        try Self.validate(
-            response: response,
-            maximumBytes: Self.maximumCertificateResponseBytes,
-            actualBytes: data.count
-        )
-        guard let body = String(data: data, encoding: .utf8) else {
-            throw CAServiceError.invalidUTF8Response
-        }
-        return try Self.parsePollingResponse(body)
-    }
-
-    static func validatedEndpoint(_ endpoint: URL) throws -> URL {
-        guard let components = URLComponents(
-            url: endpoint,
-            resolvingAgainstBaseURL: false
-        ),
-        components.scheme?.lowercased() == "https",
-        let host = components.host,
-        !host.isEmpty,
-        components.user == nil,
-        components.password == nil,
-        components.fragment == nil else {
-            throw CAServiceError.invalidHTTPSEndpoint
-        }
-        return endpoint
-    }
-
-    static func validatedRequestId(_ raw: String) throws -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard raw == trimmed,
-              !raw.isEmpty,
-              raw.utf8.count <= maximumRequestIdBytes,
-              raw.unicodeScalars.allSatisfy({
-                  !CharacterSet.controlCharacters.contains($0)
-              }) else {
-            throw CAServiceError.invalidRequestId
-        }
-        return raw
-    }
-
-    static func validatedCSRData(_ pem: String) throws -> Data {
-        let encoded = Data(pem.utf8)
-        guard !encoded.isEmpty,
-              encoded.count <= maximumCSRBytes,
-              pem.unicodeScalars.allSatisfy({ scalar in
-                  !CharacterSet.controlCharacters.contains(scalar)
-                      || scalar.value == 0x0A
-                      || scalar.value == 0x0D
-              }) else {
-            throw CAServiceError.invalidCSR
-        }
-
-        let lineNormalized = pem.replacingOccurrences(of: "\r\n", with: "\n")
-        guard !lineNormalized.contains("\r") else {
-            throw CAServiceError.invalidCSR
-        }
-        let normalized = lineNormalized.hasSuffix("\n")
-            ? String(lineNormalized.dropLast())
-            : lineNormalized
-        let lines = normalized.split(
-            separator: "\n",
-            omittingEmptySubsequences: false
-        )
-        guard lines.count >= 3,
-              lines.first == "-----BEGIN CERTIFICATE REQUEST-----",
-              lines.last == "-----END CERTIFICATE REQUEST-----" else {
-            throw CAServiceError.invalidCSR
-        }
-        let base64Lines = lines.dropFirst().dropLast()
-        guard base64Lines.allSatisfy({ !$0.isEmpty }),
-              let der = Data(
-                  base64Encoded: base64Lines.joined(),
-                  options: []
-              ),
-              !der.isEmpty else {
-            throw CAServiceError.invalidCSR
-        }
-        return encoded
-    }
-
-    static func parsePollingResponse(
-        _ body: String
-    ) throws -> (issued: Bool, pem: String?) {
-        if body == "pending" {
-            return (false, nil)
-        }
-        let begin = "-----BEGIN CERTIFICATE-----"
-        let end = "-----END CERTIFICATE-----"
-        let normalized = body.replacingOccurrences(of: "\r\n", with: "\n")
-        guard !normalized.contains("\r"),
-              normalized.hasPrefix(begin),
-              normalized.hasSuffix(end)
-                || normalized.hasSuffix(end + "\n") else {
-            throw CAServiceError.invalidResponseBody
-        }
-        let base64 = normalized
-            .split(whereSeparator: \Character.isNewline)
-            .filter { !$0.hasPrefix("---") }
-            .joined()
-        guard let der = Data(base64Encoded: String(base64)),
-              SecCertificateCreateWithData(nil, der as CFData) != nil else {
-            throw CAServiceError.invalidResponseBody
-        }
-        return (true, body)
-    }
-
-    private static func validate(
-        response: URLResponse,
-        maximumBytes: Int,
-        actualBytes: Int
-    ) throws {
-        guard actualBytes <= maximumBytes else {
-            throw CAServiceError.responseTooLarge(
-                maximumBytes: maximumBytes
-            )
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw CAServiceError.invalidResponseBody
-        }
-        _ = try validatedEndpoint(try requiredResponseURL(http.url))
-        guard (200...299).contains(http.statusCode) else {
-            throw CAServiceError.unexpectedHTTPStatus(http.statusCode)
-        }
-    }
-
-    private static func requiredResponseURL(_ url: URL?) throws -> URL {
-        guard let url else { throw CAServiceError.invalidHTTPSEndpoint }
-        return url
-    }
-
- /// Issued certificates cannot bypass private-key matching or rotation policy.
-        public func importIssuedCertificate(
-            _ pem: String,
-            for deviceId: String
-        ) throws {
-            _ = pem
-            _ = try TLSCertificateKeychainStore.validatedDeviceId(deviceId)
-            throw TLSCertificateLifecycleError.issuedCertificateImportUnavailable
-        }
-}

@@ -91,6 +91,38 @@ final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
         }
     }
 
+    func testMacDashboardStagesHeavyFirstFrameWork() throws {
+        let dashboardSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift"
+        )
+        let contentSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift"
+        )
+        let backgroundSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/DashboardBackgroundView.swift"
+        )
+        let appSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
+        )
+
+        XCTAssertTrue(dashboardSource.contains("private enum DashboardPresentationPhase"))
+        XCTAssertTrue(dashboardSource.contains("presentationPhase = .animatedBackground"))
+        XCTAssertTrue(dashboardSource.contains("presentationPhase = .fullContent"))
+        XCTAssertTrue(dashboardSource.contains("showDeferredContent: presentationPhase.enablesDeferredContent"))
+        XCTAssertEqual(
+            Self.countOccurrences(of: "ScrollView {", in: contentSource),
+            0,
+            "DashboardContentView must rely on the owning Dashboard scroll view instead of nesting scroll containers."
+        )
+        XCTAssertTrue(contentSource.contains("LazyVStack(spacing: sectionSpacing)"))
+        XCTAssertTrue(backgroundSource.contains("weatherManager.currentWeather != nil"))
+        XCTAssertTrue(backgroundSource.contains("enableWeatherEffects"))
+        XCTAssertFalse(
+            appSource.contains(".animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)"),
+            "Authentication routing must not retain both heavyweight roots for an implicit transition animation."
+        )
+    }
+
     private static func countOccurrences(of needle: String, in haystack: String) -> Int {
         haystack.components(separatedBy: needle).count - 1
     }

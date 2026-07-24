@@ -196,7 +196,11 @@ final class RemoteRealtimeSyntheticPCM16ToneSource: @unchecked Sendable {
                 )
                 sequence &+= 1
                 pipe.submit(chunk)
-                try? await Task.sleep(nanoseconds: frameDurationNanos)
+                do {
+                    try await Task.sleep(nanoseconds: frameDurationNanos)
+                } catch {
+                    return
+                }
             }
         }
     }
@@ -518,7 +522,11 @@ actor RemoteRealtimeMediaAudioSender {
     private func refreshRelayBindingUntilClosed() async {
         defer { relayBindingRefreshTask = nil }
         while !Task.isCancelled, !closed {
-            try? await Task.sleep(nanoseconds: relayBindingRefreshIntervalNanos)
+            do {
+                try await Task.sleep(nanoseconds: relayBindingRefreshIntervalNanos)
+            } catch {
+                return
+            }
             guard !Task.isCancelled, !closed,
                   let token = currentRelayToken,
                   let udpTransport = transport as? SkyBridgeUDPRealtimeMediaTransport else {
@@ -539,7 +547,11 @@ actor RemoteRealtimeMediaAudioSender {
         while !Task.isCancelled, !closed {
             let now = DispatchTime.now().uptimeNanoseconds
             if nextDeadline > now {
-                try? await Task.sleep(nanoseconds: nextDeadline - now)
+                do {
+                    try await Task.sleep(nanoseconds: nextDeadline - now)
+                } catch {
+                    return
+                }
                 guard !Task.isCancelled, !closed else { return }
             }
             let wokeAt = DispatchTime.now().uptimeNanoseconds
@@ -637,7 +649,7 @@ actor RemoteRealtimeMediaAudioSender {
         var firstError: Error?
         for copyIndex in 0..<copyCount {
             if copyIndex > 0 {
-                try? await Task.sleep(nanoseconds: redundantDatagramStaggerNanos)
+                try await Task.sleep(nanoseconds: redundantDatagramStaggerNanos)
             }
             do {
                 try await transport.send(packet)

@@ -27,7 +27,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(sent.map(\.1), ["tx/webrtc-ft-metaAck"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
 
-        receiver.cleanupOnChannelClosed()
+        await receiver.cleanupOnChannelClosed().value
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
     }
@@ -61,7 +61,10 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         defer { fixture.cleanup() }
 
         let transferId = UUID().uuidString
-        let receiver = WebRTCInboundFileTransferReceiver(destinationBaseDirectory: { fixture.directory })
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() }
+        )
         var sent: [(CrossNetworkFileTransferMessage, String)] = []
 
         try await receiver.handle(
@@ -88,6 +91,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         var approvalCalled = false
         let receiver = WebRTCInboundFileTransferReceiver(
             destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
             approvalProvider: { _ in
                 approvalCalled = true
                 return .approved
@@ -120,6 +124,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         var approvalCalled = false
         let receiver = WebRTCInboundFileTransferReceiver(
             destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
             approvalProvider: { _ in
                 approvalCalled = true
                 return .approved
@@ -144,6 +149,44 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
     }
 
+    func testMetadataSenderClaimMustMatchAuthenticatedSessionAuthority() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        var approvalCalled = false
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { _ in
+                approvalCalled = true
+                return .approved
+            }
+        )
+        var sent: [CrossNetworkFileTransferMessage] = []
+
+        try await receiver.handle(
+            metadata(
+                transferId: transferId,
+                senderDeviceId: "spoofed-sender",
+                fileSize: 4,
+                chunkSize: 2,
+                totalChunks: 2
+            ),
+            sessionID: "session",
+            endpointDescription: "endpoint-peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { message, _ in sent.append(message) },
+            failSenderWaiters: { _, _ in XCTFail("sender mismatch must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("sender mismatch must not resume outbound waiters") }
+        )
+
+        XCTAssertFalse(approvalCalled)
+        XCTAssertEqual(sent.last?.op, .error)
+        XCTAssertEqual(sent.last?.message, "sender identity does not match authenticated session")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
+    }
+
     func testMetadataApprovalProviderReceivesValidatedMetadataBeforePartialCreation() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -152,6 +195,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         var capturedRequest: WebRTCInboundFileTransferApprovalRequest?
         let receiver = WebRTCInboundFileTransferReceiver(
             destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
             approvalProvider: { request in
                 capturedRequest = request
                 return .rejected(reason: "operator_rejected")
@@ -180,6 +224,186 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
     }
 
+    func testApprovalCompletingAfterChannelCleanupCannotCreateTransferOrAck() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let approvalStarted = expectation(description: "approval started")
+        var approvalContinuation: CheckedContinuation<WebRTCInboundFileTransferApprovalDecision, Never>?
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { _ in
+                approvalStarted.fulfill()
+                return await withCheckedContinuation { continuation in
+                    approvalContinuation = continuation
+                }
+            }
+        )
+        var sent: [CrossNetworkFileTransferMessage] = []
+
+        let handlingTask = Task { @MainActor in
+            try await receiver.handle(
+                metadata(transferId: transferId, fileSize: 4, chunkSize: 2, totalChunks: 2),
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { message, _ in sent.append(message) },
+                failSenderWaiters: { _, _ in XCTFail("stale approval must not fail outbound waiters") },
+                resumeSenderWaiter: { _ in XCTFail("stale approval must not resume outbound waiters") }
+            )
+        }
+
+        await fulfillment(of: [approvalStarted], timeout: 1)
+        await receiver.cleanupOnChannelClosed().value
+        approvalContinuation?.resume(returning: .approved)
+        try await handlingTask.value
+
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
+    }
+
+    func testQueuedTransferApprovalDoesNotBlockIndependentTransferLane() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let suspendedTransferID = UUID().uuidString
+        let independentTransferID = UUID().uuidString
+        let suspendedApprovalStarted = expectation(description: "suspended approval started")
+        let independentResponseSent = expectation(description: "independent transfer received a response")
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { request in
+                if request.transferId == suspendedTransferID {
+                    suspendedApprovalStarted.fulfill()
+                    do {
+                        try await Task.sleep(for: .seconds(30))
+                        XCTFail("The suspended lane must be cancelled during test cleanup")
+                    } catch is CancellationError {
+                        return .approved
+                    } catch {
+                        XCTFail("Unexpected suspended approval error: \(error)")
+                    }
+                    return .rejected(reason: "unexpected_approval_completion")
+                }
+                XCTAssertEqual(request.transferId, independentTransferID)
+                return .rejected(reason: "independent_transfer_rejected")
+            }
+        )
+        var responsesByTransferID: [String: [CrossNetworkFileTransferMessage]] = [:]
+        let sendMessage: WebRTCInboundFileTransferReceiver.SendMessage = { message, _ in
+            responsesByTransferID[message.transferId, default: []].append(message)
+            if message.transferId == independentTransferID {
+                independentResponseSent.fulfill()
+            }
+        }
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: suspendedTransferID,
+                fileSize: 4,
+                chunkSize: 4,
+                totalChunks: 1
+            ),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: sendMessage,
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") },
+            onFatalError: { error in XCTFail("Queued metadata failed: \(error)") }
+        )
+        await fulfillment(of: [suspendedApprovalStarted], timeout: 1)
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: independentTransferID,
+                fileSize: 4,
+                chunkSize: 4,
+                totalChunks: 1
+            ),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: sendMessage,
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") },
+            onFatalError: { error in XCTFail("Queued metadata failed: \(error)") }
+        )
+        await fulfillment(of: [independentResponseSent], timeout: 1)
+
+        XCTAssertTrue(responsesByTransferID[suspendedTransferID, default: []].isEmpty)
+        XCTAssertEqual(responsesByTransferID[independentTransferID]?.map(\.op), [.error])
+        XCTAssertEqual(
+            responsesByTransferID[independentTransferID]?.last?.message,
+            "independent_transfer_rejected"
+        )
+
+        await receiver.cleanupOnChannelClosed().value
+    }
+
+    func testChannelCleanupCancelsAndJoinsEveryActiveTransferLane() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferIDs = [UUID().uuidString, UUID().uuidString]
+        let firstApprovalStarted = expectation(description: "first approval started")
+        let secondApprovalStarted = expectation(description: "second approval started")
+        var cancelledApprovalIDs = Set<String>()
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { request in
+                if request.transferId == transferIDs[0] {
+                    firstApprovalStarted.fulfill()
+                } else if request.transferId == transferIDs[1] {
+                    secondApprovalStarted.fulfill()
+                } else {
+                    XCTFail("Unexpected transfer lane: \(request.transferId)")
+                }
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                    XCTFail("Channel cleanup must cancel every suspended approval lane")
+                } catch is CancellationError {
+                    cancelledApprovalIDs.insert(request.transferId)
+                } catch {
+                    XCTFail("Unexpected approval error: \(error)")
+                }
+                return .approved
+            }
+        )
+        var sentMessages: [CrossNetworkFileTransferMessage] = []
+
+        for transferID in transferIDs {
+            try receiver.enqueueInboundRequest(
+                metadata(
+                    transferId: transferID,
+                    fileSize: 4,
+                    chunkSize: 4,
+                    totalChunks: 1
+                ),
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { message, _ in sentMessages.append(message) },
+                failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+                resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") },
+                onFatalError: { error in XCTFail("Queued metadata failed: \(error)") }
+            )
+        }
+        await fulfillment(of: [firstApprovalStarted, secondApprovalStarted], timeout: 1)
+
+        await receiver.cleanupOnChannelClosed().value
+
+        XCTAssertEqual(cancelledApprovalIDs, Set(transferIDs))
+        XCTAssertTrue(sentMessages.isEmpty)
+        for transferID in transferIDs {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferID).path))
+        }
+    }
+
     #if os(macOS)
     func testFileTransferManagerMapsFileApprovalToWebRTCInboundDecision() {
         XCTAssertEqual(
@@ -198,6 +422,8 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
 
         XCTAssertTrue(
             source.contains("let inboundFileTransferReceiver = WebRTCInboundFileTransferReceiver(") &&
+                source.contains("senderAuthorityProvider: { [weak self] requestedSessionID in") &&
+                source.contains("currentPathExpectedRemoteAuthorityBySessionId[requestedSessionID]") &&
                 source.contains("approvalProvider: { request in") &&
                 source.contains("await FileTransferManager.shared.approveInboundWebRTCFileTransfer(request)"),
             "CrossNetworkConnectionManager must route WebRTC inbound metadata through the product approval provider instead of leaving the receiver on its default reject-only policy."
@@ -241,7 +467,55 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.partialURL(firstTransferId).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(secondTransferId).path))
 
-        receiver.cleanupOnChannelClosed()
+        await receiver.cleanupOnChannelClosed().value
+    }
+
+    func testGlobalConcurrentMetadataLimitSpansReceiverInstances() async throws {
+        let firstFixture = try makeFixture()
+        let secondFixture = try makeFixture()
+        defer {
+            firstFixture.cleanup()
+            secondFixture.cleanup()
+        }
+
+        let ledger = WebRTCInboundFileTransferAdmissionLedger()
+        let firstReceiver = approvedReceiver(
+            destinationBaseDirectory: { firstFixture.directory },
+            maxGlobalConcurrentInboundTransfers: 1,
+            admissionLedger: ledger
+        )
+        let secondReceiver = approvedReceiver(
+            destinationBaseDirectory: { secondFixture.directory },
+            maxGlobalConcurrentInboundTransfers: 1,
+            admissionLedger: ledger
+        )
+        var secondResponses: [CrossNetworkFileTransferMessage] = []
+
+        try await firstReceiver.handle(
+            metadata(transferId: UUID().uuidString, fileSize: 4, chunkSize: 4, totalChunks: 1),
+            sessionID: "session-a",
+            endpointDescription: "peer-a",
+            keys: Self.sessionKeys(sessionID: "session-a"),
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        let rejectedTransferID = UUID().uuidString
+        try await secondReceiver.handle(
+            metadata(transferId: rejectedTransferID, fileSize: 4, chunkSize: 4, totalChunks: 1),
+            sessionID: "session-b",
+            endpointDescription: "peer-b",
+            keys: Self.sessionKeys(sessionID: "session-b"),
+            sendMessage: { message, _ in secondResponses.append(message) },
+            failSenderWaiters: { _, _ in XCTFail("global limit must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("global limit must not resume outbound waiters") }
+        )
+
+        XCTAssertEqual(secondResponses.last?.op, .error)
+        XCTAssertEqual(secondResponses.last?.message, "Global inbound file transfer limit reached")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondFixture.partialURL(rejectedTransferID).path))
+        await firstReceiver.cleanupOnChannelClosed().value
+        await secondReceiver.cleanupOnChannelClosed().value
     }
 
     func testIdleTimeoutClosesAndRemovesPartialTransfer() async throws {
@@ -268,6 +542,44 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
         try await Task.sleep(for: .milliseconds(150))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
+    }
+
+    func testRefreshingIdleTimeoutDoesNotLetCancelledTimerDeleteActiveTransfer() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let receiver = approvedReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            transferIdleTimeout: .milliseconds(200)
+        )
+
+        try await receiver.handle(
+            metadata(transferId: transferId, fileSize: 4, chunkSize: 2, totalChunks: 2),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        try await Task.sleep(for: .milliseconds(120))
+        try await receiver.handle(
+            chunk(transferId: transferId, index: 0, data: Data("ab".utf8)),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("chunk must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("chunk must not resume outbound waiters") }
+        )
+        try await Task.sleep(for: .milliseconds(120))
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path),
+            "The cancelled metadata timer must not wake and delete a transfer whose chunk refreshed the idle deadline"
+        )
+        await receiver.cleanupOnChannelClosed().value
     }
 
     func testChunkHashMismatchSendsErrorWithoutDroppingTransfer() async throws {
@@ -310,7 +622,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(sent.last?.0.message, "chunk hash mismatch")
         XCTAssertEqual(sent.last?.1, "tx/webrtc-ft-error")
 
-        receiver.cleanupOnChannelClosed()
+        await receiver.cleanupOnChannelClosed().value
     }
 
     func testCompleteWithMissingChunkRequestsMissingChunks() async throws {
@@ -361,7 +673,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(sent.last?.0.message, "missingChunks")
         XCTAssertEqual(sent.last?.1, "tx/webrtc-ft-missingChunks")
 
-        receiver.cleanupOnChannelClosed()
+        await receiver.cleanupOnChannelClosed().value
     }
 
     func testCompleteMovesFileAndSendsCompleteAck() async throws {
@@ -413,6 +725,196 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(sent.last?.0.fileSha256, payloadHash)
         XCTAssertEqual(sent.last?.1, "tx/webrtc-ft-completeAck")
         XCTAssertEqual(try Data(contentsOf: fixture.directory.appendingPathComponent("payload.bin")), payload)
+    }
+
+    func testLostCompleteAckIsReplayedExactlyWithoutReprocessingSavedFile() async throws {
+        enum SendFailure: Error { case injected }
+
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let receiver = approvedReceiver(destinationBaseDirectory: { fixture.directory })
+        let keys = Self.sessionKeys()
+        let payload = Data("terminal-receipt".utf8)
+        let payloadHash = Data(SHA256.hash(data: payload))
+        let complete = CrossNetworkFileTransferMessage(
+            op: .complete,
+            transferId: transferId,
+            receivedBytes: Int64(payload.count),
+            fileSha256: payloadHash
+        )
+
+        try await receiver.handle(
+            metadata(
+                transferId: transferId,
+                fileSize: Int64(payload.count),
+                chunkSize: payload.count,
+                totalChunks: 1
+            ),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        try await receiver.handle(
+            chunk(transferId: transferId, index: 0, data: payload),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("chunk must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("chunk must not resume outbound waiters") }
+        )
+
+        var firstReceipt: (CrossNetworkFileTransferMessage, String)?
+        try await receiver.handle(
+            complete,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { message, label in
+                firstReceipt = (message, label)
+                throw SendFailure.injected
+            },
+            failSenderWaiters: { _, _ in XCTFail("complete must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("complete must not resume outbound waiters") }
+        )
+
+        var replayedReceipt: (CrossNetworkFileTransferMessage, String)?
+        try await receiver.handle(
+            complete,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { message, label in replayedReceipt = (message, label) },
+            failSenderWaiters: { _, _ in XCTFail("complete retry must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("complete retry must not resume outbound waiters") }
+        )
+
+        XCTAssertEqual(firstReceipt?.0.op, .completeAck)
+        XCTAssertEqual(replayedReceipt?.0.op, firstReceipt?.0.op)
+        XCTAssertEqual(replayedReceipt?.0.transferId, firstReceipt?.0.transferId)
+        XCTAssertEqual(replayedReceipt?.0.receivedBytes, firstReceipt?.0.receivedBytes)
+        XCTAssertEqual(replayedReceipt?.0.fileSha256, firstReceipt?.0.fileSha256)
+        XCTAssertEqual(replayedReceipt?.1, firstReceipt?.1)
+        XCTAssertEqual(try Data(contentsOf: fixture.directory.appendingPathComponent("payload.bin")), payload)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("payload (1).bin").path))
+    }
+
+    func testLostTerminalIntegrityErrorIsReplayedExactly() async throws {
+        enum SendFailure: Error { case injected }
+
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let receiver = approvedReceiver(destinationBaseDirectory: { fixture.directory })
+        let keys = Self.sessionKeys()
+        let payload = Data("abcd".utf8)
+        let complete = CrossNetworkFileTransferMessage(
+            op: .complete,
+            transferId: transferId,
+            receivedBytes: Int64(payload.count),
+            fileSha256: Data(repeating: 0, count: 32)
+        )
+
+        try await receiver.handle(
+            metadata(
+                transferId: transferId,
+                fileSize: Int64(payload.count),
+                chunkSize: payload.count,
+                totalChunks: 1
+            ),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        try await receiver.handle(
+            chunk(transferId: transferId, index: 0, data: payload),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in XCTFail("chunk must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("chunk must not resume outbound waiters") }
+        )
+
+        var firstError: (CrossNetworkFileTransferMessage, String)?
+        try await receiver.handle(
+            complete,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { message, label in
+                firstError = (message, label)
+                throw SendFailure.injected
+            },
+            failSenderWaiters: { _, _ in XCTFail("complete must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("complete must not resume outbound waiters") }
+        )
+
+        var replayedError: (CrossNetworkFileTransferMessage, String)?
+        try await receiver.handle(
+            complete,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { message, label in replayedError = (message, label) },
+            failSenderWaiters: { _, _ in XCTFail("complete retry must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("complete retry must not resume outbound waiters") }
+        )
+
+        XCTAssertEqual(firstError?.0.op, .error)
+        XCTAssertEqual(firstError?.0.message, "file sha256 mismatch")
+        XCTAssertEqual(replayedError?.0.op, firstError?.0.op)
+        XCTAssertEqual(replayedError?.0.message, firstError?.0.message)
+        XCTAssertEqual(replayedError?.1, firstError?.1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
+    }
+
+    func testRepeatedTransferIdRejectsConflictingMetadataWithoutReplacingActiveTransfer() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let receiver = approvedReceiver(destinationBaseDirectory: { fixture.directory })
+        var sent: [CrossNetworkFileTransferMessage] = []
+
+        try await receiver.handle(
+            metadata(transferId: transferId, fileSize: 4, chunkSize: 4, totalChunks: 1),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { message, _ in sent.append(message) },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        try await receiver.handle(
+            metadata(
+                transferId: transferId,
+                fileName: "different.bin",
+                fileSize: 4,
+                chunkSize: 4,
+                totalChunks: 1
+            ),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { message, _ in sent.append(message) },
+            failSenderWaiters: { _, _ in XCTFail("metadata conflict must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata conflict must not resume outbound waiters") }
+        )
+
+        XCTAssertEqual(sent.map(\.op), [.metadataAck, .error])
+        XCTAssertEqual(sent.last?.message, "transferId metadata conflict")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
+        await receiver.cleanupOnChannelClosed().value
     }
 
     func testCompleteDoesNotOverwriteDestinationCreatedAfterApproval() async throws {
@@ -494,8 +996,17 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertTrue(receiverSource.contains("private var transfers: [String: WebRTCInboundFileTransferState]"))
         XCTAssertTrue(receiverSource.contains("private var completeTimers: [String: Task<Void, Never>]"))
         XCTAssertTrue(receiverSource.contains("private var idleTimers: [String: Task<Void, Never>]"))
+        XCTAssertTrue(receiverSource.contains("private var terminalReceipts: WebRTCInboundFileTransferTerminalReceiptCache"))
         XCTAssertTrue(receiverSource.contains("private static let defaultMaxConcurrentInboundTransfers = 8"))
         XCTAssertTrue(receiverSource.contains("private static let defaultTransferIdleTimeout: Duration = .seconds(120)"))
+        XCTAssertTrue(receiverSource.contains("private static let defaultMaxTerminalReceiptsPerSession = 128"))
+        XCTAssertTrue(receiverSource.contains("private static let defaultTerminalReceiptTTL: TimeInterval = 300"))
+        XCTAssertTrue(receiverSource.contains("recordTerminalReceiptAndRemoveActive("))
+        XCTAssertTrue(receiverSource.contains("current.stateToken == expected.stateToken"))
+        XCTAssertTrue(receiverSource.contains("current.revision == expected.revision"))
+        XCTAssertTrue(receiverSource.contains("closeAndDigest(using:"))
+        XCTAssertTrue(receiverSource.contains("transferId metadata conflict"))
+        XCTAssertTrue(receiverSource.contains("transferId completion conflict"))
     }
 
     private func metadata(
@@ -553,25 +1064,40 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
     private func approvedReceiver(
         destinationBaseDirectory: @escaping () -> URL?,
         maxConcurrentInboundTransfers: Int = 8,
-        transferIdleTimeout: Duration = .seconds(120)
+        maxGlobalConcurrentInboundTransfers: Int = 16,
+        transferIdleTimeout: Duration = .seconds(120),
+        maxTerminalReceiptsPerSession: Int = 128,
+        terminalReceiptTTL: TimeInterval = 300,
+        now: @escaping () -> Date = Date.init,
+        admissionLedger: WebRTCInboundFileTransferAdmissionLedger = .shared
     ) -> WebRTCInboundFileTransferReceiver {
         WebRTCInboundFileTransferReceiver(
             destinationBaseDirectory: destinationBaseDirectory,
             maxConcurrentInboundTransfers: maxConcurrentInboundTransfers,
+            maxGlobalConcurrentInboundTransfers: maxGlobalConcurrentInboundTransfers,
             transferIdleTimeout: transferIdleTimeout,
+            maxTerminalReceiptsPerSession: maxTerminalReceiptsPerSession,
+            terminalReceiptTTL: terminalReceiptTTL,
+            now: now,
+            admissionLedger: admissionLedger,
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
             approvalProvider: { _ in .approved }
         )
     }
 
-    private static func sessionKeys() -> SessionKeys {
+    private static func sessionKeys(sessionID: String = "session") -> SessionKeys {
         SessionKeys(
             sendKey: Data(repeating: 0x01, count: 32),
             receiveKey: Data(repeating: 0x02, count: 32),
             negotiatedSuite: .x25519Ed25519,
             role: .initiator,
             transcriptHash: Data(repeating: 0x03, count: 32),
-            sessionId: "session"
+            sessionId: sessionID
         )
+    }
+
+    private static func senderAuthority() -> WebRTCInboundFileTransferSenderAuthority {
+        WebRTCInboundFileTransferSenderAuthority(deviceId: "sender", deviceName: "Sender")
     }
 
     private struct ReceiverFixture {

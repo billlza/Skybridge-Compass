@@ -1,6 +1,6 @@
 # OS 27 Cutover & Real-Device Validation Runbook
 
-_Last updated: 2026-06-16. Companion to `Docs/os27-adaptation-plan-2026-06.md`._
+_Last updated: 2026-07-10. Companion to `Docs/os27-adaptation-plan-2026-06.md`._
 
 This runbook covers (1) building/releasing under Xcode 27 / macOS 27 / iOS 27 while
 keeping macOS 14 / iOS 17 support, (2) the real-device (iPad + Mac) validation the
@@ -73,14 +73,15 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # GA: poi
 ## 2. Real-device validation (iPad + Mac) — operator-only
 
 The signed-release gate (`.github/workflows/macos-release-readiness.yml` →
-`Scripts/check_macos_release_readiness.sh`) **fails closed** without six real-device
-artifact directories. Producing them requires physical hardware and cannot be done in CI
-or by an agent:
+`Scripts/check_macos_release_readiness.sh`) **fails closed** without seven release-evidence
+artifact directories: five production-identity/real-device sets and two local security-notice
+sets. Producing the real-device sets requires physical hardware and operator interaction:
 
 | Artifact dir | Produced by |
 |---|---|
 | `Artifacts/release-gate/connectivity` | `Scripts/run_real_device_*smoke.sh` (connectivity) |
 | `Artifacts/release-gate/p2p-remote` | `Scripts/run_real_device_p2p_remote_smoke.sh` |
+| `Artifacts/release-gate/webrtc-remote` | `Scripts/run_real_device_webrtc_smoke.sh` |
 | `Artifacts/release-gate/file-transfer` | `Scripts/run_real_device_file_transfer_smoke.sh` |
 | `Artifacts/release-gate/p2p-notice` | remote-control notice probe |
 | `Artifacts/release-gate/webrtc-notice` | WebRTC notice probe |
@@ -104,7 +105,13 @@ or by an agent:
    `Accessibility permission is required to press the SkyBridge online iPad Connect button`.
    Tip: run the smoke from a Terminal that already has Accessibility granted.
 
-### Validation results — 2026-06-16 (real iPad Pro 11" M4 / iOS 27.0 + Mac, production signaling)
+### Historical validation results — 2026-06-16 (superseded by PIB-1 v3)
+
+The results below predate the two-sided PIB-1 v3 candidate/confirm/final-ack transaction.
+They remain useful diagnostic history, but **are not release evidence for the current source**.
+After any PIB/AppMessage change, rerun all current real-device lanes and archive a fresh
+`release-acceptance.json`; never reuse this historical result.
+
 Run via `skybridge smoke real-device-p2p --real-device-id <iPad UDID>` against
 `api.nebula-technologies.net` (verified `/health` → 200). **Core capability PASSED:**
 - Apple PQC SDK gate (macOS + iOS) = `symbol_probe` (real PQC, no fallback)
@@ -130,9 +137,39 @@ notarized** `dist/SkyBridge Compass Pro.app` (omit the two `MAC_ONLINE` override
 Scripts/run_real_device_p2p_remote_smoke.sh
 Scripts/run_real_device_file_transfer_smoke.sh
 Scripts/run_real_device_webrtc_smoke.sh
-# 3. Readiness gate over the produced artifacts
-Scripts/check_macos_release_readiness.sh --connectivity-artifact-dir ... (six dirs)
+# 3. Readiness gate over the produced artifacts (seven dirs, including WebRTC remote)
+Scripts/check_macos_release_readiness.sh \
+  --connectivity-artifact-dir ... \
+  --p2p-remote-artifact-dir ... \
+  --webrtc-remote-artifact-dir ... \
+  --file-transfer-artifact-dir ... \
+  --p2p-notice-artifact-dir ... \
+  --webrtc-notice-artifact-dir ... \
+  --notice-panel-artifact-dir ...
 ```
+
+The P2P remote smoke defaults to the system Keychain and actual/user trust. Injected
+KEM trust or an in-memory Keychain is permitted only with
+`SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1`; that run exits as non-acceptance and its artifact
+is rejected by release readiness. WebRTC acceptance likewise requires relay-only ICE,
+audio, a successful relay UDP preflight, non-synthetic media, and at least a 10-second
+passing soak. `SKYBRIDGE_REAL_DEVICE_WEBRTC_LAB_RUN=1` permits diagnostic overrides but
+cannot produce a release-eligible artifact.
+
+Current PIB-1 v3 acceptance is explicitly two-sided: the responder returns only a signed
+candidate, both devices display the same SAS and require an operator decision for a new identity,
+the requester sends a signed confirmation bound to the request/candidate/transcript, and neither
+side installs the new pin until the responder's signed final acknowledgement has been verified.
+Automatic approval of a new/unpinned identity, a v2 response, a missing/expired transaction, or a
+one-sided pin is a hard failure. Compare the SAS on the Mac and iPad before accepting either prompt.
+
+The real-device WebRTC lane transfers its access token, tenant, connection code, and peer KEM
+material in a bounded one-time `0600` bootstrap file copied into the app data container. The app
+reads it off the main actor, deletes it before use, validates run ID/expiry/JWT-tenant/code/key
+bindings, and installs the session only in the in-memory Keychain. These values must never be
+added back to `devicectl --environment-variables` or the launch-result JSON. Raw smoke evidence
+directories are private (`0700`, files `0600`); only the separately materialized and scanned
+`-public-redacted` directory is shareable.
 
 ---
 

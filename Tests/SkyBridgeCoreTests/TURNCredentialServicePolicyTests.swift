@@ -58,4 +58,18 @@ final class TURNCredentialServicePolicyTests: XCTestCase {
         XCTAssertEqual(credentials.password, "secret")
         XCTAssertEqual(credentials.uris, ["turns:relay.example.com:5349?transport=tcp"])
     }
+
+    func testServerErrorDescriptionNeverIncludesResponseBody() {
+        let sensitiveBody = "token=secret-value password=credential"
+        let error = TURNCredentialService.TURNCredentialError.serverError(
+            statusCode: 401,
+            responseBytes: sensitiveBody.utf8.count
+        )
+        let description = error.localizedDescription
+
+        XCTAssertTrue(description.contains("401"))
+        XCTAssertTrue(description.contains("\(sensitiveBody.utf8.count)"))
+        XCTAssertFalse(description.contains("secret-value"))
+        XCTAssertFalse(description.contains("credential"))
+    }
 }

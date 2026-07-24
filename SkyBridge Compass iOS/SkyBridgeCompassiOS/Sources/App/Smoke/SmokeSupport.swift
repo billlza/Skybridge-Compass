@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 import SwiftUI
 import SkyBridgeRealtimeMedia
@@ -49,19 +50,19 @@ struct LocalWebRTCSmokeNativeRenderHost: View {
                         )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .onAppear {
-                        SkyBridgeSmokeTraceWriter.appendStatus(
+                        SkyBridgeDiagnosticTrace.appendStatus(
                             "native-render-host trackId=\(track.trackId) visible=1 size=\(Int(geometry.size.width))x\(Int(geometry.size.height)) source=smoke-overlay"
                         )
                     }
                     .onChange(of: track.trackId) { _, newTrackId in
-                        SkyBridgeSmokeTraceWriter.appendStatus(
+                        SkyBridgeDiagnosticTrace.appendStatus(
                             "native-render-host trackId=\(newTrackId) visible=1 size=\(Int(geometry.size.width))x\(Int(geometry.size.height)) source=smoke-overlay"
                         )
                     }
                 } else {
                     Color.clear
                         .onAppear {
-                            SkyBridgeSmokeTraceWriter.appendStatus(
+                            SkyBridgeDiagnosticTrace.appendStatus(
                                 "native-render-host waitingForTrack=1 size=\(Int(geometry.size.width))x\(Int(geometry.size.height)) source=smoke-overlay"
                             )
                         }
@@ -74,4 +75,5 @@ struct LocalWebRTCSmokeNativeRenderHost: View {
         .accessibilityIdentifier("smoke.native-video.render-host")
     }
 }
+#endif
 #endif

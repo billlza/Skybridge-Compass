@@ -1,32 +1,36 @@
-import CryptoKit
 import Foundation
 import SkyBridgeProtocolCore
+import SkyBridgeQPeriaptRuntime
 
-#if canImport(CQPeriapt)
-import CQPeriapt
-#if canImport(Security)
-import Security
-#endif
+struct QPeriaptProviderIdentity: Sendable, Equatable {
+    let authProfile: String
+    let trustRootFingerprint: Data
+}
+
+protocol QPeriaptSessionBoundCryptoProvider: ApplicationContextBoundCryptoProvider {
+    var qPeriaptProviderIdentity: QPeriaptProviderIdentity { get }
+}
 
 /// Q-Periapt ABI2 policy-bound KEM + the existing ML-DSA-65 identity-signature
 /// implementation. All Q-Periapt KEM operations reuse one native adapter; this
 /// avoids the former duplicated ABI1 implementation in two provider types.
 @available(macOS 14.0, iOS 17.0, *)
-public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Sendable {
+public struct QPeriaptCryptoProvider: QPeriaptSessionBoundCryptoProvider, Sendable {
     public let providerName = "QPeriaptABI2PolicyBound"
     public let tier: CryptoTier = .qperiaptPQC
     public let activeSuite: CryptoSuite = .qperiaptABI2PolicyBound
     public var supportedSuites: [CryptoSuite] { [.qperiaptABI2PolicyBound] }
 
-    private static let nonceSize = 12
-    private static let aesKeySize = 32
-    private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
-
     private let adapter: QPeriaptNativeAdapter
     private let signatureProvider = OQSPQCCryptoProvider()
+    let qPeriaptProviderIdentity: QPeriaptProviderIdentity
 
     public init(session: QPeriaptRuntimeSession) {
         self.adapter = QPeriaptNativeAdapter(session: session)
+        self.qPeriaptProviderIdentity = QPeriaptProviderIdentity(
+            authProfile: session.authProfile,
+            trustRootFingerprint: session.trustRootFingerprint
+        )
     }
 
     public func supportsSuite(_ suite: CryptoSuite) -> Bool {
@@ -39,6 +43,7 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         try QPeriaptRuntimeContract.requireCompatible()
         let adapter = QPeriaptNativeAdapter(session: session)
         let keys = try await adapter.generateKeyPair()
+        defer { keys.privateKey.zeroize() }
         guard keys.publicKey.count == QPeriaptNativeAdapter.publicKeyLength,
               keys.privateKey.byteCount == QPeriaptNativeAdapter.privateKeyLength else {
             return false
@@ -49,6 +54,7 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
             recipientPublicKey: keys.publicKey,
             applicationContext: context
         )
+        defer { encapsulated.sharedSecret.zeroize() }
         guard encapsulated.encapsulatedKey.count == QPeriaptNativeAdapter.encapsulatedKeyLength,
               encapsulated.sharedSecret.byteCount == QPeriaptNativeAdapter.sharedSecretLength else {
             return false
@@ -58,14 +64,14 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
             privateKey: keys.privateKey,
             applicationContext: context
         )
-        var decapsulatedData = decapsulated.copyData()
-        defer { decapsulatedData.resetBytes(in: 0..<decapsulatedData.count) }
-        var encapsulatedData = encapsulated.sharedSecret.copyData()
-        defer { encapsulatedData.resetBytes(in: 0..<encapsulatedData.count) }
-        return decapsulatedData == encapsulatedData
+        defer { decapsulated.zeroize() }
+        guard decapsulated.byteCount == QPeriaptNativeAdapter.sharedSecretLength else {
+            return false
+        }
+        return constantTimeEqual(decapsulated, encapsulated.sharedSecret)
     }
 
-    // MARK: - Policy-bound application-context KEM
+    // MARK: - Context-bound KEM
 
     public func kemEncapsulate(
         recipientPublicKey: Data,
@@ -115,12 +121,15 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         recipientPublicKey: Data,
         info: Data
     ) async throws -> HPKESealedBox {
-        let result = try await kemDemSealWithSecret(
-            plaintext: plaintext,
-            recipientPublicKey: recipientPublicKey,
-            info: info
-        )
-        return result.sealedBox
+        throw Self.genericSurfaceUnavailable
+    }
+
+    public func kemDemSeal(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> HPKESealedBox {
+        throw Self.genericSurfaceUnavailable
     }
 
     public func kemDemSealWithSecret(
@@ -128,23 +137,15 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         recipientPublicKey: Data,
         info: Data
     ) async throws -> (sealedBox: HPKESealedBox, sharedSecret: SecureBytes) {
-        let kem = try await adapter.encapsulate(
-            recipientPublicKey: recipientPublicKey,
-            applicationContext: info
-        )
-        let key = Self.deriveSymmetricKey(from: kem.sharedSecret, info: info)
-        let nonceData = try Self.randomNonce()
-        let nonce = try AES.GCM.Nonce(data: nonceData)
-        let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce)
-        return (
-            HPKESealedBox(
-                encapsulatedKey: kem.encapsulatedKey,
-                nonce: nonceData,
-                ciphertext: sealed.ciphertext,
-                tag: sealed.tag
-            ),
-            kem.sharedSecret
-        )
+        throw Self.genericSurfaceUnavailable
+    }
+
+    public func hpkeOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: Data,
+        info: Data
+    ) async throws -> Data {
+        throw Self.genericSurfaceUnavailable
     }
 
     public func hpkeOpen(
@@ -152,12 +153,23 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         privateKey: SecureBytes,
         info: Data
     ) async throws -> Data {
-        let result = try await kemDemOpenWithSecret(
-            sealedBox: sealedBox,
-            privateKey: privateKey,
-            info: info
-        )
-        return result.plaintext
+        throw Self.genericSurfaceUnavailable
+    }
+
+    public func kemDemOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> Data {
+        throw Self.genericSurfaceUnavailable
+    }
+
+    public func kemDemOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: Data,
+        info: Data
+    ) async throws -> Data {
+        throw Self.genericSurfaceUnavailable
     }
 
     public func kemDemOpenWithSecret(
@@ -165,19 +177,7 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         privateKey: SecureBytes,
         info: Data
     ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
-        let secret = try await adapter.decapsulate(
-            encapsulatedKey: sealedBox.encapsulatedKey,
-            privateKey: privateKey,
-            applicationContext: info
-        )
-        let key = Self.deriveSymmetricKey(from: secret, info: info)
-        let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
-        let sealed = try AES.GCM.SealedBox(
-            nonce: nonce,
-            ciphertext: sealedBox.ciphertext,
-            tag: sealedBox.tag
-        )
-        return (try AES.GCM.open(sealed, using: key), secret)
+        throw Self.genericSurfaceUnavailable
     }
 
     // MARK: - Identity signatures
@@ -194,6 +194,7 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         switch usage {
         case .keyExchange:
             let keys = try await adapter.generateKeyPair()
+            defer { keys.privateKey.zeroize() }
             return KeyPair(
                 publicKey: KeyMaterial(
                     suite: activeSuite,
@@ -227,33 +228,21 @@ public struct QPeriaptCryptoProvider: ApplicationPolicyBoundCryptoProvider, Send
         }
     }
 
-    private static func deriveSymmetricKey(from sharedSecret: SecureBytes, info: Data) -> SymmetricKey {
-        var saltInput = Data(hkdfSaltLabel.utf8)
-        saltInput.append(info)
-        let salt = Data(SHA256.hash(data: saltInput))
-        var secretData = sharedSecret.copyData()
-        defer { secretData.resetBytes(in: 0..<secretData.count) }
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: secretData),
-            salt: salt,
-            info: info,
-            outputByteCount: aesKeySize
-        )
+    private static let genericSurfaceUnavailable = CryptoProviderError.operationFailed(
+        "Q-Periapt ABI2 is available only through the canonical MessageA application-context KEM surface"
+    )
+
+    private static func constantTimeEqual(_ lhs: SecureBytes, _ rhs: SecureBytes) -> Bool {
+        guard lhs.byteCount == rhs.byteCount else { return false }
+        var difference: UInt8 = 0
+        lhs.withUnsafeBytes { lhsBytes in
+            rhs.withUnsafeBytes { rhsBytes in
+                for index in 0..<lhsBytes.count {
+                    difference |= lhsBytes[index] ^ rhsBytes[index]
+                }
+            }
+        }
+        return difference == 0
     }
 
-    private static func randomNonce() throws -> Data {
-        var bytes = [UInt8](repeating: 0, count: nonceSize)
-        #if canImport(Security)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        guard status == errSecSuccess else {
-            throw CryptoProviderError.keyGenerationFailed(
-                "SecRandomCopyBytes failed while generating an AES-GCM nonce (\(status))"
-            )
-        }
-        #else
-        throw CryptoProviderError.providerNotAvailable(.qPeriapt)
-        #endif
-        return Data(bytes)
-    }
 }
-#endif

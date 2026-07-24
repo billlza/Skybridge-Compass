@@ -1,13 +1,7 @@
 import XCTest
 import OQSRAII
-@testable import SkyBridgeCore
 
 final class OQSRAIISampleTests: XCTestCase {
-    func testPublicRAIISamplesRespectNativeBufferContracts() {
-        XCTAssertTrue(OQSRAIISample.demoMLDSA65())
-        XCTAssertTrue(OQSRAIISample.demoMLKEM768())
-    }
-
     func testMLDSA65KeypairSignVerify() throws {
  // 中文注释：准备缓冲区（根据长度接口获取）
         let pkLen = oqs_raii_mldsa65_public_key_length()

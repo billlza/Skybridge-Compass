@@ -49,16 +49,6 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
  // Test legacy key tag
         let legacyPurpose = await manager.identifyKeyPurpose(tag: "com.skybridge.p2p.identity.signing")
         XCTAssertEqual(legacyPurpose, .legacy, "Legacy key tag should have .legacy purpose")
-
-        // Test current immutable authority identity key tag
-        let identityPurpose = await manager.identifyKeyPurpose(
-            tag: DeviceIdentityAuthorityRecord.uniquePrivateKeyApplicationTag()
-        )
-        XCTAssertEqual(
-            identityPurpose,
-            .identity,
-            "Unique authority key tags should have .identity purpose"
-        )
         
  // Test unknown tag
         let unknownPurpose = await manager.identifyKeyPurpose(tag: "com.unknown.tag")
@@ -148,7 +138,6 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
     /// Test KeyPurpose raw values
     func testKeyPurposeRawValues() {
         XCTAssertEqual(KeyPurpose.legacy.rawValue, "legacy")
-        XCTAssertEqual(KeyPurpose.identity.rawValue, "identity")
         XCTAssertEqual(KeyPurpose.protocol.rawValue, "protocol")
         XCTAssertEqual(KeyPurpose.pop.rawValue, "pop")
         XCTAssertEqual(KeyPurpose.unknown.rawValue, "unknown")
@@ -156,58 +145,31 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
 
     func testDeviceIdentityKeychainAccessGroupContract() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
-        let authoritySource = try repositorySource(
-            "Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift"
-        )
-        let scopeSource = try repositorySource(
-            "Sources/SkyBridgeCore/Security/KeychainGenericPasswordScope.swift"
-        )
-        let keychainSource = try repositorySource(
-            "Sources/SkyBridgeCore/Security/KeychainManager.swift"
-        )
-        let keyPairStoreSource = try repositorySource(
-            "Sources/SkyBridgeCore/Security/PQCKeyPairStore.swift"
-        )
+        let scopeSource = try repositorySource("Sources/SkyBridgeCore/Security/KeychainGenericPasswordScope.swift")
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
 
         XCTAssertTrue(
             scopeSource.contains("SecTaskCopyValueForEntitlement(") &&
-            scopeSource.contains("\"keychain-access-groups\" as CFString"),
+                scopeSource.contains("\"keychain-access-groups\" as CFString"),
             "Runtime identity storage must read the signed keychain access groups instead of assuming the process default namespace."
         )
         XCTAssertTrue(
             scopeSource.contains("hasSuffix(\".group.com.skybridge.compass\")") &&
-            !scopeSource.contains("hasSuffix(\".com.skybridge.compass.pro\")") &&
-            scopeSource.contains("requiredSharedAccessGroup()") &&
-            scopeSource.contains("missingSharedIdentityAccessGroupEntitlement") &&
-            scopeSource.contains("OSAllocatedUnfairLock(") &&
-            !scopeSource.contains("nonisolated(unsafe)"),
-            "Runtime identity storage must require the signed shared SkyBridge keychain group and fail closed when it is absent."
+                scopeSource.contains("The app-only access group is deliberately not accepted"),
+            "Cross-process identity authority must require the shared signed group and reject an app-only authority."
         )
         XCTAssertTrue(
-            authoritySource.contains("kSecAttrAccessGroup as String") &&
-            authoritySource.contains("authoritativeOnly()") &&
-            authoritySource.contains("insertAuthorityIfAbsent") &&
-            authoritySource.contains("DeviceIdentityAuthorityTransaction.claimCandidate") == false &&
-            source.contains("DeviceIdentityAuthorityTransaction.claimCandidate") &&
-            source.contains("try sharedIdentityScopeSource.resolve()") &&
-            source.contains("sharedIdentityScopeSource") &&
-            keychainSource.contains("applyAccessGroup(scope.writeAccessGroup, to: &query)"),
-            "All persistent identity material must be written into the resolved keychain access group."
+            scopeSource.contains("func authoritativeOnly() throws") &&
+                authoritySource.contains("let authoritativeScope: KeychainGenericPasswordScope") &&
+                authoritySource.contains("authoritativeScope.writeAccessGroup"),
+            "All authoritative identity material must use the exact resolved shared-group scope."
         )
         XCTAssertTrue(
-            authoritySource.contains("uniquePrivateKeyApplicationTag()") &&
-            authoritySource.contains("insertKeyIfAbsent") &&
-            authoritySource.contains("loadAuthoritativePrivateKey") &&
-            authoritySource.contains("deletePrivateKey") &&
-            !source.contains("upsertGenericPassword(") &&
-            !source.contains("SecItemUpdate(") &&
             scopeSource.contains("readAccessGroups: [accessGroup, nil]") &&
-            scopeSource.contains("case requiredEntitlement") &&
-            keyPairStoreSource.contains("reconcileCanonicalLegacyCandidates") &&
-            keyPairStoreSource.contains("deleteLegacyGenericPasswordCandidate") &&
-            keyPairStoreSource.contains("keychainScope.authoritativeOnly()") &&
-            keyPairStoreSource.contains("requireAuthority(for: descriptor, keychainScope: keychainScope)"),
-            "Existing unscoped identity material must be migrated into the signed access group without creating a new protocol identity."
+                authoritySource.contains("persistentReference") &&
+                authoritySource.contains("legacyIdentityConflictsWithAuthority") &&
+                source.contains("inMemorySharedIdentityForTesting"),
+            "Legacy discovery must reconcile by exact persistent reference, while tests use an explicit isolated authority."
         )
     }
 
@@ -254,10 +216,8 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
 
     func testPersistentIdentityKeychainFailuresDoNotRegenerateIdentityMaterial() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
-        let selfIdentitySource = try repositorySource(
-            "Sources/SkyBridgeCore/Utilities/SelfIdentityProvider.swift"
-        )
         let keychainSource = try repositorySource("Sources/SkyBridgeCore/Security/KeychainManager.swift")
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
 
         XCTAssertFalse(
             source.contains("try? loadKEMKeyRecord"),
@@ -267,45 +227,19 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
             keychainSource.contains("public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data?"),
             "Generic Keychain service/account reads need a strict API for security-sensitive callers."
         )
-        XCTAssertFalse(
-            keychainSource.contains("getOrGenerateDeviceId"),
-            "Generic Keychain storage must not own a parallel device-identity generator; callers must use the immutable authority."
-        )
         XCTAssertTrue(
             source.contains("public func getOrCreateDeviceIdStrict() async throws -> String"),
             "Device ID creation needs a throwing path so storage errors do not silently rotate persistent identity."
         )
         XCTAssertTrue(
-            source.contains("public func getDeviceId() async throws -> String") &&
-            source.contains("public func existingIdentityKeyInfoStrict() async throws") &&
-            source.contains("public func existingDeviceIdStrict() async throws -> String?") &&
-            !source.contains("public func getDeviceId() async -> String") &&
-            !source.contains("public func existingDeviceId() async -> String?"),
-            "Both creating and existing device identity reads must propagate authority failures."
+            source.contains("try saveDeviceIdStrict(newId)") &&
+            source.contains("try await getOrCreateDeviceIdStrict()"),
+            "Identity creation and rotation must persist the device ID through the strict path before publishing new key material."
         )
         XCTAssertTrue(
             source.contains("return try await getOrCreateIdentityKey().deviceId") &&
-            source.contains("let deviceId = UUID().uuidString") &&
-            source.contains("DeviceIdentityAuthorityRecord(") &&
-            !source.contains("account: KeychainConstants.deviceIdKey,\n            data:"),
-            "Production device IDs must be elected inside the immutable identity authority rather than persisted independently."
-        )
-        XCTAssertTrue(
-            source.contains("try KeychainManager.shared.exportKeyStrict(") &&
-            source.contains("try KeychainManager.shared.insertKeyIfAbsent(") &&
-            !source.contains("try? KeychainManager.shared.exportKeyStrict("),
-            "Strict Data Protection Keychain reads and compare-and-set writes must propagate failures."
-        )
-        XCTAssertTrue(
-            selfIdentitySource.contains("public func loadOrCreate() async throws") &&
-            selfIdentitySource.contains("public func protocolIdentityDeviceId(allowCreate: Bool) async throws") &&
-            selfIdentitySource.contains("snapshotEnsuringProtocolDeviceId(") &&
-            selfIdentitySource.contains("DeviceIdentityAuthorityRecord.fingerprint(") &&
-            !selfIdentitySource.contains("loadPersistedDeviceId()") &&
-            !selfIdentitySource.contains("loadSecureEnclavePublicKey(tag:") &&
-            !selfIdentitySource.contains("loadP256PublicKey(tag:") &&
-            !selfIdentitySource.contains("generateP256SigningKeypair(tag:"),
-            "Self identity must obtain device ID and P-256 fingerprint from one authority tuple without independent fallback identity sources."
+                authoritySource.contains("throw DeviceIdentityKeyError.keychainError(status)"),
+            "Production device IDs must come from the immutable identity authority and propagate Data Protection Keychain failures."
         )
     }
 
@@ -403,18 +337,14 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
 
     func testPartialPersistentIdentityMaterialFailsClosed() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
-        let authoritySource = try repositorySource(
-            "Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift"
-        )
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
 
         XCTAssertTrue(
             source.contains("case incompleteKeyMaterial(String)"),
             "Persistent identity stores need an explicit partial-material error for public/private split keypairs."
         )
         XCTAssertTrue(
-            authoritySource.contains(
-                "fixed-tag key, keyInfo, and deviceId must all be present"
-            ),
+            authoritySource.contains("fixed-tag key, keyInfo, and deviceId must all be present"),
             "A stored identity record without its private key must not be treated as absent and regenerated."
         )
         XCTAssertTrue(

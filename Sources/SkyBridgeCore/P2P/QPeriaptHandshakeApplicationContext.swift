@@ -39,7 +39,7 @@ enum QPeriaptHandshakeApplicationContext {
         guard !offeredSuites.isEmpty,
               offeredSuites.count <= Int(HandshakeConstants.maxSupportedSuites),
               offeredSuites.contains(.qperiaptABI2PolicyBound),
-              Set(offeredSuites).count == offeredSuites.count,
+              Set(offeredSuites.map(\.wireId)).count == offeredSuites.count,
               offeredSuites.allSatisfy(\.isNegotiable) else {
             throw CryptoProviderError.operationFailed(
                 "Q-Periapt ABI2 application context received a non-canonical suite offer"

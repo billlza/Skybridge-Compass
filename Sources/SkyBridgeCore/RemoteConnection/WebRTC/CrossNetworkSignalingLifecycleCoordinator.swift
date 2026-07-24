@@ -9,6 +9,7 @@ final class CrossNetworkSignalingLifecycleCoordinator {
     private var generationBySessionId: [String: Int] = [:]
     private var activeHandle: HandleID?
     private var recoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var recoveryTaskTokensBySessionId: [String: UUID] = [:]
 
     func generation(for sessionID: String) -> Int {
         generationBySessionId[sessionID] ?? 0
@@ -31,8 +32,19 @@ final class CrossNetworkSignalingLifecycleCoordinator {
     }
 
     func cancelRecovery(for sessionID: String) {
-        recoveryTasksBySessionId[sessionID]?.cancel()
-        recoveryTasksBySessionId.removeValue(forKey: sessionID)
+        recoveryTasksBySessionId.removeValue(forKey: sessionID)?.cancel()
+        recoveryTaskTokensBySessionId.removeValue(forKey: sessionID)
+    }
+
+    /// Removes every signaling-lifecycle resource owned by one terminal session.
+    /// Generation state must not survive a real session teardown because a later
+    /// session reusing the identifier would otherwise inherit stale ordering.
+    func teardown(sessionID: String) {
+        cancelRecovery(for: sessionID)
+        generationBySessionId.removeValue(forKey: sessionID)
+        if activeHandle?.sessionId == sessionID {
+            activeHandle = nil
+        }
     }
 
     func cancelAllRecovery() {
@@ -40,6 +52,7 @@ final class CrossNetworkSignalingLifecycleCoordinator {
             task.cancel()
         }
         recoveryTasksBySessionId.removeAll()
+        recoveryTaskTokensBySessionId.removeAll()
     }
 
     func shouldAllowOperation(
@@ -68,33 +81,53 @@ final class CrossNetworkSignalingLifecycleCoordinator {
            !existingTask.isCancelled {
             return
         }
+        let taskToken = UUID()
+        recoveryTaskTokensBySessionId[sessionID] = taskToken
         recoveryTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.finishRecoveryTask(sessionID: sessionID, token: taskToken) }
             let effectiveMaxAttempts = tokenExpired ? 1 : max(1, maxAttempts)
             for attempt in 0..<effectiveMaxAttempts where !Task.isCancelled {
                 if attempt > 0 {
-                    try? await Task.sleep(for: .milliseconds(reconnectDelayMilliseconds(attempt - 1)))
+                    do {
+                        try await Task.sleep(for: .milliseconds(reconnectDelayMilliseconds(attempt - 1)))
+                    } catch {
+                        if self.recoveryTaskTokensBySessionId[sessionID] == taskToken {
+                            logCancellation(sessionID, attempt + 1)
+                        }
+                        return
+                    }
                 }
+                guard self.recoveryTaskTokensBySessionId[sessionID] == taskToken else { return }
                 do {
                     try await ensureConnected(sessionID)
+                    try Task.checkCancellation()
+                    guard self.recoveryTaskTokensBySessionId[sessionID] == taskToken else { return }
                     if currentShardKey() == sessionID {
                         setHealth(.healthy)
                     }
-                    self.recoveryTasksBySessionId.removeValue(forKey: sessionID)
                     return
                 } catch is CancellationError {
-                    self.recoveryTasksBySessionId.removeValue(forKey: sessionID)
-                    logCancellation(sessionID, attempt + 1)
+                    if self.recoveryTaskTokensBySessionId[sessionID] == taskToken {
+                        logCancellation(sessionID, attempt + 1)
+                    }
                     return
                 } catch {
+                    guard self.recoveryTaskTokensBySessionId[sessionID] == taskToken else { return }
                     logFailure(sessionID, attempt + 1, error)
                 }
             }
+            guard self.recoveryTaskTokensBySessionId[sessionID] == taskToken else { return }
             if tokenExpired, isHandshakeComplete(sessionID) {
                 setHealth(.degradedFatal)
             }
-            self.recoveryTasksBySessionId.removeValue(forKey: sessionID)
         }
+    }
+
+    private func finishRecoveryTask(sessionID: String, token: UUID) {
+        guard recoveryTaskTokensBySessionId[sessionID] == token else { return }
+        recoveryTasksBySessionId.removeValue(forKey: sessionID)
+        recoveryTaskTokensBySessionId.removeValue(forKey: sessionID)
     }
 
     func handleLifecycleEvent(

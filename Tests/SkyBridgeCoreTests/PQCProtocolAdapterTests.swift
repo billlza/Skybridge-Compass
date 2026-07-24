@@ -145,8 +145,8 @@ struct PQCDigitalSignatureTests {
         #expect(isValid == true)
     }
     
-    @Test("ML-DSA-87 primitive 不进入生产协议适配层", arguments: [16, 64, 256, 1024])
-    func testMLDSA87IsRejectedByProductionAdapter(dataSize: Int) async throws {
+    @Test("ML-DSA-65 兼容适配层不冒充 ML-DSA-87 主协议", arguments: [16, 64, 256, 1024])
+    func testLegacyMLDSA65AdapterRejectsMLDSA87(dataSize: Int) async throws {
         let adapter = try makePQCProtocolAdapterForTesting()
         try #require(
             adapter.isPQCAvailable,
@@ -160,7 +160,7 @@ struct PQCDigitalSignatureTests {
         
         do {
             _ = try await adapter.sign(data: data, peerId: peerId, variant: .mldsa87)
-            Issue.record("Production adapter must not dispatch ML-DSA-87 before the trust model binds it")
+            Issue.record("The legacy ML-DSA-65 adapter must not impersonate the active ML-DSA-87 identity path")
         } catch let error as PQCProtocolError {
             guard case .unsupportedSignatureVariant("ML-DSA-87") = error else {
                 Issue.record("Unexpected error: \(error)")

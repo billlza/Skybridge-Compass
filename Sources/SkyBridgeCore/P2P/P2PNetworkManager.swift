@@ -6,6 +6,82 @@ import os
 /// P2P网络管理器 - 统一管理设备发现、连接建立和状态监控
 @MainActor
 public class P2PNetworkManager: ObservableObject, Sendable {
+    private static let maximumConcurrentConnectionAttempts = 8
+    private static let maximumActiveConnections = 32
+    private final class ConnectionReadinessContext: @unchecked Sendable {
+        private struct State {
+            var didResume = false
+            var timeoutTask: Task<Void, Never>?
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State())
+        private let continuation: CheckedContinuation<Void, Error>
+
+        init(continuation: CheckedContinuation<Void, Error>) {
+            self.continuation = continuation
+        }
+
+        func installTimeoutTask(_ task: Task<Void, Never>) {
+            let shouldCancel = state.withLock { state -> Bool in
+                guard !state.didResume else { return true }
+                state.timeoutTask = task
+                return false
+            }
+            if shouldCancel {
+                task.cancel()
+            }
+        }
+
+        func complete(
+            _ result: Result<Void, Error>,
+            beforeResume: () -> Void = {}
+        ) {
+            let completion = state.withLock { state -> (Bool, Task<Void, Never>?) in
+                guard !state.didResume else { return (false, nil) }
+                state.didResume = true
+                defer { state.timeoutTask = nil }
+                return (true, state.timeoutTask)
+            }
+            guard completion.0 else { return }
+            completion.1?.cancel()
+            beforeResume()
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private final class ConnectionReadinessCancellationHandle: @unchecked Sendable {
+        private struct State {
+            var context: ConnectionReadinessContext?
+            var cancelled = false
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State())
+
+        func install(_ context: ConnectionReadinessContext) {
+            let wasCancelled = state.withLock { state -> Bool in
+                state.context = context
+                return state.cancelled
+            }
+            if wasCancelled {
+                context.complete(.failure(CancellationError()))
+            }
+        }
+
+        func cancel(connection: NWConnection) {
+            let context = state.withLock { state -> ConnectionReadinessContext? in
+                state.cancelled = true
+                return state.context
+            }
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+            context?.complete(.failure(CancellationError()))
+        }
+    }
     
  // MARK: - 单例
     
@@ -31,6 +107,9 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
     private let discoveryService: P2PDiscoveryService
     private var p2pNetworkCancellables = Set<AnyCancellable>()
+    private var connectionStatusSubscriptions: [ObjectIdentifier: AnyCancellable] = [:]
+    private var connectionAttempts: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    private var wifiAwareStartTask: Task<Void, Never>?
     private var discoveryTimer: Timer?
     private var qualityMonitorTimer: Timer?
     
@@ -61,6 +140,15 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         
  // 停止设备发现
         stopDiscovery()
+
+        wifiAwareStartTask?.cancel()
+        wifiAwareStartTask = nil
+        let attempts = Array(connectionAttempts.values)
+        connectionAttempts.removeAll()
+        attempts.forEach { $0.task.cancel() }
+        for attempt in attempts {
+            await attempt.task.value
+        }
         
  // 断开所有连接
         for deviceId in Array(activeConnections.keys) {
@@ -80,6 +168,8 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         
  // 清理订阅
         p2pNetworkCancellables.removeAll()
+        connectionStatusSubscriptions.values.forEach { $0.cancel() }
+        connectionStatusSubscriptions.removeAll()
         
  // 清理数据
         discoveredDevices.removeAll()
@@ -95,14 +185,22 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         
         networkState = .discovering
         #if canImport(WiFiAware)
-        Task {
-            try? await P2PConnectionService.shared.start(role: .publisher)
+        wifiAwareStartTask?.cancel()
+        wifiAwareStartTask = Task { @MainActor in
+            do {
+                try await P2PConnectionService.shared.start(role: .publisher)
+            } catch is CancellationError {
+                return
+            } catch {
+                SkyBridgeLogger.p2p.error("Wi-Fi Aware publisher start failed: \(error.localizedDescription, privacy: .private)")
+            }
         }
         #endif
         
         discoveryService.startScanning()
         
  // 监听发现的设备
+        p2pNetworkCancellables.removeAll()
         discoveryService.$p2pDevices
             .receive(on: DispatchQueue.main)
             .sink { [weak self] devices in
@@ -155,6 +253,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  /// 停止设备发现
     public func stopDiscovery() {
         discoveryService.stopScanning()
+        p2pNetworkCancellables.removeAll()
         stopDiscoveryTimer()
         networkState = .disconnected
     }
@@ -174,33 +273,81 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     public func connectToDevice(_ device: P2PDevice,
                                connectionEstablished: @escaping () -> Void,
                                connectionFailed: @escaping (Error) -> Void) {
+        guard isStarted else {
+            connectionFailed(P2PConnectionError.disconnected)
+            return
+        }
+        guard activeConnections[device.deviceId] != nil
+                || activeConnections.count < Self.maximumActiveConnections else {
+            connectionFailed(
+                P2PConnectionError.capacityExceeded(
+                    resource: "active connections",
+                    limit: Self.maximumActiveConnections
+                )
+            )
+            return
+        }
+        guard connectionAttempts[device.deviceId] != nil
+                || connectionAttempts.count < Self.maximumConcurrentConnectionAttempts else {
+            connectionFailed(
+                P2PConnectionError.capacityExceeded(
+                    resource: "connection attempts",
+                    limit: Self.maximumConcurrentConnectionAttempts
+                )
+            )
+            return
+        }
         SkyBridgeLogger.p2p.debugOnly("🔗 尝试连接到设备: \(device.name)")
         
         networkState = .connecting
         
         let deviceCopy = device
-        Task { @MainActor in
+        let attemptID = UUID()
+        connectionAttempts[deviceCopy.deviceId]?.task.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var attemptedConnection: P2PConnection?
             do {
                 let connection = try await establishConnection(to: deviceCopy)
+                attemptedConnection = connection
+                try await connection.authenticate()
+                try Task.checkCancellation()
+                guard self.connectionAttempts[deviceCopy.deviceId]?.id == attemptID,
+                      self.isStarted else {
+                    connection.disconnect()
+                    return
+                }
                 self.activeConnections[deviceCopy.deviceId] = connection
                 self.monitorConnection(connection)
                 self.addToHistory(deviceCopy)
-
-                try await connection.authenticate()
                 self.networkState = .connected
+                self.connectionAttempts.removeValue(forKey: deviceCopy.deviceId)
                 connectionEstablished()
             } catch {
-                self.activeConnections.removeValue(forKey: deviceCopy.deviceId)
-                if self.activeConnections.isEmpty {
-                    self.networkState = .disconnected
+                if let attemptedConnection {
+                    attemptedConnection.disconnect()
+                    self.removeActiveConnection(attemptedConnection)
                 }
-                connectionFailed(error)
+                let isCurrentAttempt = self.connectionAttempts[deviceCopy.deviceId]?.id == attemptID
+                if isCurrentAttempt {
+                    self.connectionAttempts.removeValue(forKey: deviceCopy.deviceId)
+                }
+                if self.activeConnections.isEmpty && self.connectionAttempts.isEmpty {
+                    self.networkState = .disconnected
+                } else if !self.activeConnections.isEmpty {
+                    self.networkState = .connected
+                }
+                if isCurrentAttempt, !(error is CancellationError) {
+                    connectionFailed(error)
+                }
             }
         }
+        connectionAttempts[deviceCopy.deviceId] = (attemptID, task)
     }
     
- /// 断开设备连接
+    /// 断开设备连接
     public func disconnectFromDevice(_ deviceId: String) {
+        connectionAttempts.removeValue(forKey: deviceId)?.task.cancel()
         guard let connection = activeConnections[deviceId]
                 ?? activeConnections.first(where: { entry in
                     let key = entry.key
@@ -210,7 +357,12 @@ public class P2PNetworkManager: ObservableObject, Sendable {
                         PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
                     )
                     return key == deviceId || !targetAliases.isDisjoint(with: connectionAliases)
-                })?.value else { return }
+                })?.value else {
+            if activeConnections.isEmpty && connectionAttempts.isEmpty {
+                networkState = .disconnected
+            }
+            return
+        }
         
  // 关闭连接
         connection.disconnect()
@@ -252,77 +404,71 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     }
 
     private func waitUntilReady(_ connection: NWConnection, updating p2p: P2PConnection, timeoutSeconds: Double) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let resumed = OSAllocatedUnfairLock(initialState: false)
+        let cancellationHandle = ConnectionReadinessCancellationHandle()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let context = ConnectionReadinessContext(continuation: continuation)
+                cancellationHandle.install(context)
 
-            connection.stateUpdateHandler = { state in
-                Task { @MainActor in
-                    switch state {
-                    case .ready:
-                        p2p.markConnectedAndStartReceiving()
-                        let shouldResume = resumed.withLock { hasResumed in
-                            if !hasResumed {
-                                hasResumed = true
-                                return true
+                connection.stateUpdateHandler = { [weak connection, weak p2p] state in
+                    guard let connection else {
+                        context.complete(.failure(P2PConnectionError.disconnected))
+                        return
+                    }
+                    Task { @MainActor [weak connection, weak p2p] in
+                        guard let connection else {
+                            context.complete(.failure(P2PConnectionError.disconnected))
+                            return
+                        }
+                        switch state {
+                        case .ready:
+                            connection.stateUpdateHandler = nil
+                            context.complete(.success(())) {
+                                p2p?.markConnectedAndStartReceiving()
                             }
-                            return false
-                        }
-                        if shouldResume {
-                            continuation.resume()
-                        }
 
-                    case .failed(let error):
-                        p2p.disconnect()
-                        let shouldResume = resumed.withLock { hasResumed in
-                            if !hasResumed {
-                                hasResumed = true
-                                return true
-                            }
-                            return false
-                        }
-                        if shouldResume {
-                            continuation.resume(throwing: error)
-                        }
+                        case .failed(let error):
+                            connection.stateUpdateHandler = nil
+                            p2p?.disconnect()
+                            context.complete(.failure(error))
 
-                    case .cancelled:
-                        p2p.disconnect()
-                        let shouldResume = resumed.withLock { hasResumed in
-                            if !hasResumed {
-                                hasResumed = true
-                                return true
-                            }
-                            return false
-                        }
-                        if shouldResume {
-                            continuation.resume(throwing: P2PConnectionError.disconnected)
-                        }
+                        case .cancelled:
+                            connection.stateUpdateHandler = nil
+                            p2p?.disconnect()
+                            context.complete(.failure(P2PConnectionError.disconnected))
 
-                    default:
-                        break
+                        default:
+                            break
+                        }
                     }
                 }
-            }
 
-            let queue = DispatchQueue(label: "com.skybridge.p2p.networkmanager.connection", qos: .userInitiated)
-            connection.start(queue: queue)
-
-            Task.detached {
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                let shouldTimeout = resumed.withLock { hasResumed in
-                    if !hasResumed && connection.state != .ready && connection.state != .cancelled {
-                        hasResumed = true
-                        return true
-                    }
-                    return false
-                }
-                if shouldTimeout {
+                guard !Task.isCancelled else {
                     connection.stateUpdateHandler = nil
                     connection.cancel()
-                    await MainActor.run {
-                        continuation.resume(throwing: P2PConnectionError.disconnected)
+                    context.complete(.failure(CancellationError()))
+                    return
+                }
+
+                let queue = DispatchQueue(label: "com.skybridge.p2p.networkmanager.connection", qos: .userInitiated)
+                connection.start(queue: queue)
+
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: .seconds(timeoutSeconds))
+                    } catch {
+                        return
+                    }
+                    if connection.state != .ready && connection.state != .cancelled {
+                        connection.stateUpdateHandler = nil
+                        connection.cancel()
+                        context.complete(.failure(P2PConnectionError.disconnected))
                     }
                 }
+                context.installTimeoutTask(timeoutTask)
             }
+        } onCancel: {
+            cancellationHandle.cancel(connection: connection)
         }
     }
     
@@ -437,15 +583,20 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
     private func monitorConnection(_ connection: P2PConnection) {
  // 监听连接状态变化
-        connection.$status
+        let identifier = ObjectIdentifier(connection)
+        connectionStatusSubscriptions[identifier]?.cancel()
+        connectionStatusSubscriptions[identifier] = connection.$status
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.handleConnectionStatusChange(connection, status: status)
             }
-            .store(in: &p2pNetworkCancellables)
     }
     
     private func handleConnectionStatusChange(_ connection: P2PConnection, status: P2PConnectionStatus) {
+        guard activeConnections.values.contains(where: { $0 === connection }) else {
+            connectionStatusSubscriptions.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
+            return
+        }
         switch status {
         case .connected, .authenticated:
             networkState = .connected
@@ -464,20 +615,14 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     }
 
     private func removeActiveConnection(_ connection: P2PConnection, additionalKeys: [String] = []) {
-        let aliases = Set(
-            additionalKeys.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
-                + PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
-                + PeerTrustLookup.lookupCandidates(for: connection.device.address)
-        )
+        _ = additionalKeys
         for key in Array(activeConnections.keys) {
             guard let stored = activeConnections[key] else { continue }
-            let keyAliases = Set(PeerTrustLookup.lookupCandidates(for: key))
-            if stored === connection ||
-                additionalKeys.contains(key) ||
-                !keyAliases.isDisjoint(with: aliases) {
+            if stored === connection {
                 activeConnections.removeValue(forKey: key)
             }
         }
+        connectionStatusSubscriptions.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
     }
     
     private func addToHistory(_ device: P2PDevice) {
@@ -531,7 +676,7 @@ extension P2PNetworkManager {
 
 // MARK: - 模拟数据扩展
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension P2PNetworkManager {
     
  /// 添加模拟设备用于测试

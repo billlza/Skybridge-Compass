@@ -309,15 +309,17 @@ public class QuantumSecureP2PNetwork: BaseManager {
  // 使用增强版加密（AES-GCM）
         let encrypted = try await postQuantumCrypto.encrypt(message, using: encryptionKey)
 
- // 签名加密数据
-        let signature = try await postQuantumCrypto.signPQCRequired(encrypted.combined, for: peerId)
+ // 签名加密数据，并把实际 committed 算法与签名作为一个不可分割的快照传输。
+        let requiredSignature = try await postQuantumCrypto
+            .signPQCRequiredWithAlgorithm(encrypted.combined, for: peerId)
 
  // 创建安全数据包
         let securePacket = SecurePacket(
             type: .message,
             data: encrypted.combined,
             timestamp: Date().timeIntervalSince1970,
-            signature: signature
+            signature: requiredSignature.bytes,
+            signatureAlgorithm: requiredSignature.algorithm
         )
 
         let packetData = try JSONEncoder().encode(securePacket)
@@ -464,7 +466,10 @@ public class QuantumSecureP2PNetwork: BaseManager {
                     logger.error("❌ 用户消息缺少 Strict-PQC 签名: \(Self.redactedPeerLabel(peerId))")
                     return
                 }
-                let signatureAlgorithm = SettingsManager.shared.pqcSignatureAlgorithm
+                guard let signatureAlgorithm = packet.signatureAlgorithm else {
+                    logger.error("❌ 用户消息缺少 Strict-PQC 签名算法: \(Self.redactedPeerLabel(peerId))")
+                    return
+                }
                 let isValid = try await postQuantumCrypto.verifyPQCRequired(
                     packet.data,
                     signature: packet.signature,
@@ -745,6 +750,21 @@ private struct SecurePacket: Codable {
     let data: Data
     let timestamp: TimeInterval
     let signature: Data
+    let signatureAlgorithm: String?
+
+    init(
+        type: PacketType,
+        data: Data,
+        timestamp: TimeInterval,
+        signature: Data,
+        signatureAlgorithm: String? = nil
+    ) {
+        self.type = type
+        self.data = data
+        self.timestamp = timestamp
+        self.signature = signature
+        self.signatureAlgorithm = signatureAlgorithm
+    }
 
     enum PacketType: String, Codable {
         case message

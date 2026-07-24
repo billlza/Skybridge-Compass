@@ -18,9 +18,16 @@ private enum CurrentPathActivationError: LocalizedError {
 final class CurrentPathDeviceActivationCoordinator {
     static let shared = CurrentPathDeviceActivationCoordinator()
 
+    private struct SyncKey: Hashable {
+        let tenantID: String
+        let userID: String
+        let deviceID: String
+        let protocolPublicKeyFingerprint: String
+    }
+
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CurrentPathActivation")
-    private var lastSuccessfulSyncKey: String?
-    private var activeSyncKey: String?
+    private var lastSuccessfulSyncKey: SyncKey?
+    private var activeSyncKey: SyncKey?
 
     private init() {}
 
@@ -33,6 +40,15 @@ final class CurrentPathDeviceActivationCoordinator {
             return
         }
 
+        do {
+            _ = try await CurrentPathAuthorityReadinessGate.shared.ensureReady()
+        } catch {
+            logger.error(
+                "❌ current-path activation blocked by pending identity rotation recovery: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+
         let binding: ProtocolIdentityBinding
         do {
             binding = try await Self.currentPathLocalBinding()
@@ -41,27 +57,24 @@ final class CurrentPathDeviceActivationCoordinator {
             return
         }
 
-        let accessToken: String
+        let authenticatedClient: (
+            client: SignalServerClient,
+            authenticationScope: SignalServerClient.IdentityRotationAuthenticationScope
+        )
         do {
-            accessToken = try await AuthenticationService.shared.validAccessToken(forceRefresh: false)
-                ?? session.accessToken
+            authenticatedClient = try await CrossNetworkConnectionManager
+                .makeAuthenticatedSignalServerClientSnapshot()
         } catch {
-            logger.error("❌ current-path activation skipped: token refresh failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("❌ current-path activation skipped: authenticated scope unavailable: \(error.localizedDescription, privacy: .public)")
             return
         }
 
-        let tenantID = Self.deriveTenantIdentifier(accessToken: accessToken)
-        guard !tenantID.isEmpty else {
-            logger.error("❌ current-path activation skipped: tenant id missing")
-            return
-        }
-
-        let syncKey = [
-            tenantID,
-            session.userIdentifier,
-            binding.deviceId,
-            binding.protocolPublicKeyFingerprint
-        ].joined(separator: "|")
+        let syncKey = SyncKey(
+            tenantID: authenticatedClient.authenticationScope.tenantID,
+            userID: authenticatedClient.authenticationScope.userID,
+            deviceID: binding.deviceId,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+        )
         if lastSuccessfulSyncKey == syncKey || activeSyncKey == syncKey {
             return
         }
@@ -73,19 +86,11 @@ final class CurrentPathDeviceActivationCoordinator {
             }
         }
 
-        let clientVersion = Self.resolvedClientVersion()
-        let protocolVersion = Self.resolvedProtocolVersion()
-        let client = SignalServerClient(
-            bearerTokenProvider: { accessToken },
-            tenantIDProvider: { tenantID },
-            clientVersionProvider: { clientVersion },
-            protocolVersionProvider: { protocolVersion }
-        )
-
         do {
-            let registered = try await client.registerCurrentDevice(
+            let registered = try await authenticatedClient.client.registerCurrentDevice(
                 binding: binding,
-                deviceName: Host.current().localizedName ?? "Mac"
+                deviceName: Host.current().localizedName ?? "Mac",
+                expectedScope: authenticatedClient.authenticationScope
             )
             lastSuccessfulSyncKey = syncKey
             logger.info(
@@ -97,83 +102,21 @@ final class CurrentPathDeviceActivationCoordinator {
     }
 
     private static func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
-        let algorithm: ProtocolSigningAlgorithm = .ed25519
-        let deviceID = try await DeviceIdentityKeyManager.shared.getDeviceId()
+        let identity = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
+        let deviceID = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            .deviceId
         guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CurrentPathActivationError.identityNotProvisioned("deviceId")
         }
-        let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
-        guard !publicKey.isEmpty else {
+        guard !identity.publicKey.isEmpty else {
             throw CurrentPathActivationError.identityNotProvisioned("协议签名公钥")
         }
         return try ProtocolIdentityBinding(
             deviceId: deviceID,
-            protocolSigningAlgorithm: algorithm,
-            protocolPublicKeyBytes: publicKey
+            protocolSigningAlgorithm: identity.algorithm,
+            protocolPublicKeyBytes: identity.publicKey
         )
     }
 
-    private static func deriveTenantIdentifier(accessToken: String?) -> String {
-        let explicit = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !explicit.isEmpty { return explicit }
-        guard let accessToken, !accessToken.isEmpty else { return "" }
-        guard let payload = accessToken.split(separator: ".").dropFirst().first else { return "" }
-        var base64 = payload.replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let remainder = base64.count % 4
-        if remainder != 0 {
-            base64.append(String(repeating: "=", count: 4 - remainder))
-        }
-        guard let data = Data(base64Encoded: base64),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return ""
-        }
-        let appMetadata = object["app_metadata"] as? [String: Any]
-        let userMetadata = object["user_metadata"] as? [String: Any]
-        let candidates: [Any?] = [
-            appMetadata?["tenant_id"],
-            appMetadata?["tenantId"],
-            appMetadata?["org_id"],
-            appMetadata?["workspace_id"],
-            userMetadata?["tenant_id"],
-            userMetadata?["tenantId"],
-            userMetadata?["org_id"],
-            userMetadata?["workspace_id"],
-            object["tenant_id"],
-            object["tenantId"],
-            object["sub"]
-        ]
-        for candidate in candidates {
-            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty, value != "nil" {
-                return value
-            }
-        }
-        return ""
-    }
-
-    private static func resolvedClientVersion() -> String {
-        if let value = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !value.isEmpty {
-            return value
-        }
-        if let value = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
-            }
-        }
-        return "0.0.0"
-    }
-
-    private static func resolvedProtocolVersion() -> String {
-        if let value = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !value.isEmpty {
-            return value
-        }
-        return "1"
-    }
 }

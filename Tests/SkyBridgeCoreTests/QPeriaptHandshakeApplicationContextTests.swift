@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import SkyBridgeCore
@@ -37,6 +38,16 @@ final class QPeriaptHandshakeApplicationContextTests: XCTestCase {
         XCTAssertFalse(first.isEmpty)
         XCTAssertEqual(first, second)
         XCTAssertLessThanOrEqual(first.count, QPeriaptNativeAdapter.maximumApplicationContextLength)
+    }
+
+    func testContextMatchesCrossPlatformGoldenDigest() throws {
+        let digest = SHA256.hash(data: try makeContext())
+            .map { String(format: "%02x", $0) }
+            .joined()
+        XCTAssertEqual(
+            digest,
+            "9cdf97efe7d030b4f96cbbbd01f4f7681a3b2991e00159c361105a61948cc14f"
+        )
     }
 
     func testEverySecurityRelevantInputChangesContext() throws {
@@ -109,6 +120,20 @@ final class QPeriaptHandshakeApplicationContextTests: XCTestCase {
         ) { error in
             guard case CryptoProviderError.operationFailed(let reason) = error else {
                 return XCTFail("unexpected duplicate-offer error: \(error)")
+            }
+            XCTAssertTrue(reason.contains("non-canonical suite offer"))
+        }
+        XCTAssertThrowsError(
+            try makeContext(offeredSuites: [
+                .qperiaptABI2PolicyBound,
+                CryptoSuite(
+                    rawValue: "Q-Periapt-ABI2-PolicyBound-Alias",
+                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
+                )
+            ])
+        ) { error in
+            guard case CryptoProviderError.operationFailed(let reason) = error else {
+                return XCTFail("unexpected duplicate-wire offer error: \(error)")
             }
             XCTAssertTrue(reason.contains("non-canonical suite offer"))
         }

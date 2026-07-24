@@ -1,0 +1,262 @@
+name: real-device-release-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_root:
+        description: "Absolute path on the protected physical-device runner containing the seven completed public-redacted evidence directories"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-device-release-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish-evidence:
+    runs-on: [self-hosted, macOS, skybridge-real-device-release]
+    environment: release-real-device-evidence
+    timeout-minutes: 45
+    env:
+      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}
+      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Require Exact Clean Producer Source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]] || {
+            echo "::error::Producer checkout does not match the workflow head SHA."
+            exit 1
+          }
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
+            echo "::error::Producer checkout must be clean before evidence attestation."
+            exit 1
+          }
+
+      - name: Self-Test Release Evidence Contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 Scripts/test_verify_ios_distribution_product.py
+          python3 Scripts/test_validate_real_device_release_acceptance_artifact.py
+          python3 Scripts/test_finalize_release_acceptance_manifests.py
+          python3 Scripts/test_stage_real_device_release_evidence.py
+          python3 Scripts/test_real_device_release_workflow_contract.py
+
+      - name: Validate and Stage Physical-Device Evidence
+        shell: bash
+        env:
+          EVIDENCE_ROOT: ${{ inputs.evidence_root }}
+        run: |
+          set -euo pipefail
+          [[ "$EVIDENCE_ROOT" == /* ]] || {
+            echo "::error::evidence_root must be absolute."
+            exit 1
+          }
+          [[ -d "$EVIDENCE_ROOT" && ! -L "$EVIDENCE_ROOT" ]] || {
+            echo "::error::evidence_root must be a real directory on the protected runner."
+            exit 1
+          }
+          if find "$EVIDENCE_ROOT" ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::Evidence root contains a symbolic link or special file."
+            exit 1
+          fi
+
+          evidence_specs=(
+            "real-device-connectivity-matrix-public-redacted|connectivity"
+            "real-device-p2p-remote-smoke-public-redacted|p2p-remote"
+            "real-device-webrtc-smoke-public-redacted|webrtc-remote"
+            "real-device-file-transfer-smoke-public-redacted|file-transfer"
+            "real-device-p2p-security-notice-public-redacted|p2p-notice"
+            "local-webrtc-security-notice-public-redacted|webrtc-notice"
+            "local-macos-security-notice-panel-public-redacted|notice-panel"
+          )
+
+          staging="$RUNNER_TEMP/skybridge-release-evidence"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          source Scripts/real_device_smoke_redaction.sh
+          for evidence_spec in "${evidence_specs[@]}"; do
+            evidence_name="${evidence_spec%%|*}"
+            evidence_kind="${evidence_spec#*|}"
+            source_path="$EVIDENCE_ROOT/$evidence_name"
+            [[ -d "$source_path" && ! -L "$source_path" ]] || {
+              echo "::error::Missing release evidence directory: $evidence_name"
+              exit 1
+            }
+            python3 Scripts/stage_real_device_release_evidence.py \
+              --kind "$evidence_kind" \
+              --source "$source_path" \
+              --destination "$staging/$evidence_name"
+            python3 Scripts/stage_real_device_release_evidence.py \
+              --kind "$evidence_kind" \
+              --verify "$staging/$evidence_name"
+            skybridge_smoke_check_public_artifacts "$staging/$evidence_name"
+          done
+
+          for evidence_name in \
+            real-device-connectivity-matrix-public-redacted \
+            real-device-p2p-remote-smoke-public-redacted \
+            real-device-webrtc-smoke-public-redacted \
+            real-device-file-transfer-smoke-public-redacted \
+            real-device-p2p-security-notice-public-redacted; do
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind production-identity \
+              --artifact-dir "$staging/$evidence_name" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA"
+          done
+          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+            --kind p2p \
+            --artifact-dir "$staging/real-device-p2p-remote-smoke-public-redacted" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-sha "$GITHUB_SHA"
+          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+            --kind webrtc \
+            --artifact-dir "$staging/real-device-webrtc-smoke-public-redacted" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-sha "$GITHUB_SHA"
+
+      - name: Create Mode-Preserving Evidence Archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_names=(
+            "real-device-connectivity-matrix-public-redacted"
+            "real-device-p2p-remote-smoke-public-redacted"
+            "real-device-webrtc-smoke-public-redacted"
+            "real-device-file-transfer-smoke-public-redacted"
+            "real-device-p2p-security-notice-public-redacted"
+            "local-webrtc-security-notice-public-redacted"
+            "local-macos-security-notice-panel-public-redacted"
+          )
+          staging="$RUNNER_TEMP/skybridge-release-evidence"
+          archive_root="$RUNNER_TEMP/skybridge-release-evidence-archives"
+          archive_verification_root="$RUNNER_TEMP/skybridge-release-evidence-archive-verification"
+          rm -rf "$archive_root"
+          rm -rf "$archive_verification_root"
+          mkdir -p "$archive_root"
+          mkdir -p "$archive_verification_root"
+          for evidence_name in "${evidence_names[@]}"; do
+            archive_path="$archive_root/$evidence_name.tar.gz"
+            verification_path="$archive_verification_root/$evidence_name"
+            COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$staging/$evidence_name" .
+            [[ -s "$archive_path" ]] || {
+              echo "::error::Evidence archive is empty: $evidence_name"
+              exit 1
+            }
+            tar -tzf "$archive_path" >/dev/null
+            python3 Scripts/extract_real_device_release_evidence_archive.py \
+              --archive "$archive_path" \
+              --destination "$verification_path"
+          done
+
+          evidence_specs=(
+            "real-device-connectivity-matrix-public-redacted|connectivity"
+            "real-device-p2p-remote-smoke-public-redacted|p2p-remote"
+            "real-device-webrtc-smoke-public-redacted|webrtc-remote"
+            "real-device-file-transfer-smoke-public-redacted|file-transfer"
+            "real-device-p2p-security-notice-public-redacted|p2p-notice"
+            "local-webrtc-security-notice-public-redacted|webrtc-notice"
+            "local-macos-security-notice-panel-public-redacted|notice-panel"
+          )
+          source Scripts/real_device_smoke_redaction.sh
+          for evidence_spec in "${evidence_specs[@]}"; do
+            evidence_name="${evidence_spec%%|*}"
+            evidence_kind="${evidence_spec#*|}"
+            verification_path="$archive_verification_root/$evidence_name"
+            python3 Scripts/stage_real_device_release_evidence.py \
+              --kind "$evidence_kind" \
+              --verify "$verification_path"
+            skybridge_smoke_check_public_artifacts "$verification_path"
+          done
+
+          # Validate the exact bytes that will be uploaded, not only the
+          # mutable staging directories from which the archives were created.
+          for evidence_name in \
+            real-device-connectivity-matrix-public-redacted \
+            real-device-p2p-remote-smoke-public-redacted \
+            real-device-webrtc-smoke-public-redacted \
+            real-device-file-transfer-smoke-public-redacted \
+            real-device-p2p-security-notice-public-redacted; do
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind production-identity \
+              --artifact-dir "$archive_verification_root/$evidence_name" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA"
+          done
+          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+            --kind p2p \
+            --artifact-dir "$archive_verification_root/real-device-p2p-remote-smoke-public-redacted" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-sha "$GITHUB_SHA"
+          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+            --kind webrtc \
+            --artifact-dir "$archive_verification_root/real-device-webrtc-smoke-public-redacted" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-sha "$GITHUB_SHA"
+
+      - name: Upload Connectivity Matrix Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-device-connectivity-matrix-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-connectivity-matrix-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload P2P Remote Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-device-p2p-remote-smoke-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-remote-smoke-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload WebRTC Remote Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-device-webrtc-smoke-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-webrtc-smoke-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload File Transfer Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-device-file-transfer-smoke-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-file-transfer-smoke-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload P2P Notice Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-device-p2p-security-notice-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-security-notice-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload WebRTC Notice Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-webrtc-security-notice-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-webrtc-security-notice-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS Notice Panel Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-macos-security-notice-panel-public-redacted
+          path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-macos-security-notice-panel-public-redacted.tar.gz
+          if-no-files-found: error
+          retention-days: 30

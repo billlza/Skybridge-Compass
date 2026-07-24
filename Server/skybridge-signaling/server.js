@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
-const { spawn, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 const express = require('express');
 const { Webhook } = require('standardwebhooks');
@@ -22,6 +22,31 @@ const {
   extractWebSocketSessionCredentials
 } = require('./lib/websocket_credentials');
 const packageInfo = require('./package.json');
+
+const MINIMUM_NODE_RUNTIME = Object.freeze({ major: 24, minor: 6, patch: 0 });
+
+function assertSupportedNodeRuntime(version = process.versions.node) {
+  const components = String(version || '').split('.').map((component) => Number(component));
+  const [major, minor, patch] = components;
+  const supported = Number.isInteger(major)
+    && Number.isInteger(minor)
+    && Number.isInteger(patch)
+    && (
+      major > MINIMUM_NODE_RUNTIME.major
+      || (
+        major === MINIMUM_NODE_RUNTIME.major
+        && (
+          minor > MINIMUM_NODE_RUNTIME.minor
+          || (minor === MINIMUM_NODE_RUNTIME.minor && patch >= MINIMUM_NODE_RUNTIME.patch)
+        )
+      )
+    );
+  if (!supported) {
+    throw new Error('unsupported_node_runtime_requires_24_6_0');
+  }
+}
+
+assertSupportedNodeRuntime();
 
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -101,6 +126,36 @@ const WEBRTC_ACTIVE_SESSION_TTL_MS = Number(process.env.WEBRTC_ACTIVE_SESSION_TT
 
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 90_000);
 const ADMISSION_TOKEN_TTL_MS = Number(process.env.ADMISSION_TOKEN_TTL_MS || 120_000);
+const IDENTITY_ROTATION_CHALLENGE_TTL_MS = Number(
+  process.env.IDENTITY_ROTATION_CHALLENGE_TTL_MS || 2 * 60_000
+);
+const IDENTITY_ROTATION_GRACE_TTL_MS = Number(
+  process.env.IDENTITY_ROTATION_GRACE_TTL_MS || 24 * 60 * 60_000
+);
+const MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS = Number(
+  process.env.MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS || 8
+);
+if (
+  !Number.isSafeInteger(IDENTITY_ROTATION_CHALLENGE_TTL_MS)
+  || IDENTITY_ROTATION_CHALLENGE_TTL_MS < 30_000
+  || IDENTITY_ROTATION_CHALLENGE_TTL_MS > 10 * 60_000
+) {
+  throw new Error('invalid_identity_rotation_challenge_ttl');
+}
+if (
+  !Number.isSafeInteger(IDENTITY_ROTATION_GRACE_TTL_MS)
+  || IDENTITY_ROTATION_GRACE_TTL_MS < 60_000
+  || IDENTITY_ROTATION_GRACE_TTL_MS > 7 * 24 * 60 * 60_000
+) {
+  throw new Error('invalid_identity_rotation_grace_ttl');
+}
+if (
+  !Number.isSafeInteger(MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS)
+  || MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS < 2
+  || MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS > 32
+) {
+  throw new Error('invalid_identity_rotation_commit_proof_attempt_limit');
+}
 // 设备在线状态（presence）TTL：心跳每 ~30s 写一次；超时未续即视为离线（缺键 == 离线）。
 const PRESENCE_TTL_MS = Number(process.env.SIGNALING_PRESENCE_TTL_MS || 90_000);
 const TURN_ADMISSION_TOKEN_TTL_MS = Number(process.env.TURN_ADMISSION_TOKEN_TTL_MS || 60_000);
@@ -243,12 +298,32 @@ const ENV_ALLOWLIST_ONLY = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_ALLOWL
 
 const STRICT_DEVICE_ID_RE = /^[A-Za-z0-9._:-]{16,128}$/;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/;
-const ALLOWED_PROTOCOL_SIGNING_ALGORITHMS = new Set(['Ed25519', 'ML-DSA-65']);
-const MLDSA65_PUBLIC_KEY_BYTES = 1952;
-const MLDSA65_OID_DER = Buffer.from('608648016503040312', 'hex');
-const MLDSA_VERIFY_HELPER = String(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER || '').trim();
-const MLDSA_VERIFY_HELPER_TIMEOUT_MS = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_TIMEOUT_MS || 2000);
-const MLDSA_VERIFY_HELPER_MAX_CONCURRENT = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_MAX_CONCURRENT || 4);
+const ROTATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CANONICAL_NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
+const CANONICAL_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const IDENTITY_ROTATION_TRANSCRIPT_DOMAIN = Buffer.from('SkyBridge.DeviceIdentityRotation', 'utf8');
+const IDENTITY_ROTATION_TRANSCRIPT_VERSION = 1;
+const PROTOCOL_SIGNING_PROFILES = new Map([
+  ['Ed25519', Object.freeze({
+    publicKeyBytes: 32,
+    signatureBytes: 64,
+    nodeKeyType: 'ed25519',
+    oidDer: null
+  })],
+  ['ML-DSA-65', Object.freeze({
+    publicKeyBytes: 1952,
+    signatureBytes: 3309,
+    nodeKeyType: 'ml-dsa-65',
+    oidDer: Buffer.from('608648016503040312', 'hex')
+  })],
+  ['ML-DSA-87', Object.freeze({
+    publicKeyBytes: 2592,
+    signatureBytes: 4627,
+    nodeKeyType: 'ml-dsa-87',
+    oidDer: Buffer.from('608648016503040313', 'hex')
+  })]
+]);
+const ALLOWED_PROTOCOL_SIGNING_ALGORITHMS = new Set(PROTOCOL_SIGNING_PROFILES.keys());
 const TRUSTED_PROXY_MTLS_VERIFY_HEADER = 'x-skybridge-mtls-client-verify';
 const TRUSTED_PROXY_MTLS_CERT_HEADER = 'x-skybridge-mtls-client-cert-pem';
 const TRUSTED_PROXY_MTLS_CERT_HEADER_MAX_BYTES = 16 * 1024;
@@ -613,12 +688,8 @@ function normalizeDeviceId(value) {
 }
 
 function normalizeProtocolSigningAlgorithm(raw) {
-  const value = String(raw || '').trim();
-  if (ALLOWED_PROTOCOL_SIGNING_ALGORITHMS.has(value)) return value;
-  const folded = value.toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (folded === 'ed25519') return 'Ed25519';
-  if (folded === 'mldsa65') return 'ML-DSA-65';
-  return '';
+  if (typeof raw !== 'string') return '';
+  return ALLOWED_PROTOCOL_SIGNING_ALGORITHMS.has(raw) ? raw : '';
 }
 
 function normalizeFingerprint(raw) {
@@ -626,8 +697,43 @@ function normalizeFingerprint(raw) {
   return FINGERPRINT_RE.test(value) ? value : '';
 }
 
+function computeProtocolIdentityFingerprint(algorithm, publicKeyBytes) {
+  const normalizedAlgorithm = normalizeProtocolSigningAlgorithm(algorithm);
+  const profile = PROTOCOL_SIGNING_PROFILES.get(normalizedAlgorithm);
+  if (
+    !profile
+    || !Buffer.isBuffer(publicKeyBytes)
+    || publicKeyBytes.length !== profile.publicKeyBytes
+  ) {
+    throw new TypeError('invalid_protocol_identity_fingerprint_input');
+  }
+
+  // This is the byte-for-byte ProtocolIdentityBinding contract used by the
+  // Swift clients: UInt16LE(tag length) || UTF-8 tag || UInt32LE(key length)
+  // || exact raw public key. Including the algorithm prevents cross-algorithm
+  // key-byte ambiguity and is part of the persisted trust identity.
+  const tagBytes = Buffer.from(normalizedAlgorithm, 'utf8');
+  const payload = Buffer.alloc(2 + tagBytes.length + 4 + publicKeyBytes.length);
+  let offset = 0;
+  payload.writeUInt16LE(tagBytes.length, offset);
+  offset += 2;
+  tagBytes.copy(payload, offset);
+  offset += tagBytes.length;
+  payload.writeUInt32LE(publicKeyBytes.length, offset);
+  offset += 4;
+  publicKeyBytes.copy(payload, offset);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
 function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
-  if (!raw || typeof raw !== 'object') return null;
+  if (!isPlainObject(raw)) return null;
+  if (
+    typeof raw.deviceId !== 'string'
+    || typeof raw.protocolSigningAlgorithm !== 'string'
+    || typeof raw.protocolPublicKeyFingerprint !== 'string'
+  ) {
+    return null;
+  }
   const deviceId = normalizeDeviceId(raw.deviceId);
   const protocolSigningAlgorithm = normalizeProtocolSigningAlgorithm(raw.protocolSigningAlgorithm);
   const protocolPublicKeyFingerprint = normalizeFingerprint(raw.protocolPublicKeyFingerprint);
@@ -640,7 +746,8 @@ function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
     protocolPublicKeyFingerprint
   };
   if (requirePublicKey) {
-    const publicKeyBytes = decodePublicKeyBytes(raw.protocolPublicKeyBytes);
+    const profile = PROTOCOL_SIGNING_PROFILES.get(protocolSigningAlgorithm);
+    const publicKeyBytes = decodeCanonicalBase64(raw.protocolPublicKeyBytes, profile?.publicKeyBytes);
     if (!publicKeyBytes) {
       return null;
     }
@@ -649,15 +756,248 @@ function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
   return binding;
 }
 
-function decodePublicKeyBytes(value) {
-  if (Buffer.isBuffer(value)) return value;
-  if (value instanceof Uint8Array) return Buffer.from(value);
-  if (typeof value !== 'string') return null;
-  try {
-    return Buffer.from(value, 'base64');
-  } catch (_) {
+function decodeCanonicalBase64(value, expectedByteLength) {
+  if (typeof value !== 'string' || !Number.isInteger(expectedByteLength) || expectedByteLength <= 0) {
     return null;
   }
+  const expectedEncodedLength = Math.ceil(expectedByteLength / 3) * 4;
+  if (value.length !== expectedEncodedLength || !CANONICAL_BASE64_RE.test(value)) {
+    return null;
+  }
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length !== expectedByteLength || decoded.toString('base64') !== value) {
+    return null;
+  }
+  return decoded;
+}
+
+function decodeCanonicalBase64Url(value, expectedByteLength) {
+  if (
+    typeof value !== 'string'
+    || !Number.isInteger(expectedByteLength)
+    || expectedByteLength <= 0
+    || !CANONICAL_NONCE_RE.test(value)
+  ) {
+    return null;
+  }
+  const decoded = Buffer.from(value, 'base64url');
+  if (decoded.length !== expectedByteLength || decoded.toString('base64url') !== value) {
+    return null;
+  }
+  return decoded;
+}
+
+function normalizeIdentityGeneration(value) {
+  if (typeof value === 'string' && !/^[1-9][0-9]*$/.test(value)) {
+    return null;
+  }
+  const generation = Number(value);
+  return Number.isSafeInteger(generation) && generation > 0 ? generation : null;
+}
+
+function encodeUInt16BE(value) {
+  const encoded = Buffer.alloc(2);
+  encoded.writeUInt16BE(value);
+  return encoded;
+}
+
+function encodeUInt32BE(value) {
+  const encoded = Buffer.alloc(4);
+  encoded.writeUInt32BE(value);
+  return encoded;
+}
+
+function encodeUInt64BE(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('invalid_identity_rotation_uint64');
+  }
+  const encoded = Buffer.alloc(8);
+  encoded.writeBigUInt64BE(BigInt(value));
+  return encoded;
+}
+
+function encodeLengthPrefixedField(value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
+  if (bytes.length > 0xffffffff) {
+    throw new TypeError('identity_rotation_field_too_large');
+  }
+  return Buffer.concat([encodeUInt32BE(bytes.length), bytes]);
+}
+
+function buildIdentityRotationTranscript({
+  rotationId,
+  nonce,
+  expiresAt,
+  tenantId,
+  userId,
+  deviceId,
+  oldGeneration,
+  oldBinding,
+  newBinding
+}) {
+  const normalizedRotationId = typeof rotationId === 'string' ? rotationId : '';
+  const nonceBytes = Buffer.isBuffer(nonce) ? nonce : decodeCanonicalBase64Url(nonce, 32);
+  const generation = normalizeIdentityGeneration(oldGeneration);
+  const normalizedDeviceId = normalizeDeviceId(deviceId);
+  const normalizedTenantId = typeof tenantId === 'string' ? tenantId : '';
+  const normalizedUserId = typeof userId === 'string' ? userId : '';
+  const oldProfile = PROTOCOL_SIGNING_PROFILES.get(oldBinding?.protocolSigningAlgorithm);
+  const newProfile = PROTOCOL_SIGNING_PROFILES.get(newBinding?.protocolSigningAlgorithm);
+  if (
+    !ROTATION_ID_RE.test(normalizedRotationId)
+    || !nonceBytes
+    || nonceBytes.length !== 32
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt <= 0
+    || !normalizedTenantId
+    || Buffer.byteLength(normalizedTenantId, 'utf8') > 256
+    || !normalizedUserId
+    || Buffer.byteLength(normalizedUserId, 'utf8') > 256
+    || !STRICT_DEVICE_ID_RE.test(normalizedDeviceId)
+    || generation == null
+    || !oldProfile
+    || !newProfile
+    || !FINGERPRINT_RE.test(oldBinding?.protocolPublicKeyFingerprint || '')
+    || !FINGERPRINT_RE.test(newBinding?.protocolPublicKeyFingerprint || '')
+    || !Buffer.isBuffer(oldBinding?.protocolPublicKeyBytes)
+    || oldBinding.protocolPublicKeyBytes.length !== oldProfile.publicKeyBytes
+    || !Buffer.isBuffer(newBinding?.protocolPublicKeyBytes)
+    || newBinding.protocolPublicKeyBytes.length !== newProfile.publicKeyBytes
+  ) {
+    throw new TypeError('invalid_identity_rotation_transcript_input');
+  }
+
+  const fields = [
+    Buffer.from(normalizedRotationId, 'utf8'),
+    nonceBytes,
+    encodeUInt64BE(expiresAt),
+    Buffer.from(normalizedTenantId, 'utf8'),
+    Buffer.from(normalizedUserId, 'utf8'),
+    Buffer.from(normalizedDeviceId, 'utf8'),
+    encodeUInt64BE(generation),
+    Buffer.from(oldBinding.protocolSigningAlgorithm, 'utf8'),
+    Buffer.from(oldBinding.protocolPublicKeyFingerprint, 'hex'),
+    oldBinding.protocolPublicKeyBytes,
+    Buffer.from(newBinding.protocolSigningAlgorithm, 'utf8'),
+    Buffer.from(newBinding.protocolPublicKeyFingerprint, 'hex'),
+    newBinding.protocolPublicKeyBytes
+  ];
+  return Buffer.concat([
+    encodeLengthPrefixedField(IDENTITY_ROTATION_TRANSCRIPT_DOMAIN),
+    encodeUInt16BE(IDENTITY_ROTATION_TRANSCRIPT_VERSION),
+    encodeUInt16BE(fields.length),
+    ...fields.map(encodeLengthPrefixedField)
+  ]);
+}
+
+function timestampMillis(value) {
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value !== 'string' || !value) return null;
+  const parsed = Date.parse(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isCanonicalIdentityBindingRequest(raw, binding, prefix = '') {
+  const field = (name) => prefix
+    ? `${prefix}${name[0].toUpperCase()}${name.slice(1)}`
+    : name;
+  return raw?.[field('protocolSigningAlgorithm')] === binding?.protocolSigningAlgorithm
+    && raw?.[field('protocolPublicKeyFingerprint')] === binding?.protocolPublicKeyFingerprint;
+}
+
+function normalizeStoredIdentityRotation(record) {
+  if (!isPlainObject(record)) return null;
+  const rotationId = typeof record.rotation_id === 'string' ? record.rotation_id : '';
+  const requestId = typeof record.request_id === 'string' ? record.request_id : '';
+  const tenantId = typeof record.tenant_id === 'string' ? record.tenant_id : '';
+  const userId = typeof record.user_id === 'string' ? record.user_id : '';
+  const deviceId = typeof record.device_id === 'string' ? record.device_id : '';
+  const nonce = typeof record.nonce === 'string' ? record.nonce : '';
+  const transcriptHash = typeof record.transcript_hash === 'string' ? record.transcript_hash : '';
+  const state = typeof record.state === 'string' ? record.state : '';
+  const issuedAt = timestampMillis(record.issued_at);
+  const expiresAt = timestampMillis(record.expires_at);
+  const oldGeneration = normalizeIdentityGeneration(record.old_generation);
+  const oldBinding = normalizeIdentityBinding({
+    deviceId,
+    protocolSigningAlgorithm: record.old_protocol_signing_algorithm,
+    protocolPublicKeyFingerprint: record.old_protocol_public_key_fingerprint,
+    protocolPublicKeyBytes: record.old_protocol_public_key_base64
+  }, { requirePublicKey: true });
+  const newBinding = normalizeIdentityBinding({
+    deviceId,
+    protocolSigningAlgorithm: record.new_protocol_signing_algorithm,
+    protocolPublicKeyFingerprint: record.new_protocol_public_key_fingerprint,
+    protocolPublicKeyBytes: record.new_protocol_public_key_base64
+  }, { requirePublicKey: true });
+  if (
+    !ROTATION_ID_RE.test(rotationId)
+    || !ROTATION_ID_RE.test(requestId)
+    || !tenantId
+    || !userId
+    || !oldBinding
+    || !newBinding
+    || !decodeCanonicalBase64Url(nonce, 32)
+    || !FINGERPRINT_RE.test(transcriptHash)
+    || !['issued', 'committed', 'expired', 'cancelled'].includes(state)
+    || issuedAt == null
+    || expiresAt == null
+    || oldGeneration == null
+  ) {
+    return null;
+  }
+  return {
+    rotationId,
+    requestId,
+    tenantId,
+    userId,
+    deviceId,
+    nonce,
+    transcriptHash,
+    state,
+    issuedAt,
+    expiresAt,
+    oldGeneration,
+    oldBinding,
+    newBinding
+  };
+}
+
+function identityRotationCommitResponse(result, rotation) {
+  if (!isPlainObject(result)) return null;
+  const rotationId = typeof result.rotation_id === 'string' ? result.rotation_id : '';
+  const state = typeof result.state === 'string' ? result.state : '';
+  const generation = normalizeIdentityGeneration(result.generation);
+  const committedAt = timestampMillis(result.committed_at);
+  const graceExpiresAt = timestampMillis(result.grace_expires_at);
+  if (
+    rotationId !== rotation.rotationId
+    || state !== 'committed'
+    || generation !== rotation.oldGeneration + 1
+    || committedAt == null
+    || graceExpiresAt == null
+  ) {
+    return null;
+  }
+  return {
+    committed: true,
+    rotationId,
+    state,
+    committedAt,
+    generation,
+    deviceId: rotation.deviceId,
+    oldIdentity: {
+      protocolSigningAlgorithm: rotation.oldBinding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: rotation.oldBinding.protocolPublicKeyFingerprint,
+      state: 'grace',
+      graceExpiresAt
+    },
+    newIdentity: {
+      protocolSigningAlgorithm: rotation.newBinding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: rotation.newBinding.protocolPublicKeyFingerprint,
+      state: 'active'
+    }
+  };
 }
 
 function serializeURLHost(host) {
@@ -797,14 +1137,10 @@ function assertVersionGates(clientVersion, protocolVersion, tenantPolicy) {
   const minClientVersion = effectiveMinVersion(GLOBAL_MIN_CLIENT_VERSION, tenantPolicy?.min_supported_client_version || null);
   const minProtocolVersion = effectiveMinVersion(GLOBAL_MIN_PROTOCOL_VERSION, tenantPolicy?.min_supported_protocol_version || null);
   if (compareVersions(clientVersion, minClientVersion) < 0) {
-    const error = new Error('client_version_too_old');
-    error.statusCode = 426;
-    throw error;
+    throw makeError('client_version_too_old', 426);
   }
   if (compareVersions(protocolVersion, minProtocolVersion) < 0) {
-    const error = new Error('protocol_version_too_old');
-    error.statusCode = 426;
-    throw error;
+    throw makeError('protocol_version_too_old', 426);
   }
 }
 
@@ -835,46 +1171,9 @@ function challengeSignaturePayload(challenge) {
   ].join('\n'), 'utf8');
 }
 
-class AsyncConcurrencyGate {
-  constructor(maxConcurrent) {
-    this.maxConcurrent = Math.max(1, Number(maxConcurrent) || 1);
-    this.inFlight = 0;
-    this.waiters = [];
-  }
-
-  async run(operation) {
-    await this.acquire();
-    try {
-      return await operation();
-    } finally {
-      this.release();
-    }
-  }
-
-  acquire() {
-    if (this.inFlight < this.maxConcurrent) {
-      this.inFlight += 1;
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-
-  release() {
-    if (this.waiters.length > 0) {
-      const next = this.waiters.shift();
-      next();
-      return;
-    }
-    this.inFlight = Math.max(0, this.inFlight - 1);
-  }
-}
-
-const mldsaVerifyHelperGate = new AsyncConcurrencyGate(MLDSA_VERIFY_HELPER_MAX_CONCURRENT);
-
 function ed25519RawPublicKeyToSpki(rawKey) {
-  if (!Buffer.isBuffer(rawKey) || rawKey.length !== 32) {
+  const profile = PROTOCOL_SIGNING_PROFILES.get('Ed25519');
+  if (!Buffer.isBuffer(rawKey) || rawKey.length !== profile.publicKeyBytes) {
     return null;
   }
   const prefix = Buffer.from('302a300506032b6570032100', 'hex');
@@ -928,131 +1227,79 @@ function rawPublicKeyToSpki(rawKey, algorithmOidDer) {
   ]);
 }
 
-function mldsa65RawPublicKeyToSpki(rawKey) {
-  if (!Buffer.isBuffer(rawKey) || rawKey.length !== MLDSA65_PUBLIC_KEY_BYTES) {
+function mldsaRawPublicKeyToSpki(rawKey, algorithm) {
+  const profile = PROTOCOL_SIGNING_PROFILES.get(algorithm);
+  if (
+    !profile
+    || !profile.oidDer
+    || !Buffer.isBuffer(rawKey)
+    || rawKey.length !== profile.publicKeyBytes
+  ) {
     return null;
   }
-  return rawPublicKeyToSpki(rawKey, MLDSA65_OID_DER);
+  return rawPublicKeyToSpki(rawKey, profile.oidDer);
 }
 
-async function runMldsaVerifyHelper(rawPublicKey, signature, challengePayload) {
-  const helper = MLDSA_VERIFY_HELPER;
-  if (!helper) return false;
-
-  return mldsaVerifyHelperGate.run(() => new Promise((resolve) => {
-    const child = spawn(helper, [
-      'internal',
-      'verify-mldsa',
-      '--message-base64', challengePayload.toString('base64'),
-      '--signature-base64', signature.toString('base64'),
-      '--public-key-base64', rawPublicKey.toString('base64')
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let finished = false;
-    let stdoutSize = 0;
-    let stderrSize = 0;
-    let stderr = '';
-
-    const finish = (result) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeoutHandle);
-      resolve(result);
-    };
-
-    const timeoutHandle = setTimeout(() => {
-      child.kill('SIGKILL');
-      console.warn('[ML-DSA verify helper] timed out');
-      finish(false);
-    }, MLDSA_VERIFY_HELPER_TIMEOUT_MS);
-
-    child.on('error', (error) => {
-      console.warn('[ML-DSA verify helper] execution failed:', error.message);
-      finish(false);
-    });
-
-    child.stdout.on('data', (chunk) => {
-      stdoutSize += chunk.length;
-      if (stdoutSize > 64 * 1024) {
-        console.warn('[ML-DSA verify helper] stdout exceeded max buffer');
-        child.kill('SIGKILL');
-        finish(false);
-      }
-    });
-
-    child.stderr.on('data', (chunk) => {
-      stderrSize += chunk.length;
-      if (stderrSize <= 64 * 1024) {
-        stderr += chunk.toString('utf8');
-      } else {
-        console.warn('[ML-DSA verify helper] stderr exceeded max buffer');
-        child.kill('SIGKILL');
-        finish(false);
-      }
-    });
-
-    child.on('close', (code, signal) => {
-      if (signal) {
-        console.warn('[ML-DSA verify helper] terminated by signal:', signal);
-        finish(false);
-        return;
-      }
-      if (code !== 0) {
-        if (stderr.trim()) {
-          console.warn('[ML-DSA verify helper] rejected signature:', stderr.trim());
-        }
-        finish(false);
-        return;
-      }
-      finish(true);
-    });
-  }));
-}
-
-async function verifyMldsa65ChallengeSignature(rawPublicKey, signature, challenge) {
-  const spki = mldsa65RawPublicKeyToSpki(rawPublicKey);
-  if (!spki) return false;
-  const payload = challengeSignaturePayload(challenge);
-  try {
-    return crypto.verify(
-      null,
-      payload,
-      { key: spki, format: 'der', type: 'spki' },
-      signature
-    );
-  } catch (_) {
-    if (!MLDSA_VERIFY_HELPER) return false;
-  }
-
-  return runMldsaVerifyHelper(rawPublicKey, signature, payload);
-}
-
-async function verifyChallengeSignature(binding, signatureBase64, challenge) {
-  const signature = Buffer.from(String(signatureBase64 || '').trim(), 'base64');
-  if (!signature.length || !binding.protocolPublicKeyBytes) {
+function verifyProtocolSignature(binding, signature, payload) {
+  const profile = PROTOCOL_SIGNING_PROFILES.get(binding.protocolSigningAlgorithm);
+  if (
+    !profile
+    || !Buffer.isBuffer(signature)
+    || !Buffer.isBuffer(payload)
+    || signature.length !== profile.signatureBytes
+    || !Buffer.isBuffer(binding.protocolPublicKeyBytes)
+    || binding.protocolPublicKeyBytes.length !== profile.publicKeyBytes
+  ) {
     return false;
   }
+  let spki;
   if (binding.protocolSigningAlgorithm === 'Ed25519') {
-    const spki = ed25519RawPublicKeyToSpki(binding.protocolPublicKeyBytes);
-    if (!spki) return false;
-    try {
-      return crypto.verify(
-        null,
-        challengeSignaturePayload(challenge),
-        { key: spki, format: 'der', type: 'spki' },
-        signature
-      );
-    } catch (_) {
+    spki = ed25519RawPublicKeyToSpki(binding.protocolPublicKeyBytes);
+  } else {
+    spki = mldsaRawPublicKeyToSpki(binding.protocolPublicKeyBytes, binding.protocolSigningAlgorithm);
+  }
+  if (!spki) return false;
+
+  try {
+    const publicKey = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    if (publicKey.asymmetricKeyType !== profile.nodeKeyType) {
       return false;
     }
-  } else if (binding.protocolSigningAlgorithm === 'ML-DSA-65') {
-    return verifyMldsa65ChallengeSignature(binding.protocolPublicKeyBytes, signature, challenge);
-  } else {
-    return false;
+    return crypto.verify(null, payload, publicKey, signature);
+  } catch (error) {
+    const code = String(error?.code || '');
+    if (code.startsWith('ERR_OSSL_') || code.startsWith('ERR_CRYPTO_')) {
+      return false;
+    }
+    throw error;
   }
 }
+
+function verifyChallengeSignature(binding, signature, challenge) {
+  return verifyProtocolSignature(binding, signature, challengeSignaturePayload(challenge));
+}
+
+function assertNativeMldsaRuntimeSupport() {
+  for (const algorithm of ['ML-DSA-65', 'ML-DSA-87']) {
+    const profile = PROTOCOL_SIGNING_PROFILES.get(algorithm);
+    const spki = mldsaRawPublicKeyToSpki(Buffer.alloc(profile.publicKeyBytes), algorithm);
+    const publicKey = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    if (publicKey.asymmetricKeyType !== profile.nodeKeyType) {
+      throw new Error(`native_${profile.nodeKeyType}_unavailable`);
+    }
+    const acceptedInvalidSignature = crypto.verify(
+      null,
+      Buffer.alloc(0),
+      publicKey,
+      Buffer.alloc(profile.signatureBytes)
+    );
+    if (acceptedInvalidSignature) {
+      throw new Error(`native_${profile.nodeKeyType}_self_check_failed`);
+    }
+  }
+}
+
+assertNativeMldsaRuntimeSupport();
 
 function normalizeCodePrefixes(raw) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1083,21 +1330,34 @@ function generateCode(len = CODE_LEN) {
 }
 
 function asyncRoute(handler) {
-  return (req, res, next) => {
-    Promise.resolve(handler(req, res, next)).catch((error) => {
-      const statusCode = Number(error.statusCode || error.status || 500);
-      const errorCode = String(error.code || error.message || 'internal_error');
-      console.error(`[HTTP] ${req.method} ${req.path} failed:`, errorCode);
+  return (req, res) => Promise.resolve(handler(req, res)).catch((error) => {
+      const candidateStatus = Number(error?.statusCode || error?.status || 500);
+      const statusCode = Number.isInteger(candidateStatus)
+        && candidateStatus >= 400
+        && candidateStatus <= 599
+        ? candidateStatus
+        : 500;
+      const markedPublic = error?.isPublicError === true;
+      const candidateCode = markedPublic ? String(error?.code || '') : '';
+      const stablePublicCode = /^[a-z][a-z0-9_]{0,95}$/.test(candidateCode)
+        ? candidateCode
+        : '';
+      const errorCode = stablePublicCode || (statusCode >= 500 ? 'internal_error' : 'request_failed');
+      const candidateDiagnostic = String(error?.name || 'Error');
+      const diagnostic = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(candidateDiagnostic)
+        ? candidateDiagnostic
+        : 'Error';
+      console.error(
+        `[HTTP] ${req.method} ${req.path} failed code=${errorCode} status=${statusCode} diagnostic=${diagnostic}`
+      );
       if (!res.headersSent) {
         const responseBody = { error: errorCode };
-        if (error.publicDetails && typeof error.publicDetails === 'object') {
+        if (markedPublic && error.publicDetails && typeof error.publicDetails === 'object') {
           Object.assign(responseBody, error.publicDetails);
         }
         res.status(statusCode).json(responseBody);
       }
-      if (typeof next === 'function') next(error);
     });
-  };
 }
 
 function rateLimit({ windowMs, max, keyFn }) {
@@ -1250,6 +1510,7 @@ function makeError(code, statusCode = 400, publicDetails = null) {
   const error = new Error(code);
   error.code = code;
   error.statusCode = statusCode;
+  error.isPublicError = true;
   if (publicDetails && typeof publicDetails === 'object') {
     error.publicDetails = publicDetails;
   }
@@ -1585,6 +1846,52 @@ function registryCanBootstrapRegisterDevices(store = registryStore) {
   return registrySupportsMethod(store, 'bootstrapRegisterDevice');
 }
 
+function registryCanManageIdentityRotations(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised === false) return false;
+  return registrySupportsMethod(store, 'issueIdentityRotationChallenge')
+    && registrySupportsMethod(store, 'getIdentityRotationByRequestId')
+    && registrySupportsMethod(store, 'getIdentityRotation')
+    && registrySupportsMethod(store, 'commitIdentityRotation');
+}
+
+function identityRotationRegistryErrorCode(error) {
+  const explicit = typeof error?.registryCode === 'string' ? error.registryCode.trim() : '';
+  if (/^[a-z0-9_]+$/.test(explicit)) return explicit;
+  const match = String(error?.message || '').match(/^registry_http_[0-9]+:([a-z0-9_]+)$/);
+  return match ? match[1] : '';
+}
+
+function translateIdentityRotationRegistryError(error) {
+  const code = identityRotationRegistryErrorCode(error);
+  const statusByCode = new Map([
+    ['registry_not_configured', 503],
+    ['device_not_registered', 403],
+    ['device_revoked', 403],
+    ['device_frozen', 403],
+    ['device_not_active', 403],
+    ['current_identity_mismatch', 409],
+    ['old_public_key_conflict', 409],
+    ['identity_unchanged', 409],
+    ['identity_rotation_already_pending', 409],
+    ['new_identity_already_owned', 409],
+    ['identity_rotation_device_daily_limited', 429],
+    ['identity_rotation_user_daily_limited', 429],
+    ['identity_generation_conflict', 409],
+    ['rotation_payload_conflict', 409],
+    ['rotation_state_conflict', 409],
+    ['rotation_expired', 410],
+    ['rotation_not_found', 404]
+  ]);
+  const statusCode = statusByCode.get(code);
+  if (statusCode) return makeError(code, statusCode);
+
+  console.error('[identity-rotation] registry operation failed:', String(error?.message || error));
+  const translated = makeError('identity_rotation_store_failed', 503);
+  translated.cause = error;
+  return translated;
+}
+
 async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true } = {}) {
   const accessToken = getBearerToken(req);
   if (!accessToken) {
@@ -1667,6 +1974,9 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
     if (deviceRecord.status === 'frozen') {
       throw makeError('device_frozen', 403);
     }
+    if (deviceRecord.status !== 'active') {
+      throw makeError('device_not_active', 403);
+    }
   }
   return {
     accessToken,
@@ -1691,6 +2001,19 @@ async function enforceChallengeQuotas(ctx) {
   if (deviceCount.count > MAX_CHALLENGES_PER_DEVICE_PER_10M) throw makeError('challenge_device_rate_limited', 429);
   if (userCount.count > MAX_CHALLENGES_PER_USER_PER_10M) throw makeError('challenge_user_rate_limited', 429);
   if (ipCount.count > MAX_CHALLENGES_PER_IP_PER_10M) throw makeError('challenge_ip_rate_limited', 429);
+}
+
+async function identityRotationProofFailureCount(rotation, increment = 0) {
+  try {
+    return await signalingState.incrementWindowCounter(
+      `identity-rotation-proof-failure:${rotation.tenantId}:${rotation.deviceId}:${rotation.rotationId}`,
+      Math.max(60_000, rotation.expiresAt - now()),
+      increment
+    );
+  } catch (error) {
+    console.error('[identity-rotation] proof-failure tracking failed:', String(error?.message || error));
+    throw makeError('identity_rotation_proof_tracking_failed', 503);
+  }
 }
 
 async function createIdempotencyGuard(action, key, fingerprint) {
@@ -2081,6 +2404,62 @@ function validateEnvelopeSchema(message) {
     if (typeof payload.sdpMid === 'string' && Buffer.byteLength(payload.sdpMid, 'utf8') > ICE_SDP_MID_MAX_BYTES) {
       return 'bad_sdp_mid';
     }
+  }
+  return null;
+}
+
+/// A WebSocket session token freezes the protocol identity that completed
+/// admission. A `.join` bootstrap may add the corresponding raw public key,
+/// but it must never substitute another authority after the token is issued.
+/// Identity-free joins remain accepted for the explicit legacy/classic path;
+/// any partial identity is rejected instead of being treated as legacy.
+function validateJoinIdentityAgainstSession(message, meta) {
+  if (message?.type !== 'join') return null;
+  const payload = message.payload;
+  if (payload == null) return null;
+  if (!isPlainObject(payload)) return 'join_identity_invalid';
+
+  const identityFieldNames = [
+    'protocolSigningAlgorithm',
+    'protocolPublicKeyFingerprint',
+    'protocolPublicKeyBytes'
+  ];
+  const presentIdentityFields = identityFieldNames.filter((field) => (
+    Object.prototype.hasOwnProperty.call(payload, field) && payload[field] != null
+  ));
+  if (presentIdentityFields.length === 0) return null;
+  if (presentIdentityFields.length !== identityFieldNames.length) {
+    return 'join_identity_incomplete';
+  }
+
+  const binding = normalizeIdentityBinding({
+    deviceId: meta?.deviceId,
+    protocolSigningAlgorithm: payload.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: payload.protocolPublicKeyFingerprint,
+    protocolPublicKeyBytes: payload.protocolPublicKeyBytes
+  }, { requirePublicKey: true });
+  if (!binding) return 'join_identity_invalid';
+
+  let computedFingerprint;
+  try {
+    computedFingerprint = computeProtocolIdentityFingerprint(
+      binding.protocolSigningAlgorithm,
+      binding.protocolPublicKeyBytes
+    );
+  } catch (_) {
+    return 'join_identity_invalid';
+  }
+  if (!secureStringEqual(computedFingerprint, binding.protocolPublicKeyFingerprint)) {
+    return 'join_identity_fingerprint_mismatch';
+  }
+  if (
+    binding.protocolSigningAlgorithm !== meta?.protocolSigningAlgorithm
+    || !secureStringEqual(
+      binding.protocolPublicKeyFingerprint,
+      meta?.protocolPublicKeyFingerprint
+    )
+  ) {
+    return 'join_identity_scope_violation';
   }
   return null;
 }
@@ -3059,11 +3438,21 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
   if (appControlFlags().disableChallengeAdmission) {
     throw makeError('admission_disabled', 503);
   }
-  const challengeId = String(req.body?.challengeId || '').trim();
-  const signature = String(req.body?.signature || '').trim();
+  const challengeId = typeof req.body?.challengeId === 'string' ? req.body.challengeId.trim() : '';
   const publicBinding = normalizeIdentityBinding(req.body || {}, { requirePublicKey: true });
+  const profile = publicBinding
+    ? PROTOCOL_SIGNING_PROFILES.get(publicBinding.protocolSigningAlgorithm)
+    : null;
+  const signature = decodeCanonicalBase64(req.body?.signature, profile?.signatureBytes);
   if (!challengeId || !signature || !publicBinding) {
     throw makeError('bad_admission_request', 400);
+  }
+  const authoritativePublicKeyFingerprint = computeProtocolIdentityFingerprint(
+    publicBinding.protocolSigningAlgorithm,
+    publicBinding.protocolPublicKeyBytes
+  );
+  if (!secureStringEqual(authoritativePublicKeyFingerprint, publicBinding.protocolPublicKeyFingerprint)) {
+    throw makeError('public_key_fingerprint_mismatch', 400);
   }
   if (!secureStringEqual(publicBinding.protocolPublicKeyFingerprint, context.binding.protocolPublicKeyFingerprint)) {
     throw makeError('public_key_fingerprint_mismatch', 400);
@@ -3104,7 +3493,7 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
       consumeError.includes('_mtls_') ? mtlsBindingStatusCode(consumeError) : 409
     );
   }
-  if (!await verifyChallengeSignature(publicBinding, signature, challenge)) {
+  if (!verifyChallengeSignature(publicBinding, signature, challenge)) {
     incrementSecurityCounter('admission_signature_rejected');
     throw makeError('admission_signature_invalid', 401);
   }
@@ -3692,6 +4081,323 @@ app.post('/api/devices/register-current', rlControl, asyncRoute(async (req, res)
   res.json({ registered: true, activated: !existing, device: result });
 }));
 
+app.post('/api/devices/identity-rotation/challenge', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('identity_rotation_challenge', context.tenantId);
+  if (context.deviceRecord?.synthetic) {
+    throw makeError('device_not_registered', 403);
+  }
+  if (!registryCanManageIdentityRotations()) {
+    throw makeError('registry_not_configured', 503);
+  }
+
+  const requestId = typeof req.get('Idempotency-Key') === 'string'
+    ? req.get('Idempotency-Key')
+    : '';
+  if (!ROTATION_ID_RE.test(requestId)) {
+    throw makeError('missing_or_invalid_identity_rotation_idempotency_key', 400);
+  }
+
+  const oldBinding = normalizeIdentityBinding(req.body || {}, { requirePublicKey: true });
+  const newBinding = normalizeIdentityBinding({
+    deviceId: context.binding.deviceId,
+    protocolSigningAlgorithm: req.body?.newProtocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: req.body?.newProtocolPublicKeyFingerprint,
+    protocolPublicKeyBytes: req.body?.newProtocolPublicKeyBytes
+  }, { requirePublicKey: true });
+  if (
+    !oldBinding
+    || !newBinding
+    || req.body?.deviceId !== oldBinding.deviceId
+    || !isCanonicalIdentityBindingRequest(req.body, oldBinding)
+    || !isCanonicalIdentityBindingRequest(req.body, newBinding, 'new')
+    || oldBinding.deviceId !== context.binding.deviceId
+    || oldBinding.protocolSigningAlgorithm !== context.binding.protocolSigningAlgorithm
+    || !secureStringEqual(
+      oldBinding.protocolPublicKeyFingerprint,
+      context.binding.protocolPublicKeyFingerprint
+    )
+  ) {
+    throw makeError('bad_identity_rotation_request', 400);
+  }
+
+  const authoritativeOldFingerprint = computeProtocolIdentityFingerprint(
+    oldBinding.protocolSigningAlgorithm,
+    oldBinding.protocolPublicKeyBytes
+  );
+  const authoritativeNewFingerprint = computeProtocolIdentityFingerprint(
+    newBinding.protocolSigningAlgorithm,
+    newBinding.protocolPublicKeyBytes
+  );
+  if (!secureStringEqual(authoritativeOldFingerprint, oldBinding.protocolPublicKeyFingerprint)) {
+    throw makeError('old_public_key_fingerprint_mismatch', 400);
+  }
+  if (!secureStringEqual(authoritativeNewFingerprint, newBinding.protocolPublicKeyFingerprint)) {
+    throw makeError('new_public_key_fingerprint_mismatch', 400);
+  }
+  if (
+    oldBinding.protocolSigningAlgorithm === newBinding.protocolSigningAlgorithm
+    && secureStringEqual(
+      oldBinding.protocolPublicKeyFingerprint,
+      newBinding.protocolPublicKeyFingerprint
+    )
+  ) {
+    throw makeError('identity_unchanged', 409);
+  }
+
+  const oldGeneration = normalizeIdentityGeneration(context.deviceRecord?.identity_generation);
+  if (oldGeneration == null) {
+    throw makeError('identity_rotation_schema_unavailable', 503);
+  }
+  let existingRequest;
+  try {
+    existingRequest = await registryStore.getIdentityRotationByRequestId({
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      requestId,
+      oldProtocolSigningAlgorithm: oldBinding.protocolSigningAlgorithm,
+      oldProtocolPublicKeyFingerprint: oldBinding.protocolPublicKeyFingerprint
+    });
+  } catch (error) {
+    throw translateIdentityRotationRegistryError(error);
+  }
+  if (!existingRequest) {
+    await enforceChallengeQuotas(context);
+  }
+
+  const rotationId = randomUUID();
+  const nonce = newOpaqueToken(32);
+  const expiresAt = now() + IDENTITY_ROTATION_CHALLENGE_TTL_MS;
+  const transcript = buildIdentityRotationTranscript({
+    rotationId,
+    nonce,
+    expiresAt,
+    tenantId: context.tenantId,
+    userId: context.user.id,
+    deviceId: context.binding.deviceId,
+    oldGeneration,
+    oldBinding,
+    newBinding
+  });
+  const transcriptHash = crypto.createHash('sha256').update(transcript).digest('hex');
+
+  let issued;
+  try {
+    issued = await registryStore.issueIdentityRotationChallenge({
+      p_request_id: requestId,
+      p_rotation_id: rotationId,
+      p_tenant_id: context.tenantId,
+      p_user_id: context.user.id,
+      p_device_id: context.binding.deviceId,
+      p_old_generation: oldGeneration,
+      p_old_protocol_signing_algorithm: oldBinding.protocolSigningAlgorithm,
+      p_old_protocol_public_key_fingerprint: oldBinding.protocolPublicKeyFingerprint,
+      p_old_protocol_public_key_base64: oldBinding.protocolPublicKeyBytes.toString('base64'),
+      p_new_protocol_signing_algorithm: newBinding.protocolSigningAlgorithm,
+      p_new_protocol_public_key_fingerprint: newBinding.protocolPublicKeyFingerprint,
+      p_new_protocol_public_key_base64: newBinding.protocolPublicKeyBytes.toString('base64'),
+      p_nonce: nonce,
+      p_transcript_hash: transcriptHash,
+      p_expires_at: new Date(expiresAt).toISOString()
+    });
+  } catch (error) {
+    throw translateIdentityRotationRegistryError(error);
+  }
+
+  const storedRotation = normalizeStoredIdentityRotation(issued);
+  if (
+    !storedRotation
+    || storedRotation.requestId !== requestId
+    || storedRotation.state !== 'issued'
+    || storedRotation.tenantId !== context.tenantId
+    || storedRotation.userId !== context.user.id
+    || storedRotation.deviceId !== context.binding.deviceId
+    || storedRotation.oldGeneration !== oldGeneration
+    || storedRotation.oldBinding.protocolSigningAlgorithm !== oldBinding.protocolSigningAlgorithm
+    || !secureStringEqual(
+      storedRotation.oldBinding.protocolPublicKeyFingerprint,
+      oldBinding.protocolPublicKeyFingerprint
+    )
+    || !storedRotation.oldBinding.protocolPublicKeyBytes.equals(oldBinding.protocolPublicKeyBytes)
+    || storedRotation.newBinding.protocolSigningAlgorithm !== newBinding.protocolSigningAlgorithm
+    || !secureStringEqual(
+      storedRotation.newBinding.protocolPublicKeyFingerprint,
+      newBinding.protocolPublicKeyFingerprint
+    )
+    || !storedRotation.newBinding.protocolPublicKeyBytes.equals(newBinding.protocolPublicKeyBytes)
+  ) {
+    throw makeError('identity_rotation_store_failed', 503);
+  }
+
+  const storedTranscript = buildIdentityRotationTranscript({
+    rotationId: storedRotation.rotationId,
+    nonce: storedRotation.nonce,
+    expiresAt: storedRotation.expiresAt,
+    tenantId: storedRotation.tenantId,
+    userId: storedRotation.userId,
+    deviceId: storedRotation.deviceId,
+    oldGeneration: storedRotation.oldGeneration,
+    oldBinding: storedRotation.oldBinding,
+    newBinding: storedRotation.newBinding
+  });
+  const storedTranscriptHash = crypto.createHash('sha256').update(storedTranscript).digest('hex');
+  if (!secureStringEqual(storedTranscriptHash, storedRotation.transcriptHash)) {
+    throw makeError('identity_rotation_store_failed', 503);
+  }
+
+  res.json({
+    requestId,
+    rotationId: storedRotation.rotationId,
+    nonce: storedRotation.nonce,
+    state: 'issued',
+    issuedAt: storedRotation.issuedAt,
+    expiresAt: storedRotation.expiresAt,
+    transcriptVersion: IDENTITY_ROTATION_TRANSCRIPT_VERSION,
+    transcriptHash: storedRotation.transcriptHash,
+    transcriptBase64: storedTranscript.toString('base64'),
+    tenantId: context.tenantId,
+    userId: context.user.id,
+    deviceId: context.binding.deviceId,
+    oldGeneration,
+    oldProtocolSigningAlgorithm: oldBinding.protocolSigningAlgorithm,
+    oldProtocolPublicKeyFingerprint: oldBinding.protocolPublicKeyFingerprint,
+    newProtocolSigningAlgorithm: newBinding.protocolSigningAlgorithm,
+    newProtocolPublicKeyFingerprint: newBinding.protocolPublicKeyFingerprint
+  });
+}));
+
+app.post('/api/devices/identity-rotation/commit', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  await assertPublicCapabilityAvailable('identity_rotation_commit', context.tenantId);
+  if (!registryCanManageIdentityRotations()) {
+    throw makeError('registry_not_configured', 503);
+  }
+
+  const rotationId = typeof req.body?.rotationId === 'string' ? req.body.rotationId : '';
+  const transcriptHash = typeof req.body?.transcriptHash === 'string'
+    ? req.body.transcriptHash
+    : '';
+  if (
+    !ROTATION_ID_RE.test(rotationId)
+    || !FINGERPRINT_RE.test(transcriptHash)
+    || req.body?.deviceId !== context.binding.deviceId
+    || !isCanonicalIdentityBindingRequest(req.body, context.binding)
+  ) {
+    throw makeError('bad_identity_rotation_commit_request', 400);
+  }
+
+  let stored;
+  try {
+    stored = await registryStore.getIdentityRotation({
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      rotationId,
+      oldProtocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      oldProtocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint
+    });
+  } catch (error) {
+    throw translateIdentityRotationRegistryError(error);
+  }
+  if (!stored) {
+    throw makeError('rotation_not_found', 404);
+  }
+  const rotation = normalizeStoredIdentityRotation(stored);
+  if (
+    !rotation
+    || rotation.tenantId !== context.tenantId
+    || rotation.userId !== context.user.id
+    || rotation.deviceId !== context.binding.deviceId
+    || rotation.oldBinding.protocolSigningAlgorithm !== context.binding.protocolSigningAlgorithm
+    || !secureStringEqual(
+      rotation.oldBinding.protocolPublicKeyFingerprint,
+      context.binding.protocolPublicKeyFingerprint
+    )
+  ) {
+    throw makeError('identity_rotation_store_failed', 503);
+  }
+
+  const transcript = buildIdentityRotationTranscript({
+    rotationId: rotation.rotationId,
+    nonce: rotation.nonce,
+    expiresAt: rotation.expiresAt,
+    tenantId: rotation.tenantId,
+    userId: rotation.userId,
+    deviceId: rotation.deviceId,
+    oldGeneration: rotation.oldGeneration,
+    oldBinding: rotation.oldBinding,
+    newBinding: rotation.newBinding
+  });
+  const authoritativeTranscriptHash = crypto.createHash('sha256').update(transcript).digest('hex');
+  if (!secureStringEqual(authoritativeTranscriptHash, rotation.transcriptHash)) {
+    throw makeError('identity_rotation_store_failed', 503);
+  }
+  if (!secureStringEqual(transcriptHash, rotation.transcriptHash)) {
+    throw makeError('rotation_payload_conflict', 409);
+  }
+  if (rotation.state === 'expired' || (rotation.state === 'issued' && rotation.expiresAt <= now())) {
+    throw makeError('rotation_expired', 410);
+  }
+  if (rotation.state === 'cancelled') {
+    throw makeError('rotation_state_conflict', 409);
+  }
+
+  const oldProfile = PROTOCOL_SIGNING_PROFILES.get(rotation.oldBinding.protocolSigningAlgorithm);
+  const newProfile = PROTOCOL_SIGNING_PROFILES.get(rotation.newBinding.protocolSigningAlgorithm);
+  if (rotation.state === 'issued') {
+    const failures = await identityRotationProofFailureCount(rotation);
+    if (failures.count >= MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS) {
+      throw makeError('identity_rotation_proof_attempts_exhausted', 429);
+    }
+  }
+  const oldSignature = decodeCanonicalBase64(req.body?.oldSignature, oldProfile?.signatureBytes);
+  const newSignature = decodeCanonicalBase64(req.body?.newSignature, newProfile?.signatureBytes);
+  if (!oldSignature || !newSignature) {
+    if (rotation.state === 'issued') {
+      const failures = await identityRotationProofFailureCount(rotation, 1);
+      if (failures.count >= MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS) {
+        throw makeError('identity_rotation_proof_attempts_exhausted', 429);
+      }
+    }
+    throw makeError('bad_identity_rotation_commit_request', 400);
+  }
+  const oldProofValid = verifyProtocolSignature(rotation.oldBinding, oldSignature, transcript);
+  const newProofValid = verifyProtocolSignature(rotation.newBinding, newSignature, transcript);
+  if (!oldProofValid || !newProofValid) {
+    incrementSecurityCounter('identity_rotation_proof_rejected');
+    if (rotation.state === 'issued') {
+      const failures = await identityRotationProofFailureCount(rotation, 1);
+      if (failures.count >= MAX_IDENTITY_ROTATION_COMMIT_PROOF_ATTEMPTS) {
+        throw makeError('identity_rotation_proof_attempts_exhausted', 429);
+      }
+    }
+    throw makeError('identity_rotation_proof_invalid', 401);
+  }
+
+  let committed;
+  try {
+    committed = await registryStore.commitIdentityRotation({
+      p_rotation_id: rotation.rotationId,
+      p_tenant_id: rotation.tenantId,
+      p_user_id: rotation.userId,
+      p_device_id: rotation.deviceId,
+      p_old_generation: rotation.oldGeneration,
+      p_old_protocol_signing_algorithm: rotation.oldBinding.protocolSigningAlgorithm,
+      p_old_protocol_public_key_fingerprint: rotation.oldBinding.protocolPublicKeyFingerprint,
+      p_transcript_hash: rotation.transcriptHash,
+      p_grace_expires_at: new Date(now() + IDENTITY_ROTATION_GRACE_TTL_MS).toISOString()
+    });
+  } catch (error) {
+    throw translateIdentityRotationRegistryError(error);
+  }
+  const response = identityRotationCommitResponse(committed, rotation);
+  if (!response) {
+    throw makeError('identity_rotation_store_failed', 503);
+  }
+  res.json(response);
+}));
+
 app.post('/api/devices/enroll/confirm', rlControl, asyncRoute(async (req, res) => {
   const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
   await assertPublicCapabilityAvailable('enroll_confirm', context.tenantId);
@@ -3908,6 +4614,7 @@ wss.on('connection', (ws, req) => {
       sessionId,
       deviceId: boundToken.deviceId,
       role: boundToken.role,
+      protocolSigningAlgorithm: boundToken.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint,
       clientCertificateFingerprint256: peerCertificate.certificate?.fingerprint256 || null,
       tenantId: boundToken.tenantId,
@@ -3924,6 +4631,7 @@ wss.on('connection', (ws, req) => {
       sessionId,
       deviceId: boundToken.deviceId,
       role: boundToken.role,
+      protocolSigningAlgorithm: boundToken.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint
     });
     wsSendRaw(ws, { type: 'bound', sessionId, role: boundToken.role, clientId });
@@ -3998,6 +4706,12 @@ wss.on('connection', (ws, req) => {
       if (message.sessionId !== meta.sessionId || message.from !== meta.deviceId) {
         incrementSecurityCounter('ws_1008_scope_violation');
         ws.close(1008, 'scope_violation');
+        return;
+      }
+      const joinIdentityError = validateJoinIdentityAgainstSession(message, meta);
+      if (joinIdentityError) {
+        incrementSecurityCounter(`ws_1008_${joinIdentityError}`);
+        ws.close(1008, joinIdentityError);
         return;
       }
       await touchConnectionActiveSession(meta.sessionId, 'signalingEnvelope');
@@ -4237,21 +4951,27 @@ if (require.main === module) {
 module.exports = {
   createRuntime,
   __test: {
+    asyncRoute,
+    assertSupportedNodeRuntime,
     assertMTLSBindingForRecord,
     buildNodeHTTPSServerTLSOptions,
     buildSupabaseSMSHookVerifier,
+    buildIdentityRotationTranscript,
     classifySMSDeliveryFailure,
     closeSlowConsumer,
     collectSMSServiceSnapshot,
+    computeProtocolIdentityFingerprint,
     evaluateServiceHealth,
     mtlsBindingErrorForRecord,
     mtlsClientCertificateFingerprintForRequest,
+    makeError,
     parseTrustedProxyClientCertificate,
     redactSecretURLForLog,
     resolveNodeHTTPSTransportPolicy,
     resolvePeerCertificateForMTLS,
     resolveSignalingServerOrigin,
     renewRoomMembershipLease,
+    validateJoinIdentityAgainstSession,
     wsSendRaw,
     WS_MAX_BUFFERED_BYTES
   }

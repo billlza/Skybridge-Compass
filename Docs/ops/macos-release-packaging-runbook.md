@@ -1,6 +1,6 @@
 # macOS Release Packaging Runbook
 
-Last verified: 2026-05-26
+Last verified: 2026-07-19
 
 This runbook records the only supported release packaging path for SkyBridge
 Compass Pro on macOS. Its purpose is to prevent four regressions that are easy
@@ -274,10 +274,11 @@ keys, signing validity, notarization/stapling, and launch smoke.
 
 The in-app Check for Updates flow is backed by a GitHub Releases manifest, not
 a placeholder alert. Release builds must point
-`SKYBRIDGE_UPDATE_MANIFEST_URL` at a GitHub Releases HTTPS asset such as:
+`SKYBRIDGE_UPDATE_MANIFEST_URL` at the manifest in the explicitly marked Latest
+immutable macOS Release:
 
 ```text
-https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json
+https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json
 ```
 
 The manifest must be signed with Ed25519. The app verifies the detached
@@ -294,6 +295,13 @@ not a GitHub Releases HTTPS asset or that lacks trusted public-key material.
 
 Operational publishing details live in
 [`Docs/ops/macos-update-management.md`](macos-update-management.md).
+The supported publisher requires a pre-pushed
+`macos-v<semver>-build-<build>` tag bound to the exact source SHA, publishes the
+DMG, signed manifest, and public-redacted evidence archive together from a
+verified draft, and verifies GitHub release and per-asset attestations after the
+single publication transition. It never mutates the legacy `stable` Release or
+replaces an asset. Existing clients that still use the legacy stable URL require
+an explicit bridge-update or manual-upgrade plan before that manifest expires.
 
 ## P2P Identity Drift Gate
 

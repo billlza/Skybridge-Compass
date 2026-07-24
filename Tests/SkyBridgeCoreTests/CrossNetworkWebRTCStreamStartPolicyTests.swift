@@ -1125,4 +1125,57 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("audioTxSenderRenewing"))
         XCTAssertTrue(realtimeAudioSenderSource.contains("continuitySeq"))
     }
+
+    func testWebRTCStreamingTeardownIsStructuredAndGenerationBound() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("@MainActor\nprivate final class WebRTCScreenStreamingRuntimeState"))
+        XCTAssertTrue(source.contains("let streamingState = WebRTCScreenStreamingRuntimeState()"))
+        XCTAssertTrue(source.contains("@MainActor [weak self, weak streamingState] in"))
+        XCTAssertFalse(
+            source.contains("let runStreamingLoop: @MainActor () async -> Void"),
+            "The already-MainActor screen task must not send mutable loop state into another escaping closure."
+        )
+        XCTAssertFalse(source.contains("await runStreamingLoop()"))
+        XCTAssertTrue(source.contains("await directSyntheticNativeVideoTask?.value"))
+        XCTAssertTrue(source.contains("await directNativeFramePacingTask?.value"))
+        XCTAssertTrue(source.contains("await streamingState.directRealtimeAudioAttachTask?.value"))
+        XCTAssertTrue(source.contains("reason: \"stale-audio-attach-generation\""))
+        XCTAssertTrue(source.contains("reason: \"streaming-state-released\""))
+        XCTAssertGreaterThanOrEqual(
+            source.components(separatedBy: "streamingState.directRealtimeAudioAttachGeneration == attachGeneration").count - 1,
+            2,
+            "Both successful and failed attach completions must be generation-bound."
+        )
+        XCTAssertTrue(source.contains("webrtcScreenStreamingTaskTokensBySessionId"))
+        XCTAssertTrue(source.contains("webrtcInteractionStreamingTaskTokensBySessionId"))
+        XCTAssertTrue(source.contains("await task.value"))
+        let stopStreamingBody = try sourceSlice(
+            from: "private func stopWebRTCScreenStreaming(sessionID: String)",
+            to: "#if os(macOS)",
+            in: source
+        )
+        XCTAssertTrue(
+            stopStreamingBody.contains("webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)"),
+            "Stopping or rekeying a stream must revoke the interaction capability before old tasks quiesce."
+        )
+        XCTAssertGreaterThanOrEqual(
+            source.components(separatedBy: "self.stopWebRTCScreenStreaming(sessionID: sessionID)").count - 1,
+            2,
+            "Both inbound and outbound rekey paths must use the centralized stream stop boundary."
+        )
+        XCTAssertFalse(
+            source.contains("defer {\n#if os(macOS)\n                    cgDisplayFrameWorker.stop()\n                    Task { @MainActor in"),
+            "Streaming cleanup must not escape into an unowned task from defer."
+        )
+    }
 }

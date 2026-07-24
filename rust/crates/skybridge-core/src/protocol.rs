@@ -12,6 +12,8 @@ pub enum ProtocolSigningAlgorithm {
     Ed25519,
     #[serde(rename = "ML-DSA-65")]
     MlDsa65,
+    #[serde(rename = "ML-DSA-87")]
+    MlDsa87,
 }
 
 impl ProtocolSigningAlgorithm {
@@ -19,7 +21,32 @@ impl ProtocolSigningAlgorithm {
         match self {
             Self::Ed25519 => "Ed25519",
             Self::MlDsa65 => "ML-DSA-65",
+            Self::MlDsa87 => "ML-DSA-87",
         }
+    }
+
+    /// Stable cross-platform signature-algorithm identifier.
+    pub const fn wire_code(self) -> u16 {
+        match self {
+            Self::Ed25519 => 0x0001,
+            Self::MlDsa65 => 0x0002,
+            Self::MlDsa87 => 0x0004,
+        }
+    }
+
+    pub fn from_wire_code(wire_code: u16) -> Result<Self, CurrentPathSecurityError> {
+        match wire_code {
+            0x0001 => Ok(Self::Ed25519),
+            0x0002 => Ok(Self::MlDsa65),
+            0x0004 => Ok(Self::MlDsa87),
+            _ => Err(CurrentPathSecurityError::InvalidProtocolIdentity(
+                "unknown signing algorithm wire code".to_owned(),
+            )),
+        }
+    }
+
+    pub const fn is_ml_dsa(self) -> bool {
+        matches!(self, Self::MlDsa65 | Self::MlDsa87)
     }
 }
 
@@ -37,6 +64,7 @@ impl std::str::FromStr for ProtocolSigningAlgorithm {
         match trimmed {
             "Ed25519" | "ed25519" => Ok(Self::Ed25519),
             "ML-DSA-65" | "mldsa65" | "MLDSA65" => Ok(Self::MlDsa65),
+            "ML-DSA-87" | "mldsa87" | "MLDSA87" => Ok(Self::MlDsa87),
             _ => Err(CurrentPathSecurityError::InvalidProtocolIdentity(
                 "unknown signing algorithm".to_owned(),
             )),
@@ -52,10 +80,10 @@ pub struct CryptoSuite {
 
 impl CryptoSuite {
     pub const XWING_MLDSA: Self = Self { wire_id: 0x0001 };
-    /// Decode-only legacy Q-Periapt ContextBound suite. Wire id 0x0011 remains
-    /// recognizable for compatibility diagnostics, but is never negotiable or
-    /// operator-selectable; the authenticated ABI2 policy suite uses a distinct
-    /// contract in the Apple implementation.
+    /// EXPERIMENTAL, DEFAULT-OFF (built only with the `q-periapt` feature on
+    /// skybridge-core): Q-Periapt ContextBound `ML-KEM-768 + X25519` hybrid KEM
+    /// with ML-DSA-65 signatures. The constant itself is always defined (it is a
+    /// plain wire id); only the KEM dispatch is feature-gated.
     pub const QPERIAPT_CONTEXTBOUND_MLDSA65: Self = Self { wire_id: 0x0011 };
     pub const MLKEM768_MLDSA65: Self = Self { wire_id: 0x0101 };
     pub const MLKEM768_MLDSA65_FS: Self = Self { wire_id: 0x0102 };
@@ -70,6 +98,11 @@ impl CryptoSuite {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "x-wing" | "x-wing+mldsa65" | "x-wing+ml-dsa-65" | "xwing" => Some(Self::XWING_MLDSA),
+            "q-periapt"
+            | "qperiapt"
+            | "qperiapt-contextbound"
+            | "q-periapt-contextbound"
+            | "q-periapt+ml-dsa-65" => Some(Self::QPERIAPT_CONTEXTBOUND_MLDSA65),
             "ml-kem-768" | "ml-kem-768+mldsa65" | "ml-kem-768+ml-dsa-65" => {
                 Some(Self::MLKEM768_MLDSA65)
             }
@@ -96,14 +129,6 @@ impl CryptoSuite {
 
     pub fn is_known(self) -> bool {
         self.as_known_name().is_some()
-    }
-
-    pub fn is_legacy_only(self) -> bool {
-        self.wire_id == Self::QPERIAPT_CONTEXTBOUND_MLDSA65.wire_id
-    }
-
-    pub fn is_negotiable(self) -> bool {
-        self.is_known() && !self.is_legacy_only()
     }
 
     pub fn is_pqc(self) -> bool {
@@ -236,12 +261,24 @@ impl ProtocolIdentityBinding {
                     "ed25519 public key must be 32 bytes".to_owned(),
                 ))
             }
-            ProtocolSigningAlgorithm::MlDsa65 if public_key_bytes.is_empty() => {
-                Err(CurrentPathSecurityError::InvalidProtocolIdentity(
-                    "mlDSA65 public key must not be empty".to_owned(),
-                ))
+            ProtocolSigningAlgorithm::MlDsa65
+                if public_key_bytes.len() != crate::pqc::MLDSA65_PUBLIC_KEY_BYTES =>
+            {
+                Err(CurrentPathSecurityError::InvalidProtocolIdentity(format!(
+                    "ML-DSA-65 public key must be {} bytes",
+                    crate::pqc::MLDSA65_PUBLIC_KEY_BYTES
+                )))
             }
             ProtocolSigningAlgorithm::MlDsa65 => Ok(()),
+            ProtocolSigningAlgorithm::MlDsa87
+                if public_key_bytes.len() != crate::pqc::MLDSA87_PUBLIC_KEY_BYTES =>
+            {
+                Err(CurrentPathSecurityError::InvalidProtocolIdentity(format!(
+                    "ML-DSA-87 public key must be {} bytes",
+                    crate::pqc::MLDSA87_PUBLIC_KEY_BYTES
+                )))
+            }
+            ProtocolSigningAlgorithm::MlDsa87 => Ok(()),
         }
     }
 
@@ -323,13 +360,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fingerprint_matches_contract_shape() {
-        let fingerprint = ProtocolIdentityBinding::compute_fingerprint(
-            ProtocolSigningAlgorithm::Ed25519,
-            &[7_u8; 32],
-        );
-        assert_eq!(fingerprint.len(), 64);
-        assert!(fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()));
+    fn fingerprint_matches_cross_platform_canonical_vectors() {
+        let vectors = [
+            (
+                ProtocolSigningAlgorithm::Ed25519,
+                (0_u8..32).collect::<Vec<_>>(),
+                "09d14ebcd4f85644dbb1957e4b5bcf4501953e8ff2a96a6debcc1c9e5ef25de6",
+            ),
+            (
+                ProtocolSigningAlgorithm::MlDsa65,
+                vec![0x65; 1_952],
+                "1fdfd364181724c0cc67300bef7bdf2b555614b550785781d9fb3ef6de0e26d4",
+            ),
+            (
+                ProtocolSigningAlgorithm::MlDsa87,
+                vec![0x87; crate::pqc::MLDSA87_PUBLIC_KEY_BYTES],
+                "49fa4ab724c2d05fb329373c72d899767f4cdb95f18dd497a36714aea3ee32c4",
+            ),
+        ];
+
+        for (algorithm, public_key, expected) in vectors {
+            assert_eq!(
+                ProtocolIdentityBinding::compute_fingerprint(algorithm, &public_key),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -360,14 +415,30 @@ mod tests {
     }
 
     #[test]
-    fn qperiapt_abi1_remains_wire_parseable_but_not_operator_selectable() {
-        let legacy = CryptoSuite::from_wire_id(0x0011);
-
-        assert!(legacy.is_known());
-        assert!(legacy.is_legacy_only());
-        assert!(!legacy.is_negotiable());
-        assert_eq!(legacy.as_known_name(), Some("Q-Periapt-ContextBound"));
-        assert_eq!(CryptoSuite::from_name("q-periapt"), None);
-        assert_eq!(CryptoSuite::from_name("q-periapt-contextbound"), None);
+    fn mldsa87_has_exact_cross_platform_wire_and_key_contract() {
+        assert_eq!(ProtocolSigningAlgorithm::MlDsa87.wire_code(), 0x0004);
+        assert_eq!(
+            ProtocolSigningAlgorithm::from_wire_code(0x0004).unwrap(),
+            ProtocolSigningAlgorithm::MlDsa87
+        );
+        assert_eq!(
+            "ML-DSA-87".parse::<ProtocolSigningAlgorithm>().unwrap(),
+            ProtocolSigningAlgorithm::MlDsa87
+        );
+        assert!(
+            ProtocolIdentityBinding::validate_key_encoding(
+                &vec![0; crate::pqc::MLDSA87_PUBLIC_KEY_BYTES],
+                ProtocolSigningAlgorithm::MlDsa87,
+            )
+            .is_ok()
+        );
+        assert!(
+            ProtocolIdentityBinding::validate_key_encoding(
+                &vec![0; crate::pqc::MLDSA87_PUBLIC_KEY_BYTES - 1],
+                ProtocolSigningAlgorithm::MlDsa87,
+            )
+            .is_err()
+        );
+        assert!(ProtocolSigningAlgorithm::from_wire_code(0x0003).is_err());
     }
 }

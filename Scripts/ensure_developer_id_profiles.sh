@@ -127,6 +127,8 @@ DEVELOPER_ID_SHA1="$(security find-identity -v -p codesigning 2>/dev/null \
   | awk -v identity="${SIGNING_IDENTITY}" 'index($0, "\"" identity "\"") {print $2; exit}')"
 DEVELOPER_ID_SHA1="${DEVELOPER_ID_SHA1//:/}"
 DEVELOPER_ID_SHA1="$(printf '%s' "${DEVELOPER_ID_SHA1}" | tr '[:lower:]' '[:upper:]')"
+[[ "${DEVELOPER_ID_SHA1}" =~ ^[0-9A-F]{40}$ ]] \
+  || die "Could not resolve a unique SHA-1 fingerprint for Developer ID identity: ${SIGNING_IDENTITY}"
 
 profile_search_dirs() {
   local dir
@@ -140,61 +142,9 @@ profile_search_dirs() {
 profile_is_developer_id_distribution() {
   local profile_path="$1"
   local expected_cert_sha1="${2:-}"
-
-  python3 - "${profile_path}" "${expected_cert_sha1}" <<'PY'
-import datetime as dt
-import hashlib
-import plistlib
-import subprocess
-import sys
-from pathlib import Path
-
-
-def load_profile(path: Path):
-    payload = path.read_bytes()
-    try:
-        return plistlib.loads(payload)
-    except Exception:
-        pass
-    for command in (
-        ["security", "cms", "-D", "-i", str(path)],
-        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
-    ):
-        completed = subprocess.run(command, check=False, capture_output=True)
-        if completed.returncode == 0 and completed.stdout:
-            return plistlib.loads(completed.stdout)
-    print(f"could not decode provisioning profile: {path}", file=sys.stderr)
-    raise SystemExit(1)
-
-
-profile_path = Path(sys.argv[1])
-expected_sha1 = sys.argv[2].strip().replace(":", "").upper()
-profile = load_profile(profile_path)
-
-if profile.get("ProvisionsAllDevices") is not True:
-    print(f"profile is not a Developer ID direct distribution profile: {profile_path}", file=sys.stderr)
-    raise SystemExit(1)
-
-expires = profile.get("ExpirationDate")
-if isinstance(expires, dt.datetime):
-    now = dt.datetime.now(tz=expires.tzinfo) if expires.tzinfo else dt.datetime.now()
-    if expires <= now:
-        print(f"profile has expired: {profile_path}", file=sys.stderr)
-        raise SystemExit(1)
-
-if expected_sha1:
-    certs = profile.get("DeveloperCertificates") or []
-    cert_hashes = {
-        hashlib.sha1(bytes(cert)).hexdigest().upper()
-        for cert in certs
-    }
-    if expected_sha1 not in cert_hashes:
-        print(
-            f"profile does not include current Developer ID certificate: {profile_path}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-PY
+  skybridge_validate_developer_id_distribution_profile_certificate \
+    "${profile_path}" \
+    "${expected_cert_sha1}"
 }
 
 profile_matches_target() {

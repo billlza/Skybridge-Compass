@@ -13,9 +13,16 @@ extension CrossNetworkConnectionManager {
  /// 正常文件传输的瞬时积压远低于此值，仅当消费端长期停滞或对端恶意灌注时触发。
  /// 触发后 fail-closed（显式 overflow 错误中止该传输），优于整进程 OOM 崩溃。
         private let maxPendingBytes: Int
+        private let maxPendingChunks: Int
 
-        init(maxPendingBytes: Int = 256 * 1024 * 1024) {
+        init(
+            maxPendingBytes: Int = 32 * 1024 * 1024,
+            maxPendingChunks: Int = 1_024
+        ) {
+            precondition(maxPendingBytes > 0)
+            precondition(maxPendingChunks > 0)
             self.maxPendingBytes = maxPendingBytes
+            self.maxPendingChunks = maxPendingChunks
         }
 
         enum QueueError: Error {
@@ -24,25 +31,36 @@ extension CrossNetworkConnectionManager {
             case overflow
         }
 
-        func push(_ data: Data) {
-            guard !finished, !overflowed else { return }
+        @discardableResult
+        func push(_ data: Data) -> Bool {
+            guard !finished, !overflowed else { return false }
+            guard !data.isEmpty else {
+                failOverflow()
+                return false
+            }
             if let w = waiters.first {
                 waiters.removeFirst()
                 w.resume(returning: data)
-                return
+                return true
             }
-            if pendingBytes + data.count > maxPendingBytes {
- // 积压超过高水位：进入 overflow 状态并唤醒所有等待者抛错，丢弃已缓冲数据。
-                overflowed = true
-                pending.removeAll()
-                pendingBytes = 0
-                let ws = waiters
-                waiters.removeAll()
-                ws.forEach { $0.resume(throwing: QueueError.overflow) }
-                return
+            if pending.count >= maxPendingChunks
+                || data.count > maxPendingBytes - pendingBytes {
+                failOverflow()
+                return false
             }
             pending.append(data)
             pendingBytes += data.count
+            return true
+        }
+
+        func failOverflow() {
+            guard !overflowed, !finished else { return }
+            overflowed = true
+            pending.removeAll()
+            pendingBytes = 0
+            let ws = waiters
+            waiters.removeAll()
+            ws.forEach { $0.resume(throwing: QueueError.overflow) }
         }
 
         func finish() {

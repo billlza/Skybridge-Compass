@@ -124,8 +124,16 @@ struct CurrentPathProbe {
 
     private static func createCode(validDuration: TimeInterval) async throws {
         let context = try await currentContext()
-        let signalServer = makeSignalServer(accessToken: context.accessToken, tenantID: context.tenantID)
-        let admission = try await requestAdmissionLease(signalServer: signalServer, binding: context.binding)
+        let signalServer = makeSignalServer(
+            accessToken: context.accessToken,
+            tenantID: context.tenantID,
+            userID: context.userID
+        )
+        let admission = try await requestAdmissionLease(
+            signalServer: signalServer,
+            binding: context.binding,
+            signingKeyHandle: context.signingKeyHandle
+        )
         let deviceName = Host.current().localizedName ?? "Mac"
         let lease = try await signalServer.registerConnectionCode(
             admissionToken: admission.token,
@@ -149,10 +157,18 @@ struct CurrentPathProbe {
 
     private static func registerCurrentDevice(deviceName: String?) async throws {
         let context = try await currentContext()
-        let signalServer = makeSignalServer(accessToken: context.accessToken, tenantID: context.tenantID)
+        let signalServer = makeSignalServer(
+            accessToken: context.accessToken,
+            tenantID: context.tenantID,
+            userID: context.userID
+        )
         let registered = try await signalServer.registerCurrentDevice(
             binding: context.binding,
-            deviceName: deviceName ?? Host.current().localizedName ?? "Mac"
+            deviceName: deviceName ?? Host.current().localizedName ?? "Mac",
+            expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                tenantID: context.tenantID,
+                userID: context.userID
+            )
         )
         try printJSONObject([
             "tenant_id": registered.tenantId,
@@ -168,8 +184,16 @@ struct CurrentPathProbe {
 
     private static func connectCode(code: String, stateDir: String?) async throws {
         let context = try await currentContext()
-        let signalServer = makeSignalServer(accessToken: context.accessToken, tenantID: context.tenantID)
-        let admission = try await requestAdmissionLease(signalServer: signalServer, binding: context.binding)
+        let signalServer = makeSignalServer(
+            accessToken: context.accessToken,
+            tenantID: context.tenantID,
+            userID: context.userID
+        )
+        let admission = try await requestAdmissionLease(
+            signalServer: signalServer,
+            binding: context.binding,
+            signingKeyHandle: context.signingKeyHandle
+        )
         let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
         let origin = try canonicalOrigin(lookup.signalingServerOrigin)
         guard let wsURL = signalingWebSocketURL(
@@ -488,6 +512,12 @@ struct CurrentPathProbe {
         let userID: String
         let tenantID: String
         let binding: ProtocolIdentityBinding
+        let signingKeyHandle: SigningKeyHandle
+    }
+
+    private struct CurrentPathLocalIdentity {
+        let binding: ProtocolIdentityBinding
+        let signingKeyHandle: SigningKeyHandle
     }
 
     private static func currentContext() async throws -> Context {
@@ -500,10 +530,21 @@ struct CurrentPathProbe {
             throw ProbeError.invalidArguments("failed to derive tenant id from current session")
         }
         debug("resolving local binding")
-        let binding = try await currentPathLocalBinding()
+        let localIdentity = try await currentPathLocalIdentity()
         debug("local binding resolved")
-        let userID = authSession.userIdentifier.isEmpty ? deriveUserIdentifier(accessToken: accessToken) : authSession.userIdentifier
-        return Context(accessToken: accessToken, userID: userID, tenantID: tenantID, binding: binding)
+        let userID = authSession.userIdentifier.isEmpty
+            ? deriveUserIdentifier(accessToken: accessToken)
+            : authSession.userIdentifier
+        guard !userID.isEmpty else {
+            throw ProbeError.invalidArguments("failed to derive user id from current session")
+        }
+        return Context(
+            accessToken: accessToken,
+            userID: userID,
+            tenantID: tenantID,
+            binding: localIdentity.binding,
+            signingKeyHandle: localIdentity.signingKeyHandle
+        )
     }
 
     private static func currentAuthSession() async throws -> AuthSession {
@@ -734,25 +775,35 @@ struct CurrentPathProbe {
     }
 
     private static func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
-        let algorithm: ProtocolSigningAlgorithm = .ed25519
+        try await currentPathLocalIdentity().binding
+    }
+
+    private static func currentPathLocalIdentity() async throws -> CurrentPathLocalIdentity {
+        let identity = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
         let selfIdentity = try await SelfIdentityProvider.shared
             .snapshotEnsuringProtocolDeviceId(allowCreate: true)
-        let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
-        return try ProtocolIdentityBinding(
+        let binding = try ProtocolIdentityBinding(
             deviceId: selfIdentity.deviceId,
-            protocolSigningAlgorithm: algorithm,
-            protocolPublicKeyBytes: publicKey
+            protocolSigningAlgorithm: identity.algorithm,
+            protocolPublicKeyBytes: identity.publicKey
+        )
+        return CurrentPathLocalIdentity(
+            binding: binding,
+            signingKeyHandle: identity.keyHandle
         )
     }
 
     private static func requestAdmissionLease(
         signalServer: SignalServerClient,
-        binding: ProtocolIdentityBinding
+        binding: ProtocolIdentityBinding,
+        signingKeyHandle: SigningKeyHandle
     ) async throws -> SignalServerClient.AdmissionLease {
         let challenge = try await signalServer.requestAdmissionChallenge(binding: binding)
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: binding.protocolSigningAlgorithm)
-        let signingHandle = try await DeviceIdentityKeyManager.shared.getProtocolSigningKeyHandle(for: binding.protocolSigningAlgorithm)
-        let signature = try await signatureProvider.sign(challenge.signaturePayload(), key: signingHandle)
+        let signature = try await signatureProvider.sign(
+            challenge.signaturePayload(),
+            key: signingKeyHandle
+        )
         return try await signalServer.completeAdmission(
             challenge: challenge,
             binding: binding,
@@ -760,9 +811,19 @@ struct CurrentPathProbe {
         )
     }
 
-    private static func makeSignalServer(accessToken: String, tenantID: String) -> SignalServerClient {
+    private static func makeSignalServer(
+        accessToken: String,
+        tenantID: String,
+        userID: String
+    ) -> SignalServerClient {
         SignalServerClient(
-            bearerTokenProvider: { accessToken },
+            authenticatedRequestContextProvider: {
+                SignalServerClient.AuthenticatedRequestContext(
+                    bearerToken: accessToken,
+                    tenantID: tenantID,
+                    userID: userID
+                )
+            },
             tenantIDProvider: { tenantID },
             clientVersionProvider: { resolvedClientVersion() },
             protocolVersionProvider: { resolvedProtocolVersion() }

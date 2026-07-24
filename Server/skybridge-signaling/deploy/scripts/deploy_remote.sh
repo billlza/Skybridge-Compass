@@ -109,6 +109,7 @@ if ! command -v node >/dev/null 2>&1; then
     echo "node is required locally for preflight checks" >&2
     exit 1
 fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 24 || (major === 24 && minor < 6)) { console.error('Node.js 24.6.0 or newer is required'); process.exit(1); }"
 
 pushd "$SERVER_DIR" >/dev/null
 node --check server.js
@@ -158,6 +159,7 @@ if ! command -v node >/dev/null 2>&1; then
   echo "node is not installed on remote host" >&2
   exit 1
 fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 24 || (major === 24 && minor < 6)) { console.error('Node.js 24.6.0 or newer is required'); process.exit(1); }"
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm is not installed on remote host" >&2
   exit 1

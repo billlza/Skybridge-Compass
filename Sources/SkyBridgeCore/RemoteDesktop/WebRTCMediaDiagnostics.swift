@@ -1,5 +1,9 @@
 import CryptoKit
 import Foundation
+#if os(macOS)
+import Darwin
+import OSLog
+#endif
 
 public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
     public let schemaVersion: Int
@@ -267,29 +271,58 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
 }
 
 public enum WebRTCMediaDiagnosticWriter {
+#if os(macOS)
+    private static let logger = Logger(
+        subsystem: "com.skybridge.compass",
+        category: "WebRTCMediaDiagnostics"
+    )
+
+    private static let writeQueue = WebRTCMediaDiagnosticWriteQueue(
+        queue: DispatchQueue(
+            label: "com.skybridge.webrtc-media-diagnostics",
+            qos: .utility,
+            autoreleaseFrequency: .workItem
+        ),
+        maximumPendingCount: 128,
+        maximumPendingBytes: 1 * 1_024 * 1_024,
+        writeOperation: { data, safeSessionReference in
+            try WebRTCMediaDiagnosticFileWriter().appendEncodedLine(
+                data,
+                safeSessionReference: safeSessionReference
+            )
+        },
+        failureHandler: { error in
+            if let error = error as? WebRTCMediaDiagnosticWriteError {
+                logger.error(
+                    "WebRTC media diagnostic write failed: \(error.safeLogSummary, privacy: .public)"
+                )
+            } else {
+                logger.error("WebRTC media diagnostic write failed: unexpected_error")
+            }
+        }
+    )
+#endif
+
     public static func append(_ event: WebRTCMediaDiagnosticEvent) {
 #if os(macOS)
-        let safeSessionRef = safeSessionReference(event.sessionId)
-        let logsDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Logs", isDirectory: true)
-            .appendingPathComponent("SkyBridge", isDirectory: true)
-        let logURL = logsDirectory.appendingPathComponent("webrtc-media-\(safeSessionRef).jsonl")
-        guard let encoded = publicDiagnosticJSONData(for: event) else { return }
-        var line = encoded
-        line.append(0x0a)
-        try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: logURL.path),
-           let handle = try? FileHandle(forWritingTo: logURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
-        } else {
-            try? line.write(to: logURL, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: logURL.path
+        do {
+            var line = try publicDiagnosticJSONData(for: event)
+            line.append(0x0a)
+            guard writeQueue.enqueue(
+                data: line,
+                safeSessionReference: safeSessionReference(event.sessionId)
+            ) else {
+                logger.error(
+                    "WebRTC media diagnostic queue reached its bounded count/byte capacity; event dropped"
+                )
+                return
+            }
+        } catch let error as WebRTCMediaDiagnosticWriteError {
+            logger.error(
+                "WebRTC media diagnostic admission failed: \(error.safeLogSummary, privacy: .public)"
             )
+        } catch {
+            logger.error("WebRTC media diagnostic admission failed: unexpected_error")
         }
 #else
         _ = event
@@ -297,33 +330,698 @@ public enum WebRTCMediaDiagnosticWriter {
     }
 
 #if os(macOS)
-    private static func safeSessionReference(_ sessionId: String) -> String {
+    static func safeSessionReference(_ sessionId: String) -> String {
         let value = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             return "ref-missing"
         }
-        let digest = SHA256.hash(data: Data(value.utf8))
+        let boundedUTF8 = value.utf8.prefix(WebRTCMediaDiagnosticFileWriter.maximumLineBytes + 1)
+        guard boundedUTF8.count <= WebRTCMediaDiagnosticFileWriter.maximumLineBytes else {
+            return "ref-invalid"
+        }
+        let digest = SHA256.hash(data: Data(boundedUTF8))
         let prefix = digest.prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
         return "ref-\(prefix)"
     }
 
-    private static func publicDiagnosticJSONData(for event: WebRTCMediaDiagnosticEvent) -> Data? {
-        guard let encoded = try? JSONEncoder().encode(event),
-              let jsonObject = try? JSONSerialization.jsonObject(with: encoded),
-              var payload = jsonObject as? [String: Any] else {
-            return nil
+    static func publicDiagnosticJSONData(for event: WebRTCMediaDiagnosticEvent) throws -> Data {
+        try validateStringByteBudget(for: event)
+
+        let encoded: Data
+        do {
+            encoded = try JSONEncoder().encode(event)
+        } catch {
+            throw WebRTCMediaDiagnosticWriteError.encodingFailed
+        }
+
+        let jsonObject: Any
+        do {
+            jsonObject = try JSONSerialization.jsonObject(with: encoded)
+        } catch {
+            throw WebRTCMediaDiagnosticWriteError.encodingFailed
+        }
+        guard var payload = jsonObject as? [String: Any] else {
+            throw WebRTCMediaDiagnosticWriteError.encodingFailed
         }
         payload.removeValue(forKey: "session_id")
         payload["session_ref"] = safeSessionReference(event.sessionId)
         guard JSONSerialization.isValidJSONObject(payload) else {
-            return nil
+            throw WebRTCMediaDiagnosticWriteError.encodingFailed
         }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        do {
+            let result = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            guard result.count <= WebRTCMediaDiagnosticFileWriter.maximumLineBytes else {
+                throw WebRTCMediaDiagnosticWriteError.payloadTooLarge
+            }
+            return result
+        } catch let error as WebRTCMediaDiagnosticWriteError {
+            throw error
+        } catch {
+            throw WebRTCMediaDiagnosticWriteError.encodingFailed
+        }
+    }
+
+    /// Bounds all variable-width fields before JSONEncoder can allocate an arbitrarily large
+    /// intermediate object. The final encoded-size check remains authoritative because JSON
+    /// escaping can expand otherwise-valid UTF-8.
+    private static func validateStringByteBudget(
+        for event: WebRTCMediaDiagnosticEvent
+    ) throws {
+        let stringFields: [String?] = [
+            event.sessionId,
+            event.kind,
+            event.probable,
+            event.fallbackProducer,
+            event.nativeVideoHealth,
+            event.codec,
+            event.encoder,
+            event.qualityLimit,
+            event.validationMode,
+            event.failureReason
+        ]
+        var remainingBytes = WebRTCMediaDiagnosticFileWriter.maximumLineBytes
+        for value in stringFields.compactMap({ $0 }) {
+            let byteCount = value.utf8.prefix(remainingBytes + 1).count
+            guard byteCount <= remainingBytes else {
+                throw WebRTCMediaDiagnosticWriteError.payloadTooLarge
+            }
+            remainingBytes -= byteCount
+        }
     }
 #endif
 }
+
+#if os(macOS)
+enum WebRTCMediaDiagnosticWriteError: Error, Equatable {
+    case encodingFailed
+    case payloadTooLarge
+    case lockUnavailable
+    case retentionLimitExceeded
+    case unsafeFileSystemObject
+    case posix(operation: String, code: Int32)
+
+    var safeLogSummary: String {
+        switch self {
+        case .encodingFailed:
+            return "encoding_failed"
+        case .payloadTooLarge:
+            return "payload_too_large"
+        case .lockUnavailable:
+            return "lock_unavailable"
+        case .retentionLimitExceeded:
+            return "retention_limit_exceeded"
+        case .unsafeFileSystemObject:
+            return "unsafe_filesystem_object"
+        case .posix(let operation, let code):
+            return "posix_\(operation)_\(code)"
+        }
+    }
+}
+
+final class WebRTCMediaDiagnosticWriteQueue: @unchecked Sendable {
+    typealias WriteOperation = @Sendable (Data, String) throws -> Void
+    typealias FailureHandler = @Sendable (Error) -> Void
+
+    private struct PendingEntry: Sendable {
+        let data: Data
+        let safeSessionReference: String
+    }
+
+    private let queue: DispatchQueue
+    private let maximumPendingCount: Int
+    private let maximumPendingBytes: Int
+    private let writeOperation: WriteOperation
+    private let failureHandler: FailureHandler
+    private let lock = NSLock()
+    private var pendingEntries: [PendingEntry] = []
+    private var pendingCount = 0
+    private var pendingBytes = 0
+    private var isDraining = false
+
+    init(
+        queue: DispatchQueue,
+        maximumPendingCount: Int,
+        maximumPendingBytes: Int,
+        writeOperation: @escaping WriteOperation,
+        failureHandler: @escaping FailureHandler
+    ) {
+        precondition(maximumPendingCount > 0)
+        precondition(maximumPendingBytes > 0)
+        self.queue = queue
+        self.maximumPendingCount = maximumPendingCount
+        self.maximumPendingBytes = maximumPendingBytes
+        self.writeOperation = writeOperation
+        self.failureHandler = failureHandler
+    }
+
+    @discardableResult
+    func enqueue(data: Data, safeSessionReference: String) -> Bool {
+        var shouldScheduleDrain = false
+        lock.lock()
+        let canAccept = !data.isEmpty
+            && data.count <= maximumPendingBytes
+            && safeSessionReference.utf8.prefix(33).count <= 32
+            && pendingCount < maximumPendingCount
+            && pendingBytes <= maximumPendingBytes - data.count
+        if canAccept {
+            pendingEntries.append(
+                PendingEntry(data: data, safeSessionReference: safeSessionReference)
+            )
+            pendingCount += 1
+            pendingBytes += data.count
+            if !isDraining {
+                isDraining = true
+                shouldScheduleDrain = true
+            }
+        }
+        lock.unlock()
+
+        if shouldScheduleDrain {
+            queue.async { [weak self] in
+                self?.drain()
+            }
+        }
+        return canAccept
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    func flushForTesting() {
+        queue.sync {}
+    }
+
+    func pendingSnapshotForTesting() -> (count: Int, bytes: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (pendingCount, pendingBytes)
+    }
+#endif
+
+    private func drain() {
+        while true {
+            let entry: PendingEntry
+            lock.lock()
+            guard !pendingEntries.isEmpty else {
+                isDraining = false
+                lock.unlock()
+                return
+            }
+            entry = pendingEntries.removeFirst()
+            lock.unlock()
+
+            do {
+                try writeOperation(entry.data, entry.safeSessionReference)
+            } catch {
+                failureHandler(error)
+            }
+
+            lock.lock()
+            pendingCount -= 1
+            pendingBytes -= entry.data.count
+            lock.unlock()
+        }
+    }
+}
+
+struct WebRTCMediaDiagnosticFileWriter {
+    static let maximumLineBytes = 64 * 1_024
+    static let maximumLogFileBytes = 8 * 1_024 * 1_024
+    static let maximumRetainedBytes = 32 * 1_024 * 1_024
+    static let maximumRetainedFileCount = 8
+
+    typealias LockAttempt = @Sendable (Int32) -> Int32
+
+    private struct RetainedLogFile {
+        let name: String
+        let size: Int
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+    }
+
+    private let logsRootURL: URL
+    private let maximumFileBytes: Int
+    private let maximumTotalBytes: Int
+    private let maximumFileCount: Int
+    private let lockAttempt: LockAttempt
+    private let lockRetryCount: Int
+    private let lockRetryDelayMicroseconds: UInt32
+
+    init(
+        logsRootURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true),
+        maximumFileBytes: Int = Self.maximumLogFileBytes,
+        maximumTotalBytes: Int = Self.maximumRetainedBytes,
+        maximumFileCount: Int = Self.maximumRetainedFileCount,
+        lockRetryCount: Int = 20,
+        lockRetryDelayMicroseconds: UInt32 = 5_000,
+        lockAttempt: @escaping LockAttempt = { descriptor in
+            Darwin.lockf(descriptor, F_TLOCK, 0) == 0 ? 0 : errno
+        }
+    ) {
+        precondition(maximumFileBytes > 0)
+        precondition(maximumTotalBytes >= maximumFileBytes)
+        precondition(maximumFileCount > 0)
+        precondition(lockRetryCount > 0)
+        self.logsRootURL = logsRootURL
+        self.maximumFileBytes = maximumFileBytes
+        self.maximumTotalBytes = maximumTotalBytes
+        self.maximumFileCount = maximumFileCount
+        self.lockAttempt = lockAttempt
+        self.lockRetryCount = lockRetryCount
+        self.lockRetryDelayMicroseconds = lockRetryDelayMicroseconds
+    }
+
+    func append(_ event: WebRTCMediaDiagnosticEvent) throws {
+        var line = try WebRTCMediaDiagnosticWriter.publicDiagnosticJSONData(for: event)
+        line.append(0x0a)
+        try appendEncodedLine(
+            line,
+            safeSessionReference: WebRTCMediaDiagnosticWriter.safeSessionReference(event.sessionId)
+        )
+    }
+
+    func appendEncodedLine(
+        _ line: Data,
+        safeSessionReference: String
+    ) throws {
+        guard !line.isEmpty,
+              line.last == 0x0a,
+              line.count <= Self.maximumLineBytes + 1,
+              line.count <= maximumFileBytes else {
+            throw WebRTCMediaDiagnosticWriteError.payloadTooLarge
+        }
+        guard Self.isSafeSessionReference(safeSessionReference) else {
+            throw WebRTCMediaDiagnosticWriteError.unsafeFileSystemObject
+        }
+
+        let rootDescriptor = try openTrustedDirectory(at: logsRootURL)
+        defer { _ = Darwin.close(rootDescriptor) }
+        let logsDescriptor = try openOrCreateTrustedDirectory(
+            named: "SkyBridge",
+            parentDescriptor: rootDescriptor
+        )
+        defer { _ = Darwin.close(logsDescriptor) }
+
+        let lockDescriptor = try openTrustedLogFile(
+            named: ".webrtc-media.lock",
+            directoryDescriptor: logsDescriptor
+        )
+        do {
+            try acquireBoundedLock(lockDescriptor)
+            try appendWhileLocked(
+                line,
+                safeSessionReference: safeSessionReference,
+                directoryDescriptor: logsDescriptor
+            )
+        } catch {
+            let operationError = error
+            _ = Darwin.close(lockDescriptor)
+            throw operationError
+        }
+        guard Darwin.close(lockDescriptor) == 0 else {
+            throw posixError("close_lock")
+        }
+    }
+
+    private func appendWhileLocked(
+        _ line: Data,
+        safeSessionReference: String,
+        directoryDescriptor: Int32
+    ) throws {
+        let filename = "webrtc-media-\(safeSessionReference).jsonl"
+        let rotatedFilename = "\(filename).1"
+        var fileDescriptor = try openTrustedLogFile(
+            named: filename,
+            directoryDescriptor: directoryDescriptor
+        )
+        var fileIsOpen = true
+        defer {
+            if fileIsOpen {
+                _ = Darwin.close(fileDescriptor)
+            }
+        }
+
+        var metadata = try validatedFileMetadata(fileDescriptor)
+        guard metadata.st_size >= 0,
+              metadata.st_size <= off_t(Int.max) else {
+            throw WebRTCMediaDiagnosticWriteError.retentionLimitExceeded
+        }
+
+        if Int(metadata.st_size) > maximumFileBytes - line.count {
+            guard Darwin.close(fileDescriptor) == 0 else {
+                fileIsOpen = false
+                throw posixError("close_before_rotation")
+            }
+            fileIsOpen = false
+            try removeRetainedFileIfPresent(
+                named: rotatedFilename,
+                directoryDescriptor: directoryDescriptor
+            )
+            guard Darwin.renameat(
+                directoryDescriptor,
+                filename,
+                directoryDescriptor,
+                rotatedFilename
+            ) == 0 else {
+                throw posixError("rotate")
+            }
+            try synchronizeDescriptor(directoryDescriptor)
+
+            fileDescriptor = try openTrustedLogFile(
+                named: filename,
+                directoryDescriptor: directoryDescriptor
+            )
+            fileIsOpen = true
+            metadata = try validatedFileMetadata(fileDescriptor)
+            guard metadata.st_size == 0 else {
+                throw WebRTCMediaDiagnosticWriteError.unsafeFileSystemObject
+            }
+        }
+
+        try reserveRetentionCapacity(
+            forAdditionalBytes: line.count,
+            protecting: filename,
+            directoryDescriptor: directoryDescriptor
+        )
+        try writeAll(line, to: fileDescriptor)
+
+        guard Darwin.close(fileDescriptor) == 0 else {
+            fileIsOpen = false
+            throw posixError("close_file")
+        }
+        fileIsOpen = false
+    }
+
+    private func reserveRetentionCapacity(
+        forAdditionalBytes additionalBytes: Int,
+        protecting protectedFilename: String,
+        directoryDescriptor: Int32
+    ) throws {
+        var files = try retainedLogFiles(directoryDescriptor: directoryDescriptor)
+        var totalBytes = try files.reduce(into: 0) { total, file in
+            guard file.size >= 0, total <= Int.max - file.size else {
+                throw WebRTCMediaDiagnosticWriteError.retentionLimitExceeded
+            }
+            total += file.size
+        }
+        var removedFile = false
+
+        while totalBytes > maximumTotalBytes - additionalBytes
+                || files.count > maximumFileCount {
+            guard let victimIndex = files.indices
+                .filter({ files[$0].name != protectedFilename })
+                .min(by: { Self.retentionOrder(files[$0], files[$1]) }) else {
+                throw WebRTCMediaDiagnosticWriteError.retentionLimitExceeded
+            }
+            let victim = files.remove(at: victimIndex)
+            guard Darwin.unlinkat(directoryDescriptor, victim.name, 0) == 0 else {
+                throw posixError("prune")
+            }
+            totalBytes -= victim.size
+            removedFile = true
+        }
+
+        if removedFile {
+            try synchronizeDescriptor(directoryDescriptor)
+        }
+    }
+
+    private func retainedLogFiles(
+        directoryDescriptor: Int32
+    ) throws -> [RetainedLogFile] {
+        let scanDescriptor = Darwin.dup(directoryDescriptor)
+        guard scanDescriptor >= 0 else { throw posixError("duplicate_directory") }
+        guard let directory = Darwin.fdopendir(scanDescriptor) else {
+            _ = Darwin.close(scanDescriptor)
+            throw posixError("open_directory_stream")
+        }
+        defer { _ = Darwin.closedir(directory) }
+
+        var files: [RetainedLogFile] = []
+        while true {
+            errno = 0
+            guard let entry = Darwin.readdir(directory) else {
+                guard errno == 0 else { throw posixError("read_directory") }
+                break
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(cString: $0)
+                }
+            }
+            guard Self.isRetainedLogFilename(name) else { continue }
+
+            var metadata = stat()
+            guard Darwin.fstatat(
+                directoryDescriptor,
+                name,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            ) == 0 else {
+                throw posixError("stat_retained_file")
+            }
+            try validateFileMetadata(metadata)
+            guard metadata.st_size >= 0,
+                  metadata.st_size <= off_t(Int.max) else {
+                throw WebRTCMediaDiagnosticWriteError.retentionLimitExceeded
+            }
+            files.append(
+                RetainedLogFile(
+                    name: name,
+                    size: Int(metadata.st_size),
+                    modifiedSeconds: Int64(metadata.st_mtimespec.tv_sec),
+                    modifiedNanoseconds: Int64(metadata.st_mtimespec.tv_nsec)
+                )
+            )
+        }
+        return files
+    }
+
+    private static func retentionOrder(
+        _ lhs: RetainedLogFile,
+        _ rhs: RetainedLogFile
+    ) -> Bool {
+        (lhs.modifiedSeconds, lhs.modifiedNanoseconds, lhs.name)
+            < (rhs.modifiedSeconds, rhs.modifiedNanoseconds, rhs.name)
+    }
+
+    private static func isRetainedLogFilename(_ name: String) -> Bool {
+        guard name.hasPrefix("webrtc-media-ref-") else { return false }
+        return name.hasSuffix(".jsonl") || name.hasSuffix(".jsonl.1")
+    }
+
+    private static func isSafeSessionReference(_ value: String) -> Bool {
+        guard value == "ref-missing" || value == "ref-invalid"
+                || (value.hasPrefix("ref-") && value.utf8.count == 20) else {
+            return false
+        }
+        return value.utf8.allSatisfy {
+            ($0 >= 48 && $0 <= 57)
+                || ($0 >= 97 && $0 <= 102)
+                || $0 == 45
+                || ($0 >= 103 && $0 <= 122)
+        }
+    }
+
+    private func removeRetainedFileIfPresent(
+        named name: String,
+        directoryDescriptor: Int32
+    ) throws {
+        var metadata = stat()
+        if Darwin.fstatat(
+            directoryDescriptor,
+            name,
+            &metadata,
+            AT_SYMLINK_NOFOLLOW
+        ) != 0 {
+            if errno == ENOENT { return }
+            throw posixError("stat_rotation_target")
+        }
+        try validateFileMetadata(metadata)
+        guard Darwin.unlinkat(directoryDescriptor, name, 0) == 0 else {
+            throw posixError("remove_rotation_target")
+        }
+    }
+
+    private func openTrustedDirectory(at url: URL) throws -> Int32 {
+        let descriptor = Darwin.open(
+            url.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else { throw posixError("open_root") }
+        do {
+            try validateDirectory(descriptor)
+            return descriptor
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    private func openOrCreateTrustedDirectory(
+        named name: String,
+        parentDescriptor: Int32
+    ) throws -> Int32 {
+        var descriptor = Darwin.openat(
+            parentDescriptor,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        if descriptor < 0, errno == ENOENT {
+            guard Darwin.mkdirat(parentDescriptor, name, 0o700) == 0 else {
+                if errno != EEXIST { throw posixError("mkdir") }
+                descriptor = Darwin.openat(
+                    parentDescriptor,
+                    name,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                )
+                guard descriptor >= 0 else { throw posixError("open_directory") }
+                do {
+                    try validateDirectory(descriptor)
+                    return descriptor
+                } catch {
+                    Darwin.close(descriptor)
+                    throw error
+                }
+            }
+            guard Darwin.fsync(parentDescriptor) == 0 else {
+                throw posixError("sync_parent")
+            }
+            descriptor = Darwin.openat(
+                parentDescriptor,
+                name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard descriptor >= 0 else { throw posixError("open_directory") }
+        do {
+            try validateDirectory(descriptor)
+            return descriptor
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    private func validateDirectory(_ descriptor: Int32) throws {
+        var status = stat()
+        guard Darwin.fstat(descriptor, &status) == 0 else {
+            throw posixError("stat_directory")
+        }
+        guard status.st_mode & S_IFMT == S_IFDIR,
+              status.st_uid == geteuid(),
+              status.st_mode & 0o022 == 0 else {
+            throw WebRTCMediaDiagnosticWriteError.unsafeFileSystemObject
+        }
+    }
+
+    private func openTrustedLogFile(
+        named name: String,
+        directoryDescriptor: Int32
+    ) throws -> Int32 {
+        var descriptor = Darwin.openat(
+            directoryDescriptor,
+            name,
+            O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0o600
+        )
+        if descriptor < 0, errno == EEXIST {
+            descriptor = Darwin.openat(
+                directoryDescriptor,
+                name,
+                O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW
+            )
+        } else if descriptor >= 0 {
+            if Darwin.fsync(directoryDescriptor) != 0 {
+                let syncError = posixError("sync_directory")
+                Darwin.close(descriptor)
+                throw syncError
+            }
+        }
+        guard descriptor >= 0 else { throw posixError("open_file") }
+
+        do {
+            _ = try validatedFileMetadata(descriptor)
+            return descriptor
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    private func validatedFileMetadata(_ descriptor: Int32) throws -> stat {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else {
+            throw posixError("stat_file")
+        }
+        try validateFileMetadata(metadata)
+        return metadata
+    }
+
+    private func validateFileMetadata(_ metadata: stat) throws {
+        guard metadata.st_mode & S_IFMT == S_IFREG,
+              metadata.st_uid == geteuid(),
+              metadata.st_nlink == 1,
+              metadata.st_mode & 0o777 == 0o600 else {
+            throw WebRTCMediaDiagnosticWriteError.unsafeFileSystemObject
+        }
+    }
+
+    private func acquireBoundedLock(_ descriptor: Int32) throws {
+        for attempt in 0..<lockRetryCount {
+            let result = lockAttempt(descriptor)
+            if result == 0 { return }
+            if result != EINTR && result != EAGAIN && result != EACCES {
+                throw WebRTCMediaDiagnosticWriteError.posix(
+                    operation: "lock_file",
+                    code: result
+                )
+            }
+            guard attempt + 1 < lockRetryCount else {
+                throw WebRTCMediaDiagnosticWriteError.lockUnavailable
+            }
+            if lockRetryDelayMicroseconds > 0 {
+                _ = Darwin.usleep(lockRetryDelayMicroseconds)
+            }
+        }
+        throw WebRTCMediaDiagnosticWriteError.lockUnavailable
+    }
+
+    private func writeAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let written = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    rawBuffer.count - offset
+                )
+                if written > 0 {
+                    offset += written
+                } else if written < 0, errno == EINTR {
+                    continue
+                } else {
+                    throw posixError("write_file")
+                }
+            }
+        }
+    }
+
+    private func posixError(_ operation: String) -> WebRTCMediaDiagnosticWriteError {
+        .posix(operation: operation, code: errno)
+    }
+
+    private func synchronizeDescriptor(_ descriptor: Int32) throws {
+        while Darwin.fsync(descriptor) != 0 {
+            if errno == EINTR { continue }
+            throw posixError("sync_directory")
+        }
+    }
+}
+#endif
 
 public struct RealtimeMediaAudioSenderDiagnosticSnapshot: Codable, Equatable, Sendable {
     public let capturedPackets: UInt64

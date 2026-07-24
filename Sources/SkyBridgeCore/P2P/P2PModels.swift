@@ -265,7 +265,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         )
     }
 
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
     @available(macOS 14.0, iOS 17.0, *)
     func testingSetClassicTransferRemoteIdentity(
         deviceId: String,
@@ -531,61 +531,83 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             rekeyPairKey = nil
         }
 
+        let configuration = try await SettingsManager.shared
+            .committedProtocolIdentityConfiguration()
+        let outboundProtocolIdentity = await MainActor.run {
+            let requestedAlgorithm = configuration.algorithm
+            let protection = configuration.protection
+            let peerAlgorithm = TrustSyncService.shared.outboundPQCSignatureAlgorithm(
+                deviceId: handshakePeer.deviceId,
+                requestedAlgorithm: requestedAlgorithm
+            )
+            return (
+                requestedAlgorithm: requestedAlgorithm,
+                requestedProtection: protection,
+                selectedAlgorithm: peerAlgorithm
+            )
+        }
+
         do {
             return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
                 deviceId: handshakePeer.deviceId,
                 preferPQC: preferPQC,
                 policy: policy,
-                cryptoProvider: baseProvider
-            ) { [weak self] preparation in
-                guard let self else { throw P2PConnectionError.disconnected }
+                cryptoProvider: baseProvider,
+                executor: { [weak self] preparation in
+                    guard let self else { throw P2PConnectionError.disconnected }
 
-                let cryptoProvider: any CryptoProvider = {
-                    switch preparation.strategy {
-                    case .pqcOnly:
-                        return CryptoProviderFactory.make(policy: selectionPolicy)
-                    case .classicOnly:
-                        return CryptoProviderFactory.make(policy: .classicOnly)
-                    }
-                }()
+                    let cryptoProvider: any CryptoProvider = {
+                        switch preparation.strategy {
+                        case .pqcOnly:
+                            return CryptoProviderFactory.make(policy: selectionPolicy)
+                        case .classicOnly:
+                            return CryptoProviderFactory.make(policy: .classicOnly)
+                        }
+                    }()
 
-                let identityProvider = DeviceIdentityHandshakeProvider(
-                    sigAAlgorithm: preparation.sigAAlgorithm,
-                    includeSecureEnclavePoP: policy.requireSecureEnclavePoP
-                )
-
-                let outboundSOA: HandshakeSOAMetadata? = {
-                    guard shouldAdvertiseSOA,
-                          let localSOAPeerId,
-                          let expectedRemoteSOAPeerId else {
-                        return nil
-                    }
-                    return try? HandshakeSOAMetadata(
-                        initiatorPeerId: localSOAPeerId,
-                        targetPeerId: expectedRemoteSOAPeerId,
-                        attemptId: Self.randomAttemptIdBytes()
+                    let identityProvider = DeviceIdentityHandshakeProvider(
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        protocolSigningKeyProtection: preparation.sigAAlgorithm
+                            == outboundProtocolIdentity.requestedAlgorithm
+                            ? outboundProtocolIdentity.requestedProtection
+                            : .softwareKeychain,
+                        includeSecureEnclavePoP: policy.requireSecureEnclavePoP
                     )
-                }()
 
-                let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
-                let driver = try HandshakeDriver(
-                    transport: transport,
-                    cryptoProvider: cryptoProvider,
-                    protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
-                    identityProvider: identityProvider,
-                    sigAAlgorithm: preparation.sigAAlgorithm,
-                    offeredSuites: preparation.offeredSuites,
-                    policy: policy,
-                    cryptoPolicy: cryptoPolicy,
-                    soaMetadata: outboundSOA,
-                    localSOAPeerId: localSOAPeerId,
-                    expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
-                )
-                self.handshakeDriverLock.withLock { $0 = driver }
-                let sessionKeys = try await driver.initiateHandshake(with: self.handshakePeer)
-                await self.captureAuthenticatedRemoteAuthority(from: driver)
-                return sessionKeys
-            }
+                    let outboundSOA: HandshakeSOAMetadata? = {
+                        guard shouldAdvertiseSOA,
+                              let localSOAPeerId,
+                              let expectedRemoteSOAPeerId else {
+                            return nil
+                        }
+                        return try? HandshakeSOAMetadata(
+                            initiatorPeerId: localSOAPeerId,
+                            targetPeerId: expectedRemoteSOAPeerId,
+                            attemptId: Self.randomAttemptIdBytes()
+                        )
+                    }()
+
+                    let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
+                    let driver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: cryptoProvider,
+                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
+                        identityProvider: identityProvider,
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        offeredSuites: preparation.offeredSuites,
+                        policy: policy,
+                        cryptoPolicy: cryptoPolicy,
+                        soaMetadata: outboundSOA,
+                        localSOAPeerId: localSOAPeerId,
+                        expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                    )
+                    self.handshakeDriverLock.withLock { $0 = driver }
+                    let sessionKeys = try await driver.initiateHandshake(with: self.handshakePeer)
+                    await self.captureAuthenticatedRemoteAuthority(from: driver)
+                    return sessionKeys
+                },
+                pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm
+            )
         } catch {
             if hadEstablishedSession, let rekeyPairKey {
                 SkyBridgeLogger.p2p.info(
@@ -604,9 +626,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         requestedSelection: CryptoProviderFactory.SelectionPolicy,
         requestedProvider: any CryptoProvider
     ) async throws -> SessionKeys? {
-        let requiredPQCSuites = requestedProvider.supportedSuites.filter {
-            $0.isPQCGroup && $0.isNegotiable
-        }
+        let requiredPQCSuites = requestedProvider.supportedSuites.filter { $0.isPQCGroup }
         let requiredWireIds = Set(requiredPQCSuites.map { $0.canonicalKEMSuite.wireId })
         guard !requiredWireIds.isEmpty else { return nil }
 
@@ -672,9 +692,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         requestedSelection: CryptoProviderFactory.SelectionPolicy,
         requestedProvider: any CryptoProvider
     ) async throws -> SessionKeys? {
-        let requiredPQCSuites = requestedProvider.supportedSuites.filter {
-            $0.isPQCGroup && $0.isNegotiable
-        }
+        let requiredPQCSuites = requestedProvider.supportedSuites.filter { $0.isPQCGroup }
         let requiredWireIds = Set(requiredPQCSuites.map { $0.canonicalKEMSuite.wireId })
         guard !requiredWireIds.isEmpty else { return nil }
 
@@ -858,16 +876,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             let trust = TrustSyncService.shared
 
             for candidate in candidates {
-                if trust.getTrustRecord(deviceId: candidate)?.isAuthenticationEligible == true {
+                if trust.getTrustRecord(deviceId: candidate) != nil {
                     return candidate
                 }
             }
 
             if let fingerprint {
                 let matches = trust.activeTrustRecords.filter { record in
-                    record.isAuthenticationEligible
-                        && !record.pubKeyFP.isEmpty
-                        && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
+                    !record.pubKeyFP.isEmpty && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
                 }
                 if let resolvedRecord = resolvedUniqueTrustRecord(from: matches),
                    !resolvedRecord.deviceId.isEmpty {
@@ -1083,7 +1099,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let normalizedCandidatesLower = Set(normalizedCandidates.map { $0.lowercased() })
 
         var matchedByDeviceId: [String: TrustRecord] = [:]
-        for record in TrustSyncService.shared.activeTrustRecords where record.isAuthenticationEligible {
+        for record in TrustSyncService.shared.activeTrustRecords where !record.isTombstone {
             if PeerTrustLookup.recordMatches(
                 record,
                 candidates: normalizedCandidates,
@@ -1099,7 +1115,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @available(macOS 14.0, iOS 17.0, *)
     @MainActor
     private func resolvedUniqueTrustRecord(from matches: [TrustRecord]) -> TrustRecord? {
-        let activeMatches = matches.filter(\.isAuthenticationEligible)
+        let activeMatches = matches.filter { !$0.isTombstone && !$0.isExpired }
         guard !activeMatches.isEmpty else { return nil }
         if activeMatches.count == 1 {
             return activeMatches[0]
@@ -1132,8 +1148,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         var diagnostic = await MainActor.run {
             let trust = TrustSyncService.shared
             for candidate in candidates {
-                if let record = trust.getTrustRecord(deviceId: candidate),
-                   record.isAuthenticationEligible {
+                if let record = trust.getTrustRecord(deviceId: candidate) {
                     let kemIds = record.kemPublicKeys?.map(\.suiteWireId) ?? []
                     return SuiteNegotiationTrustDiagnostic(
                         resolvedId: candidate,
@@ -1159,9 +1174,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             if let fingerprint {
                 let matches = trust.activeTrustRecords.filter { record in
-                    record.isAuthenticationEligible
-                        && !record.pubKeyFP.isEmpty
-                        && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
+                    !record.pubKeyFP.isEmpty && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
                 }
                 if let resolvedRecord = resolvedUniqueTrustRecord(from: matches),
                    !resolvedRecord.deviceId.isEmpty {
@@ -1179,7 +1192,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             if let alias {
                 let matches = trust.activeTrustRecords.filter { record in
-                    guard record.isAuthenticationEligible else { return false }
                     guard let recordName = record.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
                           !recordName.isEmpty else { return false }
                     return recordName.caseInsensitiveCompare(alias) == .orderedSame
@@ -1239,7 +1251,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let diag = await resolveSuiteNegotiationTrustDiagnostic()
 
         let requiredPQC = cryptoProvider.supportedSuites
-            .filter { $0.isPQCGroup && $0.isNegotiable }
+            .filter { $0.isPQCGroup }
             .map(\.wireId)
 
         let missingPQC = requiredPQC.filter { !diag.kemSuiteWireIds.contains($0) }
@@ -1319,7 +1331,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             SkyBridgeLogger.p2p.warning("⚠️ 跳过 pairingIdentityExchange：本机 deviceId 为空")
             return
         }
-        let protocolIdentityPublicKeys = await localProtocolIdentityPublicKeysForPairing()
+        let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing()
         let localPresentation = LocalDevicePresentation.current()
         let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
 
@@ -1343,19 +1355,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func localProtocolIdentityPublicKeysForPairing() async -> [AppMessage.ProtocolIdentityPublicKeyInfo] {
-        var keys: [AppMessage.ProtocolIdentityPublicKeyInfo] = []
-        for algorithm in [ProtocolSigningAlgorithm.ed25519, .mlDSA65] {
-            do {
-                let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
-                keys.append(.init(protocolSigningAlgorithm: algorithm.rawValue, publicKey: publicKey))
-            } catch {
-                SkyBridgeLogger.p2p.debug(
-                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue, privacy: .public): \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-                )
-            }
-        }
-        return AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(keys) ?? []
+    private func localProtocolIdentityPublicKeysForPairing() async throws -> [AppMessage.ProtocolIdentityPublicKeyInfo] {
+        return try await LocalProtocolIdentityAdvertisement.load()
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1374,7 +1375,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 requiringFreshKeyMaterialComparedTo: baselineKeys
             )
             if ready { return true }
-            try? await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return false
+            }
         }
         return await hasRequiredPeerKEMPublicKeys(
             requiredWireIds: requiredWireIds,
@@ -1414,7 +1419,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             for candidate in candidates {
                 guard let record = trust.getTrustRecord(deviceId: candidate),
-                      record.isAuthenticationEligible,
                       let kemKeys = record.kemPublicKeys else {
                     continue
                 }
@@ -1619,7 +1623,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             while !Task.isCancelled {
                 await self.sampleBandwidth(clock: clock)
                 await self.tickPing(clock: clock)
-                try? await Task.sleep(for: .seconds(1))
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
             }
         }
     }
@@ -1827,7 +1835,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
         if #available(macOS 14.0, iOS 17.0, *),
            sessionKeysLock.withLock({ $0 }) != nil,
-           handshakeDriverLock.withLock({ $0 }) == nil,
            let inboundDriver = await restartInboundRekeyDriver(for: frame) {
             await inboundDriver.handleMessage(frame, from: handshakePeer)
             await syncHandshakeState(after: inboundDriver)
@@ -1914,10 +1921,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     ) -> Bool {
         switch state {
         case .waitingFinished, .established:
-            guard let messageA = try? HandshakeMessageA.decode(from: frame) else {
-                return false
-            }
-            return messageA.hasNegotiableOfferShape
+            return (try? HandshakeMessageA.decode(from: frame)) != nil
         default:
             return false
         }
@@ -1927,7 +1931,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func restartInboundRekeyDriver(for frame: Data) async -> HandshakeDriver? {
         guard let previousKeys = sessionKeysLock.withLock({ $0 }) else { return nil }
         guard let messageA = try? HandshakeMessageA.decode(from: frame),
-              messageA.hasNegotiableOfferShape else {
+              !messageA.supportedSuites.isEmpty else {
             return nil
         }
 
@@ -1941,12 +1945,29 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let capability = CryptoProviderFactory.detectCapability()
         let localPQCAvailable = capability.hasApplePQC || capability.hasLiboqs
-        let peerHasPQCGroup = messageA.supportedSuites.contains {
-            $0.isPQCGroup && $0.isNegotiable
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        #if !os(macOS)
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        #endif
+        #if os(macOS)
+        let inboundProtocolIdentity: InboundProtocolIdentitySelection
+        do {
+            inboundProtocolIdentity = try await InboundProtocolIdentitySelectionPolicy.resolve(
+                messageA: messageA,
+                candidateDeviceIds: [handshakePeer.deviceId]
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ inbound rekey protocol identity selection failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public). peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
+            )
+            return nil
         }
-        let peerHasClassicGroup = messageA.supportedSuites.contains {
-            !$0.isPQCGroup && $0.isNegotiable
-        }
+        #else
+        let inboundProtocolIdentity = InboundProtocolIdentitySelection(
+            algorithm: peerHasPQCGroup ? .mlDSA65 : .ed25519,
+            protection: .softwareKeychain
+        )
+        #endif
         if let rejection = StrictPQCAdmissionGate.inboundRejection(
             policy: requestedPolicy,
             peerSupportedSuites: messageA.supportedSuites,
@@ -1962,11 +1983,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter {
-            !$0.isPQCGroup && $0.isNegotiable
-        }
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
 
-        if peerHasPQCGroup {
+        if inboundProtocolIdentity.algorithm != .ed25519 {
             selection = effectivePolicy.requirePQC ? .requirePQC : .preferPQC
             cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
                 policy: selection,
@@ -1984,6 +2003,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 return nil
             }
             if localPQCSuites.isEmpty {
+                #if os(macOS)
+                SkyBridgeLogger.p2p.error(
+                    "❌ inbound rekey rejected: no local suite is compatible with \(inboundProtocolIdentity.algorithm.rawValue, privacy: .public). peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
+                )
+                return nil
+                #else
                 if !peerHasClassicGroup {
                     SkyBridgeLogger.p2p.error(
                         "❌ inbound rekey rejected: peer offered PQC suites but local PQC responder unavailable. peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
@@ -1993,12 +2018,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 selection = .classicOnly
                 cryptoProvider = CryptoProviderFactory.make(policy: selection)
                 sigAAlgorithm = .ed25519
-                offeredSuites = cryptoProvider.supportedSuites.filter {
-                    !$0.isPQCGroup && $0.isNegotiable
-                }
+                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                #endif
             } else {
-                sigAAlgorithm = .mlDSA65
-                offeredSuites = localPQCSuites
+                let compatibleSuites = InboundProtocolIdentitySelectionPolicy
+                    .compatibleResponderPQCSuites(
+                        localPQCSuites,
+                        algorithm: inboundProtocolIdentity.algorithm
+                    )
+                guard !compatibleSuites.isEmpty else {
+                    SkyBridgeLogger.p2p.error(
+                        "❌ inbound rekey rejected: no local suite is compatible with \(inboundProtocolIdentity.algorithm.rawValue, privacy: .public). peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
+                    )
+                    return nil
+                }
+                sigAAlgorithm = inboundProtocolIdentity.algorithm
+                offeredSuites = compatibleSuites
             }
         }
 
@@ -2017,6 +2052,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         )
         let identityProvider = DeviceIdentityHandshakeProvider(
             sigAAlgorithm: sigAAlgorithm,
+            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
             includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
         )
 
@@ -2035,15 +2071,26 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 policy: effectivePolicy,
                 cryptoPolicy: cryptoPolicy,
                 localSOAPeerId: localSOAPeerId,
-                expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId,
-                authenticatedIncomingEstablishedPolicy: .replaceAuthenticated
+                expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId
             )
             handshakeDriverLock.withLock { $0 = driver }
             previousSessionKeysBeforeRekeyLock.withLock { $0 = previousKeys }
+            sessionKeysLock.withLock { $0 = nil }
+            rekeyInProgressLock.withLock { $0 = true }
+
+            let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
+                let current = state
+                state = nil
+                return current
+            }
+            if let stalePairKey {
+                await PeerSessionArbiter.shared.clearEstablished(pairKey: stalePairKey)
+                await PeerSessionArbiter.shared.clearOutgoing(pairKey: stalePairKey, attemptId: nil)
+            }
 
             let targetSuites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
             SkyBridgeLogger.p2p.info(
-                "🔁 inbound transactional rekey candidate: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) current=\(previousKeys.negotiatedSuite.rawValue, privacy: .public) target=\(targetSuites, privacy: .public)"
+                "🔁 inbound rekey start: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) current=\(previousKeys.negotiatedSuite.rawValue, privacy: .public) target=\(targetSuites, privacy: .public)"
             )
             return driver
         } catch {
@@ -2257,12 +2304,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         case .textMessage(let payload):
             // 设备间文本消息：按发送者稳定公钥指纹归档到会话存储。
             if let record = await TrustSyncService.shared.getTrustRecord(deviceId: handshakePeer.deviceId),
-               record.isAuthenticationEligible,
                !record.pubKeyFP.isEmpty {
                 await DeviceMessagingService.shared.handleIncoming(payload, fingerprint: record.pubKeyFP)
             }
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
-             .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
+             .protocolIdentityBindingRequest, .signedProtocolIdentityBinding,
+             .protocolIdentityBindingConfirm, .signedProtocolIdentityBindingFinalAck:
             break
         case .pairingIdentityExchange(let payload):
             await handlePairingIdentityExchange(payload)
@@ -2350,6 +2397,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if case .signedProtocolIdentityBinding = message {
             return true
         }
+        if case .protocolIdentityBindingConfirm = message {
+            return true
+        }
+        if case .signedProtocolIdentityBindingFinalAck = message {
+            return true
+        }
         return false
     }
 
@@ -2359,14 +2412,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         negotiatedSuite: CryptoSuite,
         bootstrapAssisted: Bool
     ) -> P2PSessionAssuranceLevel {
-        guard negotiatedSuite.isNegotiable else {
-            return .unknown
-        }
         if bootstrapAssisted {
             return .bootstrapAssisted
         }
         if negotiatedSuite.isPQCGroup {
-            return policy.requirePQC ? .pqcStrict : .pqcNegotiated
+            return .pqcStrict
         }
         if !policy.requirePQC {
             return .legacyClassic
@@ -2420,7 +2470,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let authenticatedProtocolPublicKey = AuthenticatedProtocolIdentityBinding.matchingPublicKey(
             in: payload,
             authority: authority
-        )
+        ) ?? authority.protocolPublicKey
 
         let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
             deviceId: declaredDeviceId ?? handshakePeer.deviceId,
@@ -2683,7 +2733,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension P2PConnection {
     @MainActor
     func testingSetStatus(_ status: P2PConnectionStatus) {
@@ -2700,6 +2750,7 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
     case bootstrapKEMKeyTimeout
     case bootstrapControlOnly
     case postAuthPairingIdentityExchangeTimeout
+    case capacityExceeded(resource: String, limit: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -2717,6 +2768,8 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
             return "引导恢复期间仅允许 pairingIdentityExchange 控制消息"
         case .postAuthPairingIdentityExchangeTimeout:
             return "post-auth pairingIdentityExchange 超时"
+        case .capacityExceeded(let resource, let limit):
+            return "P2P \(resource) 已达安全上限（\(limit)）"
         }
     }
 }

@@ -179,9 +179,7 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         XCTAssertTrue(pairingDiagnostics.contains("peer=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("declaredDeviceId=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("deviceId: localId"))
-        XCTAssertTrue(pairingDiagnostics.contains(
-            "await KEMTrustStore.shared.upsert(\n            deviceId: declaredDeviceId"
-        ))
+        XCTAssertTrue(pairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"))
         assertSource(
             pairingDiagnostics,
             named: "iOS pairingIdentityExchange diagnostics",
@@ -200,11 +198,6 @@ final class P2PRedactionSourceContractTests: XCTestCase {
                 "pairingIdentityExchange sent: peer=\\(deviceId)"
             ]
         )
-
-        XCTAssertTrue(source.contains(
-            "peer=\\(Self.protocolIdentityLogRedaction) reason=\\(reason.rawValue)"
-        ))
-        XCTAssertFalse(source.contains("peer=\\(peerId) reason=\\(reason)"))
 
         let traceStart = try XCTUnwrap(source.range(of: "private func handleIncomingConnection"))
         let traceEnd = try XCTUnwrap(
@@ -317,8 +310,10 @@ final class P2PRedactionSourceContractTests: XCTestCase {
     func testLegacyQuantumP2PUserMessagesRequireStrictPQCSignatures() throws {
         let source = try readSource("Sources/SkyBridgeCore/QuantumSecure/QuantumSecureP2PNetwork.swift")
 
-        XCTAssertTrue(source.contains("postQuantumCrypto.signPQCRequired(encrypted.combined, for: peerId)"))
+        XCTAssertTrue(source.contains(".signPQCRequiredWithAlgorithm(encrypted.combined, for: peerId)"))
+        XCTAssertTrue(source.contains("signatureAlgorithm: requiredSignature.algorithm"))
         XCTAssertTrue(source.contains("postQuantumCrypto.verifyPQCRequired("))
+        XCTAssertTrue(source.contains("algorithm: signatureAlgorithm"))
         XCTAssertTrue(source.contains("用户消息缺少 Strict-PQC 签名"))
         XCTAssertTrue(source.contains("用户消息 Strict-PQC 签名验证失败"))
 

@@ -4,6 +4,232 @@ import XCTest
 @MainActor
 @available(iOS 17.0, *)
 final class ConnectionCodeFormatTests: XCTestCase {
+    func testSmokeArtifactBasenameAcceptsOnlyBoundedLeafNames() throws {
+        for rawValue in [
+            "skybridge-smoke-status.log",
+            "ios-real-webrtc-01234567.status.log",
+            "ios_round_3.pqc.json",
+        ] {
+            let basename = try SmokeArtifactBasename(rawValue)
+            XCTAssertEqual(basename.value, rawValue)
+        }
+
+        let invalidValues = [
+            "",
+            " ",
+            ".",
+            "..",
+            "../status.log",
+            "/tmp/status.log",
+            "nested/status.log",
+            "nested\\status.log",
+            "status\n.log",
+            " status.log",
+            "status.log ",
+            "状态.log",
+            String(repeating: "a", count: SmokeArtifactBasename.maximumUTF8Length + 1),
+        ]
+        for rawValue in invalidValues {
+            XCTAssertThrowsError(try SmokeArtifactBasename(rawValue), "unexpectedly accepted: \(rawValue.debugDescription)")
+        }
+    }
+
+    func testSmokeArtifactBasenameResolvesInsideConfiguredDirectory() throws {
+        let directory = URL(fileURLWithPath: "/tmp/skybridge-smoke-basename-test", isDirectory: true)
+        let resolved = try XCTUnwrap(
+            SmokeArtifactBasename.resolve(
+                environmentValue: nil,
+                defaultValue: "ios.status.log"
+            )
+        )
+        let url = resolved.url(in: directory)
+
+        XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL, directory.standardizedFileURL)
+        XCTAssertEqual(url.lastPathComponent, "ios.status.log")
+        XCTAssertNil(try SmokeArtifactBasename.resolve(environmentValue: nil))
+    }
+
+    func testSmokeListenerArtifactConfigurationFailsClosed() throws {
+        let cachesDirectory = URL(
+            fileURLWithPath: "/tmp/skybridge-smoke-listener-configuration",
+            isDirectory: true
+        )
+        XCTAssertNil(
+            try SkyBridgeDiagnosticTrace.resolveListenerStatusURLForTesting(
+                environment: [:],
+                cachesDirectory: nil
+            )
+        )
+        XCTAssertNil(
+            try SkyBridgeDiagnosticTrace.resolveListenerStatusURLForTesting(
+                environment: ["SKYBRIDGE_SMOKE_ROLE": "ios-listener"],
+                cachesDirectory: cachesDirectory
+            )
+        )
+        XCTAssertThrowsError(
+            try SkyBridgeDiagnosticTrace.resolveListenerStatusURLForTesting(
+                environment: [
+                    "SKYBRIDGE_SMOKE_ROLE": "ios-listener",
+                    "SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME": "../listener.log",
+                ],
+                cachesDirectory: cachesDirectory
+            )
+        )
+        XCTAssertThrowsError(
+            try SkyBridgeDiagnosticTrace.resolveListenerStatusURLForTesting(
+                environment: [
+                    "SKYBRIDGE_SMOKE_ROLE": "ios-listener",
+                    "SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME": "listener.log",
+                ],
+                cachesDirectory: nil
+            )
+        )
+
+        let resolved = try SkyBridgeDiagnosticTrace.resolveListenerStatusURLForTesting(
+            environment: [
+                "SKYBRIDGE_SMOKE_ROLE": "ios-listener",
+                "SKYBRIDGE_SMOKE_LISTENER_STATUS_BASENAME": "listener.log",
+            ],
+            cachesDirectory: cachesDirectory
+        )
+        XCTAssertEqual(resolved, cachesDirectory.appendingPathComponent("listener.log"))
+    }
+
+    func testSmokeStatusReporterResetPropagatesProtectedWriteFailure() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-smoke-reporter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: root)
+        }
+
+        let blockingParent = root.appendingPathComponent("not-a-directory", isDirectory: false)
+        try Data("occupied".utf8).write(to: blockingParent, options: .atomic)
+        let reporter = SmokeStatusReporter(
+            statusURL: blockingParent.appendingPathComponent("status.log", isDirectory: false)
+        )
+
+        XCTAssertThrowsError(try reporter.reset())
+    }
+
+    func testSmokeStatusReporterResetTruncatesStatusAndAppliesDataProtection() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-smoke-reset-\(UUID().uuidString)", isDirectory: true)
+        let statusURL = root.appendingPathComponent("status.log", isDirectory: false)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: root)
+        }
+
+        let reporter = SmokeStatusReporter(statusURL: statusURL)
+        reporter.append("stale success evidence")
+        XCTAssertFalse(try Data(contentsOf: statusURL).isEmpty)
+
+        try reporter.reset()
+
+        XCTAssertTrue(try Data(contentsOf: statusURL).isEmpty)
+        XCTAssertTrue(SmokeArtifactFileIO.hasConfiguredProtectionAttribute(at: statusURL))
+#if targetEnvironment(simulator)
+        // Simulator host filesystems do not consistently surface NSFileProtectionKey even after
+        // the throwing FileManager.setAttributes call has completed successfully.
+#else
+        let attributes = try FileManager.default.attributesOfItem(atPath: statusURL.path)
+        XCTAssertEqual(
+            attributes[.protectionKey] as? FileProtectionType,
+            .completeUntilFirstUserAuthentication
+        )
+#endif
+    }
+
+    func testSmokeStatusArtifactResetPropagatesListenerFailure() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-smoke-listener-reset-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: root)
+        }
+
+        let primaryURL = root.appendingPathComponent("primary.log", isDirectory: false)
+        try Data("stale success evidence\n".utf8).write(to: primaryURL, options: .atomic)
+        let blockingParent = root.appendingPathComponent("not-a-directory", isDirectory: false)
+        try Data("occupied".utf8).write(to: blockingParent, options: .atomic)
+        let listenerURL = blockingParent.appendingPathComponent("listener.log", isDirectory: false)
+
+        XCTAssertThrowsError(
+            try SkyBridgeDiagnosticTrace.resetStatusArtifactsForTesting(
+                primaryStatusURL: primaryURL,
+                listenerStatusURL: listenerURL
+            )
+        )
+        XCTAssertTrue(try Data(contentsOf: primaryURL).isEmpty)
+    }
+
+    func testSmokeStatusConcurrentAppendsDoNotLoseOrOverwriteLines() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-smoke-concurrent-\(UUID().uuidString)", isDirectory: true)
+        let statusURL = root.appendingPathComponent("status.log", isDirectory: false)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: root)
+        }
+
+        try SmokeArtifactFileIO.resetProtectedFile(at: statusURL)
+        let expectedLineCount = 200
+        let queue = DispatchQueue(label: "com.skybridge.tests.smoke-status", attributes: .concurrent)
+        let group = DispatchGroup()
+        let failureRecorder = SmokeAppendFailureRecorder()
+        for index in 0..<expectedLineCount {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                do {
+                    try SmokeArtifactFileIO.appendProtectedData(
+                        Data("line-\(index)\n".utf8),
+                        to: statusURL
+                    )
+                } catch {
+                    failureRecorder.record(error)
+                }
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(failureRecorder.failures, [])
+
+        let lines = try String(contentsOf: statusURL, encoding: .utf8)
+            .split(separator: "\n")
+        XCTAssertEqual(lines.count, expectedLineCount)
+        XCTAssertEqual(Set(lines).count, expectedLineCount)
+    }
+
+    func testSmokeStatusReporterWriteFailureIsTerminalAndCannotEmitLaterSuccess() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-smoke-terminal-sink-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: root)
+        }
+
+        let blockingParent = root.appendingPathComponent("not-a-directory", isDirectory: false)
+        try Data("occupied".utf8).write(to: blockingParent, options: .atomic)
+        let statusURL = blockingParent.appendingPathComponent("status.log", isDirectory: false)
+        let stdoutMirrorURL = root.appendingPathComponent("stdout.log", isDirectory: false)
+        XCTAssertTrue(FileManager.default.createFile(atPath: stdoutMirrorURL.path, contents: nil))
+        let stdoutMirror = try FileHandle(forWritingTo: stdoutMirrorURL)
+        let reporter = SmokeStatusReporter(
+            statusURL: statusURL,
+            stdoutMirrorDescriptor: stdoutMirror.fileDescriptor
+        )
+
+        reporter.append("first-write-must-fail")
+        XCTAssertTrue(reporter.hasTerminalWriteFailure)
+
+        try FileManager.default.removeItem(at: blockingParent)
+        try FileManager.default.createDirectory(at: blockingParent, withIntermediateDirectories: true)
+        reporter.append("success must never be written after a terminal sink failure")
+        try stdoutMirror.close()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: statusURL.path))
+        XCTAssertTrue(try Data(contentsOf: stdoutMirrorURL).isEmpty)
+    }
+
     func testSanitizeConnectionCodeInputUppercasesFiltersAndCapsLength() {
         let raw = "ab-cd12 34efghjkmnpqrstuvwxyz23456789"
         let sanitized = CrossNetworkWebRTCManager.sanitizeConnectionCodeInput(raw)
@@ -102,24 +328,704 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertFalse(source.contains("session?.setRemoteAnswer"))
         XCTAssertFalse(source.contains("session?.addRemoteICECandidate"))
 
-        let sessionStart = try XCTUnwrap(source.range(of: "try s.start()"))
+        let sessionStart = try XCTUnwrap(source.range(of: "try await s.startAsync()"))
         let drain = try XCTUnwrap(source.range(of: "drainPendingPreSessionSignalingEnvelopes(sessionId: sessionId)"))
-        let join = try XCTUnwrap(source.range(of: "await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join"))
+        let join = try XCTUnwrap(
+            source.range(
+                of: "try await sendRequiredSetupEnvelope(",
+                range: drain.upperBound..<source.endIndex
+            )
+        )
 
         XCTAssertLessThan(sessionStart.lowerBound, drain.lowerBound)
         XCTAssertLessThan(drain.lowerBound, join.lowerBound)
     }
 
-    func testTenantIDPrefersJWTDerivedTenantBeforeUserIdentifierFallback() throws {
+    func testConnectionCodeConnectIsSingleOwnerAndExplicitDisconnectInvalidatesQueuedCalls() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+        let connectStart = try XCTUnwrap(
+            source.range(of: "public func connect(withCode rawCode: String) async")
+        )
+        let connectEnd = try XCTUnwrap(
+            source.range(
+                of: "private func performConnectWithCode",
+                range: connectStart.upperBound..<source.endIndex
+            )
+        )
+        let connectBody = String(source[connectStart.lowerBound..<connectEnd.lowerBound])
+
+        XCTAssertTrue(connectBody.contains("while let existingOwner = connectionCodeConnectOwner"))
+        XCTAssertTrue(connectBody.contains("await existingOwner.task.value"))
+        XCTAssertTrue(connectBody.contains("guard connectionCodeLifecycleEpoch == lifecycleEpoch,"))
+        XCTAssertTrue(connectBody.contains("!Task.isCancelled else { return }"))
+        XCTAssertTrue(connectBody.contains("connectionCodeConnectOwner = ConnectionCodeConnectOwner("))
+        XCTAssertFalse(connectBody.contains("connectionCodeConnectTasks"))
+
+        let disconnectStart = try XCTUnwrap(
+            source.range(of: "public func disconnect(clearSnapshot: Bool = true) async")
+        )
+        let disconnectEnd = try XCTUnwrap(
+            source.range(
+                of: "private func disconnectInternal",
+                range: disconnectStart.upperBound..<source.endIndex
+            )
+        )
+        let disconnectBody = String(source[disconnectStart.lowerBound..<disconnectEnd.lowerBound])
+        XCTAssertTrue(disconnectBody.contains("connectionCodeLifecycleEpoch &+= 1"))
+    }
+
+    func testTenantIDBindsDeclaredSessionTenantToJWTClaimBeforeLegacyFallback() throws {
         let source = try Self.crossNetworkSignalServerClientSource()
 
         XCTAssertTrue(
-            source.contains("deriveTenantIdentifier(accessToken: sessionAccessToken)"),
-            "iOS WebRTC signaling must derive the tenant from the same JWT claims as macOS before falling back to the Supabase user id."
+            source.contains("Self.resolveAuthenticatedTenantID("),
+            "iOS WebRTC signaling must resolve tenant identity through the strict JWT binding policy."
         )
         XCTAssertTrue(
-            source.contains("return sessionUserIdentifier"),
-            "The user identifier should remain only as a fallback for legacy sessions without tenant-bearing JWT claims."
+            source.contains("throw ClientError.missingTenantClaim"),
+            "A stored tenant must fail closed when the token has no tenant-bearing claim."
+        )
+        XCTAssertTrue(
+            source.contains("throw ClientError.tenantIdentityMismatch"),
+            "A token and local tenant disagreement must not be sent to the signaling server."
+        )
+    }
+
+    func testAuthenticatedTenantResolutionAcceptsMatchingTokenAndLocalIdentities() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "app_metadata": ["tenant_id": "NEBULA-123"]
+            ]
+        )
+
+        let tenant = try SignalServerClientCompat.resolveAuthenticatedTenantID(
+            accessToken: token,
+            explicitTenantID: "NEBULA-123",
+            sessionTenantID: "NEBULA-123",
+            legacyUserIdentifier: "user-123"
+        )
+
+        XCTAssertEqual(tenant, "NEBULA-123")
+    }
+
+    func testAuthenticatedTenantResolutionRejectsTokenTenantMismatch() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "app_metadata": ["tenant_id": "NEBULA-token"]
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: "NEBULA-local",
+                sessionTenantID: "NEBULA-local",
+                legacyUserIdentifier: "user-123"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.tenantIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionRejectsMissingClaimWhenSessionHasTenant() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: ["sub": "NEBULA-local", "exp": 4_102_444_800]
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: nil,
+                sessionTenantID: "NEBULA-local",
+                legacyUserIdentifier: "NEBULA-local"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.missingTenantClaim = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionUsesJWTSubjectOnlyWithoutDeclaredTenant() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(payload: ["sub": "user-123"])
+
+        let tenant = try SignalServerClientCompat.resolveAuthenticatedTenantID(
+            accessToken: token,
+            explicitTenantID: nil,
+            sessionTenantID: nil,
+            legacyUserIdentifier: "user-123"
+        )
+
+        XCTAssertEqual(tenant, "user-123")
+    }
+
+    func testAuthenticatedJWTIdentitySeparatesExplicitAndEffectiveTenant() throws {
+        let subjectOnlyToken = try Self.makeUnsignedJWTForTenantTests(
+            payload: ["sub": "user-123"]
+        )
+        let subjectOnlyIdentity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: subjectOnlyToken,
+            expectedUserIdentifier: "user-123"
+        )
+        XCTAssertEqual(subjectOnlyIdentity.subject, "user-123")
+        XCTAssertNil(subjectOnlyIdentity.explicitTenantID)
+        XCTAssertEqual(subjectOnlyIdentity.effectiveTenantID, "user-123")
+
+        let explicitTenantToken = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "app_metadata": ["tenant_id": "tenant-123"]
+            ]
+        )
+        let explicitTenantIdentity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: explicitTenantToken,
+            expectedUserIdentifier: "user-123"
+        )
+        XCTAssertEqual(explicitTenantIdentity.subject, "user-123")
+        XCTAssertEqual(explicitTenantIdentity.explicitTenantID, "tenant-123")
+        XCTAssertEqual(explicitTenantIdentity.effectiveTenantID, "tenant-123")
+    }
+
+    func testAuthenticatedJWTIdentityRejectsExpectedUserMismatch() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(payload: ["sub": "user-123"])
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+                accessToken: token,
+                expectedUserIdentifier: "different-user"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.userIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionRejectsJWTSubjectAndSessionUserMismatch() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(payload: ["sub": "token-user"])
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: nil,
+                sessionTenantID: nil,
+                legacyUserIdentifier: "different-session-user"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.userIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionRejectsJWTSubjectMismatchWithDeclaredTenant() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "token-user",
+                "app_metadata": ["tenant_id": "tenant-123"]
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: "tenant-123",
+                sessionTenantID: "tenant-123",
+                legacyUserIdentifier: "different-session-user"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.userIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionRejectsConflictingSignedTenantClaims() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "tenant_id": "root-tenant",
+                "app_metadata": ["tenant_id": "app-tenant"]
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: "root-tenant",
+                sessionTenantID: "root-tenant",
+                legacyUserIdentifier: "user-123"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.conflictingTenantClaims = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionIgnoresUserControlledMetadataForTenantAuthority() throws {
+        let token = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "user_metadata": ["tenant_id": "attacker-selected-tenant"]
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: token,
+                explicitTenantID: "attacker-selected-tenant",
+                sessionTenantID: "attacker-selected-tenant",
+                legacyUserIdentifier: "user-123"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.missingTenantClaim = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testAuthenticatedTenantResolutionKeepsOpaqueLegacyFallbackWithoutDeclaredTenant() throws {
+        let tenant = try SignalServerClientCompat.resolveAuthenticatedTenantID(
+            accessToken: "opaque-legacy-token",
+            explicitTenantID: nil,
+            sessionTenantID: nil,
+            legacyUserIdentifier: "legacy-user"
+        )
+
+        XCTAssertEqual(tenant, "legacy-user")
+    }
+
+    func testRefreshedSessionRejectsJWTSubjectDriftBeforePersistence() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let original = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-123"],
+                    "exp": now.timeIntervalSince1970 - 1
+                ]
+            ),
+            refreshToken: "refresh-original",
+            userIdentifier: "user-123",
+            displayName: "User",
+            nebulaId: "tenant-123",
+            issuedAt: now.addingTimeInterval(-3_600)
+        )
+        let refreshed = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "attacker-user",
+                    "app_metadata": ["tenant_id": "tenant-123"],
+                    "exp": now.timeIntervalSince1970 + 3_600
+                ]
+            ),
+            refreshToken: "refresh-next",
+            userIdentifier: "user-123",
+            displayName: "Ignored",
+            nebulaId: "tenant-123",
+            issuedAt: now
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.validatedRefreshedAuthSession(
+                refreshed,
+                replacing: original,
+                explicitTenantID: "tenant-123",
+                now: now
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.userIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testRefreshedSessionRejectsJWTTenantDriftBeforePersistence() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let original = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-original"],
+                    "exp": now.timeIntervalSince1970 - 1
+                ]
+            ),
+            refreshToken: "refresh-original",
+            userIdentifier: "user-123",
+            displayName: "User",
+            nebulaId: "tenant-original",
+            issuedAt: now.addingTimeInterval(-3_600)
+        )
+        let refreshed = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-drifted"],
+                    "exp": now.timeIntervalSince1970 + 3_600
+                ]
+            ),
+            refreshToken: "refresh-next",
+            userIdentifier: "user-123",
+            displayName: "Ignored",
+            nebulaId: "tenant-drifted",
+            issuedAt: now
+        )
+
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.validatedRefreshedAuthSession(
+                refreshed,
+                replacing: original,
+                explicitTenantID: "tenant-original",
+                now: now
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.tenantIdentityMismatch = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testRefreshedSessionRejectsOpaqueOrUnsignedAccessToken() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let original = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-123"],
+                    "exp": now.timeIntervalSince1970 - 1
+                ]
+            ),
+            refreshToken: "refresh-original",
+            userIdentifier: "user-123",
+            displayName: "User",
+            nebulaId: "tenant-123",
+            issuedAt: now.addingTimeInterval(-3_600)
+        )
+
+        for invalidToken in ["opaque-refresh-response", "e30.e30."] {
+            let refreshed = AuthSession(
+                accessToken: invalidToken,
+                refreshToken: "refresh-next",
+                userIdentifier: "user-123",
+                displayName: "Ignored",
+                nebulaId: "tenant-123",
+                issuedAt: now
+            )
+            XCTAssertThrowsError(
+                try SignalServerClientCompat.validatedRefreshedAuthSession(
+                    refreshed,
+                    replacing: original,
+                    explicitTenantID: "tenant-123",
+                    now: now
+                )
+            ) { error in
+                guard case SignalServerClientCompat.ClientError.invalidAuthenticationClaims = error else {
+                    return XCTFail("Unexpected error for \(invalidToken): \(error)")
+                }
+            }
+        }
+    }
+
+    func testSupabaseAuthenticatedTokenClassifierRequiresExactIssuerAudienceAndRole() throws {
+        let expectedIssuer = "https://project.supabase.co/auth/v1"
+        let valid = try Self.makeUnsignedJWTForTenantTests(
+            payload: [
+                "sub": "user-123",
+                "iss": expectedIssuer,
+                "aud": "authenticated",
+                "role": "authenticated"
+            ]
+        )
+        XCTAssertTrue(
+            SupabaseService.isAuthenticatedAccessToken(valid, expectedIssuer: expectedIssuer)
+        )
+        XCTAssertFalse(
+            SupabaseService.isAuthenticatedAccessToken(
+                String(repeating: "a", count: 65_537),
+                expectedIssuer: expectedIssuer
+            )
+        )
+
+        let invalidPayloads: [[String: Any]] = [
+            [
+                "sub": "user-123",
+                "iss": expectedIssuer + ".attacker.example",
+                "aud": "authenticated",
+                "role": "authenticated"
+            ],
+            [
+                "sub": "user-123",
+                "iss": " \(expectedIssuer) ",
+                "aud": "authenticated",
+                "role": "authenticated"
+            ],
+            [
+                "sub": "user-123",
+                "iss": expectedIssuer,
+                "aud": "anon",
+                "role": "authenticated"
+            ],
+            [
+                "sub": "user-123",
+                "iss": expectedIssuer,
+                "aud": "authenticated",
+                "role": "service_role"
+            ]
+        ]
+        for payload in invalidPayloads {
+            let token = try Self.makeUnsignedJWTForTenantTests(payload: payload)
+            XCTAssertFalse(
+                SupabaseService.isAuthenticatedAccessToken(token, expectedIssuer: expectedIssuer)
+            )
+        }
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapValidatesBoundTenantCodeAndXWingKey() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let data = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-123",
+            tenantID: "NEBULA-123",
+            expiresAtEpochSeconds: 1_300
+        )
+
+        let bootstrap = try LocalWebRTCSmokeBootstrap.validate(
+            data: data,
+            expectedRunID: "run-123",
+            now: now
+        )
+
+        XCTAssertEqual(bootstrap.runID, "run-123")
+        XCTAssertEqual(bootstrap.tenantID, "NEBULA-123")
+        XCTAssertEqual(bootstrap.connectionCode, "ABCDEFGH")
+        XCTAssertEqual(bootstrap.peerDeviceID, "peer-device")
+        XCTAssertEqual(bootstrap.peerKEMPublicKeys.map(\.suiteWireId), [0x0001])
+        XCTAssertEqual(bootstrap.peerKEMPublicKeys.first?.publicKey.count, 1_216)
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapAcceptsSubjectAsEffectiveTenant() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let data = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-subject-fallback",
+            tenantID: "fixture-user",
+            includeTokenTenantClaim: false,
+            expiresAtEpochSeconds: 1_300
+        )
+
+        let bootstrap = try LocalWebRTCSmokeBootstrap.validate(
+            data: data,
+            expectedRunID: "run-subject-fallback",
+            now: now
+        )
+
+        XCTAssertEqual(bootstrap.tenantID, "fixture-user")
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapRejectsUntrustedTenantMetadata() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let data = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-user-metadata",
+            tenantID: "attacker-selected-tenant",
+            includeTokenTenantClaim: false,
+            tokenUserMetadataTenantID: "attacker-selected-tenant",
+            expiresAtEpochSeconds: 1_300
+        )
+
+        XCTAssertThrowsError(
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: data,
+                expectedRunID: "run-user-metadata",
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? LocalWebRTCSmokeBootstrap.ValidationError,
+                .tenantBindingFailed
+            )
+        }
+    }
+
+    func testRealDeviceWebRTCSmokeSessionSeparatesAuthUserFromProtocolDevice() throws {
+        let harnessSource = try Self.localWebRTCSmokeHarnessSource()
+        let authSource = try Self.authenticationManagerSource()
+
+        XCTAssertTrue(
+            harnessSource.contains("effectiveTenantID: bootstrap.tenantID")
+        )
+        XCTAssertFalse(
+            harnessSource.contains("userIdentifier: resolvedLocalDeviceID()")
+        )
+        XCTAssertTrue(authSource.contains("userIdentifier: identity.subject"))
+        XCTAssertTrue(authSource.contains("nebulaId: identity.explicitTenantID"))
+        XCTAssertTrue(authSource.contains("nebulaId: identity.effectiveTenantID"))
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapRejectsTenantAndRunBindingFailures() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let tenantMismatch = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-123",
+            tenantID: "NEBULA-other",
+            tokenTenantID: "NEBULA-token",
+            expiresAtEpochSeconds: 1_300
+        )
+        XCTAssertThrowsError(
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: tenantMismatch,
+                expectedRunID: "run-123",
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? LocalWebRTCSmokeBootstrap.ValidationError,
+                .tenantBindingFailed
+            )
+        }
+
+        let valid = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-123",
+            tenantID: "NEBULA-123",
+            expiresAtEpochSeconds: 1_300
+        )
+        XCTAssertThrowsError(
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: valid,
+                expectedRunID: "different-run",
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? LocalWebRTCSmokeBootstrap.ValidationError,
+                .runIDMismatch
+            )
+        }
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapRejectsExpiredAndInvalidKEMMaterial() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let expired = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-123",
+            tenantID: "NEBULA-123",
+            expiresAtEpochSeconds: 999
+        )
+        XCTAssertThrowsError(
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: expired,
+                expectedRunID: "run-123",
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(error as? LocalWebRTCSmokeBootstrap.ValidationError, .expired)
+        }
+
+        let invalidKey = try Self.makeWebRTCSmokeBootstrapData(
+            runID: "run-123",
+            tenantID: "NEBULA-123",
+            expiresAtEpochSeconds: 1_300,
+            xwingPublicKey: Data(repeating: 0xAA, count: 32)
+        )
+        XCTAssertThrowsError(
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: invalidKey,
+                expectedRunID: "run-123",
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? LocalWebRTCSmokeBootstrap.ValidationError,
+                .invalidPeerKEMPublicKeys
+            )
+        }
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapFileIsConsumedOffTheLaunchPath() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch {
+                XCTFail("Failed to remove bootstrap test directory: \(error)")
+            }
+        }
+        let file = directory.appendingPathComponent("bootstrap.json")
+        let expected = Data("bootstrap-fixture".utf8)
+        try expected.write(to: file, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: file.path
+        )
+
+        let consumed = try await LocalWebRTCSmokeHarness.consumeBootstrapFile(at: file)
+
+        XCTAssertEqual(consumed, expected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapFileRejectsSymlinkWithoutConsumingTarget() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch {
+                XCTFail("Failed to remove bootstrap test directory: \(error)")
+            }
+        }
+        let target = directory.appendingPathComponent("target.json")
+        let symlink = directory.appendingPathComponent("bootstrap.json")
+        let expected = Data("bootstrap-fixture".utf8)
+        try expected.write(to: target, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: target.path
+        )
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+
+        do {
+            _ = try await LocalWebRTCSmokeHarness.consumeBootstrapFile(at: symlink)
+            XCTFail("A symbolic-link bootstrap path must fail closed.")
+        } catch {
+            XCTAssertEqual(
+                error as? LocalWebRTCSmokeBootstrap.ConsumptionError,
+                .unsafeFile
+            )
+        }
+
+        XCTAssertEqual(try Data(contentsOf: target), expected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: symlink.path))
+    }
+
+    func testRealDeviceWebRTCSmokeBootstrapFileUsesDescriptorBoundConsumption() throws {
+        let source = try Self.localWebRTCSmokeHarnessSource()
+
+        XCTAssertTrue(source.contains("O_RDONLY | O_CLOEXEC | O_NOFOLLOW"))
+        XCTAssertTrue(source.contains("Darwin.fstat(descriptor, &openedMetadata)"))
+        XCTAssertTrue(source.contains("finalMetadata.st_ino == openedMetadata.st_ino"))
+        XCTAssertTrue(source.contains("pathMetadata.st_ino == openedMetadata.st_ino"))
+        XCTAssertTrue(source.contains("Darwin.unlink(url.path)"))
+        XCTAssertFalse(source.contains("Data(contentsOf: url"))
+    }
+
+    func testRealDeviceWebRTCSmokeAudioLifecycleOwnsRolloverAndPropagatesCancellation() throws {
+        let source = try Self.localWebRTCSmokeHarnessSource()
+
+        XCTAssertTrue(source.contains("private var smokeAudioRelayRolloverTask: Task<Void, Never>?"))
+        XCTAssertTrue(source.contains("private func stopSmokeAudioReceiver() async"))
+        XCTAssertTrue(source.contains("await rolloverTask?.value"))
+        XCTAssertTrue(source.contains("await transport?.stop()"))
+        XCTAssertTrue(source.contains("await receiver?.close()"))
+        XCTAssertTrue(source.contains("previousTask?.cancel()\n        await previousTask?.value"))
+        XCTAssertTrue(source.contains("await newTransport.stop()"))
+        XCTAssertTrue(source.contains("await oldTransport.stop()"))
+        XCTAssertFalse(
+            source.contains("try?"),
+            "The smoke harness must not swallow file-write, sleep cancellation, or relay teardown errors."
         )
     }
 
@@ -245,15 +1151,21 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertEqual(profile.nebulaId, "NEBULA-123")
     }
 
-    func testAuthSessionStrictLoaderDistinguishesMissingCorruptAndValidData() throws {
+    func testAuthSessionStrictLoaderDistinguishesMissingCorruptAndValidData() async throws {
         let keychain = KeychainManager.shared
-        keychain.deleteAuthSession()
-        defer { keychain.deleteAuthSession() }
+        try await keychain.deleteAuthSession()
+        addTeardownBlock {
+            try await keychain.deleteAuthSession()
+        }
 
-        XCTAssertNil(try keychain.loadAuthSessionStrict())
+        let missingSession = try await keychain.loadAuthSessionStrict()
+        XCTAssertNil(missingSession)
 
         try keychain.savePublicKey(Data("not-json".utf8), identifier: "auth.session")
-        XCTAssertThrowsError(try keychain.loadAuthSessionStrict()) { error in
+        do {
+            _ = try await keychain.loadAuthSessionStrict()
+            XCTFail("Expected corrupt auth.session data to throw.")
+        } catch {
             guard case KeychainError.decodingError = error else {
                 return XCTFail("Expected corrupt auth.session data to throw KeychainError.decodingError, got \(error).")
             }
@@ -269,9 +1181,16 @@ final class ConnectionCodeFormatTests: XCTestCase {
             nebulaId: "NEBULA-123",
             issuedAt: Date(timeIntervalSince1970: 1_234_567)
         )
-        try keychain.storeAuthSession(expected)
+        try await keychain.storeAuthSession(expected)
 
-        XCTAssertEqual(try keychain.loadAuthSessionStrict(), expected)
+        let loadedSession = try await keychain.loadAuthSessionStrict()
+        XCTAssertEqual(loadedSession, expected)
+    }
+
+    func testKeychainActorExecutorLeavesMainActor() async {
+        let probe = IOSKeychainExecutorProbe()
+        let isMainThread = await probe.isRunningOnMainThread()
+        XCTAssertFalse(isMainThread)
     }
 
     func testKeychainAuthSessionStorageUsesUpdateFirstAndStrictDecoding() throws {
@@ -286,8 +1205,13 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Generic password writes must not delete an existing auth item before adding its replacement."
         )
         XCTAssertTrue(
-            source.contains("nonisolated func loadAuthSessionStrict() throws -> AuthSession?"),
+            source.contains("func loadAuthSessionStrict() throws -> AuthSession?"),
             "Critical auth paths need a throwing loader so corrupt storage is not collapsed into a signed-out state."
+        )
+        XCTAssertTrue(
+            source.contains("public nonisolated var unownedExecutor: UnownedSerialExecutor") &&
+                source.contains("final class IOSKeychainSerialExecutor: SerialExecutor"),
+            "Auth-session Keychain calls must run on the dedicated serial executor instead of inheriting MainActor."
         )
         XCTAssertTrue(
             source.contains("throw KeychainError.decodingError"),
@@ -328,7 +1252,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Signaling admission should expose Keychain/session storage failures distinctly from missing authentication."
         )
         XCTAssertTrue(
-            source.contains("try KeychainManager.shared.loadAuthSessionStrict()"),
+            source.contains("try await KeychainManager.shared.loadAuthSessionStrict()"),
             "Signaling auth should use the throwing auth-session loader instead of the legacy optional wrapper."
         )
         XCTAssertFalse(
@@ -341,16 +1265,44 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let source = try Self.authenticationManagerSource()
 
         XCTAssertTrue(
-            source.contains("try KeychainManager.shared.loadAuthSessionStrict()"),
+            source.contains("try await KeychainManager.shared.loadAuthSessionStrict()"),
             "Launch-time auth restoration should distinguish absent sessions from corrupt Keychain data."
         )
         XCTAssertTrue(
-            source.contains("try persistSession(session)\n        self.session = session"),
+            source.contains("try await persistSession(session)\n        self.session = session"),
             "Login success should persist the session before publishing authenticated in-memory state."
         )
         XCTAssertFalse(
             source.contains("try? KeychainManager.shared.storeAuthSession"),
             "AuthenticationManager must not silently discard auth-session persistence failures."
+        )
+        XCTAssertTrue(
+            source.contains("public func signOut() async throws {\n        let sessionToRevoke = session\n        try await clearSession()") &&
+                source.contains("public func signInAsGuest() async throws {\n        try await clearSession()"),
+            "Sign-out and guest transitions must delete persisted auth state before publishing a new UI state."
+        )
+        XCTAssertTrue(
+            source.contains("@Published public private(set) var isRestoringSession: Bool = true"),
+            "Launch must hold a restoration phase while the asynchronous Keychain read completes."
+        )
+    }
+
+    func testSupabaseConfigurationLoadsKeychainAsynchronouslyAndFailsClosed() throws {
+        let source = try Self.supabaseServiceSource()
+
+        XCTAssertTrue(
+            source.contains("private func requireConfiguration(logIfMissing: Bool = true) async throws") &&
+                source.contains("try await KeychainManager.shared.retrieveSupabaseConfig()"),
+            "Supabase configuration should cross the Keychain actor asynchronously."
+        )
+        XCTAssertTrue(
+            source.contains("case configurationStorageUnavailable(String)") &&
+                source.contains("case invalidStoredConfiguration"),
+            "Storage failures and invalid stored configuration must remain distinct from an absent configuration."
+        )
+        XCTAssertFalse(
+            source.contains("try? KeychainManager.shared.retrieveSupabaseConfig()"),
+            "Supabase configuration lookup must not collapse Keychain failures into a missing configuration."
         )
     }
 
@@ -359,22 +1311,24 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let kemStoreSource = try Self.p2pKEMIdentityKeyStoreSource()
         let pqcManagerSource = try Self.pqcCryptoManagerSource()
         let protocolDeviceIdentitySource = try Self.protocolDeviceIdentitySource()
+        let keychainSource = try Self.keychainManagerSource()
 
         XCTAssertFalse(
             platformSource.contains("try? loadIdentityKeyFromKeychain"),
             "Platform identity loading must not collapse Keychain failures into missing identity material."
         )
         XCTAssertTrue(
-            platformSource.contains("ProtocolDeviceIdentityAuthority.shared.resolveSigningIdentity") &&
-            platformSource.contains("Stored identity key failed self-test") &&
-            !platformSource.contains("SecItemUpdate"),
-            "Platform signing identity must use the immutable authority transaction and fail closed on corrupt stored keys."
+            protocolDeviceIdentitySource.contains("case keychainProbeFailed(OSStatus)") &&
+                protocolDeviceIdentitySource.contains("throw KeychainError.unexpectedError(status)") &&
+                platformSource.contains("Stored identity key failed self-test"),
+            "Platform identity storage must propagate Keychain failures and fail closed on corrupt stored signing keys."
         )
         XCTAssertTrue(
-            protocolDeviceIdentitySource.contains("configureExplicitSmokeOverrideIfPresent") &&
-            protocolDeviceIdentitySource.contains("if smokeDeviceId != nil") &&
-            protocolDeviceIdentitySource.contains("Once started, convergence is intentionally cancellation-independent"),
-            "Smoke identities must be explicitly injected, memory-only, and cancellation-safe."
+            protocolDeviceIdentitySource.contains("SkyBridgeRuntimeEnvironment.isRunningUnderXCTest") &&
+                protocolDeviceIdentitySource.contains("TEST.group.com.skybridge.compass") &&
+                keychainSource.contains("SKYBRIDGE_KEYCHAIN_IN_MEMORY") &&
+                keychainSource.contains("SkyBridgeRuntimeEnvironment.isRunningUnderXCTest"),
+            "Simulator identity storage must use an explicit isolated authority backed by the test-only in-memory Keychain."
         )
         XCTAssertFalse(
             kemStoreSource.contains("try? keychain.loadPrivateKey") ||
@@ -396,10 +1350,63 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "PQC key loading must not use try? to convert Keychain errors into missing keys."
         )
         XCTAssertTrue(
-            protocolDeviceIdentitySource.contains("insertDeviceAuthorityIfAbsent") &&
-            protocolDeviceIdentitySource.contains("authorityWinnerMissing") &&
-            protocolDeviceIdentitySource.contains("conflictingLegacyDeviceIds"),
-            "Protocol device identity must use add-only authority CAS, reload its winner, and reject conflicting legacy inputs."
+            protocolDeviceIdentitySource.contains("private func resolveDeviceIdForAuthority() throws") &&
+                protocolDeviceIdentitySource.contains("insertDeviceAuthorityIfAbsent") &&
+                protocolDeviceIdentitySource.contains("authorityWinnerMissing"),
+            "Protocol device ID creation must use a compare-and-set authority transaction so storage failures cannot rotate IDs."
+        )
+    }
+
+    private static func makeUnsignedJWTForTenantTests(payload: [String: Any]) throws -> String {
+        func base64URL(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+
+        let header = try JSONSerialization.data(
+            withJSONObject: ["alg": "ES256", "typ": "JWT"],
+            options: [.sortedKeys]
+        )
+        let body = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        return "\(base64URL(header)).\(base64URL(body)).test-signature"
+    }
+
+    private static func makeWebRTCSmokeBootstrapData(
+        runID: String,
+        tenantID: String,
+        tokenTenantID: String? = nil,
+        includeTokenTenantClaim: Bool = true,
+        tokenUserMetadataTenantID: String? = nil,
+        expiresAtEpochSeconds: Int64,
+        xwingPublicKey: Data = Data(repeating: 0xA5, count: 1_216)
+    ) throws -> Data {
+        var tokenPayload: [String: Any] = ["sub": "fixture-user"]
+        if includeTokenTenantClaim {
+            tokenPayload["app_metadata"] = ["tenant_id": tokenTenantID ?? tenantID]
+        }
+        if let tokenUserMetadataTenantID {
+            tokenPayload["user_metadata"] = ["tenant_id": tokenUserMetadataTenantID]
+        }
+        let token = try makeUnsignedJWTForTenantTests(payload: tokenPayload)
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "schemaVersion": 1,
+                "runId": runID,
+                "expiresAtEpochSeconds": expiresAtEpochSeconds,
+                "accessToken": token,
+                "tenantId": tenantID,
+                "connectionCode": "ABCDEFGH",
+                "peerDeviceId": "peer-device",
+                "peerKEMPublicKeys": [
+                    [
+                        "suiteWireId": 0x0001,
+                        "publicKeyBase64": xwingPublicKey.base64EncodedString()
+                    ]
+                ]
+            ],
+            options: [.sortedKeys]
         )
     }
 
@@ -409,6 +1416,16 @@ final class ConnectionCodeFormatTests: XCTestCase {
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func localWebRTCSmokeHarnessSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/App/Smoke/LocalWebRTCSmokeHarness.swift"
         )
         return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
@@ -503,4 +1520,46 @@ final class ConnectionCodeFormatTests: XCTestCase {
         return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
+    private static func supabaseServiceSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Auth/SupabaseService.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+}
+
+private final class SmokeAppendFailureRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedFailures: [String] = []
+
+    var failures: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedFailures
+    }
+
+    func record(_ error: Error) {
+        lock.lock()
+        recordedFailures.append(String(describing: error))
+        lock.unlock()
+    }
+}
+
+@available(iOS 17.0, *)
+private actor IOSKeychainExecutorProbe {
+    private nonisolated let executor = IOSKeychainSerialExecutor(
+        label: "com.skybridge.compass.ios.keychain.tests"
+    )
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
+    func isRunningOnMainThread() -> Bool {
+        Thread.isMainThread
+    }
 }

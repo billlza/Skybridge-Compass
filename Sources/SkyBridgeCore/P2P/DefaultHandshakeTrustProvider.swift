@@ -1,7 +1,7 @@
 import Foundation
 
 @available(macOS 14.0, iOS 17.0, *)
-struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Sendable {
+struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, ExactProtocolIdentityHandshakeTrustProvider, Sendable {
     private let trustRecordsSnapshot: [TrustRecord]?
 
     init(trustRecordsSnapshot: [TrustRecord]? = nil) {
@@ -9,7 +9,6 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
     }
 
     func authoritativeProtocolPins(for record: TrustRecord) -> [ProtocolIdentityPin] {
-        guard record.isAuthenticationEligible else { return [] }
         let storedPins = record.currentPathAuthorityPins
         if !storedPins.isEmpty {
             return storedPins
@@ -63,11 +62,10 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         matchingRecords: [TrustRecord]
     ) -> Set<String> {
         var recordsById: [String: TrustRecord] = [:]
-        if let directRecord, directRecord.isAuthenticationEligible {
+        if let directRecord {
             recordsById[directRecord.deviceId] = directRecord
         }
-        for record in matchingRecords
-        where record.isAuthenticationEligible && recordsById[record.deviceId] == nil {
+        for record in matchingRecords where recordsById[record.deviceId] == nil {
             recordsById[record.deviceId] = record
         }
 
@@ -136,7 +134,7 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
 
         var matched: [String: TrustRecord] = [:]
 
-        for record in records where record.isAuthenticationEligible {
+        for record in records where !record.isTombstone {
             if matched[record.deviceId] != nil {
                 continue
             }
@@ -195,6 +193,43 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         }
 
         return trusted.union(cached)
+    }
+
+    func trustedProtocolIdentityRawKeys(for deviceId: String) async -> [TrustedProtocolIdentityRawKey] {
+        let records = await trustRecords()
+        let directRecord = directRecord(for: deviceId, in: records)
+        var recordsById = Dictionary(
+            uniqueKeysWithValues: matchingTrustRecordsSnapshot(records, for: deviceId)
+                .map { ($0.deviceId, $0) }
+        )
+        if let directRecord {
+            recordsById[directRecord.deviceId] = directRecord
+        }
+
+        var bindings = Set<TrustedProtocolIdentityRawKey>()
+        for record in recordsById.values {
+            for algorithm in [
+                ProtocolSigningAlgorithm.ed25519,
+                .mlDSA65,
+                .mlDSA87
+            ] {
+                guard let binding = record.authenticatedProtocolIdentityBinding(for: algorithm) else {
+                    continue
+                }
+                bindings.insert(
+                    TrustedProtocolIdentityRawKey(
+                        algorithm: algorithm,
+                        publicKey: binding.publicKey
+                    )
+                )
+            }
+        }
+        return bindings.sorted {
+            if $0.algorithm.rawValue != $1.algorithm.rawValue {
+                return $0.algorithm.rawValue < $1.algorithm.rawValue
+            }
+            return $0.publicKey.lexicographicallyPrecedes($1.publicKey)
+        }
     }
 
     private func trustRecords() async -> [TrustRecord] {

@@ -52,7 +52,7 @@ struct KeyboardEventWire: Codable {
     let timestamp: TimeInterval
 }
 
-struct ScreenDataWire: Codable {
+struct ScreenDataWire: Codable, Sendable {
     let width: Int
     let height: Int
     let imageData: Data

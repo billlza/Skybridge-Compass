@@ -134,6 +134,7 @@ public final class USBCConnectionManager: ObservableObject {
     }
 
     private static var isRunningUnderTests: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = ProcessInfo.processInfo.environment
         if env["XCTestConfigurationFilePath"] != nil { return true }
         if env["XCTestBundlePath"] != nil { return true }
@@ -141,6 +142,9 @@ public final class USBCConnectionManager: ObservableObject {
         // 兜底：如果 XCTest 符号存在，也视为测试进程
         if NSClassFromString("XCTestCase") != nil { return true }
         return false
+        #else
+        return false
+        #endif
     }
 
     static var canUseExternalAccessory: Bool {

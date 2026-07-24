@@ -71,7 +71,10 @@ public enum HybridCryptoDegradationPolicy: Sendable, Equatable {
     case requirePQCComponent
 }
 
-/// 混合加密服务 - 提供经典+PQC 混合加密功能
+/// Legacy ML-DSA-65 compatibility/test service.
+///
+/// This service is deliberately separate from the active main-protocol
+/// identity authority and is not used by product capability or settings paths.
 @available(macOS 14.0, *)
 public actor HybridCryptoService {
     
@@ -86,19 +89,6 @@ public actor HybridCryptoService {
     
  /// 降级警告回调
     public var onDegradationWarning: (@Sendable (String) -> Void)?
-
-    /// Installs a remote signing key only after the caller has authenticated it
-    /// through the canonical pairing/trust flow.
-    public func registerAuthenticatedRemoteSigningKey(
-        _ publicKey: Data,
-        peerId: String
-    ) async throws {
-        try await pqcAdapter.registerAuthenticatedSigningPublicKey(
-            publicKey,
-            peerId: peerId,
-            variant: .mldsa65
-        )
-    }
     
  // MARK: - Initialization
     

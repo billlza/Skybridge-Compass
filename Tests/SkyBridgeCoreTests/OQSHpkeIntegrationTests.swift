@@ -27,10 +27,10 @@ final class OQSHpkeIntegrationTests: XCTestCase {
         let sig = try await fixture.sender.sign(data: payload, peerId: peer, algorithm: "ML-DSA-65")
         _ = try await authenticateLocalSigningKeyForTesting(
             signer: fixture.sender,
-            verifier: fixture.recipient,
+            verifier: fixture.sender,
             peerId: peer
         )
-        let ok = await fixture.recipient.verify(
+        let ok = await fixture.sender.verify(
             data: payload,
             signature: sig,
             peerId: peer,

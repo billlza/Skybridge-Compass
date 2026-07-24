@@ -62,16 +62,19 @@ public struct StaticHandshakeIdentityProvider: HandshakeIdentityProvider, Sendab
 @available(macOS 14.0, iOS 17.0, *)
 public actor DeviceIdentityHandshakeProvider: HandshakeIdentityProvider {
     private let sigAAlgorithm: ProtocolSigningAlgorithm
+    private let protocolSigningKeyProtection: ProtocolSigningKeyProtection?
     private let includeSecureEnclavePoP: Bool
     private let keyManager: DeviceIdentityKeyManager
     private var cachedIdentity: ResolvedHandshakeIdentity?
 
     public init(
         sigAAlgorithm: ProtocolSigningAlgorithm,
+        protocolSigningKeyProtection: ProtocolSigningKeyProtection? = nil,
         includeSecureEnclavePoP: Bool = false,
         keyManager: DeviceIdentityKeyManager = .shared
     ) {
         self.sigAAlgorithm = sigAAlgorithm
+        self.protocolSigningKeyProtection = protocolSigningKeyProtection
         self.includeSecureEnclavePoP = includeSecureEnclavePoP
         self.keyManager = keyManager
     }
@@ -81,8 +84,33 @@ public actor DeviceIdentityHandshakeProvider: HandshakeIdentityProvider {
             return cachedIdentity
         }
 
-        let protocolPublicKey = try await keyManager.getProtocolSigningPublicKey(for: sigAAlgorithm)
-        let signingKeyHandle = try await keyManager.getProtocolSigningKeyHandle(for: sigAAlgorithm)
+        let protection: ProtocolSigningKeyProtection
+        if let protocolSigningKeyProtection {
+            protection = protocolSigningKeyProtection
+        } else {
+            protection = try await keyManager
+                .existingProtocolSigningKeyProtection(for: sigAAlgorithm)
+                ?? .softwareKeychain
+        }
+        let protocolIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)
+        if protocolSigningKeyProtection != nil, sigAAlgorithm != .ed25519 {
+            guard let existing = try await keyManager.existingProtocolSigningIdentity(
+                for: sigAAlgorithm,
+                protection: protection
+            ) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The selected \(sigAAlgorithm.rawValue)/\(protection.rawValue) protocol identity is not committed"
+                )
+            }
+            protocolIdentity = existing
+        } else {
+            protocolIdentity = try await keyManager.getProtocolSigningIdentity(
+                for: sigAAlgorithm,
+                protection: protection
+            )
+        }
+        let protocolPublicKey = protocolIdentity.publicKey
+        let signingKeyHandle = protocolIdentity.keyHandle
         let secureEnclavePublicKey = includeSecureEnclavePoP
             ? try await keyManager.getSecureEnclavePublicKey()
             : nil

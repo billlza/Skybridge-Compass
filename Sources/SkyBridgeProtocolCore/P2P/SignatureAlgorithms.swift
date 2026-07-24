@@ -8,6 +8,7 @@ public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
     case p256ECDSA = "P-256-ECDSA"
+    case mlDSA87 = "ML-DSA-87"
 
     public static func forSuite(_ suite: CryptoSuite) -> SignatureAlgorithm {
         if suite.isPQC || suite.isHybrid {
@@ -22,8 +23,10 @@ public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
         case .ed25519: return 0x0001
         case .mlDSA65: return 0x0002
         case .p256ECDSA: return 0x0003
+        case .mlDSA87: return 0x0004
         }
     }
+
 }
 
 /// Main-protocol signing algorithm set.
@@ -33,11 +36,13 @@ public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
 public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
+    case mlDSA87 = "ML-DSA-87"
 
     public var wire: SignatureAlgorithm {
         switch self {
         case .ed25519: return .ed25519
         case .mlDSA65: return .mlDSA65
+        case .mlDSA87: return .mlDSA87
         }
     }
 
@@ -45,6 +50,7 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
         switch wire {
         case .ed25519: self = .ed25519
         case .mlDSA65: self = .mlDSA65
+        case .mlDSA87: self = .mlDSA87
         case .p256ECDSA: return nil
         }
     }
@@ -53,6 +59,15 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
         switch self {
         case .ed25519: return 0x0001
         case .mlDSA65: return 0x0002
+        case .mlDSA87: return 0x0004
+        }
+    }
+
+    public var signatureByteCount: Int {
+        switch self {
+        case .ed25519: return 64
+        case .mlDSA65: return 3_309
+        case .mlDSA87: return 4_627
         }
     }
 

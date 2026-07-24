@@ -1,5 +1,57 @@
 import Foundation
 
+struct RemoteDesktopVideoFrameTraits: Equatable, Sendable {
+    let normalizedFormat: String
+    let isPredictiveVideo: Bool
+    let isIndependentlyDecodableFrame: Bool
+    let isDecoderBootstrapFrame: Bool
+}
+
+struct RemoteDesktopClassifiedScreenFrame: Sendable {
+    let screenData: ScreenData
+    let traits: RemoteDesktopVideoFrameTraits
+}
+
+enum RemoteDesktopVideoFrameClassificationError: Error, Equatable, LocalizedError, Sendable {
+    case accessUnitTooLarge(actualBytes: Int, maximumBytes: Int)
+    case tooManyNALUnits(actual: Int, maximum: Int)
+    case parameterSetTooLarge(actualBytes: Int, maximumBytes: Int)
+    case invalidNALHeader
+    case malformedAccessUnit
+
+    var errorDescription: String? {
+        switch self {
+        case .accessUnitTooLarge(let actualBytes, let maximumBytes):
+            return "Video access unit contains \(actualBytes) bytes, exceeding the \(maximumBytes)-byte classification limit."
+        case .tooManyNALUnits(let actual, let maximum):
+            return "Video access unit contains \(actual) NAL units, exceeding the \(maximum)-unit classification limit."
+        case .parameterSetTooLarge(let actualBytes, let maximumBytes):
+            return "Video parameter set contains \(actualBytes) bytes, exceeding the \(maximumBytes)-byte classification limit."
+        case .invalidNALHeader:
+            return "Video access unit contains an invalid NAL header."
+        case .malformedAccessUnit:
+            return "Video access unit framing is malformed."
+        }
+    }
+}
+
+/// Serial non-UI executor for untrusted frame classification. Camera callers await this actor
+/// in wire order, so classification adds bounded backpressure without occupying MainActor.
+actor RemoteDesktopVideoFrameClassificationWorker {
+    func classify(_ screenData: ScreenData) throws -> RemoteDesktopClassifiedScreenFrame {
+        try Task.checkCancellation()
+        let classifiedFrame = RemoteDesktopClassifiedScreenFrame(
+            screenData: screenData,
+            traits: try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+                format: screenData.format,
+                imageData: screenData.imageData
+            )
+        )
+        try Task.checkCancellation()
+        return classifiedFrame
+    }
+}
+
 enum RemoteDesktopScreenFrameWire {
     private static let magic: UInt32 = 0x53425246 // "SBRF"
     private static let versionV1: UInt8 = 1
@@ -28,9 +80,11 @@ enum RemoteDesktopScreenFrameWire {
         }
 
         private let maxFrameBytes: Int
+        private let maxChunkCount = 2_048
         private let frameTTL: TimeInterval = 1.0
         private var frameId: UInt64?
         private var suppressedFrameReasons: [UInt64: String] = [:]
+        private var suppressedFrameOrder: [UInt64] = []
         private var expectedChunkCount = 0
         private var expectedTotalBytes = 0
         private var nextChunkIndex = 0
@@ -57,6 +111,7 @@ enum RemoteDesktopScreenFrameWire {
 
         private mutating func clearSuppressedFrames() {
             suppressedFrameReasons.removeAll(keepingCapacity: true)
+            suppressedFrameOrder.removeAll(keepingCapacity: true)
         }
 
         private mutating func drop(
@@ -66,7 +121,13 @@ enum RemoteDesktopScreenFrameWire {
         ) -> Result {
             reset(clearSuppression: orphanFrameIds.isEmpty)
             for orphanFrameId in orphanFrameIds {
+                if suppressedFrameReasons[orphanFrameId] == nil {
+                    suppressedFrameOrder.append(orphanFrameId)
+                }
                 suppressedFrameReasons[orphanFrameId] = reason
+            }
+            while suppressedFrameOrder.count > 2 {
+                suppressedFrameReasons.removeValue(forKey: suppressedFrameOrder.removeFirst())
             }
             return .dropped(reason: reason, frameId: droppedFrameId)
         }
@@ -91,10 +152,13 @@ enum RemoteDesktopScreenFrameWire {
             }
 
             guard envelope.chunkCount > 0,
+                  envelope.chunkCount <= maxChunkCount,
+                  envelope.chunkCount <= envelope.totalBytes,
                   envelope.chunkIndex >= 0,
                   envelope.chunkIndex < envelope.chunkCount,
                   envelope.totalBytes > 0,
                   envelope.totalBytes <= maxFrameBytes,
+                  !envelope.payload.isEmpty,
                   envelope.chunkOffset >= 0,
                   envelope.chunkOffset + envelope.payload.count <= envelope.totalBytes else {
                 return drop(reason: "invalid-sbc2-chunk-metadata", frameId: envelope.frameId)
@@ -217,11 +281,11 @@ enum RemoteDesktopScreenFrameWire {
     static func decodeIfPresent(_ data: Data) -> ScreenData? {
         guard data.count >= headerSizeV1 else { return nil }
         guard readUInt32(from: data, offset: 0) == magic else { return nil }
-        let version = data[4]
+        let version = byte(in: data, at: 4)
         guard version == versionV1 || version == versionV2 else { return nil }
         let headerSize = version == versionV2 ? headerSizeV2 : headerSizeV1
         guard data.count >= headerSize else { return nil }
-        guard let codecTag = CodecTag(rawValue: data[5]) else { return nil }
+        guard let codecTag = CodecTag(rawValue: byte(in: data, at: 5)) else { return nil }
 
         let flags = readUInt16(from: data, offset: 6)
         let width = Int(readUInt32(from: data, offset: 8))
@@ -241,7 +305,7 @@ enum RemoteDesktopScreenFrameWire {
         return ScreenData(
             width: width,
             height: height,
-            imageData: data.subdata(in: headerSize..<data.count),
+            imageData: subdata(in: data, offsetRange: headerSize..<data.count),
             timestamp: TimeInterval(timestampMicros) / 1_000_000.0,
             format: codecTag.format,
             isSyncFrame: (flags & 0x0001) != 0,
@@ -257,12 +321,12 @@ enum RemoteDesktopScreenFrameWire {
     static func decodeChunkEnvelopeIfPresent(_ data: Data) -> ChunkEnvelope? {
         guard data.count >= screenChunkHeaderByteCount,
               readUInt32(from: data, offset: 0) == screenChunkMagic,
-              data[4] == screenChunkVersion,
+              byte(in: data, at: 4) == screenChunkVersion,
               Int(readUInt16(from: data, offset: 6)) == screenChunkHeaderByteCount else {
             return nil
         }
 
-        let flags = data[5]
+        let flags = byte(in: data, at: 5)
         let chunkIndex = Int(readUInt32(from: data, offset: 16))
         let chunkCount = Int(readUInt32(from: data, offset: 20))
         let totalBytes = Int(readUInt32(from: data, offset: 24))
@@ -283,7 +347,7 @@ enum RemoteDesktopScreenFrameWire {
             return nil
         }
 
-        let payload = data.subdata(in: payloadStart..<data.count)
+        let payload = subdata(in: data, offsetRange: payloadStart..<data.count)
         guard chunkOffset + payload.count <= totalBytes else { return nil }
         return ChunkEnvelope(
             frameId: readUInt64(from: data, offset: 8),
@@ -295,145 +359,248 @@ enum RemoteDesktopScreenFrameWire {
         )
     }
 
-    static func containsSyncFrame(
+    private static let maximumClassifiedAccessUnitBytes = 8 * 1_024 * 1_024
+    private static let maximumClassifiedNALUnits = 512
+    private static let maximumClassifiedParameterSetBytes = 64 * 1_024
+
+    private struct VideoNALSummary {
+        var nalUnitCount = 0
+        var hasVPS = false
+        var hasSPS = false
+        var hasPPS = false
+        var hasSyncFrame = false
+    }
+
+    /// Strictly classifies one encoded frame without allocating NAL payload copies. For H.264
+    /// and HEVC, advertised sync metadata is intentionally not an input: only actual NAL types
+    /// can authorize independent/bootstrap recovery behavior.
+    static func classifyVideoFrame(
         format: String?,
-        imageData: Data,
-        advertisedSyncFrame: Bool?
-    ) -> Bool {
-        switch CodecTag(format: format) {
-        case .jpeg, .bgra, .unknown:
-            return advertisedSyncFrame ?? true
+        imageData: Data
+    ) throws -> RemoteDesktopVideoFrameTraits {
+        let normalizedFormat = (format ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let codec = CodecTag(format: normalizedFormat)
+        guard codec == .h264 || codec == .hevc else {
+            return RemoteDesktopVideoFrameTraits(
+                normalizedFormat: normalizedFormat,
+                isPredictiveVideo: false,
+                isIndependentlyDecodableFrame: true,
+                isDecoderBootstrapFrame: true
+            )
+        }
+
+        guard !imageData.isEmpty else {
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+        }
+        guard imageData.count <= maximumClassifiedAccessUnitBytes else {
+            throw RemoteDesktopVideoFrameClassificationError.accessUnitTooLarge(
+                actualBytes: imageData.count,
+                maximumBytes: maximumClassifiedAccessUnitBytes
+            )
+        }
+
+        let summary = try imageData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            if startCodeLength(in: bytes, at: 0) != nil {
+                return try classifyAnnexB(bytes, codec: codec)
+            }
+            return try classifyLengthPrefixed(bytes, codec: codec)
+        }
+        let isBootstrap: Bool
+        switch codec {
         case .h264:
-            return parseNALUnits(from: imageData).contains { nalu in
-                guard let first = nalu.first else { return false }
-                return Int(first & 0x1F) == 5
-            }
+            isBootstrap = summary.hasSPS && summary.hasPPS && summary.hasSyncFrame
         case .hevc:
-            return parseNALUnits(from: imageData).contains { nalu in
-                guard nalu.count >= 2, let first = nalu.first else { return false }
-                let type = Int((first >> 1) & 0x3F)
-                return (16...21).contains(type)
-            }
-        }
-    }
-
-    static func containsDecoderBootstrapFrame(
-        format: String?,
-        imageData: Data,
-        advertisedSyncFrame: Bool?
-    ) -> Bool {
-        switch CodecTag(format: format) {
+            isBootstrap = summary.hasVPS && summary.hasSPS && summary.hasPPS && summary.hasSyncFrame
         case .jpeg, .bgra, .unknown:
-            return advertisedSyncFrame ?? true
-        case .h264:
-            let nalus = parseNALUnits(from: imageData)
-            var hasSPS = false
-            var hasPPS = false
-            var hasIDR = false
-            for nalu in nalus {
-                guard let first = nalu.first else { continue }
-                switch Int(first & 0x1F) {
-                case 5:
-                    hasIDR = true
-                case 7:
-                    hasSPS = true
-                case 8:
-                    hasPPS = true
-                default:
-                    break
-                }
-            }
-            return hasSPS && hasPPS && hasIDR
-        case .hevc:
-            let nalus = parseNALUnits(from: imageData)
-            var hasVPS = false
-            var hasSPS = false
-            var hasPPS = false
-            var hasIRAP = false
-            for nalu in nalus {
-                guard nalu.count >= 2, let first = nalu.first else { continue }
-                switch Int((first >> 1) & 0x3F) {
-                case 16...21:
-                    hasIRAP = true
-                case 32:
-                    hasVPS = true
-                case 33:
-                    hasSPS = true
-                case 34:
-                    hasPPS = true
-                default:
-                    break
-                }
-            }
-            return hasVPS && hasSPS && hasPPS && hasIRAP
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
         }
+        return RemoteDesktopVideoFrameTraits(
+            normalizedFormat: normalizedFormat,
+            isPredictiveVideo: true,
+            isIndependentlyDecodableFrame: summary.hasSyncFrame,
+            isDecoderBootstrapFrame: isBootstrap
+        )
     }
 
-    private static func parseNALUnits(from data: Data) -> [Data] {
-        if data.count >= 4,
-           data.starts(with: [0x00, 0x00, 0x00, 0x01]) || data.starts(with: [0x00, 0x00, 0x01]) {
-            return parseAnnexBNALUnits(from: data)
-        }
-        return parseLengthPrefixedNALUnits(from: data)
-    }
-
-    private static func parseLengthPrefixedNALUnits(from data: Data) -> [Data] {
-        var nalus: [Data] = []
+    private static func classifyLengthPrefixed(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        codec: CodecTag
+    ) throws -> VideoNALSummary {
+        var summary = VideoNALSummary()
         var offset = 0
-        while offset + 4 <= data.count {
-            let length = data.withUnsafeBytes { raw -> Int in
-                let value = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
-                return Int(UInt32(bigEndian: value))
+        while offset < bytes.count {
+            guard bytes.count - offset >= 4 else {
+                throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
             }
+            let declaredLength =
+                (Int(bytes[offset]) << 24)
+                | (Int(bytes[offset + 1]) << 16)
+                | (Int(bytes[offset + 2]) << 8)
+                | Int(bytes[offset + 3])
             offset += 4
-            guard length > 0, offset + length <= data.count else { break }
-            nalus.append(data.subdata(in: offset..<(offset + length)))
-            offset += length
+            guard declaredLength > 0, declaredLength <= bytes.count - offset else {
+                throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+            }
+            let minimumNALBytes = codec == .hevc ? 2 : 1
+            guard declaredLength >= minimumNALBytes else {
+                throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+            }
+            try classifyNAL(
+                firstByte: bytes[offset],
+                secondByte: codec == .hevc ? bytes[offset + 1] : nil,
+                byteCount: declaredLength,
+                codec: codec,
+                summary: &summary
+            )
+            offset += declaredLength
         }
-        return nalus
+        guard summary.nalUnitCount > 0 else {
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+        }
+        return summary
     }
 
-    private static func parseAnnexBNALUnits(from data: Data) -> [Data] {
-        func startCodeLength(at index: Int) -> Int? {
-            guard index + 3 <= data.count else { return nil }
-            if index + 4 <= data.count,
-               data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x00, data[index + 3] == 0x01 {
-                return 4
-            }
-            if data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x01 {
-                return 3
-            }
-            return nil
+    private static func classifyAnnexB(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        codec: CodecTag
+    ) throws -> VideoNALSummary {
+        guard let firstStartCodeLength = startCodeLength(in: bytes, at: 0) else {
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
         }
+        var summary = VideoNALSummary()
+        var nalStart = firstStartCodeLength
+        var searchOffset = nalStart
 
-        var nalus: [Data] = []
-        var currentStart: Int?
-        var currentSkip = 0
-        var index = 0
-
-        while index < data.count {
-            if let skip = startCodeLength(at: index) {
-                if let start = currentStart {
-                    let naluStart = start + currentSkip
-                    if naluStart < index {
-                        nalus.append(data.subdata(in: naluStart..<index))
-                    }
-                }
-                currentStart = index
-                currentSkip = skip
-                index += skip
-            } else {
-                index += 1
-            }
+        while let nextStartCode = findStartCode(in: bytes, from: searchOffset) {
+            try classifyNALRange(
+                nalStart..<nextStartCode.offset,
+                bytes: bytes,
+                codec: codec,
+                summary: &summary
+            )
+            nalStart = nextStartCode.offset + nextStartCode.length
+            searchOffset = nalStart
         }
+        try classifyNALRange(
+            nalStart..<bytes.count,
+            bytes: bytes,
+            codec: codec,
+            summary: &summary
+        )
+        return summary
+    }
 
-        if let start = currentStart {
-            let naluStart = start + currentSkip
-            if naluStart < data.count {
-                nalus.append(data.subdata(in: naluStart..<data.count))
-            }
+    private static func classifyNALRange(
+        _ range: Range<Int>,
+        bytes: UnsafeBufferPointer<UInt8>,
+        codec: CodecTag,
+        summary: inout VideoNALSummary
+    ) throws {
+        let minimumBytes = codec == .hevc ? 2 : 1
+        guard range.count >= minimumBytes else {
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
         }
-        return nalus
+        try classifyNAL(
+            firstByte: bytes[range.lowerBound],
+            secondByte: codec == .hevc ? bytes[range.lowerBound + 1] : nil,
+            byteCount: range.count,
+            codec: codec,
+            summary: &summary
+        )
+    }
+
+    private static func classifyNAL(
+        firstByte: UInt8,
+        secondByte: UInt8?,
+        byteCount: Int,
+        codec: CodecTag,
+        summary: inout VideoNALSummary
+    ) throws {
+        let minimumBytes = codec == .hevc ? 2 : 1
+        guard byteCount >= minimumBytes else {
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+        }
+        guard summary.nalUnitCount < maximumClassifiedNALUnits else {
+            throw RemoteDesktopVideoFrameClassificationError.tooManyNALUnits(
+                actual: summary.nalUnitCount + 1,
+                maximum: maximumClassifiedNALUnits
+            )
+        }
+        summary.nalUnitCount += 1
+
+        let nalType: Int
+        let parameterSetType: Bool
+        switch codec {
+        case .h264:
+            guard firstByte & 0x80 == 0 else {
+                throw RemoteDesktopVideoFrameClassificationError.invalidNALHeader
+            }
+            nalType = Int(firstByte & 0x1F)
+            guard (1...23).contains(nalType) else {
+                throw RemoteDesktopVideoFrameClassificationError.invalidNALHeader
+            }
+            parameterSetType = nalType == 7 || nalType == 8
+            if nalType == 5 { summary.hasSyncFrame = true }
+            if nalType == 7 { summary.hasSPS = true }
+            if nalType == 8 { summary.hasPPS = true }
+        case .hevc:
+            guard firstByte & 0x80 == 0,
+                  let secondByte,
+                  secondByte & 0x07 != 0 else {
+                throw RemoteDesktopVideoFrameClassificationError.invalidNALHeader
+            }
+            nalType = Int((firstByte >> 1) & 0x3F)
+            parameterSetType = (32...34).contains(nalType)
+            if (16...21).contains(nalType) { summary.hasSyncFrame = true }
+            if nalType == 32 { summary.hasVPS = true }
+            if nalType == 33 { summary.hasSPS = true }
+            if nalType == 34 { summary.hasPPS = true }
+        case .jpeg, .bgra, .unknown:
+            throw RemoteDesktopVideoFrameClassificationError.malformedAccessUnit
+        }
+        if parameterSetType, byteCount > maximumClassifiedParameterSetBytes {
+            throw RemoteDesktopVideoFrameClassificationError.parameterSetTooLarge(
+                actualBytes: byteCount,
+                maximumBytes: maximumClassifiedParameterSetBytes
+            )
+        }
+    }
+
+    private static func findStartCode(
+        in bytes: UnsafeBufferPointer<UInt8>,
+        from startOffset: Int
+    ) -> (offset: Int, length: Int)? {
+        var offset = startOffset
+        while offset + 3 <= bytes.count {
+            if let length = startCodeLength(in: bytes, at: offset) {
+                return (offset, length)
+            }
+            offset += 1
+        }
+        return nil
+    }
+
+    private static func startCodeLength(
+        in bytes: UnsafeBufferPointer<UInt8>,
+        at offset: Int
+    ) -> Int? {
+        guard offset >= 0, offset + 3 <= bytes.count else { return nil }
+        if offset + 4 <= bytes.count,
+           bytes[offset] == 0,
+           bytes[offset + 1] == 0,
+           bytes[offset + 2] == 0,
+           bytes[offset + 3] == 1 {
+            return 4
+        }
+        if bytes[offset] == 0,
+           bytes[offset + 1] == 0,
+           bytes[offset + 2] == 1 {
+            return 3
+        }
+        return nil
     }
 
     private static func readUInt16(from data: Data, offset: Int) -> UInt16 {
@@ -445,6 +612,16 @@ enum RemoteDesktopScreenFrameWire {
                 )
             )
         }
+    }
+
+    private static func byte(in data: Data, at offset: Int) -> UInt8 {
+        data[data.index(data.startIndex, offsetBy: offset)]
+    }
+
+    private static func subdata(in data: Data, offsetRange: Range<Int>) -> Data {
+        let lowerBound = data.index(data.startIndex, offsetBy: offsetRange.lowerBound)
+        let upperBound = data.index(data.startIndex, offsetBy: offsetRange.upperBound)
+        return data.subdata(in: lowerBound..<upperBound)
     }
 
     private static func readUInt32(from data: Data, offset: Int) -> UInt32 {
@@ -470,46 +647,10 @@ enum RemoteDesktopScreenFrameWire {
     }
 }
 
-extension ScreenData {
-    var normalizedFormat: String {
-        (format ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    var isCompressedPredictiveVideoFrame: Bool {
-        switch normalizedFormat {
-        case "h264", "hevc":
-            return true
-        default:
-            return false
-        }
-    }
-
-    var isIndependentlyDecodableFrame: Bool {
-        if isCompressedPredictiveVideoFrame {
-            return RemoteDesktopScreenFrameWire.containsSyncFrame(
-                format: format,
-                imageData: imageData,
-                advertisedSyncFrame: isSyncFrame
-            )
-        }
-        return true
-    }
-
-    var isDecoderBootstrapFrame: Bool {
-        if isCompressedPredictiveVideoFrame {
-            return RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
-                format: format,
-                imageData: imageData,
-                advertisedSyncFrame: isSyncFrame
-            )
-        }
-        return true
-    }
-}
-
 enum RemoteDesktopDecodeQueuePolicy {
     static let maxPredictiveVideoFrames = 12
     static let hardMaxPredictiveVideoFrames = 36
+    static let maxQueuedEncodedBytes = 32 * 1_024 * 1_024
     static let progressStallThresholdSeconds: TimeInterval = 0.35
 
     enum EnqueueResult: Equatable {
@@ -517,8 +658,10 @@ enum RemoteDesktopDecodeQueuePolicy {
         case enqueuedAboveSoftLimit
         case replacedStillFrame
         case droppedIncomingPredictiveFrame
+        case droppedIncomingFrameExceedingByteBudget
         case enteredWaitingForSync
         case recoveredWithIndependentFrame
+        case compactedWithIndependentFrame
     }
 
     enum SequenceValidationResult: Equatable {
@@ -559,34 +702,106 @@ enum RemoteDesktopDecodeQueuePolicy {
         return .accepted
     }
 
+    /// Returns true when appending one encoded frame would exceed the queue budget.
+    /// The subtraction-based comparison cannot wrap even when a caller supplies
+    /// synthetic byte counts near `Int.max` in a test.
+    static func exceedsEncodedByteBudget<QueuedByteCounts: Sequence>(
+        queuedEncodedByteCounts: QueuedByteCounts,
+        incomingEncodedBytes: Int,
+        maximumEncodedBytes: Int
+    ) -> Bool where QueuedByteCounts.Element == Int {
+        guard incomingEncodedBytes >= 0,
+              maximumEncodedBytes >= 0,
+              incomingEncodedBytes <= maximumEncodedBytes else {
+            return true
+        }
+
+        var remainingBytes = maximumEncodedBytes - incomingEncodedBytes
+        for queuedBytes in queuedEncodedByteCounts {
+            guard queuedBytes >= 0, queuedBytes <= remainingBytes else {
+                return true
+            }
+            remainingBytes -= queuedBytes
+        }
+        return false
+    }
+
+    static func queuedEncodedByteCount(
+        in pendingFrames: [RemoteDesktopClassifiedScreenFrame]
+    ) -> Int {
+        var totalBytes = 0
+        for frame in pendingFrames {
+            let (nextTotal, overflow) = totalBytes.addingReportingOverflow(
+                frame.screenData.imageData.count
+            )
+            if overflow {
+                return Int.max
+            }
+            totalBytes = nextTotal
+        }
+        return totalBytes
+    }
+
     @discardableResult
     static func enqueue(
-        _ screenData: ScreenData,
-        into pendingFrames: inout [ScreenData],
+        _ frame: RemoteDesktopClassifiedScreenFrame,
+        into pendingFrames: inout [RemoteDesktopClassifiedScreenFrame],
         waitingForSyncFrame: inout Bool,
         decoderProgressStalled: Bool = true,
         maxPredictiveVideoFrames: Int = maxPredictiveVideoFrames,
-        hardMaxPredictiveVideoFrames: Int = hardMaxPredictiveVideoFrames
+        hardMaxPredictiveVideoFrames: Int = hardMaxPredictiveVideoFrames,
+        maxQueuedEncodedBytes: Int = maxQueuedEncodedBytes
     ) -> EnqueueResult {
-        guard isPredictiveVideoFormat(screenData.format) else {
+        let incomingEncodedBytes = frame.screenData.imageData.count
+        let incomingFrameExceedsByteBudget = exceedsEncodedByteBudget(
+            queuedEncodedByteCounts: EmptyCollection<Int>(),
+            incomingEncodedBytes: incomingEncodedBytes,
+            maximumEncodedBytes: maxQueuedEncodedBytes
+        )
+        if incomingFrameExceedsByteBudget {
+            if frame.traits.isPredictiveVideo {
+                pendingFrames.removeAll(keepingCapacity: true)
+                waitingForSyncFrame = true
+            }
+            return .droppedIncomingFrameExceedingByteBudget
+        }
+
+        guard frame.traits.isPredictiveVideo else {
             pendingFrames.removeAll(keepingCapacity: true)
             waitingForSyncFrame = false
-            pendingFrames.append(screenData)
+            pendingFrames.append(frame)
             return .replacedStillFrame
         }
 
         if waitingForSyncFrame {
-            guard screenData.isDecoderBootstrapFrame else {
+            guard frame.traits.isDecoderBootstrapFrame else {
                 return .droppedIncomingPredictiveFrame
             }
             pendingFrames.removeAll(keepingCapacity: true)
-            pendingFrames.append(screenData)
+            pendingFrames.append(frame)
             waitingForSyncFrame = false
             return .recoveredWithIndependentFrame
         }
 
-        if screenData.isIndependentlyDecodableFrame {
-            pendingFrames.append(screenData)
+        let prospectiveBytesExceedBudget = exceedsEncodedByteBudget(
+            queuedEncodedByteCounts: pendingFrames.lazy.map {
+                $0.screenData.imageData.count
+            },
+            incomingEncodedBytes: incomingEncodedBytes,
+            maximumEncodedBytes: maxQueuedEncodedBytes
+        )
+        let queuePressureRequiresRecovery = pendingFrames.count >= hardMaxPredictiveVideoFrames
+            || (pendingFrames.count >= maxPredictiveVideoFrames && decoderProgressStalled)
+            || prospectiveBytesExceedBudget
+
+        if frame.traits.isIndependentlyDecodableFrame {
+            if queuePressureRequiresRecovery {
+                pendingFrames.removeAll(keepingCapacity: true)
+                pendingFrames.append(frame)
+                waitingForSyncFrame = false
+                return .compactedWithIndependentFrame
+            }
+            pendingFrames.append(frame)
             return pendingFrames.count > maxPredictiveVideoFrames ? .enqueuedAboveSoftLimit : .enqueued
         }
 
@@ -594,18 +809,19 @@ enum RemoteDesktopDecodeQueuePolicy {
             return .droppedIncomingPredictiveFrame
         }
 
-        if pendingFrames.count >= hardMaxPredictiveVideoFrames
-            || (pendingFrames.count >= maxPredictiveVideoFrames && decoderProgressStalled) {
+        if queuePressureRequiresRecovery {
             pendingFrames.removeAll(keepingCapacity: true)
             waitingForSyncFrame = true
             return .enteredWaitingForSync
         }
 
-        pendingFrames.append(screenData)
+        pendingFrames.append(frame)
         return pendingFrames.count > maxPredictiveVideoFrames ? .enqueuedAboveSoftLimit : .enqueued
     }
 
-    static func dequeueNext(from pendingFrames: inout [ScreenData]) -> ScreenData? {
+    static func dequeueNext(
+        from pendingFrames: inout [RemoteDesktopClassifiedScreenFrame]
+    ) -> RemoteDesktopClassifiedScreenFrame? {
         guard !pendingFrames.isEmpty else { return nil }
         return pendingFrames.removeFirst()
     }

@@ -11,6 +11,7 @@
 import XCTest
 import CryptoKit
 @testable import SkyBridgeCore
+import SkyBridgeBenchmarkSupport
 
 // MARK: - Mock Transport
 
@@ -107,10 +108,11 @@ actor InlineFirstSendTransport: DiscoveryTransport {
 // MARK: - Mock Trust Provider
 
 @available(macOS 14.0, iOS 17.0, *)
-struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
+struct StaticTrustProvider: HandshakeTrustProvider, ExactProtocolIdentityHandshakeTrustProvider, Sendable {
     let deviceId: String
     let fingerprint: String?
     var kemPublicKeys: [CryptoSuite: Data] = [:]
+    var protocolIdentityRawKeys: [TrustedProtocolIdentityRawKey] = []
 
     func trustedFingerprint(for deviceId: String) async -> String? {
         guard deviceId == self.deviceId else { return nil }
@@ -125,6 +127,13 @@ struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         guard deviceId == self.deviceId else { return nil }
         return nil
+    }
+
+    func trustedProtocolIdentityRawKeys(
+        for deviceId: String
+    ) async -> [TrustedProtocolIdentityRawKey] {
+        guard deviceId == self.deviceId else { return [] }
+        return protocolIdentityRawKeys
     }
 }
 
@@ -687,6 +696,151 @@ final class HandshakeDriverTests: XCTestCase {
         }
     }
 
+    func testSecureEnclaveMLDSA87CompletesStrictPQCHandshakeAcrossSixteenKiBFraming() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *),
+              SecureEnclave.isAvailable else {
+            throw XCTSkip("Apple PQC requires macOS 26 or newer")
+        }
+
+        let cryptoProvider = ApplePQCCryptoProvider()
+        let offeredSuites: [CryptoSuite] = [.mlkem768MLDSA65]
+        let initiatorKEMStore = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: offeredSuites,
+            provider: cryptoProvider
+        )
+        let responderKEMStore = try await BenchmarkHandshakeKEMIdentityStore.make(
+            offeredSuites: offeredSuites,
+            provider: cryptoProvider
+        )
+        let initiatorIdentity = try await SecureEnclaveMLDSAIdentityFactory.create(
+            algorithm: .mlDSA87
+        )
+        let responderIdentity = try await SecureEnclaveMLDSAIdentityFactory.create(
+            algorithm: .mlDSA87
+        )
+        let initiatorPublicKey = initiatorIdentity.publicKey
+        let responderPublicKey = responderIdentity.publicKey
+        let initiatorTransport = MockDiscoveryTransport()
+        let responderTransport = MockDiscoveryTransport()
+        let peer = PeerIdentifier(deviceId: "mldsa87-pqc-peer")
+        let policy = HandshakePolicy(
+            requirePQC: true,
+            allowClassicFallback: false,
+            minimumTier: .nativePQC
+        )
+        let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
+        let signatureProvider = PQCSignatureProvider(
+            algorithm: .mlDSA87,
+            backend: .applePQC
+        )
+
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: signatureProvider,
+            protocolSigningKeyHandle: .callback(initiatorIdentity.signingCallback),
+            sigAAlgorithm: .mlDSA87,
+            identityPublicKey: encodeIdentityPublicKey(
+                initiatorPublicKey,
+                algorithm: .mlDSA87
+            ),
+            offeredSuites: offeredSuites,
+            policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            timeout: .seconds(5),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(
+                    responderPublicKey,
+                    algorithm: .mlDSA87
+                ),
+                kemPublicKeys: try responderKEMStore.trustPublicKeys(
+                    for: offeredSuites
+                ),
+                protocolIdentityRawKeys: [
+                    TrustedProtocolIdentityRawKey(
+                        algorithm: .mlDSA87,
+                        publicKey: responderPublicKey
+                    )
+                ]
+            ),
+            kemIdentityStore: initiatorKEMStore
+        )
+        let responder = try HandshakeDriver(
+            transport: responderTransport,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: signatureProvider,
+            protocolSigningKeyHandle: .callback(responderIdentity.signingCallback),
+            sigAAlgorithm: .mlDSA87,
+            identityPublicKey: encodeIdentityPublicKey(
+                responderPublicKey,
+                algorithm: .mlDSA87
+            ),
+            offeredSuites: offeredSuites,
+            policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            timeout: .seconds(5),
+            trustProvider: StaticTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(
+                    initiatorPublicKey,
+                    algorithm: .mlDSA87
+                ),
+                kemPublicKeys: try initiatorKEMStore.trustPublicKeys(
+                    for: offeredSuites
+                ),
+                protocolIdentityRawKeys: [
+                    TrustedProtocolIdentityRawKey(
+                        algorithm: .mlDSA87,
+                        publicKey: initiatorPublicKey
+                    )
+                ]
+            ),
+            kemIdentityStore: responderKEMStore
+        )
+
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+        try await waitForSentMessageCount(1, on: initiatorTransport)
+        let messageABytes = await initiatorTransport.getSentMessages()[0].1
+        let messageA = try HandshakeMessageA.decode(from: messageABytes)
+        XCTAssertEqual(
+            try messageA.decodedIdentityPublicKeys().protocolAlgorithm,
+            .mlDSA87
+        )
+        XCTAssertEqual(messageA.signature.count, 4_627)
+        XCTAssertGreaterThan(messageABytes.count, 8 * 1_024)
+        XCTAssertLessThanOrEqual(messageABytes.count, HandshakeConstants.maxMessageALength)
+
+        await responder.handleMessage(messageABytes, from: peer)
+        try await waitForSentMessageCount(2, on: responderTransport)
+        let responderMessages = await responderTransport.getSentMessages()
+        let messageB = try HandshakeMessageB.decode(from: responderMessages[0].1)
+        XCTAssertEqual(
+            try messageB.decodedIdentityPublicKeys().protocolAlgorithm,
+            .mlDSA87
+        )
+        XCTAssertEqual(messageB.signature.count, 4_627)
+
+        await initiator.handleMessage(responderMessages[0].1, from: peer)
+        await initiator.handleMessage(responderMessages[1].1, from: peer)
+        try await waitForSentMessageCount(2, on: initiatorTransport)
+        let initiatorFinished = await initiatorTransport.getSentMessages()[1].1
+        await responder.handleMessage(initiatorFinished, from: peer)
+
+        let sessionKeys = try await handshakeTask.value
+        XCTAssertEqual(sessionKeys.negotiatedSuite, .mlkem768MLDSA65)
+        guard case .established = await initiator.getCurrentState(),
+              case .established = await responder.getCurrentState() else {
+            return XCTFail("Both ML-DSA-87 handshake roles must reach established")
+        }
+        #else
+        throw XCTSkip("Apple PQC SDK was not enabled for this test build")
+        #endif
+    }
+
     func testInitiatorDoesNotRollbackStateWhenMessageBArrivesDuringMessageASend() async throws {
         let initiatorTransport = InlineFirstSendTransport()
         let responderTransport = MockDiscoveryTransport()
@@ -875,14 +1029,16 @@ final class HandshakeDriverTests: XCTestCase {
             initiatorAuthority,
             AuthenticatedRemoteAuthority(
                 protocolSigningAlgorithm: .ed25519,
-                protocolPublicKeyFingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes)
+                protocolPublicKeyFingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes),
+                protocolPublicKey: responderIdentity.publicKey.bytes
             )
         )
         XCTAssertEqual(
             responderAuthority,
             AuthenticatedRemoteAuthority(
                 protocolSigningAlgorithm: .ed25519,
-                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes)
+                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes),
+                protocolPublicKey: initiatorIdentity.publicKey.bytes
             )
         )
     }
@@ -909,7 +1065,8 @@ final class HandshakeDriverTests: XCTestCase {
             authorityBeforeFailure,
             AuthenticatedRemoteAuthority(
                 protocolSigningAlgorithm: .ed25519,
-                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorKeyPair.publicKey.bytes)
+                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorKeyPair.publicKey.bytes),
+                protocolPublicKey: initiatorKeyPair.publicKey.bytes
             )
         )
 

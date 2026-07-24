@@ -31,7 +31,7 @@ import UIKit
 public enum DiscoveryServiceType: String, CaseIterable, Sendable {
     /// SkyBridge 主服务（所有平台）
     case skybridge = "_skybridge._tcp"
-    
+
     /// SkyBridge QUIC 服务（高性能传输）
     case skybridgeQUIC = "_skybridge._udp"
 
@@ -55,6 +55,9 @@ public enum DiscoveryServiceType: String, CaseIterable, Sendable {
     
     /// HTTP 服务（通用 Web 服务）
     case http = "_http._tcp"
+
+    /// 局域网摄像头 RTSP 服务（仅用于预填用户确认的流地址）
+    case rtsp = "_rtsp._tcp"
     
     /// 远程桌面（RDP 协议）
     case rdp = "_rdlink._tcp"
@@ -79,6 +82,7 @@ public enum DiscoveryServiceType: String, CaseIterable, Sendable {
         case .sftp: return "SFTP"
         case .smb: return "SMB Share"
         case .http: return "HTTP"
+        case .rtsp: return "RTSP Camera"
         case .rdp: return "Remote Desktop"
         case .androidShare: return "Android Share"
         }
@@ -408,6 +412,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         public let actualPort: UInt16?
         public let serviceType: String
         public let readyGeneration: UInt64
+        public let authorityDeviceID: String?
+        public let authorityAlgorithm: ProtocolSigningAlgorithm?
+        public let authorityFingerprint: String?
 
         public var isReady: Bool {
             isAdvertising && listenerPresent && handlerInstalled && actualPort.map { $0 > 0 } == true
@@ -416,6 +423,16 @@ public class DeviceDiscoveryManager: ObservableObject {
         public func isReady(for requestedPort: UInt16) -> Bool {
             guard isReady, let actualPort else { return false }
             return requestedPort == 0 || actualPort == requestedPort
+        }
+
+        func isReady(
+            for requestedPort: UInt16,
+            authority: ProtocolIdentitySnapshot
+        ) -> Bool {
+            isReady(for: requestedPort)
+                && authorityDeviceID == authority.deviceId
+                && authorityAlgorithm == authority.signingAlgorithm
+                && authorityFingerprint == authority.signingPublicKeyFingerprint
         }
     }
     
@@ -434,6 +451,18 @@ public class DeviceDiscoveryManager: ObservableObject {
     private var listener: NWListener?
 
     private static let advertisingStartupTimeoutSeconds: TimeInterval = 8
+    private static let maximumPreReadyInboundConnections = 32
+    private static let maximumPreReadyInboundConnectionsPerEndpoint = 4
+    private struct PreReadyInboundConnection {
+        let connection: NWConnection
+        let endpointKey: String
+    }
+    private var preReadyInboundConnections: [ObjectIdentifier: PreReadyInboundConnection] = [:]
+    private var advertisingStartupTask: Task<Void, Error>?
+    private var advertisingStartupTaskPort: UInt16?
+    private var advertisingStartupTaskAuthority: ProtocolIdentitySnapshot?
+    private var advertisingStartupTaskGeneration: UInt64 = 0
+    private var advertisingAuthorityUpdateGeneration: UInt64 = 0
     private var advertisingStartupContinuation: CheckedContinuation<Void, Error>?
     private var advertisingStartupTimeoutTask: Task<Void, Never>?
     private var advertisingRequestedPort: UInt16?
@@ -441,8 +470,14 @@ public class DeviceDiscoveryManager: ObservableObject {
     private var advertisingServiceType: String = DiscoveryServiceType.skybridge.rawValue
     private var advertisingHandlerInstalled: Bool = false
     private var advertisingReadyGeneration: UInt64 = 0
+    private var advertisingAuthority: ProtocolIdentitySnapshot?
     
     /// 设备缓存
+    private static let maximumCachedDevices = 128
+    private static let maximumEndpointMappings = 1_024
+    private static let maximumAliasesPerDevice = 32
+    private static let maximumBrowseResultsPerService = 256
+    private static let maximumBrowseChangesPerBatch = 512
     private var deviceCache: [String: DiscoveredDevice] = [:]
 
     /// endpoint debugDescription -> stable deviceId（用于处理 removed 事件时定位缓存项）
@@ -475,6 +510,8 @@ public class DeviceDiscoveryManager: ObservableObject {
     private var periodicRefreshIntervalSeconds: TimeInterval = 0
     private var lastAlreadyRunningLogAt: Date?
     private var authorizationBlockedServiceTypes = Set<DiscoveryServiceType>()
+    private var browserRecoveryTasks: [DiscoveryServiceType: Task<Void, Never>] = [:]
+    private var browserRecoveryTaskTokens: [DiscoveryServiceType: UUID] = [:]
     private var authorizationRecoveryTasks: [DiscoveryServiceType: Task<Void, Never>] = [:]
     private var authorizationRecoveryAttempts: [DiscoveryServiceType: Int] = [:]
     
@@ -492,7 +529,10 @@ public class DeviceDiscoveryManager: ObservableObject {
             requestedPort: advertisingRequestedPort,
             actualPort: advertisingActualPort,
             serviceType: advertisingServiceType,
-            readyGeneration: advertisingReadyGeneration
+            readyGeneration: advertisingReadyGeneration,
+            authorityDeviceID: advertisingAuthority?.deviceId,
+            authorityAlgorithm: advertisingAuthority?.signingAlgorithm,
+            authorityFingerprint: advertisingAuthority?.signingPublicKeyFingerprint
         )
     }
 
@@ -513,15 +553,24 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
     }
 
+    nonisolated static func shouldFailClosedAfterAuthorityUpdateFailure(
+        failedGeneration: UInt64,
+        currentGeneration: UInt64,
+        listenerStillMatches: Bool
+    ) -> Bool {
+        failedGeneration == currentGeneration && listenerStillMatches
+    }
+
     private func resetAdvertisingReadiness(requestedPort: UInt16? = nil) {
         advertisingRequestedPort = requestedPort
         advertisingActualPort = nil
         advertisingServiceType = DiscoveryServiceType.skybridge.rawValue
         advertisingHandlerInstalled = false
+        advertisingAuthority = nil
     }
 
     private func appendListenerStatus(_ body: String) {
-        SkyBridgeSmokeTraceWriter.appendStatus("p2p-listener \(body)")
+        SkyBridgeDiagnosticTrace.appendStatus("p2p-listener \(body)")
     }
     
     /// 本机设备名称
@@ -686,6 +735,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         periodicRefreshTimer?.invalidate()
         periodicRefreshTimer = nil
         authorizationBlockedServiceTypes.removeAll()
+        cancelBrowserRecoveryTasks()
         cancelAuthorizationRecoveryTasks()
         authorizationRecoveryAttempts.removeAll()
         
@@ -751,11 +801,61 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 开始广播服务（让其他平台发现我们）
     /// - Parameter port: 监听端口
-    public func startAdvertising(port: UInt16 = 9527) async throws {
+    func startAdvertising(
+        port: UInt16 = 9527,
+        authority: ProtocolIdentitySnapshot
+    ) async throws {
+        if let existingTask = advertisingStartupTask {
+            if advertisingStartupTaskPort == port,
+               advertisingStartupTaskAuthority == authority {
+                try await existingTask.value
+                return
+            }
+
+            do {
+                try await existingTask.value
+            } catch {
+                SkyBridgeLogger.shared.info(
+                    "ℹ️ 先前的 P2P Bonjour 广播启动已结束，继续处理新端口请求: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        advertisingStartupTaskGeneration &+= 1
+        let generation = advertisingStartupTaskGeneration
+        let startupTask = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.performStartAdvertising(
+                port: port,
+                authority: authority
+            )
+        }
+        advertisingStartupTask = startupTask
+        advertisingStartupTaskPort = port
+        advertisingStartupTaskAuthority = authority
+
+        defer {
+            if advertisingStartupTaskGeneration == generation {
+                advertisingStartupTask = nil
+                advertisingStartupTaskPort = nil
+                advertisingStartupTaskAuthority = nil
+            }
+        }
+        try await startupTask.value
+    }
+
+    private func performStartAdvertising(
+        port: UInt16,
+        authority: ProtocolIdentitySnapshot
+    ) async throws {
         if isAdvertising, listener != nil {
             let snapshot = advertisingReadinessSnapshot
-            if snapshot.isReady(for: port) {
+            if snapshot.isReady(for: port, authority: authority) {
                 SkyBridgeLogger.shared.debug("📡 广播已在运行且监听器已就绪")
+                return
+            }
+            if snapshot.isReady(for: port) {
+                try await updateAdvertisingAuthority(authority)
                 return
             }
 
@@ -776,13 +876,18 @@ public class DeviceDiscoveryManager: ObservableObject {
             finishAdvertisingStartup(.failure(AdvertisingStartupError.superseded))
             listener = nil
             staleListener.cancel()
+            cancelAllPreReadyInboundConnections()
         }
 
         resetAdvertisingReadiness(requestedPort: port)
         
         // 创建 TXT 记录。Bonjour `deviceId` must be the same protocol authority
         // identity used by MessageA/PIB; Apple mobile/vendor IDs are aliases only.
-        let txtRecord = try await createTXTRecord(port: port)
+        let txtRecord = try await createTXTRecord(
+            port: port,
+            authority: authority
+        )
+        try Task.checkCancellation()
         
         // 创建监听器参数
         let parameters = NWParameters.tcp
@@ -828,6 +933,8 @@ public class DeviceDiscoveryManager: ObservableObject {
             type: DiscoveryServiceType.skybridge.rawValue,
             txtRecord: txtRecord
         )
+        advertisingAuthority = authority
+        localProtocolIdentitySnapshot = authority
         
         activeListener.stateUpdateHandler = { [weak self, weak activeListener] state in
             Task { @MainActor in
@@ -857,15 +964,79 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         SkyBridgeLogger.shared.info("📡 开始广播服务: \(deviceName) (\(DiscoveryServiceType.skybridge.rawValue))")
     }
+
+    /// Replaces only the Bonjour TXT authority on the active listener. Network.framework
+    /// supports changing `service` after readiness, so existing TCP connections and the
+    /// bound control port remain intact across an identity rotation.
+    func updateAdvertisingAuthority(
+        _ authority: ProtocolIdentitySnapshot
+    ) async throws {
+        guard isAdvertising,
+              let activeListener = listener,
+              let port = advertisingActualPort else {
+            return
+        }
+        if advertisingReadinessSnapshot.isReady(
+            for: port,
+            authority: authority
+        ) {
+            return
+        }
+
+        advertisingAuthorityUpdateGeneration &+= 1
+        let generation = advertisingAuthorityUpdateGeneration
+        do {
+            let txtRecord = try await createTXTRecord(
+                port: port,
+                authority: authority
+            )
+            try Task.checkCancellation()
+            guard generation == advertisingAuthorityUpdateGeneration,
+                  listener === activeListener,
+                  isAdvertising else {
+                throw AdvertisingStartupError.superseded
+            }
+            activeListener.service = NWListener.Service(
+                name: deviceName,
+                type: DiscoveryServiceType.skybridge.rawValue,
+                txtRecord: txtRecord
+            )
+            advertisingAuthority = authority
+            localProtocolIdentitySnapshot = authority
+            appendListenerStatus(
+                "authority-updated algorithm=\(authority.signingAlgorithm.rawValue) fingerprint=\(authority.signingPublicKeyFingerprint)"
+            )
+        } catch {
+            if Self.shouldFailClosedAfterAuthorityUpdateFailure(
+                failedGeneration: generation,
+                currentGeneration: advertisingAuthorityUpdateGeneration,
+                listenerStillMatches: listener === activeListener
+            ) {
+                stopAdvertising()
+            }
+            throw error
+        }
+    }
     
     /// 停止广播服务
     public func stopAdvertising() {
-        guard isAdvertising || listener != nil || advertisingStartupContinuation != nil else { return }
+        guard isAdvertising
+                || listener != nil
+                || advertisingStartupContinuation != nil
+                || advertisingStartupTask != nil else { return }
+
+        advertisingStartupTask?.cancel()
+        advertisingStartupTask = nil
+        advertisingStartupTaskPort = nil
+        advertisingStartupTaskAuthority = nil
+        advertisingStartupTaskGeneration &+= 1
+        advertisingAuthorityUpdateGeneration &+= 1
         
         let activeListener = listener
         listener = nil
         finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
         activeListener?.cancel()
+        cancelAllPreReadyInboundConnections()
         isAdvertising = false
         resetAdvertisingReadiness()
         
@@ -900,9 +1071,22 @@ public class DeviceDiscoveryManager: ObservableObject {
         guard isDiscovering else { return }
         guard discoveryMode.serviceTypes.contains(serviceType) else { return }
 
-        Task { @MainActor [weak self] in
+        browserRecoveryTasks[serviceType]?.cancel()
+        let token = UUID()
+        browserRecoveryTaskTokens[serviceType] = token
+        browserRecoveryTasks[serviceType] = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .milliseconds(900))
+            defer {
+                if self.browserRecoveryTaskTokens[serviceType] == token {
+                    self.browserRecoveryTasks.removeValue(forKey: serviceType)
+                    self.browserRecoveryTaskTokens.removeValue(forKey: serviceType)
+                }
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(900))
+            } catch {
+                return
+            }
             guard self.isDiscovering else { return }
             guard self.discoveryMode.serviceTypes.contains(serviceType) else { return }
             guard self.browsers[serviceType] == nil else { return }
@@ -930,7 +1114,11 @@ public class DeviceDiscoveryManager: ObservableObject {
         authorizationRecoveryTasks[serviceType]?.cancel()
         authorizationRecoveryTasks[serviceType] = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .seconds(delay))
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             guard self.isDiscovering else { return }
             guard self.discoveryMode.serviceTypes.contains(serviceType) else { return }
@@ -943,6 +1131,14 @@ public class DeviceDiscoveryManager: ObservableObject {
             self.authorizationBlockedServiceTypes.remove(serviceType)
             self.startBrowser(for: serviceType)
         }
+    }
+
+    private func cancelBrowserRecoveryTasks() {
+        for task in browserRecoveryTasks.values {
+            task.cancel()
+        }
+        browserRecoveryTasks.removeAll()
+        browserRecoveryTaskTokens.removeAll()
     }
 
     private func cancelAuthorizationRecoveryTasks() {
@@ -1043,9 +1239,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         serviceType: DiscoveryServiceType
     ) async {
         liveBrowseEndpointKeysByServiceType[serviceType] = Set(
-            results.map { $0.endpoint.debugDescription }
+            results.prefix(Self.maximumBrowseResultsPerService).map { $0.endpoint.debugDescription }
         )
-        for change in changes {
+        for change in changes.prefix(Self.maximumBrowseChangesPerBatch) {
             switch change {
             case .added(let result):
                 await handleDeviceAdded(result, serviceType: serviceType)
@@ -1074,6 +1270,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         if isSelfDevice(device) {
             return
         }
+        guard admitDiscoveryDeviceIfNeeded(device.id) else { return }
         
         // 同一物理设备可能同时广播多个 SkyBridge 服务（p2p/传输/远控）：这里合并能力/端口/系统信息
         if let existing = deviceCache[device.id] {
@@ -1081,9 +1278,11 @@ public class DeviceDiscoveryManager: ObservableObject {
         } else {
             deviceCache[device.id] = device
         }
-        endpointToDeviceId[result.endpoint.debugDescription] = device.id
-        discoveryIdentityAliasesByDeviceId[device.id, default: []]
-            .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
+        recordEndpointMapping(result.endpoint.debugDescription, deviceId: device.id)
+        recordDiscoveryAliases(
+            identityAliases(from: result, txtRecord: extractTXTRecord(from: result)),
+            deviceId: device.id
+        )
         deviceLastActivity[device.id] = Date()
         scheduleDiscoveredDevicesUpdate()
 
@@ -1100,8 +1299,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         let shouldMarkConnected = activeIdentifiers.contains(deviceId) || !removalAliases.isDisjoint(with: activeIdentifiers)
 
         guard var existing = deviceCache[deviceId] else {
-            deviceCache.removeValue(forKey: deviceId)
-            deviceLastActivity.removeValue(forKey: deviceId)
+            removeCachedDiscoveryDevice(deviceId)
             endpointToDeviceId.removeValue(forKey: endpointKey)
             scheduleDiscoveredDevicesUpdate()
             return
@@ -1124,22 +1322,19 @@ public class DeviceDiscoveryManager: ObservableObject {
         existing.capabilities = recomputeCapabilities(existing: existing)
 
         if existing.services.isEmpty {
-            deviceCache.removeValue(forKey: deviceId)
-            deviceLastActivity.removeValue(forKey: deviceId)
+            removeCachedDiscoveryDevice(deviceId)
         } else {
             deviceCache[deviceId] = existing
             deviceLastActivity[deviceId] = Date()
         }
 
         endpointToDeviceId.removeValue(forKey: endpointKey)
-        if deviceCache[deviceId] == nil {
-            discoveryIdentityAliasesByDeviceId.removeValue(forKey: deviceId)
-        }
         scheduleDiscoveredDevicesUpdate()
     }
     
     private func handleDeviceChanged(_ result: NWBrowser.Result, serviceType: DiscoveryServiceType) async {
         let device = await createDevice(from: result, serviceType: serviceType)
+        guard admitDiscoveryDeviceIfNeeded(device.id) else { return }
 
         if let existing = deviceCache[device.id] {
             deviceCache[device.id] = merge(existing: existing, update: device)
@@ -1147,9 +1342,11 @@ public class DeviceDiscoveryManager: ObservableObject {
             deviceCache[device.id] = device
         }
 
-        endpointToDeviceId[result.endpoint.debugDescription] = device.id
-        discoveryIdentityAliasesByDeviceId[device.id, default: []]
-            .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
+        recordEndpointMapping(result.endpoint.debugDescription, deviceId: device.id)
+        recordDiscoveryAliases(
+            identityAliases(from: result, txtRecord: extractTXTRecord(from: result)),
+            deviceId: device.id
+        )
         deviceLastActivity[device.id] = Date()
         scheduleDiscoveredDevicesUpdate()
     }
@@ -1905,6 +2102,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             resetAdvertisingReadiness()
             appendListenerStatus("failed error=\(Self.smokeSanitize(error.localizedDescription))")
             finishAdvertisingStartup(.failure(error))
+            cancelAllPreReadyInboundConnections()
 
         case .cancelled:
             SkyBridgeLogger.shared.info("⏹️ 监听器已取消")
@@ -1913,6 +2111,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             resetAdvertisingReadiness()
             appendListenerStatus("cancelled")
             finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
+            cancelAllPreReadyInboundConnections()
             
         default:
             break
@@ -1924,7 +2123,7 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         if isLoopbackEndpoint(connection.endpoint) {
             SkyBridgeLogger.shared.warning("⚠️ 已忽略回环地址入站连接: \(endpointDescription)")
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "p2p-listener inbound-ignored reason=loopback endpoint=\(Self.smokeSanitize(endpointDescription))"
             )
             connection.cancel()
@@ -1932,7 +2131,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         SkyBridgeLogger.shared.info("📞 收到新连接: \(endpointDescription)")
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "p2p-listener inbound-new endpoint=\(Self.smokeSanitize(endpointDescription))"
         )
 
@@ -1940,32 +2139,66 @@ public class DeviceDiscoveryManager: ObservableObject {
         if let localStableDeviceId,
            peerId.caseInsensitiveCompare(localStableDeviceId) == .orderedSame {
             SkyBridgeLogger.shared.warning("⚠️ 已忽略疑似自连接入站连接: \(peerId)")
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "p2p-listener inbound-ignored reason=self peer=\(Self.smokeSanitize(peerId))"
             )
             connection.cancel()
             return
         }
 
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+        guard registerPreReadyInboundConnection(connection) else {
+            SkyBridgeLogger.shared.error("❌ 已拒绝超过入站连接容量的 P2P 连接")
+            SkyBridgeDiagnosticTrace.appendStatus(
+                "p2p-listener inbound-ignored reason=pre-ready-capacity"
+            )
+            connection.cancel()
+            return
+        }
+
+        let readinessTimeoutTask = Task { @MainActor [weak self, weak connection] in
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let connection else { return }
+            SkyBridgeLogger.shared.error("❌ 入站连接在期限内未就绪: peer=\(peerId)")
+            SkyBridgeDiagnosticTrace.appendStatus(
+                "p2p-listener inbound-timeout peer=\(Self.smokeSanitize(peerId))"
+            )
+            self?.finishPreReadyInboundConnection(connection)
+            connection.cancel()
+        }
+
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            Task { @MainActor [weak self, weak connection] in
+                guard let connection else { return }
                 switch state {
                 case .ready:
+                    readinessTimeoutTask.cancel()
+                    self?.finishPreReadyInboundConnection(connection)
+                    connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.info("✅ 入站连接就绪: \(peerId)")
-                    SkyBridgeSmokeTraceWriter.appendStatus(
+                    SkyBridgeDiagnosticTrace.appendStatus(
                         "p2p-listener inbound-ready peer=\(Self.smokeSanitize(peerId))"
                     )
                     self?.onNewConnection?(connection, peerId)
 
                 case .failed(let error):
+                    readinessTimeoutTask.cancel()
+                    self?.finishPreReadyInboundConnection(connection)
+                    connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.error("❌ 入站连接失败: \(error.localizedDescription)")
-                    SkyBridgeSmokeTraceWriter.appendStatus(
+                    SkyBridgeDiagnosticTrace.appendStatus(
                         "p2p-listener inbound-failed peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(error.localizedDescription))"
                     )
 
                 case .cancelled:
+                    readinessTimeoutTask.cancel()
+                    self?.finishPreReadyInboundConnection(connection)
+                    connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.info("⏹️ 入站连接已取消")
-                    SkyBridgeSmokeTraceWriter.appendStatus(
+                    SkyBridgeDiagnosticTrace.appendStatus(
                         "p2p-listener inbound-cancelled peer=\(Self.smokeSanitize(peerId))"
                     )
 
@@ -1976,6 +2209,52 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         connection.start(queue: queue)
+    }
+
+    private func registerPreReadyInboundConnection(_ connection: NWConnection) -> Bool {
+        let identifier = ObjectIdentifier(connection)
+        if preReadyInboundConnections[identifier] != nil {
+            return true
+        }
+        let endpointKey = Self.preReadyEndpointKey(connection.endpoint)
+        let endpointCount = preReadyInboundConnections.values.reduce(into: 0) { count, entry in
+            if entry.endpointKey == endpointKey {
+                count += 1
+            }
+        }
+        guard preReadyInboundConnections.count < Self.maximumPreReadyInboundConnections,
+              endpointCount < Self.maximumPreReadyInboundConnectionsPerEndpoint else {
+            return false
+        }
+        preReadyInboundConnections[identifier] = PreReadyInboundConnection(
+            connection: connection,
+            endpointKey: endpointKey
+        )
+        return true
+    }
+
+    private func finishPreReadyInboundConnection(_ connection: NWConnection) {
+        preReadyInboundConnections.removeValue(forKey: ObjectIdentifier(connection))
+    }
+
+    private func cancelAllPreReadyInboundConnections() {
+        let connections = preReadyInboundConnections.values.map(\.connection)
+        preReadyInboundConnections.removeAll(keepingCapacity: false)
+        connections.forEach { connection in
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+        }
+    }
+
+    private nonisolated static func preReadyEndpointKey(_ endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            return "host:\(host)"
+        case .service(let name, let type, let domain, _):
+            return "service:\(name.lowercased())|\(type.lowercased())|\(domain.lowercased())"
+        default:
+            return endpoint.debugDescription.lowercased()
+        }
     }
 
     private nonisolated static func smokeSanitize(_ value: String) -> String {
@@ -2055,11 +2334,31 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
         return nil
     }
-    
+
     // MARK: - Private Methods - TXT Record
     
     /// 创建 TXT 记录（用于广播）
-    private func createTXTRecord(port: UInt16) async throws -> NWTXTRecord {
+    private func createTXTRecord(
+        port: UInt16,
+        authority: ProtocolIdentitySnapshot
+    ) async throws -> NWTXTRecord {
+        let validatedAuthority = try ProtocolIdentityBindingCompat(
+            deviceId: authority.deviceId,
+            protocolSigningAlgorithm: authority.signingAlgorithm,
+            protocolPublicKeyBytes: authority.signingPublicKey
+        )
+        guard validatedAuthority.deviceId == authority.deviceId,
+              validatedAuthority.protocolPublicKeyFingerprint
+                == authority.signingPublicKeyFingerprint else {
+            throw NSError(
+                domain: "DeviceDiscoveryManager",
+                code: -2203,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Bonjour authority fingerprint does not match its algorithm-tagged public key"
+                ]
+            )
+        }
         var record = NWTXTRecord()
         
         // 平台信息
@@ -2102,15 +2401,15 @@ public class DeviceDiscoveryManager: ObservableObject {
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)
         let mobileSnapshot = AppleMobileDeviceIdentity.currentSnapshot()
-        let protocolIdentity = try await SkyBridgeiOSCore.shared
-            .currentProtocolIdentitySnapshot()
-        localProtocolIdentitySnapshot = protocolIdentity
-        record["deviceId"] = protocolIdentity.deviceId
-        record["uuid"] = protocolIdentity.deviceId
-        record["uniqueId"] = protocolIdentity.deviceId
-        record["pubKeyFP"] = protocolIdentity.signingPublicKeyFingerprint
-        record["identityFingerprint"] = protocolIdentity.signingPublicKeyFingerprint
-        record["protocolSigningAlgorithm"] = protocolIdentity.signingAlgorithm.rawValue
+        record["deviceId"] = validatedAuthority.deviceId
+        record["uuid"] = validatedAuthority.deviceId
+        record["uniqueId"] = validatedAuthority.deviceId
+        record["pubKeyFP"] = validatedAuthority.protocolPublicKeyFingerprint
+        record["identityFingerprint"] = validatedAuthority.protocolPublicKeyFingerprint
+        record["protocolIdentityFingerprint"] =
+            validatedAuthority.protocolPublicKeyFingerprint
+        record["protocolSigningAlgorithm"] =
+            validatedAuthority.protocolSigningAlgorithm.rawValue
         if let vendorDeviceId = mobileSnapshot.vendorDeviceId, !vendorDeviceId.isEmpty {
             record["vendorDeviceId"] = vendorDeviceId
         }
@@ -2321,6 +2620,85 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
         SkyBridgeLogger.shared.debug("🔁 设备发现周期刷新已启用：\(periodicRefreshIntervalSeconds)s")
     }
+
+    private func admitDiscoveryDeviceIfNeeded(_ deviceId: String) -> Bool {
+        if deviceCache[deviceId] != nil { return true }
+        pruneDiscoveryReverseIndexes()
+        guard deviceCache.count >= Self.maximumCachedDevices else { return true }
+
+        let protectedIdentifiers = P2PConnectionManager.instance.protectedDiscoveryIdentifiers
+        let activeIdentifiers = P2PConnectionManager.instance.activeDiscoveryIdentifiers
+        let evictionCandidate = deviceLastActivity
+            .sorted { $0.value < $1.value }
+            .map(\.key)
+            .first { candidateId in
+                let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: candidateId))
+                return !protectedIdentifiers.contains(candidateId)
+                    && aliases.isDisjoint(with: protectedIdentifiers)
+                    && !activeIdentifiers.contains(candidateId)
+                    && aliases.isDisjoint(with: activeIdentifiers)
+                    && !hasLiveBrowseEndpoint(for: candidateId)
+            }
+        guard let evictionCandidate else {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ Bonjour 设备缓存已达上限，拒绝未受保护的新设备: limit=\(Self.maximumCachedDevices)"
+            )
+            return false
+        }
+        removeCachedDiscoveryDevice(evictionCandidate)
+        return true
+    }
+
+    private func recordEndpointMapping(_ endpointKey: String, deviceId: String) {
+        if endpointToDeviceId[endpointKey] == nil,
+           endpointToDeviceId.count >= Self.maximumEndpointMappings {
+            pruneDiscoveryReverseIndexes()
+        }
+        guard endpointToDeviceId[endpointKey] != nil
+                || endpointToDeviceId.count < Self.maximumEndpointMappings else {
+            return
+        }
+        endpointToDeviceId[endpointKey] = deviceId
+    }
+
+    private func recordDiscoveryAliases(_ aliases: Set<String>, deviceId: String) {
+        var combined = discoveryIdentityAliasesByDeviceId[deviceId] ?? []
+        combined.formUnion(aliases)
+        if combined.count > Self.maximumAliasesPerDevice {
+            combined = Set(
+                combined.sorted { lhs, rhs in
+                    let lhsStrong = lhs.lowercased().hasPrefix("id:")
+                    let rhsStrong = rhs.lowercased().hasPrefix("id:")
+                    if lhsStrong != rhsStrong { return lhsStrong }
+                    return lhs < rhs
+                }.prefix(Self.maximumAliasesPerDevice)
+            )
+        }
+        discoveryIdentityAliasesByDeviceId[deviceId] = combined
+    }
+
+    private func removeCachedDiscoveryDevice(_ deviceId: String) {
+        deviceCache.removeValue(forKey: deviceId)
+        deviceLastActivity.removeValue(forKey: deviceId)
+        discoveryIdentityAliasesByDeviceId.removeValue(forKey: deviceId)
+        endpointToDeviceId = endpointToDeviceId.filter { $0.value != deviceId }
+        identityAliasToDeviceId = identityAliasToDeviceId.filter { $0.value != deviceId }
+        let liveEndpointKeys = Set(endpointToDeviceId.keys)
+        for serviceType in Array(liveBrowseEndpointKeysByServiceType.keys) {
+            liveBrowseEndpointKeysByServiceType[serviceType]?.formIntersection(liveEndpointKeys)
+        }
+    }
+
+    private func pruneDiscoveryReverseIndexes() {
+        let validDeviceIds = Set(deviceCache.keys)
+        endpointToDeviceId = endpointToDeviceId.filter { validDeviceIds.contains($0.value) }
+        discoveryIdentityAliasesByDeviceId = discoveryIdentityAliasesByDeviceId.filter {
+            validDeviceIds.contains($0.key)
+        }
+        identityAliasToDeviceId = identityAliasToDeviceId.filter {
+            validDeviceIds.contains($0.value)
+        }
+    }
     
     /// 清理过期设备
     private func cleanupStaleDevices() {
@@ -2344,8 +2722,7 @@ public class DeviceDiscoveryManager: ObservableObject {
                 continue
             }
             if now.timeIntervalSince(lastActivity) > deviceTimeout {
-                deviceCache.removeValue(forKey: deviceId)
-                deviceLastActivity.removeValue(forKey: deviceId)
+                removeCachedDiscoveryDevice(deviceId)
                 removedCount += 1
             }
         }
@@ -2394,8 +2771,11 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func scheduleDiscoveredDevicesUpdate() {
         pendingDiscoveredDevicesUpdateTask?.cancel()
         pendingDiscoveredDevicesUpdateTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
             self?.pendingDiscoveredDevicesUpdateTask = nil
             self?.updateDiscoveredDevices()
         }
@@ -2739,10 +3119,17 @@ public class DeviceDiscoveryManager: ObservableObject {
         devicesByPlatform[platform] ?? []
     }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
     func injectDiscoveredDevicesForTesting(_ devices: [DiscoveredDevice]) {
         discoveredDevices = devices
         devicesByPlatform = Dictionary(grouping: devices, by: \.platform)
+    }
+
+    func debugCreateAdvertisingTXTRecord(
+        port: UInt16,
+        authority: ProtocolIdentitySnapshot
+    ) async throws -> NWTXTRecord {
+        try await createTXTRecord(port: port, authority: authority)
     }
 #endif
     
@@ -2929,6 +3316,8 @@ extension NWTXTRecord {
             // identity
             "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id",
             "pubKeyFP", "pubKeyFp", "pub_key_fp", "identityFingerprint",
+            "protocolIdentityFingerprint", "protocol_identity_fingerprint",
+            "protocolSigningAlgorithm", "protocol_signing_algorithm",
             // system
             "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
             "model", "hardwareModel", "hwModel", "name",
@@ -2988,7 +3377,11 @@ private final class BonjourNetServiceResolver: NSObject, NetServiceDelegate {
             timeoutTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 let nanos = UInt64((timeout + 0.2) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: nanos)
+                do {
+                    try await Task.sleep(nanoseconds: nanos)
+                } catch {
+                    return
+                }
                 self.finish(nil)
             }
         }

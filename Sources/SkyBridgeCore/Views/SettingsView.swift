@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import UserNotifications
+import CryptoKit
 
 /// 设置界面 - 提供完整的应用配置和设备管理设置
 /// 适配平铺显示模式，符合macOS设计规范
@@ -28,11 +29,15 @@ public struct SettingsView: View {
     @State private var showingImportDialog = false
     @State private var showingTransferPathFallbackAlert = false
     @State private var transferPathFallbackMessage = ""
+    @State private var showingTransferPathFailureAlert = false
     @State private var newCustomServiceType = ""
     @State private var cacheSizeDisplay = "..."
     @State private var isCacheOperationInProgress = false
     @State private var cacheOperationMessage: String?
+    @State private var requestedProtocolSigningAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    @State private var requestedProtocolSigningSecureEnclave = false
     @State private var cacheOperationIsError = false
+    @State private var settingsFileOperationError: String?
 
     private let applicationCacheService = ApplicationCacheService.shared
     
@@ -154,14 +159,23 @@ public struct SettingsView: View {
                     do {
                         let exportedURL = try await settingsManager.exportSettings()
  // 将导出的文件复制到用户选择的位置
-                        try FileManager.default.copyItem(at: exportedURL, to: url)
+                        try await Task.detached(priority: .userInitiated) {
+                            try FileManager.default.copyItem(at: exportedURL, to: url)
+                        }.value
                     } catch {
- // 导出失败处理
+                        let operationError = error as NSError
+                        SkyBridgeLogger.ui.error(
+                            "导出设置失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                        )
+                        settingsFileOperationError = error.localizedDescription
                     }
                 }
-            case .failure(_):
- // 导出失败处理
-                SkyBridgeLogger.ui.error("导出设置失败")
+            case .failure(let error):
+                let operationError = error as NSError
+                SkyBridgeLogger.ui.error(
+                    "导出设置面板失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                )
+                settingsFileOperationError = error.localizedDescription
             }
         }
         .fileImporter(
@@ -177,14 +191,34 @@ public struct SettingsView: View {
                         do {
                             try await settingsManager.importSettings(from: url)
                         } catch {
- // 设置导入失败处理
+                            let operationError = error as NSError
+                            SkyBridgeLogger.ui.error(
+                                "导入设置失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                            )
+                            settingsFileOperationError = error.localizedDescription
                         }
                     }
                 }
-            case .failure(_):
-// 导入失败处理
-                SkyBridgeLogger.ui.error("导入设置失败")
+            case .failure(let error):
+                let operationError = error as NSError
+                SkyBridgeLogger.ui.error(
+                    "导入设置面板失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                )
+                settingsFileOperationError = error.localizedDescription
             }
+        }
+        .alert(
+            "设置文件操作失败",
+            isPresented: Binding(
+                get: { settingsFileOperationError != nil },
+                set: { if !$0 { settingsFileOperationError = nil } }
+            )
+        ) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {
+                settingsFileOperationError = nil
+            }
+        } message: {
+            Text(settingsFileOperationError ?? "")
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FileTransferReceivePathFallback"))) { notification in
             let fallbackPath = notification.userInfo?["path"] as? String ?? settingsManager.defaultTransferPath
@@ -198,6 +232,14 @@ public struct SettingsView: View {
             Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
         } message: {
             Text(transferPathFallbackMessage)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FileTransferReceivePathFailure"))) { _ in
+            showingTransferPathFailureAlert = true
+        }
+        .alert(localizationManager.localizedString("settings.fileTransfer.pathFailure.title"), isPresented: $showingTransferPathFailureAlert) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
+        } message: {
+            Text(localizationManager.localizedString("settings.fileTransfer.pathFailure.message"))
         }
         .task(id: selectedTab) {
             guard selectedTab == .general else { return }
@@ -395,9 +437,9 @@ public struct SettingsView: View {
                                 ProgressView()
                                     .controlSize(.small)
                             }
-                            
+
                             Spacer()
-                            
+
                             Text(String(format: localizationManager.localizedString("settings.general.cacheSize"), cacheSizeDisplay))
                                 .foregroundColor(.secondary)
                         }
@@ -1049,6 +1091,64 @@ public struct SettingsView: View {
                         Text("策略强制启用")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Picker(
+                            "协议身份签名",
+                            selection: $requestedProtocolSigningAlgorithm
+                        ) {
+                            Text("ML-DSA-65 · Category 3")
+                                .tag(ProtocolSigningAlgorithm.mlDSA65)
+                            Text("ML-DSA-87 · Category 5")
+                                .tag(ProtocolSigningAlgorithm.mlDSA87)
+                        }
+                        .pickerStyle(.segmented)
+                        Toggle(
+                            "主协议 ML-DSA 私钥使用 Secure Enclave",
+                            isOn: $requestedProtocolSigningSecureEnclave
+                        )
+                        .disabled(!secureEnclaveMLDSAAvailable)
+                        .help(
+                            secureEnclaveMLDSAAvailable
+                                ? "仅保护本机 sigA/sigB 私钥；启用失败不会回退软件密钥。"
+                                : "需要 macOS 26+ 且当前设备 Secure Enclave 可用。"
+                        )
+                        HStack {
+                            Button("应用协议身份配置") {
+                                let protection: ProtocolSigningKeyProtection =
+                                    requestedProtocolSigningSecureEnclave
+                                        ? .secureEnclaveRequired
+                                        : .softwareKeychain
+                                Task { @MainActor in
+                                    do {
+                                        let expectedScope = try await CrossNetworkConnectionManager
+                                            .currentAuthenticatedIdentityRotationScope()
+                                        try await CurrentPathDeviceIdentityRotationCoordinator
+                                            .shared.rotate(
+                                                algorithm: requestedProtocolSigningAlgorithm,
+                                                protection: protection,
+                                                expectedScope: expectedScope
+                                            )
+                                    } catch {
+                                        SkyBridgeLogger.ui.error(
+                                            "协议身份轮换失败: \(error.localizedDescription, privacy: .private)"
+                                        )
+                                    }
+                                }
+                            }
+                            .disabled(
+                                settingsManager.protocolIdentityConfigurationState == .provisioning
+                                    || (requestedProtocolSigningSecureEnclave
+                                        && !secureEnclaveMLDSAAvailable)
+                            )
+                            Text(protocolIdentityConfigurationStatusText)
+                                .font(.caption)
+                                .foregroundColor(protocolIdentityConfigurationStatusColor)
+                        }
+                        if let error = settingsManager.protocolIdentityConfigurationError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                        }
                         // 混合 PQC TLS 的密钥交换组（X25519MLKEM768）由系统 TLS 1.3 栈在 macOS 26+ 自动协商，
                         // 没有公开 API 可供 App 强制开/关（C 层 sec_protocol_options 无此旋钮，SwiftTLSOptions.keyExchangeGroup
                         // 未导出到公开接口）。因此此处不再提供仅改状态文字的假开关，改为如实说明。
@@ -1066,36 +1166,40 @@ public struct SettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                            .disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)
-                            .help("仅当已安装并验证签名策略、信任根与 ABI2 运行时会话后才可启用；开关本身不会配置或信任策略。")
-                        Text(
-                            QPeriaptPlatformPolicy.isLocalRuntimeSupported
-                                ? "已验证签名策略运行时；仅在对端具备完全相同的策略身份时协商。"
-                                : "暂不可用：当前尚未安装并验证 Q-Periapt 签名策略与信任根，功能保持关闭。"
-                        )
+                            .disabled(!settingsManager.qPeriaptRuntimeSupported)
+                            .help("实验性：仅在已验证签名策略、独立验证密钥 pin、持久化可信状态和 ABI2 自检全部通过后，才优先协商 Q-Periapt PolicyBound。")
+                        Text("Beta：默认关闭；与现有 X-Wing / ML-KEM 不互通，且双方必须使用完全相同的已认证策略。")
+                            .font(.caption)
+                        Text("现有 peer 继续使用已 pin 的 ML-DSA-65；只有完成 87 公钥认证与持久化后才使用 ML-DSA-87，不会因失败自动降级。")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
                             Spacer()
-                            Text("ML-DSA-65 · 协议身份绑定")
+                            Text("\(settingsManager.activeProtocolSigningAlgorithm.rawValue) · 协议身份绑定")
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.secondary)
                         }
-                        // CryptoKit currently exposes ML-DSA and X-Wing here as
-                        // software keys. Do not present a Secure Enclave control
-                        // unless the runtime implementation actually consumes it.
                         HStack {
                             Text("PQC 密钥执行")
                             Spacer()
-                            Text("ML-DSA-65 / X-Wing · 软件")
+                            Text(
+                                settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
+                                    ? "主协议 ML-DSA · Secure Enclave"
+                                    : "主协议 ML-DSA · 软件 Keychain"
+                            )
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.secondary)
                         }
-                        .help("当前 ML-DSA 与 X-Wing 路径均使用软件密钥；界面不会把未接入运行时的 Secure Enclave 能力显示为已启用。")
+                        .help("此状态来自已恢复并完成签名自检的本机协议身份 authority；不代表远端硬件证明。")
                         Text(localizationManager.localizedString("settings.advanced.pqc.note"))
                             .font(.caption)
                             .foregroundColor(.secondary)
+                    }
+                    .onAppear {
+                        requestedProtocolSigningAlgorithm = settingsManager.activeProtocolSigningAlgorithm
+                        requestedProtocolSigningSecureEnclave =
+                            settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
                     }
                 }
                 
@@ -1221,6 +1325,56 @@ public struct SettingsView: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var requiredFileTransferEncryptionNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.fill")
+                .foregroundColor(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(localizationManager.localizedString("settings.fileTransfer.security.encryption.alwaysOn"))
+                    .font(.subheadline)
+                Text(localizationManager.localizedString("settings.fileTransfer.security.encryption.alwaysOn.detail"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var secureEnclaveMLDSAAvailable: Bool {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, *) else { return false }
+        return SecureEnclave.isAvailable
+        #else
+        return false
+        #endif
+    }
+
+    private var protocolIdentityConfigurationStatusText: String {
+        switch settingsManager.protocolIdentityConfigurationState {
+        case .active:
+            return "已激活"
+        case .provisioning:
+            return "正在创建并验证身份…"
+        case .waitingForPeerRepin:
+            return "本机已就绪；既有 peer 待认证新 pin"
+        case .requiresExplicitConfirmation:
+            return "需要显式确认"
+        case .unavailable:
+            return "当前设备不可用"
+        case .failed:
+            return "配置失败；原身份保持不变"
+        }
+    }
+
+    private var protocolIdentityConfigurationStatusColor: Color {
+        switch settingsManager.protocolIdentityConfigurationState {
+        case .active: return .green
+        case .provisioning, .waitingForPeerRepin: return .orange
+        case .requiresExplicitConfirmation, .unavailable, .failed: return .red
+        }
+    }
     
  // MARK: - 文件传输设置
     private var fileTransferSettings: some View {
@@ -1252,9 +1406,15 @@ public struct SettingsView: View {
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.maxConcurrentTransfers"))
-                            TextField(localizationManager.localizedString("unit.count.short"), value: $settingsManager.maxConcurrentConnections, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 60)
+                            Spacer()
+                            Stepper(
+                                value: $settingsManager.maxConcurrentFileTransfers,
+                                in: 1...SettingsManager.maximumConcurrentFileTransfers
+                            ) {
+                                Text("\(settingsManager.maxConcurrentFileTransfers)")
+                                    .monospacedDigit()
+                            }
+                            .fixedSize()
                         }
                         
                         HStack {
@@ -1264,7 +1424,6 @@ public struct SettingsView: View {
                                 Text("128KB").tag(131072)
                                 Text("256KB").tag(262144)
                                 Text("512KB").tag(524288)
-                                Text("1MB").tag(1048576)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
@@ -1294,19 +1453,12 @@ public struct SettingsView: View {
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.resumeEnabled"), isOn: $settingsManager.autoRetryFailedTransfers)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepHistory"), isOn: $settingsManager.keepTransferHistory)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepAwake"), isOn: $settingsManager.keepSystemAwakeDuringTransfer)
-                        
-                        HStack {
-                            Text(localizationManager.localizedString("settings.common.retryCount"))
-                            TextField(localizationManager.localizedString("unit.times.short"), value: $settingsManager.retryCount, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 60)
-                        }
                     }
                 }
                 
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.security.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.security.enableEncrypt"), isOn: $settingsManager.enableConnectionEncryption)
+                        requiredFileTransferEncryptionNotice
                         strictCertificateValidationNotice
                         Toggle(localizationManager.localizedString("settings.fileTransfer.security.scanVirus"), isOn: $settingsManager.scanTransferFilesForVirus)
                         

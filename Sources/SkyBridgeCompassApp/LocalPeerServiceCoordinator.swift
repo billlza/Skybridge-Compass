@@ -34,12 +34,8 @@ final class LocalPeerServiceCoordinator: ObservableObject {
         self.remoteControlServer = RemoteControlServer(manager: remoteControlManager)
     }
 
-    func startIfNeeded() async {
-        do {
-            try await ensureHealthy()
-        } catch {
-            SkyBridgeLogger.ui.error("❌ 常驻本地服务健康检查失败: \(error.localizedDescription, privacy: .public)")
-        }
+    func startIfNeeded() async throws {
+        try await ensureHealthy()
     }
 
     func ensureHealthy() async throws {
@@ -62,7 +58,7 @@ final class LocalPeerServiceCoordinator: ObservableObject {
             throw LocalPeerServiceCoordinatorError.remoteControlServerUnavailable
         }
 
-        await p2pDiscoveryService.ensureAdvertisingHealthy()
+        try await p2pDiscoveryService.ensureAdvertisingHealthy()
 
         let endpoints = ServiceEndpointRegistry.shared.snapshot()
         hasStarted = true

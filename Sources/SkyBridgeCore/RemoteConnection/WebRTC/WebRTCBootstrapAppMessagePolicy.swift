@@ -12,7 +12,9 @@ enum WebRTCBootstrapAppMessagePolicy {
              .signedKEMRefresh,
              .kemRefreshFailure,
              .protocolIdentityBindingRequest,
-             .signedProtocolIdentityBinding:
+             .signedProtocolIdentityBinding,
+             .protocolIdentityBindingConfirm,
+             .signedProtocolIdentityBindingFinalAck:
             return .continueBootstrapSecurityFlow
         case .heartbeat,
              .ping,

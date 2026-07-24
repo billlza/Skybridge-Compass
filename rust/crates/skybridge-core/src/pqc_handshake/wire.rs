@@ -4,11 +4,14 @@ use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::handshake_wire::{append_u16_le, read_exact, read_u16_le};
-use crate::{CryptoSuite, ProtocolSigningAlgorithm, mldsa65_verify_detached};
+use crate::{
+    CryptoSuite, ProtocolIdentityBinding, ProtocolSigningAlgorithm, mldsa_verify_detached,
+};
 
 use super::{HANDSHAKE_A_DOMAIN, HANDSHAKE_VERSION};
 
 const IDENTITY_ALGORITHM_MLDSA65: u8 = 0x02;
+const IDENTITY_ALGORITHM_MLDSA87: u8 = 0x04;
 
 #[derive(Debug, Clone)]
 pub(super) struct DecodedMessageB {
@@ -94,6 +97,9 @@ pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
     if offset < frame.len() {
         let se_signature_len = read_u16_le(frame, &mut offset)? as usize;
         let _ = read_exact(frame, &mut offset, se_signature_len)?;
+        if se_signature_len != 0 {
+            bail!("Secure Enclave proof signatures are not supported by the Rust PQC handshake");
+        }
     }
     if offset != frame.len() {
         bail!("unexpected trailing bytes in PQC MessageA");
@@ -105,12 +111,14 @@ pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
     transcript_hash_a_bytes.copy_from_slice(transcript_hash_a.as_ref());
 
     let initiator_identity = decode_identity_public_key(&identity_public_key)?;
-    if initiator_identity.algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-        bail!("unsupported PQC initiator identity algorithm");
-    }
     let mut preimage = Vec::from(HANDSHAKE_A_DOMAIN);
     preimage.extend_from_slice(unsigned);
-    mldsa65_verify_detached(&preimage, &signature, &initiator_identity.public_key)?;
+    mldsa_verify_detached(
+        initiator_identity.algorithm,
+        &preimage,
+        &signature,
+        &initiator_identity.public_key,
+    )?;
 
     Ok(DecodedMessageA {
         offered_suites,
@@ -151,6 +159,9 @@ pub(super) fn decode_message_b(frame: &[u8]) -> Result<DecodedMessageB> {
     if offset < frame.len() {
         let se_signature_len = read_u16_le(frame, &mut offset)? as usize;
         let _ = read_exact(frame, &mut offset, se_signature_len)?;
+        if se_signature_len != 0 {
+            bail!("Secure Enclave proof signatures are not supported by the Rust PQC handshake");
+        }
     }
     if offset != frame.len() {
         bail!("unexpected trailing bytes in PQC MessageB");
@@ -174,11 +185,16 @@ pub(super) fn encode_identity_public_key(
     algorithm: ProtocolSigningAlgorithm,
     public_key: &[u8],
 ) -> Result<Vec<u8>> {
-    if algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-        bail!("PQC handshake only supports ML-DSA-65 protocol identities");
-    }
+    ProtocolIdentityBinding::validate_key_encoding(public_key, algorithm)?;
+    let algorithm_byte = match algorithm {
+        ProtocolSigningAlgorithm::MlDsa65 => IDENTITY_ALGORITHM_MLDSA65,
+        ProtocolSigningAlgorithm::MlDsa87 => IDENTITY_ALGORITHM_MLDSA87,
+        ProtocolSigningAlgorithm::Ed25519 => {
+            bail!("PQC handshake requires an ML-DSA protocol identity")
+        }
+    };
     let mut encoded = Vec::new();
-    encoded.push(IDENTITY_ALGORITHM_MLDSA65);
+    encoded.push(algorithm_byte);
     append_u16_le(&mut encoded, public_key.len() as u16);
     encoded.extend_from_slice(public_key);
     encoded.push(0x00);
@@ -191,16 +207,22 @@ pub(super) fn decode_identity_public_key(data: &[u8]) -> Result<DecodedIdentityP
     }
     let algorithm = match data[0] {
         IDENTITY_ALGORITHM_MLDSA65 => ProtocolSigningAlgorithm::MlDsa65,
+        IDENTITY_ALGORITHM_MLDSA87 => ProtocolSigningAlgorithm::MlDsa87,
         _ => bail!("unsupported identity public key algorithm"),
     };
     let mut offset = 1usize;
     let key_len = read_u16_le(data, &mut offset)? as usize;
     let public_key = read_exact(data, &mut offset, key_len)?.to_vec();
+    ProtocolIdentityBinding::validate_key_encoding(&public_key, algorithm)?;
     let has_secure_enclave = *data
         .get(offset)
         .ok_or_else(|| anyhow!("missing secure enclave identity flag"))?;
+    offset += 1;
     if has_secure_enclave != 0x00 {
-        bail!("secure enclave identity keys are not supported in PQC rust initiator");
+        bail!("Secure Enclave identity keys are not supported by the Rust PQC handshake");
+    }
+    if offset != data.len() {
+        bail!("unexpected trailing bytes in identity public key payload");
     }
     Ok(DecodedIdentityPublicKey {
         algorithm,

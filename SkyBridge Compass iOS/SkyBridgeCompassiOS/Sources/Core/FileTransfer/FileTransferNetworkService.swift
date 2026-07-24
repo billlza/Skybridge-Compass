@@ -55,6 +55,9 @@ public actor FileTransferNetworkService {
         case metadataReceiveFailed
         case missingMetadataPayload
         case malformedMetadataJSON
+        case initialHeaderTimedOut
+        case metadataPayloadTimedOut
+        case receiveHandlerUnavailable
 
         var rejectionReason: String {
             switch self {
@@ -76,6 +79,12 @@ public actor FileTransferNetworkService {
                 return "missing_metadata_payload"
             case .malformedMetadataJSON:
                 return "malformed_metadata_json"
+            case .initialHeaderTimedOut:
+                return "initial_header_timed_out"
+            case .metadataPayloadTimedOut:
+                return "metadata_payload_timed_out"
+            case .receiveHandlerUnavailable:
+                return "receive_handler_unavailable"
             }
         }
     }
@@ -87,6 +96,9 @@ public actor FileTransferNetworkService {
     
     /// 活跃连接
     private var activeConnections: [String: NWConnection] = [:]
+    private var inboundAdmission = ClassicTransferInboundAdmission()
+    private var inboundDeadlineTasks: [String: Task<Void, Never>] = [:]
+    private var inboundHandlerTasks: [String: Task<Void, Never>] = [:]
     
     /// 监听端口
     private let port: UInt16
@@ -294,7 +306,9 @@ public actor FileTransferNetworkService {
             "identityFingerprint": Data(protocolIdentityFingerprint.utf8),
             "model": Data(model.utf8),
             "osVersion": Data(systemVersion.utf8),
-            "capabilities": Data("file,file_transfer,\(ClassicTransferCapability.classicResume)".utf8),
+            // The inbound parser explicitly rejects resumeRequest. Advertise
+            // only capabilities that this listener can complete end to end.
+            "capabilities": Data("file,file_transfer".utf8),
             "transferPort": Data(portString.utf8),
             "fileTransferPort": Data(portString.utf8),
             "file_transfer_port": Data(portString.utf8),
@@ -304,16 +318,28 @@ public actor FileTransferNetworkService {
     
     /// 停止监听服务
     public func stopListening() {
-        listener?.cancel()
+        if let listener {
+            Self.cancelListener(listener)
+        }
         listener = nil
         isListening = false
         listenerHealthState = .stopped
         
         // 关闭所有连接
         for (_, connection) in activeConnections {
+            Self.clearConnectionHandlers(connection)
             connection.cancel()
         }
         activeConnections.removeAll()
+        for task in inboundDeadlineTasks.values {
+            task.cancel()
+        }
+        inboundDeadlineTasks.removeAll()
+        for task in inboundHandlerTasks.values {
+            task.cancel()
+        }
+        inboundHandlerTasks.removeAll()
+        inboundAdmission.removeAll()
         
         SkyBridgeLogger.shared.info("📁 文件传输服务已停止")
     }
@@ -323,7 +349,7 @@ public actor FileTransferNetworkService {
         ipAddress: String,
         port: UInt16 = FileTransferConstants.defaultPort,
         deviceId: String,
-        deviceName: String
+        deviceName _: String
     ) async throws -> NWConnection {
         let normalizedIP = ipAddress.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
         if normalizedIP == "127.0.0.1"
@@ -331,7 +357,7 @@ public actor FileTransferNetworkService {
             || normalizedIP == "0:0:0:0:0:0:0:1"
             || normalizedIP == "::ffff:127.0.0.1"
             || normalizedIP == "localhost" {
-            SkyBridgeLogger.shared.warning("⚠️ 已阻止文件传输自连接目标: \(ipAddress)")
+            SkyBridgeLogger.shared.warning("⚠️ 已阻止文件传输自连接目标")
             throw FileTransferError.invalidDestination
         }
 
@@ -394,8 +420,9 @@ public actor FileTransferNetworkService {
                     finishOnce { continuation.resume(throwing: FileTransferError.transferCancelled) }
 
                 case .waiting(let error):
+                    let waitingError = error as NSError
                     SkyBridgeLogger.shared.warning(
-                        "⏳ 文件传输连接等待: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                        "⏳ 文件传输连接等待: domain=\(waitingError.domain) code=\(waitingError.code)"
                     )
                     
                 default:
@@ -409,7 +436,7 @@ public actor FileTransferNetworkService {
                 gate.runOnce {
                     connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.error(
-                        "❌ 文件传输连接超时: endpoint=\(endpointDescription) timeout=\(Int(FileTransferConstants.connectionTimeout))s"
+                        "❌ 文件传输连接超时: timeout=\(Int(FileTransferConstants.connectionTimeout))s"
                     )
                     connection.cancel()
                     continuation.resume(throwing: FileTransferError.networkStageFailed(
@@ -445,11 +472,22 @@ public actor FileTransferNetworkService {
             SkyBridgeLogger.shared.info("✅ 文件传输监听器就绪")
             
         case .failed(let error):
+            if let listener {
+                Self.cancelListener(listener)
+            }
+            listener = nil
             listenerHealthState = .failed
-            SkyBridgeLogger.shared.error("❌ 文件传输监听器失败: \(error.localizedDescription)")
+            let listenerError = error as NSError
+            SkyBridgeLogger.shared.error(
+                "❌ 文件传输监听器失败: domain=\(listenerError.domain) code=\(listenerError.code)"
+            )
             isListening = false
             
         case .cancelled:
+            if let listener {
+                Self.clearListenerHandlers(listener)
+            }
+            listener = nil
             listenerHealthState = .cancelled
             SkyBridgeLogger.shared.info("⏹️ 文件传输监听器已取消")
             isListening = false
@@ -461,6 +499,13 @@ public actor FileTransferNetworkService {
     
     private func handleNewConnection(_ connection: NWConnection) {
         let connectionId = UUID().uuidString
+        guard inboundAdmission.reserve(connectionID: connectionId) else {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 拒绝文件传输入站连接: reason=capacity limit=\(ClassicTransferInboundPolicy.maximumConcurrentConnections)"
+            )
+            connection.cancel()
+            return
+        }
         
         connection.stateUpdateHandler = { [weak self] state in
             Task { [weak self] in
@@ -470,6 +515,12 @@ public actor FileTransferNetworkService {
         
         connection.start(queue: queue)
         activeConnections[connectionId] = connection
+        scheduleInboundDeadline(
+            connection,
+            connectionId: connectionId,
+            timeout: ClassicTransferInboundPolicy.initialHeaderTimeoutSeconds,
+            error: .initialHeaderTimedOut
+        )
         
         // 开始接收数据
         Task {
@@ -480,14 +531,23 @@ public actor FileTransferNetworkService {
     private func handleConnectionState(_ state: NWConnection.State, connectionId: String) {
         switch state {
         case .ready:
-            SkyBridgeLogger.shared.info("✅ 文件传输连接就绪: \(connectionId)")
+            SkyBridgeLogger.shared.info("✅ 文件传输入站连接就绪")
             
         case .failed(let error):
-            SkyBridgeLogger.shared.error("❌ 文件传输连接失败: \(error.localizedDescription)")
-            activeConnections.removeValue(forKey: connectionId)
+            let connectionError = error as NSError
+            SkyBridgeLogger.shared.error(
+                "❌ 文件传输入站连接失败: domain=\(connectionError.domain) code=\(connectionError.code)"
+            )
+            finishInboundConnection(
+                connectionId: connectionId,
+                cancelConnection: false
+            )
             
         case .cancelled:
-            activeConnections.removeValue(forKey: connectionId)
+            finishInboundConnection(
+                connectionId: connectionId,
+                cancelConnection: false
+            )
             
         default:
             break
@@ -515,42 +575,181 @@ public actor FileTransferNetworkService {
                 }
                 return
             }
-            
-            // 接收元数据
-            connection.receive(minimumIncompleteLength: header.length, maximumLength: header.length) { [weak self] metaData, _, _, error in
-                guard let self = self else { return }
-                
-                if error != nil {
-                    Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: .metadataReceiveFailed) }
+
+            Task { [weak self] in
+                guard let self else {
+                    connection.cancel()
+                    return
+                }
+                guard await self.beginInboundMetadataPayloadDeadline(
+                    connection,
+                    connectionId: connectionId
+                ) else {
                     return
                 }
 
-                let metadataResult = Self.decodeInboundInitialMetadataPayload(metaData)
-                guard case let .success(metadata) = metadataResult else {
-                    if case let .failure(validationError) = metadataResult {
-                        Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: validationError) }
+                // 接收元数据
+                connection.receive(minimumIncompleteLength: header.length, maximumLength: header.length) { [weak self] metaData, _, _, error in
+                    guard let self else {
+                        connection.cancel()
+                        return
                     }
-                    return
-                }
-                
-                let endpointHostOrIP = self.endpointHostOrIP(from: connection)
-                let peerName = endpointHostOrIP ?? self.getPeerName(from: connection)
-                let peerContext = FileTransferPeerContext(
-                    declaredSenderDeviceId: metadata.senderDeviceId,
-                    endpointHostOrIP: endpointHostOrIP,
-                    peerLabel: peerName,
-                    transferId: metadata.transferId
-                )
-                
-                // 通知文件接收请求
-                Task {
-                    do {
-                        try await self.onFileReceiveRequest?(metadata, connection, peerContext)
-                    } catch {
-                        SkyBridgeLogger.shared.error("❌ 处理文件接收请求失败: reason=file_receive_request_handler_failed")
+
+                    if error != nil {
+                        Task { await self.rejectInboundMetadataConnection(connection, connectionId: connectionId, error: .metadataReceiveFailed) }
+                        return
+                    }
+
+                    Task { [weak self] in
+                        guard let self else {
+                            connection.cancel()
+                            return
+                        }
+                        guard await self.isActiveInboundConnection(connection, id: connectionId) else {
+                            return
+                        }
+                        let metadataResult = await Self.decodeInboundInitialMetadataPayload(metaData)
+                        guard await self.isActiveInboundConnection(connection, id: connectionId) else {
+                            return
+                        }
+                        guard case let .success(metadata) = metadataResult else {
+                            if case let .failure(validationError) = metadataResult {
+                                await self.rejectInboundMetadataConnection(
+                                    connection,
+                                    connectionId: connectionId,
+                                    error: validationError
+                                )
+                            }
+                            return
+                        }
+                        await self.startInboundTransferDispatch(
+                            metadata,
+                            from: connection,
+                            connectionId: connectionId
+                        )
                     }
                 }
             }
+        }
+    }
+
+    private func startInboundTransferDispatch(
+        _ metadata: FileMetadata,
+        from connection: NWConnection,
+        connectionId: String
+    ) {
+        guard activeConnections[connectionId] === connection else {
+            return
+        }
+        inboundHandlerTasks.removeValue(forKey: connectionId)?.cancel()
+        inboundHandlerTasks[connectionId] = Task { [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            await self.dispatchInboundTransfer(
+                metadata,
+                from: connection,
+                connectionId: connectionId
+            )
+        }
+    }
+
+    private func isActiveInboundConnection(_ connection: NWConnection, id: String) -> Bool {
+        activeConnections[id] === connection
+    }
+
+    private func beginInboundMetadataPayloadDeadline(
+        _ connection: NWConnection,
+        connectionId: String
+    ) -> Bool {
+        guard activeConnections[connectionId] === connection else {
+            return false
+        }
+        scheduleInboundDeadline(
+            connection,
+            connectionId: connectionId,
+            timeout: ClassicTransferInboundPolicy.metadataPayloadTimeoutSeconds,
+            error: .metadataPayloadTimedOut
+        )
+        return true
+    }
+
+    private func dispatchInboundTransfer(
+        _ metadata: FileMetadata,
+        from connection: NWConnection,
+        connectionId: String
+    ) async {
+        guard activeConnections[connectionId] === connection else {
+            return
+        }
+        inboundDeadlineTasks.removeValue(forKey: connectionId)?.cancel()
+
+        guard let onFileReceiveRequest else {
+            rejectInboundMetadataConnection(
+                connection,
+                connectionId: connectionId,
+                error: .receiveHandlerUnavailable
+            )
+            return
+        }
+
+        let endpointHostOrIP = endpointHostOrIP(from: connection)
+        let peerName = endpointHostOrIP ?? getPeerName(from: connection)
+        let peerContext = FileTransferPeerContext(
+            declaredSenderDeviceId: metadata.senderDeviceId,
+            endpointHostOrIP: endpointHostOrIP,
+            peerLabel: peerName,
+            transferId: metadata.transferId
+        )
+
+        do {
+            try await onFileReceiveRequest(metadata, connection, peerContext)
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "❌ 处理文件接收请求失败: reason=file_receive_request_handler_failed"
+            )
+        }
+        finishInboundConnection(connectionId: connectionId, cancelConnection: true)
+    }
+
+    private func scheduleInboundDeadline(
+        _ connection: NWConnection,
+        connectionId: String,
+        timeout: TimeInterval,
+        error: InboundInitialMetadataError
+    ) {
+        inboundDeadlineTasks.removeValue(forKey: connectionId)?.cancel()
+        inboundDeadlineTasks[connectionId] = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch is CancellationError {
+                return
+            } catch let sleepError {
+                guard let self else {
+                    connection.cancel()
+                    return
+                }
+                let nsError = sleepError as NSError
+                SkyBridgeLogger.shared.error(
+                    "❌ classic inbound deadline task failed; rejecting connection domain=\(nsError.domain) code=\(nsError.code)"
+                )
+                await self.rejectInboundMetadataConnection(
+                    connection,
+                    connectionId: connectionId,
+                    error: error
+                )
+                return
+            }
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            await self.rejectInboundMetadataConnection(
+                connection,
+                connectionId: connectionId,
+                error: error
+            )
         }
     }
 
@@ -578,12 +777,16 @@ public actor FileTransferNetworkService {
 
     private nonisolated static func decodeInboundInitialMetadataPayload(
         _ data: Data?
-    ) -> Result<FileMetadata, InboundInitialMetadataError> {
+    ) async -> Result<FileMetadata, InboundInitialMetadataError> {
         guard let data else {
             return .failure(.missingMetadataPayload)
         }
         do {
-            return .success(try JSONDecoder().decode(FileMetadata.self, from: data))
+            return .success(try await ClassicTransferJSONWorker.shared.decode(
+                FileMetadata.self,
+                from: data,
+                maximumInputSize: 2_000_000
+            ))
         } catch {
             return .failure(.malformedMetadataJSON)
         }
@@ -595,9 +798,40 @@ public actor FileTransferNetworkService {
         error: InboundInitialMetadataError
     ) {
         SkyBridgeLogger.shared.error("❌ 拒绝文件传输入站元数据: reason=\(error.rejectionReason)")
+        finishInboundConnection(connectionId: connectionId, cancelConnection: true)
+    }
+
+    private func finishInboundConnection(
+        connectionId: String,
+        cancelConnection: Bool
+    ) {
+        inboundDeadlineTasks.removeValue(forKey: connectionId)?.cancel()
+        inboundHandlerTasks.removeValue(forKey: connectionId)?.cancel()
+        inboundAdmission.release(connectionID: connectionId)
+        guard let connection = activeConnections.removeValue(forKey: connectionId) else {
+            return
+        }
+        Self.clearConnectionHandlers(connection)
+        if cancelConnection {
+            connection.cancel()
+        }
+    }
+
+    private nonisolated static func clearListenerHandlers(_ listener: NWListener) {
+        listener.stateUpdateHandler = nil
+        listener.newConnectionHandler = nil
+    }
+
+    private nonisolated static func cancelListener(_ listener: NWListener) {
+        clearListenerHandlers(listener)
+        listener.cancel()
+    }
+
+    private nonisolated static func clearConnectionHandlers(_ connection: NWConnection) {
         connection.stateUpdateHandler = nil
-        activeConnections.removeValue(forKey: connectionId)
-        connection.cancel()
+        connection.viabilityUpdateHandler = nil
+        connection.betterPathUpdateHandler = nil
+        connection.pathUpdateHandler = nil
     }
 
     private nonisolated func getPeerName(from connection: NWConnection) -> String {

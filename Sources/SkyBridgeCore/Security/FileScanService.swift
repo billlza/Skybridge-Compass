@@ -529,13 +529,6 @@ public actor FileScanService {
         self.symlinkResolver = SymlinkResolver(limits: securityLimits)
     }
     
- /// Initialize with custom security limits (for testing)
-    internal init(limits: SecurityLimits) {
-        self.securityLimits = limits
-        self.batchScanLimiter = BatchScanLimiter(limits: limits)
-        self.symlinkResolver = SymlinkResolver(limits: limits)
-    }
-    
  // MARK: - Verifier Instances
     
  /// 代码签名验证器
@@ -1274,6 +1267,7 @@ public actor FileScanService {
         }
     }
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 验证当前执行上下文不在 MainActor 上
  /// 用于测试和调试，确保扫描操作在后台执行
  /// - Returns: 是否在后台线程执行
@@ -1283,6 +1277,7 @@ public actor FileScanService {
  // 除非显式标记为 @MainActor
         return !Thread.isMainThread
     }
+#endif
     
  /// 获取当前活跃扫描数量
     public func getActiveScanCount() -> Int {

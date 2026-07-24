@@ -428,9 +428,13 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     }
 
     private var isRunningUnderUnitTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        #if DEBUG || SKYBRIDGE_TESTING
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || NSClassFromString("XCTestCase") != nil
             || NSClassFromString("XCTest") != nil
+        #else
+        return false
+        #endif
     }
     
  /// 获取权限摘要

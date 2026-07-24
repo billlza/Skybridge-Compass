@@ -4,6 +4,7 @@ import AppKit
 import CryptoKit
 import SkyBridgeCore
 import SkyBridgeSmokeSupport
+import SkyBridgeUI
 
 @MainActor
 private final class LocalLanInteropHostCoordinator {
@@ -34,6 +35,21 @@ private final class LocalLanInteropHostCoordinator {
 
     func start() async throws {
         reporter.reset()
+        do {
+            if let localization = try validateEmbeddedRemoteControlLocalizationIfRequired() {
+                reporter.append(
+                    "remote-control-localization requiredKeys=\(localization.requiredKeyCount) "
+                        + "embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core "
+                        + "locale=\(sanitize(localization.locale))"
+                )
+            }
+        } catch {
+            reporter.append(
+                "failed stage=remote-control-localization reason=embedded-signed-core-invalid "
+                    + "error=\(sanitize(error.localizedDescription))"
+            )
+            throw error
+        }
         reporter.append("boot role=mac-host")
         reporter.append("identity start storage=persistent-keychain")
         do {
@@ -79,6 +95,55 @@ private final class LocalLanInteropHostCoordinator {
         reporter.append("ready remote=_skybridge-remote._tcp port=\(remoteControlPort)")
         reporter.append("ready discovery=_skybridge._tcp port=\(controlPort)")
         monitorPresence()
+    }
+
+    private func validateEmbeddedRemoteControlLocalizationIfRequired() throws -> (
+        requiredKeyCount: Int,
+        locale: String
+    )? {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES"] == "1" else {
+            return nil
+        }
+
+        let requiredKeys = RemoteControlSecurityNoticeLocalizationContract.requiredKeys
+        guard requiredKeys.count == 20, Set(requiredKeys).count == 20 else {
+            throw HostStartupError.embeddedLocalizationInvalid("required-key-contract-invalid")
+        }
+
+        let bundleURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Resources", isDirectory: true)
+            .appendingPathComponent("SkyBridgeCompassApp_SkyBridgeCore.bundle", isDirectory: true)
+        let bundleContentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        let resourceRootURL = bundleContentsURL.appendingPathComponent("Resources", isDirectory: true)
+        for url in [bundleURL, bundleContentsURL, resourceRootURL] {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw HostStartupError.embeddedLocalizationInvalid("resource-layout-invalid")
+            }
+        }
+        guard let resourceBundle = Bundle(url: bundleURL),
+              resourceBundle.bundleURL.standardizedFileURL == bundleURL.standardizedFileURL else {
+            throw HostStartupError.embeddedLocalizationInvalid("resource-bundle-unavailable")
+        }
+
+        let rawKeys = requiredKeys.filter { key in
+            resourceBundle.localizedString(forKey: key, value: key, table: nil) == key
+        }
+        guard rawKeys.isEmpty else {
+            throw HostStartupError.embeddedLocalizationInvalid("embedded-raw-key-count-\(rawKeys.count)")
+        }
+        let managerRawKeys = requiredKeys.filter { key in
+            LocalizationManager.shared.localizedString(key) == key
+        }
+        guard managerRawKeys.isEmpty else {
+            throw HostStartupError.embeddedLocalizationInvalid("manager-raw-key-count-\(managerRawKeys.count)")
+        }
+
+        let locale = resourceBundle.preferredLocalizations.first
+            ?? resourceBundle.developmentLocalization
+            ?? "unknown"
+        return (requiredKeys.count, locale)
     }
 
     private func configureRemoteControlNoticeIdentity(protocolDeviceId: String) {
@@ -334,8 +399,19 @@ private final class LocalLanInteropHostCoordinator {
                  .inboundConnectionClosedBeforeMetadata,
                  .fileNotFound,
                  .timeout,
-                 .receiptWaitFailed:
+                 .receiptWaitFailed,
+                 .partialFileCleanupFailed,
+                 .sourceFileCloseFailed,
+                 .committedFileReleaseFailed,
+                 .resumeStatePersistenceFailed,
+                 .resumeStateCleanupFailed,
+                 .automaticResumeFailed,
+                 .capacityExceeded,
+                 .deliveryConfirmationUnknown,
+                 .invalidTransferState:
                 return "payload_framing"
+            case .ambiguousTarget, .invalidPort:
+                return "discovery"
             }
         }
         let nsError = error as NSError
@@ -417,6 +493,28 @@ private final class LocalLanInteropHostCoordinator {
                 return "mac_file_transfer_secure_session_required"
             case .securityThreatDetected:
                 return "mac_file_transfer_security_threat_detected"
+            case .partialFileCleanupFailed:
+                return "mac_file_transfer_partial_cleanup_failed"
+            case .sourceFileCloseFailed:
+                return "mac_file_transfer_source_close_failed"
+            case .committedFileReleaseFailed:
+                return "mac_file_transfer_committed_file_release_failed"
+            case .resumeStatePersistenceFailed:
+                return "mac_file_transfer_resume_state_persistence_failed"
+            case .resumeStateCleanupFailed:
+                return "mac_file_transfer_resume_state_cleanup_failed"
+            case .automaticResumeFailed:
+                return "mac_file_transfer_automatic_resume_failed"
+            case .capacityExceeded:
+                return "mac_file_transfer_capacity_exceeded"
+            case .ambiguousTarget:
+                return "mac_file_transfer_ambiguous_target"
+            case .invalidPort:
+                return "mac_file_transfer_invalid_port"
+            case .deliveryConfirmationUnknown:
+                return "mac_file_transfer_delivery_confirmation_unknown"
+            case .invalidTransferState:
+                return "mac_file_transfer_invalid_transfer_state"
             }
         }
 
@@ -791,11 +889,21 @@ private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency 
 @MainActor
 private enum LocalLanInteropHostLifetime {
     static var coordinator: LocalLanInteropHostCoordinator?
+    static var pairingTrustApprovalWindowController: PairingTrustApprovalWindowController?
+    static var remoteControlSecurityNoticePanelController: RemoteControlSecurityNoticePanelController?
+
+    static func stopApprovalPresentation() {
+        remoteControlSecurityNoticePanelController?.stop()
+        remoteControlSecurityNoticePanelController = nil
+        pairingTrustApprovalWindowController?.stop()
+        pairingTrustApprovalWindowController = nil
+    }
 }
 
 private enum HostStartupError: LocalizedError {
     case initializationTimedOut(String)
     case advertisementPortUnavailable(String)
+    case embeddedLocalizationInvalid(String)
 
     var errorDescription: String? {
         switch self {
@@ -803,12 +911,15 @@ private enum HostStartupError: LocalizedError {
             return "\(component) did not finish initialization before the host timeout."
         case .advertisementPortUnavailable(let serviceType):
             return "\(serviceType) did not publish a connectable listener port before the host timeout."
+        case .embeddedLocalizationInvalid(let reason):
+            return "Embedded remote-control localization validation failed: \(reason)."
         }
     }
 }
 
 @main
 struct LocalLanInteropHostMain {
+    @MainActor
     static func main() {
         setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
         let enableCompatibilityBootstrap =
@@ -820,18 +931,39 @@ struct LocalLanInteropHostMain {
             UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
         }
 
+        let application = NSApplication.shared
+        if application.activationPolicy() != .regular {
+            _ = application.setActivationPolicy(.regular)
+        }
+        guard application.activationPolicy() == .regular else {
+            fputs("LocalLanInteropHost failed: unable to activate the explicit approval UI.\n", stderr)
+            Foundation.exit(1)
+        }
+        application.finishLaunching()
+
         Task { @MainActor in
+            let approvalWindowController = PairingTrustApprovalWindowController()
+            approvalWindowController.start()
+            LocalLanInteropHostLifetime.pairingTrustApprovalWindowController = approvalWindowController
+
+            let remoteControlSecurityNoticePanelController = RemoteControlSecurityNoticePanelController.shared
+            remoteControlSecurityNoticePanelController.start()
+            LocalLanInteropHostLifetime.remoteControlSecurityNoticePanelController =
+                remoteControlSecurityNoticePanelController
+
             let coordinator = LocalLanInteropHostCoordinator()
             LocalLanInteropHostLifetime.coordinator = coordinator
             do {
                 try await coordinator.start()
             } catch {
+                LocalLanInteropHostLifetime.stopApprovalPresentation()
                 fputs("LocalLanInteropHost failed: \(error.localizedDescription)\n", stderr)
                 Foundation.exit(1)
             }
         }
 
-        NSApplication.shared.run()
+        application.run()
+        LocalLanInteropHostLifetime.stopApprovalPresentation()
     }
 }
 

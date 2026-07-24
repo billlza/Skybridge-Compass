@@ -1,8 +1,218 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
+import Darwin
 import SkyBridgeRealtimeMedia
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
 #endif
+
+@available(iOS 17.0, *)
+struct LocalWebRTCSmokeBootstrap: Sendable, Equatable {
+    struct RuntimeMaterial: Sendable, Equatable {
+        let connectionCode: String
+        let peerDeviceID: String
+        let peerKEMPublicKeys: [KEMPublicKeyInfo]
+    }
+
+    struct Document: Decodable {
+        struct PeerKEMPublicKey: Decodable {
+            let suiteWireId: UInt16
+            let publicKeyBase64: String
+        }
+
+        let schemaVersion: Int
+        let runId: String
+        let expiresAtEpochSeconds: Int64
+        let accessToken: String
+        let tenantId: String
+        let connectionCode: String
+        let peerDeviceId: String
+        let peerKEMPublicKeys: [PeerKEMPublicKey]
+    }
+
+    enum ValidationError: LocalizedError, Equatable {
+        case malformedDocument
+        case unsupportedSchemaVersion
+        case invalidRunID
+        case runIDMismatch
+        case expired
+        case lifetimeTooLong
+        case invalidAccessToken
+        case invalidTenantID
+        case tenantBindingFailed
+        case invalidConnectionCode
+        case invalidPeerDeviceID
+        case invalidPeerKEMPublicKeys
+
+        var errorDescription: String? {
+            switch self {
+            case .malformedDocument: return "bootstrap document is malformed"
+            case .unsupportedSchemaVersion: return "bootstrap schema version is unsupported"
+            case .invalidRunID: return "bootstrap run identifier is invalid"
+            case .runIDMismatch: return "bootstrap run identifier does not match this launch"
+            case .expired: return "bootstrap document has expired"
+            case .lifetimeTooLong: return "bootstrap lifetime exceeds the allowed window"
+            case .invalidAccessToken: return "bootstrap access token is invalid"
+            case .invalidTenantID: return "bootstrap tenant identifier is invalid"
+            case .tenantBindingFailed: return "bootstrap token and tenant identity do not match"
+            case .invalidConnectionCode: return "bootstrap connection code is invalid"
+            case .invalidPeerDeviceID: return "bootstrap peer device identifier is invalid"
+            case .invalidPeerKEMPublicKeys: return "bootstrap peer KEM public keys are invalid"
+            }
+        }
+    }
+
+    enum ConsumptionError: LocalizedError, Equatable {
+        case unableToOpen(Int32)
+        case unableToReadMetadata(Int32)
+        case unsafeFile
+        case unableToRead(Int32)
+        case changedWhileReading
+        case unableToRemove(Int32)
+
+        var errorDescription: String? {
+            switch self {
+            case .unableToOpen(let rawErrno):
+                return "unable to open bootstrap file (errno \(rawErrno))"
+            case .unableToReadMetadata(let rawErrno):
+                return "unable to inspect bootstrap file (errno \(rawErrno))"
+            case .unsafeFile:
+                return "bootstrap file is not a private bounded regular file"
+            case .unableToRead(let rawErrno):
+                return "unable to read bootstrap file (errno \(rawErrno))"
+            case .changedWhileReading:
+                return "bootstrap file changed while it was consumed"
+            case .unableToRemove(let rawErrno):
+                return "unable to remove consumed bootstrap file (errno \(rawErrno))"
+            }
+        }
+    }
+
+    static let schemaVersion = 1
+    static let maximumEncodedByteCount = 64 * 1_024
+    static let maximumLifetimeSeconds: Int64 = 15 * 60
+
+    let runID: String
+    let accessToken: String
+    let tenantID: String
+    let connectionCode: String
+    let peerDeviceID: String
+    let peerKEMPublicKeys: [KEMPublicKeyInfo]
+
+    var runtimeMaterial: RuntimeMaterial {
+        RuntimeMaterial(
+            connectionCode: connectionCode,
+            peerDeviceID: peerDeviceID,
+            peerKEMPublicKeys: peerKEMPublicKeys
+        )
+    }
+
+    static func validate(
+        data: Data,
+        expectedRunID: String,
+        now: Date = Date()
+    ) throws -> LocalWebRTCSmokeBootstrap {
+        guard !data.isEmpty, data.count <= maximumEncodedByteCount else {
+            throw ValidationError.malformedDocument
+        }
+
+        let document: Document
+        do {
+            document = try JSONDecoder().decode(Document.self, from: data)
+        } catch {
+            throw ValidationError.malformedDocument
+        }
+
+        guard document.schemaVersion == schemaVersion else {
+            throw ValidationError.unsupportedSchemaVersion
+        }
+        guard isSafeRunID(document.runId), isSafeRunID(expectedRunID) else {
+            throw ValidationError.invalidRunID
+        }
+        guard document.runId == expectedRunID else {
+            throw ValidationError.runIDMismatch
+        }
+
+        let nowEpochSeconds = Int64(now.timeIntervalSince1970)
+        guard document.expiresAtEpochSeconds > nowEpochSeconds else {
+            throw ValidationError.expired
+        }
+        guard document.expiresAtEpochSeconds - nowEpochSeconds <= maximumLifetimeSeconds else {
+            throw ValidationError.lifetimeTooLong
+        }
+
+        guard isBoundedExactValue(document.accessToken, maximumUTF8Bytes: 16_384),
+              document.accessToken.split(separator: ".", omittingEmptySubsequences: false).count == 3 else {
+            throw ValidationError.invalidAccessToken
+        }
+        guard isBoundedExactValue(document.tenantId, maximumUTF8Bytes: 256) else {
+            throw ValidationError.invalidTenantID
+        }
+        do {
+            let identity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+                accessToken: document.accessToken
+            )
+            guard identity.effectiveTenantID == document.tenantId else {
+                throw ValidationError.tenantBindingFailed
+            }
+        } catch {
+            throw ValidationError.tenantBindingFailed
+        }
+
+        let normalizedConnectionCode = CrossNetworkWebRTCManager.sanitizeConnectionCodeInput(
+            document.connectionCode
+        )
+        guard normalizedConnectionCode == document.connectionCode,
+              CrossNetworkWebRTCManager.canSubmitConnectionCode(document.connectionCode) else {
+            throw ValidationError.invalidConnectionCode
+        }
+        guard isBoundedExactValue(document.peerDeviceId, maximumUTF8Bytes: 256) else {
+            throw ValidationError.invalidPeerDeviceID
+        }
+        guard (1...3).contains(document.peerKEMPublicKeys.count) else {
+            throw ValidationError.invalidPeerKEMPublicKeys
+        }
+
+        var seenSuiteWireIDs = Set<UInt16>()
+        let decodedKeys = try document.peerKEMPublicKeys.map { entry -> KEMPublicKeyInfo in
+            guard seenSuiteWireIDs.insert(entry.suiteWireId).inserted,
+                  let publicKey = Data(base64Encoded: entry.publicKeyBase64),
+                  !publicKey.isEmpty else {
+                throw ValidationError.invalidPeerKEMPublicKeys
+            }
+            return KEMPublicKeyInfo(suiteWireId: entry.suiteWireId, publicKey: publicKey)
+        }
+        let normalizedKeys = KEMPublicKeyInfo.normalizedValidKeys(decodedKeys)
+        guard normalizedKeys.count == decodedKeys.count,
+              normalizedKeys.contains(where: { $0.suiteWireId == 0x0001 }) else {
+            throw ValidationError.invalidPeerKEMPublicKeys
+        }
+
+        return LocalWebRTCSmokeBootstrap(
+            runID: document.runId,
+            accessToken: document.accessToken,
+            tenantID: document.tenantId,
+            connectionCode: document.connectionCode,
+            peerDeviceID: document.peerDeviceId,
+            peerKEMPublicKeys: normalizedKeys
+        )
+    }
+
+    private static func isSafeRunID(_ value: String) -> Bool {
+        guard (1...64).contains(value.utf8.count) else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        return value.unicodeScalars.allSatisfy(allowed.contains)
+    }
+
+    private static func isBoundedExactValue(_ value: String, maximumUTF8Bytes: Int) -> Bool {
+        guard !value.isEmpty,
+              value.utf8.count <= maximumUTF8Bytes,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    }
+}
 
 @available(iOS 17.0, *)
 @MainActor
@@ -18,11 +228,14 @@ final class LocalWebRTCSmokeHarness {
     private static let audioRelayRolloverTrafficObservationPollNanoseconds: UInt64 = 250_000_000
     private static let audioRelayRolloverMinimumObservedPackets: UInt64 = 4
     private static let audioDiagnosticsHeartbeatNanoseconds: UInt64 = 5_000_000_000
+    private static let bootstrapFileName = "skybridge-webrtc-smoke-bootstrap-v1.json"
     private var smokeAudioReceiver: IOSRealtimeMediaAudioReceiver?
     private var smokeAudioRelayTransport: SkyBridgeUDPRealtimeMediaTransport?
     private var smokeAudioRelayRenewalTask: Task<Void, Never>?
     private var smokeAudioRelayKeepaliveTask: Task<Void, Never>?
     private var smokeAudioDiagnosticsTask: Task<Void, Never>?
+    private var smokeAudioRelayRolloverTask: Task<Void, Never>?
+    private var smokeAudioRelayRolloverToken: UUID?
 
     private var didStart = false
 
@@ -115,9 +328,44 @@ final class LocalWebRTCSmokeHarness {
         guard isEnabled, !didStart else { return }
         didStart = true
 
-        let reporter = SmokeStatusReporter(statusURL: statusURL())
-        reporter.reset()
-        stopSmokeAudioReceiver()
+        let reporter: SmokeStatusReporter
+        do {
+            reporter = SmokeStatusReporter(statusURL: try statusURL())
+            try reporter.reset()
+        } catch {
+            SkyBridgeLogger.shared.error("WebRTC smoke status sink initialization failed")
+            return
+        }
+        await stopSmokeAudioReceiver()
+        let bootstrapRuntime: LocalWebRTCSmokeBootstrap.RuntimeMaterial?
+        do {
+            if let bootstrap = try await consumeRealDeviceBootstrapIfRequired() {
+                let keychainMode = environmentValue("SKYBRIDGE_SMOKE_KEYCHAIN_MODE")
+                switch keychainMode {
+                case "system":
+                    try await AuthenticationManager.instance.validateSystemSmokeRemoteDesktopSession(
+                        accessToken: bootstrap.accessToken,
+                        effectiveTenantID: bootstrap.tenantID
+                    )
+                    reporter.append("keychain-proof platform=ios mode=system auth=existing-product-session productBundle=true")
+                case "in-memory":
+                    try await AuthenticationManager.instance.installSmokeRemoteDesktopSession(
+                        accessToken: bootstrap.accessToken,
+                        effectiveTenantID: bootstrap.tenantID
+                    )
+                    reporter.append("keychain-proof platform=ios mode=in-memory auth=diagnostic-bootstrap productBundle=true")
+                default:
+                    throw LocalWebRTCSmokeBootstrap.ValidationError.malformedDocument
+                }
+                reporter.append("bootstrap-consumed run=\(Self.sanitize(bootstrap.runID))")
+                bootstrapRuntime = bootstrap.runtimeMaterial
+            } else {
+                bootstrapRuntime = nil
+            }
+        } catch {
+            reporter.append("failed stage=bootstrap-consume error=\(Self.sanitize(error.localizedDescription))")
+            return
+        }
         PQCCryptoManager.instance.allowClassicFallbackForCompatibility = false
         if expectsPQCRekey {
             do {
@@ -129,7 +377,7 @@ final class LocalWebRTCSmokeHarness {
             }
         }
         await exportLocalPQCIdentityIfNeeded(reporter: reporter)
-        await preseedPeerKEMTrustIfNeeded(reporter: reporter)
+        await preseedPeerKEMTrustIfNeeded(bootstrap: bootstrapRuntime, reporter: reporter)
 
         let manager = CrossNetworkWebRTCManager.instance
         await manager.disconnect()
@@ -137,20 +385,26 @@ final class LocalWebRTCSmokeHarness {
         switch role {
         case "ios-client":
             reporter.append("boot role=ios-client")
-            guard !connectCode.isEmpty else {
+            let effectiveConnectCode = bootstrapRuntime?.connectionCode ?? connectCode
+            guard !effectiveConnectCode.isEmpty else {
                 reporter.append("failed stage=bootstrap error=missing_connect_code")
                 return
             }
-            reporter.append("connect \(connectCode)")
-            await manager.connect(withCode: connectCode)
+            reporter.append("connect code=<redacted>")
+            await manager.connect(withCode: effectiveConnectCode)
         case "ios-host":
             reporter.append("boot role=ios-host")
             guard let code = await manager.generateConnectionCode(), !code.isEmpty else {
                 reporter.append("failed stage=bootstrap error=missing_generated_code")
                 return
             }
-            writeGeneratedCode(code)
-            reporter.append("code \(code)")
+            do {
+                try writeGeneratedCode(code)
+            } catch {
+                reporter.append("failed stage=bootstrap-code-write error=\(Self.sanitize(error.localizedDescription))")
+                return
+            }
+            reporter.append("code=<redacted>")
         default:
             reporter.append("failed stage=bootstrap error=unsupported_role_\(role)")
             return
@@ -186,6 +440,10 @@ final class LocalWebRTCSmokeHarness {
         }
 
         while Date() < deadline || successHoldUntil != nil {
+            guard !Task.isCancelled else {
+                reporter.append("cancelled stage=ios-smoke-loop")
+                return
+            }
             if successHoldUntil == nil, Date() >= deadline {
                 break
             }
@@ -204,7 +462,11 @@ final class LocalWebRTCSmokeHarness {
             let rekeyDescription = manager.lastRekeyEvent ?? ""
             if rekeyDescription != lastRekeyEvent, !rekeyDescription.isEmpty {
                 lastRekeyEvent = rekeyDescription
-                reporter.append("rekey \(Self.sanitize(rekeyDescription))")
+                if case .handshakeComplete(let sessionId, _) = manager.readiness {
+                    reporter.append("rekey session=\(sessionId) \(Self.sanitize(rekeyDescription))")
+                } else {
+                    reporter.append("rekey-pending \(Self.sanitize(rekeyDescription))")
+                }
             }
 
             if case .failed(let message) = manager.state {
@@ -360,7 +622,12 @@ final class LocalWebRTCSmokeHarness {
                             "rekey-complete session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) awaitingNativeVideo=1"
                         )
                     }
-                    try? await Task.sleep(for: .milliseconds(250))
+                    do {
+                        try await Task.sleep(for: .milliseconds(250))
+                    } catch {
+                        reporter.append("cancelled stage=ios-smoke-loop")
+                        return
+                    }
                     continue
                 }
                 if shouldFinishAfterSuccess(
@@ -400,43 +667,181 @@ final class LocalWebRTCSmokeHarness {
                 }
             }
 
-            try? await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                reporter.append("cancelled stage=ios-smoke-loop")
+                return
+            }
         }
 
         reporter.append("failed stage=timeout error=ios_smoke_timeout")
     }
 
-    private func statusURL() -> URL? {
-        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-status.log"
-        guard !fileName.isEmpty else { return nil }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName)
-    }
-
-    private func codeURL() -> URL? {
-        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CODE_BASENAME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-code.txt"
-        guard !fileName.isEmpty else { return nil }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName)
-    }
-
-    private func writeGeneratedCode(_ code: String) {
-        guard let codeURL = codeURL() else { return }
-        guard let data = code.appending("\n").data(using: .utf8) else { return }
-        try? writeProtectedData(data, to: codeURL)
-    }
-
-    private func pqcReportURL() -> URL? {
-        guard let fileName = environmentValue("SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME") else {
+    private func consumeRealDeviceBootstrapIfRequired() async throws -> LocalWebRTCSmokeBootstrap? {
+        guard let expectedRunID = environmentValue("SKYBRIDGE_SMOKE_BOOTSTRAP_RUN_ID") else {
             return nil
         }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName)
+        let environment = ProcessInfo.processInfo.environment
+        let keychainMode = environment["SKYBRIDGE_SMOKE_KEYCHAIN_MODE"]
+        guard role == "ios-client",
+              keychainMode == "system" || keychainMode == "in-memory" else {
+            throw LocalWebRTCSmokeBootstrap.ValidationError.malformedDocument
+        }
+        if keychainMode == "in-memory",
+           environment["SKYBRIDGE_REAL_DEVICE_WEBRTC_LAB_RUN"] != "1" {
+            throw LocalWebRTCSmokeBootstrap.ValidationError.malformedDocument
+        }
+        if keychainMode == "system",
+           environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" {
+            throw LocalWebRTCSmokeBootstrap.ValidationError.malformedDocument
+        }
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            throw LocalWebRTCSmokeBootstrap.ValidationError.malformedDocument
+        }
+        let bootstrapURL = cachesURL.appendingPathComponent(Self.bootstrapFileName, isDirectory: false)
+        let data = try await Self.consumeBootstrapFile(at: bootstrapURL)
+        return try await Task.detached(priority: .userInitiated) {
+            try LocalWebRTCSmokeBootstrap.validate(
+                data: data,
+                expectedRunID: expectedRunID
+            )
+        }.value
+    }
+
+    nonisolated static func consumeBootstrapFile(at url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            guard descriptor >= 0 else {
+                let rawErrno = errno
+                if rawErrno == ELOOP {
+                    throw LocalWebRTCSmokeBootstrap.ConsumptionError.unsafeFile
+                }
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToOpen(rawErrno)
+            }
+            defer { _ = Darwin.close(descriptor) }
+
+            var openedMetadata = stat()
+            guard Darwin.fstat(descriptor, &openedMetadata) == 0 else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToReadMetadata(errno)
+            }
+            guard (openedMetadata.st_mode & S_IFMT) == S_IFREG,
+                  (openedMetadata.st_mode & 0o077) == 0,
+                  openedMetadata.st_uid == geteuid(),
+                  openedMetadata.st_nlink == 1,
+                  openedMetadata.st_size > 0,
+                  openedMetadata.st_size <= LocalWebRTCSmokeBootstrap.maximumEncodedByteCount else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.unsafeFile
+            }
+
+            let expectedByteCount = Int(openedMetadata.st_size)
+            var data = Data(count: expectedByteCount)
+            try data.withUnsafeMutableBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else {
+                    throw LocalWebRTCSmokeBootstrap.ConsumptionError.changedWhileReading
+                }
+                var offset = 0
+                while offset < expectedByteCount {
+                    let bytesRead = Darwin.read(
+                        descriptor,
+                        baseAddress.advanced(by: offset),
+                        expectedByteCount - offset
+                    )
+                    if bytesRead > 0 {
+                        offset += bytesRead
+                    } else if bytesRead == -1, errno == EINTR {
+                        continue
+                    } else if bytesRead == 0 {
+                        throw LocalWebRTCSmokeBootstrap.ConsumptionError.changedWhileReading
+                    } else {
+                        throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToRead(errno)
+                    }
+                }
+            }
+
+            var trailingByte: UInt8 = 0
+            while true {
+                let trailingRead = Darwin.read(descriptor, &trailingByte, 1)
+                if trailingRead == 0 {
+                    break
+                }
+                if trailingRead == -1, errno == EINTR {
+                    continue
+                }
+                if trailingRead < 0 {
+                    throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToRead(errno)
+                }
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.changedWhileReading
+            }
+
+            var finalMetadata = stat()
+            guard Darwin.fstat(descriptor, &finalMetadata) == 0 else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToReadMetadata(errno)
+            }
+            guard finalMetadata.st_dev == openedMetadata.st_dev,
+                  finalMetadata.st_ino == openedMetadata.st_ino,
+                  finalMetadata.st_size == openedMetadata.st_size,
+                  finalMetadata.st_mtimespec.tv_sec == openedMetadata.st_mtimespec.tv_sec,
+                  finalMetadata.st_mtimespec.tv_nsec == openedMetadata.st_mtimespec.tv_nsec,
+                  finalMetadata.st_ctimespec.tv_sec == openedMetadata.st_ctimespec.tv_sec,
+                  finalMetadata.st_ctimespec.tv_nsec == openedMetadata.st_ctimespec.tv_nsec else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.changedWhileReading
+            }
+
+            var pathMetadata = stat()
+            guard Darwin.lstat(url.path, &pathMetadata) == 0,
+                  (pathMetadata.st_mode & S_IFMT) == S_IFREG,
+                  pathMetadata.st_dev == openedMetadata.st_dev,
+                  pathMetadata.st_ino == openedMetadata.st_ino else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.changedWhileReading
+            }
+            guard Darwin.unlink(url.path) == 0 else {
+                throw LocalWebRTCSmokeBootstrap.ConsumptionError.unableToRemove(errno)
+            }
+            return data
+        }.value
+    }
+
+    private func statusURL() throws -> URL {
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let basename = try SmokeArtifactBasename.resolve(
+                environmentValue: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"],
+                defaultValue: "skybridge-smoke-status.log"
+              ) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return basename.url(in: cachesURL)
+    }
+
+    private func codeURL() throws -> URL {
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let basename = try SmokeArtifactBasename.resolve(
+                environmentValue: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CODE_BASENAME"],
+                defaultValue: "skybridge-smoke-code.txt"
+              ) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return basename.url(in: cachesURL)
+    }
+
+    private func writeGeneratedCode(_ code: String) throws {
+        let codeURL = try codeURL()
+        guard let data = code.appending("\n").data(using: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        try writeProtectedData(data, to: codeURL)
+    }
+
+    private func pqcReportURL() throws -> URL? {
+        guard let basename = try SmokeArtifactBasename.resolve(
+            environmentValue: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME"]
+        ) else {
+            return nil
+        }
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return basename.url(in: cachesURL)
     }
 
     private func resolvedLocalDeviceID() async throws -> String {
@@ -445,29 +850,52 @@ final class LocalWebRTCSmokeHarness {
 
     private func decodeBase64Key(
         _ name: String,
+        expectedByteCount: Int,
         reporter: SmokeStatusReporter
     ) -> Data? {
         guard let raw = environmentValue(name) else { return nil }
-        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
-            reporter.append("failed stage=pqc-preseed error=invalid_base64_\(name)")
+        guard raw.utf8.count <= 4_096,
+              let data = Data(base64Encoded: raw),
+              data.count == expectedByteCount else {
+            reporter.append("failed stage=pqc-preseed error=invalid_key_encoding_or_length_\(name)")
             return nil
         }
         return data
     }
 
-    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async {
+    private func preseedPeerKEMTrustIfNeeded(
+        bootstrap: LocalWebRTCSmokeBootstrap.RuntimeMaterial?,
+        reporter: SmokeStatusReporter
+    ) async {
+        if let bootstrap {
+            await preseedPeerKEMTrust(
+                peerDeviceID: bootstrap.peerDeviceID,
+                keys: bootstrap.peerKEMPublicKeys,
+                reporter: reporter
+            )
+            return
+        }
+
         guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
             return
         }
 
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
-        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let xwing = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_216,
+            reporter: reporter
+        ) {
             keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.xwingSuiteWireID,
                 publicKey: xwing
             )
         }
-        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768 = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768SuiteWireID,
                 publicKey: mlkem768
@@ -479,7 +907,11 @@ final class LocalWebRTCSmokeHarness {
                 )
             }
         }
-        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768fs = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768FSSuiteWireID,
                 publicKey: mlkem768fs
@@ -487,6 +919,14 @@ final class LocalWebRTCSmokeHarness {
         }
 
         let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
+        await preseedPeerKEMTrust(peerDeviceID: peerDeviceID, keys: keys, reporter: reporter)
+    }
+
+    private func preseedPeerKEMTrust(
+        peerDeviceID: String,
+        keys: [KEMPublicKeyInfo],
+        reporter: SmokeStatusReporter
+    ) async {
         guard !keys.isEmpty else {
             reporter.append("pqc-preseed skipped device=\(Self.sanitize(peerDeviceID)) reason=missing_keys")
             return
@@ -498,8 +938,6 @@ final class LocalWebRTCSmokeHarness {
     }
 
     private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async {
-        guard let reportURL = pqcReportURL() else { return }
-
         struct LocalPQCReport: Encodable {
             struct PublicKeyEntry: Encodable {
                 let suiteWireId: UInt16
@@ -511,6 +949,7 @@ final class LocalWebRTCSmokeHarness {
         }
 
         do {
+            guard let reportURL = try pqcReportURL() else { return }
             let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
             let report = LocalPQCReport(
                 deviceId: try await resolvedLocalDeviceID(),
@@ -533,26 +972,32 @@ final class LocalWebRTCSmokeHarness {
         }
     }
 
-    private func stopSmokeAudioReceiver() {
+    private func stopSmokeAudioReceiver() async {
         CrossNetworkWebRTCManager.instance.smokeMediaHeartbeatDiagnosticsProvider = nil
-        smokeAudioDiagnosticsTask?.cancel()
+        let diagnosticsTask = smokeAudioDiagnosticsTask
+        let renewalTask = smokeAudioRelayRenewalTask
+        let keepaliveTask = smokeAudioRelayKeepaliveTask
+        let rolloverTask = smokeAudioRelayRolloverTask
+        diagnosticsTask?.cancel()
+        renewalTask?.cancel()
+        keepaliveTask?.cancel()
+        rolloverTask?.cancel()
         smokeAudioDiagnosticsTask = nil
-        smokeAudioRelayRenewalTask?.cancel()
         smokeAudioRelayRenewalTask = nil
-        smokeAudioRelayKeepaliveTask?.cancel()
         smokeAudioRelayKeepaliveTask = nil
-        if let transport = smokeAudioRelayTransport {
-            Task(priority: .utility) {
-                await transport.stop()
-            }
-        }
-        if let receiver = smokeAudioReceiver {
-            Task(priority: .utility) {
-                await receiver.close()
-            }
-        }
+        smokeAudioRelayRolloverTask = nil
+        smokeAudioRelayRolloverToken = nil
+        let transport = smokeAudioRelayTransport
+        let receiver = smokeAudioReceiver
         smokeAudioRelayTransport = nil
         smokeAudioReceiver = nil
+
+        await diagnosticsTask?.value
+        await renewalTask?.value
+        await keepaliveTask?.value
+        await rolloverTask?.value
+        await transport?.stop()
+        await receiver?.close()
     }
 
     private func installSmokeMediaHeartbeatDiagnosticsProvider(manager: CrossNetworkWebRTCManager) {
@@ -647,8 +1092,8 @@ final class LocalWebRTCSmokeHarness {
             + "startupSilenceFrames=\(startupSilenceFrames) "
             + "engineRunning=\(engineRunning)"
             + probableSuffix
-        SkyBridgeSmokeTraceWriter.appendStatus(line)
-        SkyBridgeSmokeTraceWriter.append(line)
+        SkyBridgeDiagnosticTrace.appendStatus(line)
+        SkyBridgeDiagnosticTrace.append(line)
         var diagnosticFields: [String: Any] = [
             "kind": "audioRxHeartbeat",
             "session": sessionId,
@@ -686,7 +1131,7 @@ final class LocalWebRTCSmokeHarness {
         if snapshot.datagramsSeen == 0 {
             diagnosticFields["probable"] = "audio-rx-zero-datagrams"
         }
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(diagnosticFields)
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(diagnosticFields)
     }
 
     private func startSmokeAudioRelayKeepalive(
@@ -718,10 +1163,10 @@ final class LocalWebRTCSmokeHarness {
                 }
                 do {
                     try await transport.refreshRelayBinding(relayToken)
-                    SkyBridgeSmokeTraceWriter.append(
+                    SkyBridgeDiagnosticTrace.append(
                         "audio-rx relayKeepaliveSent session=\(sessionId) relay=\(relay)"
                     )
-                    SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                         [
                             "kind": "audioRxRelayKeepaliveSent",
                             "session": sessionId,
@@ -730,10 +1175,10 @@ final class LocalWebRTCSmokeHarness {
                         ]
                     )
                 } catch {
-                    SkyBridgeSmokeTraceWriter.append(
+                    SkyBridgeDiagnosticTrace.append(
                         "audio-rx relayKeepaliveFailed session=\(sessionId) relay=\(relay) error=\(Self.sanitize(error.localizedDescription))"
                     )
-                    SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                         [
                             "kind": "audioRxRelayKeepaliveFailed",
                             "session": sessionId,
@@ -812,10 +1257,10 @@ final class LocalWebRTCSmokeHarness {
         let delaySeconds = max(1, expiresAt - nowSeconds - renewalLeadTime)
         let delayMs = Int((delaySeconds * 1000).rounded())
         let expiresInMs = Int(((expiresAt - nowSeconds) * 1000).rounded())
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx relayLeaseRenewalScheduled session=\(sessionId) delayMs=\(delayMs) relay=\(endpoint.host):\(endpoint.port)"
         )
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             [
                 "kind": "audioRxEndpointRenewalScheduled",
                 "session": sessionId,
@@ -849,7 +1294,7 @@ final class LocalWebRTCSmokeHarness {
               let receiver = smokeAudioReceiver else {
             return
         }
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx relayLeaseRenewalStart session=\(sessionId) relay=\(currentEndpoint.host):\(currentEndpoint.port)"
         )
         manager.clearCachedRealtimeMediaRelayEndpointForActiveSession(reason: "smoke-lease-renewal")
@@ -857,7 +1302,8 @@ final class LocalWebRTCSmokeHarness {
         do {
             endpointPair = try await manager.requestRealtimeMediaRelayEndpointForActiveSession()
         } catch {
-            SkyBridgeSmokeTraceWriter.append(
+            guard !Task.isCancelled else { return }
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalFailed session=\(sessionId) stage=lease error=\(Self.sanitize(error.localizedDescription))"
             )
             scheduleSmokeAudioRelayRenewal(manager: manager, sessionId: sessionId, endpoint: currentEndpoint)
@@ -865,7 +1311,7 @@ final class LocalWebRTCSmokeHarness {
         }
         guard let endpointPair else {
             let reason = manager.mediaRelayLeaseDiagnosticForActiveSession() ?? "missing_endpoint"
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalFailed session=\(sessionId) stage=lease reason=\(Self.sanitize(reason))"
             )
             if reason.hasPrefix("missingSession") {
@@ -889,10 +1335,10 @@ final class LocalWebRTCSmokeHarness {
             case .optimisticAfterSend:
                 bindPolicyDescription = "optimistic"
             }
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalInPlaceStart session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port) bindPolicy=\(bindPolicyDescription)"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxEndpointRenewalInPlaceStart",
                     "session": sessionId,
@@ -907,10 +1353,10 @@ final class LocalWebRTCSmokeHarness {
                     relayToken,
                     relayBindPolicy: bindPolicy
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port) mode=in-place bindPolicy=\(bindPolicyDescription)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointRenewed",
                         "session": sessionId,
@@ -931,17 +1377,18 @@ final class LocalWebRTCSmokeHarness {
                 )
                 return
             } catch {
-                SkyBridgeSmokeTraceWriter.append(
+                guard !Task.isCancelled else { return }
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewalFallback session=\(sessionId) stage=in-place error=\(Self.sanitize(error.localizedDescription))"
                 )
             }
         }
         if requiresStrictAudioRelayRenewal,
            sameRelayAddress {
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalRollover session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port) reason=strict-make-before-break"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxEndpointRenewalRollover",
                     "session": sessionId,
@@ -962,7 +1409,7 @@ final class LocalWebRTCSmokeHarness {
             },
             relayBindPolicy: smokeAudioRelayRenewalBindPolicy,
             startEventHandler: { event in
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx renewalTransportEvent session=\(sessionId) event=\(Self.sanitize(String(describing: event)))"
                 )
             }
@@ -970,17 +1417,21 @@ final class LocalWebRTCSmokeHarness {
         do {
             try await relayTransport.start()
         } catch {
-            SkyBridgeSmokeTraceWriter.append(
+            if Task.isCancelled {
+                await relayTransport.stop()
+                return
+            }
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalFailed session=\(sessionId) stage=transport error=\(Self.sanitize(error.localizedDescription))"
             )
             scheduleSmokeAudioRelayRenewal(manager: manager, sessionId: sessionId, endpoint: currentEndpoint)
             return
         }
 
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx relayLeaseRenewalRolloverReady session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port)"
         )
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             [
                 "kind": "audioRxEndpointRolloverReady",
                 "session": sessionId,
@@ -1000,15 +1451,26 @@ final class LocalWebRTCSmokeHarness {
             try await manager.sendRemoteDesktopMessage(
                 RemoteMessage(type: .streamConfiguration, payload: encoded)
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "stream-config audioRenewalSent session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port)"
             )
         } catch {
-            SkyBridgeSmokeTraceWriter.append(
+            if Task.isCancelled {
+                await relayTransport.stop()
+                return
+            }
+            SkyBridgeDiagnosticTrace.append(
                 "stream-config audioRenewalFailed session=\(sessionId) error=\(Self.sanitize(error.localizedDescription))"
             )
+            await relayTransport.stop()
+            scheduleSmokeAudioRelayRenewal(
+                manager: manager,
+                sessionId: sessionId,
+                endpoint: currentEndpoint
+            )
+            return
         }
-        promoteSmokeAudioRelayTransportAfterNewTraffic(
+        await promoteSmokeAudioRelayTransportAfterNewTraffic(
             newTransport: relayTransport,
             oldTransport: currentTransport,
             trafficCounter: renewalTrafficCounter,
@@ -1027,9 +1489,24 @@ final class LocalWebRTCSmokeHarness {
         sessionId: String,
         currentEndpoint: SkyBridgeMediaEndpoint,
         newEndpoint: SkyBridgeMediaEndpoint
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+    ) async {
+        let previousTask = smokeAudioRelayRolloverTask
+        previousTask?.cancel()
+        await previousTask?.value
+
+        let token = UUID()
+        smokeAudioRelayRolloverToken = token
+        smokeAudioRelayRolloverTask = Task { @MainActor [weak self] in
+            guard let self else {
+                await newTransport.stop()
+                return
+            }
+            defer {
+                if self.smokeAudioRelayRolloverToken == token {
+                    self.smokeAudioRelayRolloverTask = nil
+                    self.smokeAudioRelayRolloverToken = nil
+                }
+            }
             let deadline = Date().addingTimeInterval(Self.audioRelayRolloverTrafficObservationTimeout)
             var observedTotal: UInt64 = 0
             var observedTraffic = false
@@ -1039,7 +1516,14 @@ final class LocalWebRTCSmokeHarness {
                     observedTraffic = true
                     break
                 }
-                try? await Task.sleep(nanoseconds: Self.audioRelayRolloverTrafficObservationPollNanoseconds)
+                do {
+                    try await Task.sleep(
+                        nanoseconds: Self.audioRelayRolloverTrafficObservationPollNanoseconds
+                    )
+                } catch {
+                    await newTransport.stop()
+                    return
+                }
             }
 
             let relay = "\(newEndpoint.host):\(newEndpoint.port)"
@@ -1047,10 +1531,10 @@ final class LocalWebRTCSmokeHarness {
                 if self.smokeAudioRelayTransport === oldTransport {
                     self.smokeAudioRelayTransport = newTransport
                 }
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewalTrafficObserved session=\(sessionId) relay=\(relay) newTransportRecvTotal=\(observedTotal)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointRenewalTrafficObserved",
                         "session": sessionId,
@@ -1065,17 +1549,22 @@ final class LocalWebRTCSmokeHarness {
                     transport: newTransport,
                     sessionId: sessionId
                 )
-                try? await Task.sleep(
-                    nanoseconds: UInt64(Self.audioRelayRolloverGraceDelaySeconds * 1_000_000_000)
-                )
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(Self.audioRelayRolloverGraceDelaySeconds * 1_000_000_000)
+                    )
+                } catch {
+                    await oldTransport.stop()
+                    return
+                }
                 if self.smokeAudioRelayTransport !== oldTransport {
                     await oldTransport.stop()
                 }
             } else {
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewalTrafficMissing session=\(sessionId) relay=\(relay) newTransportRecvTotal=\(observedTotal)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointRenewalTrafficMissing",
                         "session": sessionId,
@@ -1111,7 +1600,12 @@ final class LocalWebRTCSmokeHarness {
                     return false
                 }
                 if endpointPair != nil { break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    reporter.append("cancelled stage=audio-relay-bootstrap")
+                    return false
+                }
             }
             guard let endpointPair else {
                 let reason = manager.mediaRelayLeaseDiagnosticForActiveSession() ?? "missing_endpoint"
@@ -1134,7 +1628,7 @@ final class LocalWebRTCSmokeHarness {
                     },
                     relayBindPolicy: initialSmokeAudioRelayBindPolicy,
                     startEventHandler: { event in
-                        SkyBridgeSmokeTraceWriter.append(
+                        SkyBridgeDiagnosticTrace.append(
                             "audio-rx transportEvent session=\(sessionId) event=\(Self.sanitize(String(describing: event)))"
                         )
                     }
@@ -1144,7 +1638,7 @@ final class LocalWebRTCSmokeHarness {
                 smokeAudioRelayTransport = relayTransport
                 installSmokeMediaHeartbeatDiagnosticsProvider(manager: manager)
                 startSmokeAudioDiagnosticsHeartbeat(receiver: receiver, sessionId: sessionId)
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx receiverStarted session=\(sessionId) relay=\(localEndpoint.host):\(localEndpoint.port)"
                 )
                 startSmokeAudioRelayKeepalive(
@@ -1191,3 +1685,4 @@ final class LocalWebRTCSmokeHarness {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
 }
+#endif

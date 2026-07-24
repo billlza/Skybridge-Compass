@@ -327,8 +327,8 @@ bash "$WIRE_CANON_SCRIPT"
 pass_item "wire canonicalization gate passed"
 
 log "Running SOA binding alias regression gate"
-swift test --filter SkyBridgeCoreTests.SOABindingAliasRegressionTests
-SKYBRIDGE_RUN_SOA_BENCH=1 SKYBRIDGE_SOA_ITERATIONS=100 swift test --filter SkyBridgeCoreTests.SOAInteroperabilityBenchTests
+bash Scripts/run_swift_test_filter.sh SkyBridgeCoreTests.SOABindingAliasRegressionTests
+SKYBRIDGE_RUN_SOA_BENCH=1 SKYBRIDGE_SOA_ITERATIONS=100 bash Scripts/run_swift_test_filter.sh SkyBridgeCoreTests.SOAInteroperabilityBenchTests
 pass_item "SOA binding alias regression gate passed"
 
 UNKNOWN_SUITE_GATE_SCRIPT="Scripts/check_unknown_suite_fallback_gate.py"

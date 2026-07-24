@@ -87,6 +87,7 @@ public actor WebSocketSignalingClient {
         case notConnected
         case connectTimedOut
         case sendRequiresBound
+        case protocolViolation
         case serverRejected(String)
         case backendFailed(SignalingBackend, String)
 
@@ -98,24 +99,50 @@ public actor WebSocketSignalingClient {
                 return "信令 WebSocket 连接超时"
             case .sendRequiresBound:
                 return "信令通道尚未 bound，不能发送业务消息"
-            case .serverRejected(let reason):
-                return "信令服务器拒绝请求: \(reason)"
+            case .protocolViolation:
+                return "信令服务器返回了与当前会话不一致的数据"
+            case .serverRejected:
+                return "信令服务器拒绝请求: \(WebSocketSignalingClient.redactedServerErrorReasonDescription)"
             case .backendFailed(let backend, let reason):
                 return "信令后端 \(backend.rawValue) 失败: \(reason)"
             }
         }
     }
 
-    private enum BackendSelectionPolicy: String {
+    enum BackendSelectionPolicy: String {
         case auto
         case native
-        case urlsession
+        case urlSession = "urlsession"
 
         static func current() -> BackendSelectionPolicy {
+#if DEBUG || SKYBRIDGE_TESTING
             let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_TRANSPORT"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased() ?? ""
             return BackendSelectionPolicy(rawValue: raw) ?? .auto
+#else
+            return .auto
+#endif
+        }
+    }
+
+    private struct TransportConfiguration {
+        let selectionPolicy: BackendSelectionPolicy
+        let nativeFallbackEnabled: Bool
+
+        static func current() -> TransportConfiguration {
+#if DEBUG || SKYBRIDGE_TESTING
+            return TransportConfiguration(
+                selectionPolicy: BackendSelectionPolicy.current(),
+                nativeFallbackEnabled: ProcessInfo.processInfo
+                    .environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
+            )
+#else
+            return TransportConfiguration(
+                selectionPolicy: .auto,
+                nativeFallbackEnabled: true
+            )
+#endif
         }
     }
 
@@ -146,6 +173,7 @@ public actor WebSocketSignalingClient {
     nonisolated private static let redactedServerErrorReasonDescription = "<redacted-server-error>"
     nonisolated private static let redactedTransportErrorDescription = "<redacted-transport-error>"
     nonisolated private static let sensitiveLogRedaction = "<redacted>"
+    nonisolated private static let maximumInboundTextBytes = 64 * 1024
     private let url: URL
     private let sessionId: String
     private let additionalHeaders: [String: String]
@@ -161,7 +189,8 @@ public actor WebSocketSignalingClient {
     private var isBound: Bool = false
     private var isSocketOpen: Bool = false
     private var hasEverBound: Bool = false
-    private var isConnectingSequence: Bool = false
+    private var lifecycleEpoch: UInt64 = 0
+    private var activeConnectSequenceEpoch: UInt64?
     private var connectWaiters: [CheckedContinuation<Void, Error>] = []
     private var terminalErrorsByHandle: [SignalingHandleID: Error] = [:]
 
@@ -171,21 +200,59 @@ public actor WebSocketSignalingClient {
     private var urlReceiveLoopTask: Task<Void, Never>?
     private var nativeClient: NativeWebSocketClient?
 
-    public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
+    public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) async -> Void)?
     public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
     public var onLifecycleEvent: (@Sendable (SignalingLifecycleEvent) -> Void)?
     public var onTrace: (@Sendable (String) -> Void)?
 
     public init(url: URL, sessionId: String, generation: Int, additionalHeaders: [String: String] = [:]) {
+        self.init(
+            url: url,
+            sessionId: sessionId,
+            generation: generation,
+            additionalHeaders: additionalHeaders,
+            transportConfiguration: TransportConfiguration.current()
+        )
+    }
+
+    private init(
+        url: URL,
+        sessionId: String,
+        generation: Int,
+        additionalHeaders: [String: String],
+        transportConfiguration: TransportConfiguration
+    ) {
         self.url = url
         self.sessionId = sessionId
         self.additionalHeaders = additionalHeaders
         self.nextSequenceGeneration = generation
-        self.selectionPolicy = BackendSelectionPolicy.current()
-        self.nativeFallbackEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
+        self.selectionPolicy = transportConfiguration.selectionPolicy
+        self.nativeFallbackEnabled = transportConfiguration.nativeFallbackEnabled
     }
 
-    public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
+#if DEBUG || SKYBRIDGE_TESTING
+    init(
+        url: URL,
+        sessionId: String,
+        generation: Int,
+        additionalHeaders: [String: String] = [:],
+        selectionPolicy: BackendSelectionPolicy,
+        nativeFallbackEnabled: Bool
+    ) {
+        self.init(
+            url: url,
+            sessionId: sessionId,
+            generation: generation,
+            additionalHeaders: additionalHeaders,
+            transportConfiguration: TransportConfiguration(
+                selectionPolicy: selectionPolicy,
+                nativeFallbackEnabled: nativeFallbackEnabled
+            )
+        )
+    }
+#endif
+
+    public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) async -> Void)?) {
         onEnvelope = handler
     }
 
@@ -213,28 +280,53 @@ public actor WebSocketSignalingClient {
         if isBound {
             return
         }
-        if isConnectingSequence {
+        if activeConnectSequenceEpoch != nil {
             try await waitForBound()
             return
         }
 
-        isConnectingSequence = true
-        defer { isConnectingSequence = false }
+        lifecycleEpoch &+= 1
+        let sequenceEpoch = lifecycleEpoch
+        activeConnectSequenceEpoch = sequenceEpoch
+        defer {
+            if activeConnectSequenceEpoch == sequenceEpoch {
+                activeConnectSequenceEpoch = nil
+            }
+        }
 
         do {
-            try await performConnectSequence(timeout: timeout ?? connectionTimeout)
+            // Reconnect from a clean transport slate. The previous terminal
+            // callback can mark the channel unbound without releasing the
+            // URLSession/native socket; invalidating the handle first prevents
+            // its close callback from mutating the new generation.
+            currentHandle = nil
+            await cleanupURLSessionTransport()
+            await cleanupNativeTransport()
+            try requireActiveConnectSequence(sequenceEpoch)
+            isSocketOpen = false
+            try await performConnectSequence(
+                timeout: timeout ?? connectionTimeout,
+                sequenceEpoch: sequenceEpoch
+            )
+            try requireActiveConnectSequence(sequenceEpoch)
             resumeConnectWaiters()
         } catch {
-            failConnectWaiters(with: error)
+            if activeConnectSequenceEpoch == sequenceEpoch {
+                failConnectWaiters(with: error)
+            }
             throw error
         }
     }
 
     public func close() async {
-        if let currentHandle {
+        lifecycleEpoch &+= 1
+        activeConnectSequenceEpoch = nil
+        let closingHandle = currentHandle
+        currentHandle = nil
+        if let closingHandle {
             emitLifecycle(
                 phase: .closing,
-                handleId: currentHandle,
+                handleId: closingHandle,
                 errorDescription: nil,
                 failureClass: nil,
                 serverFrameType: nil
@@ -246,22 +338,20 @@ public actor WebSocketSignalingClient {
         lifecyclePhase = .closed
         terminalErrorsByHandle.removeAll()
         onTrace?("close")
+        failConnectWaiters(with: SignalingError.notConnected)
 
         await cleanupURLSessionTransport()
         await cleanupNativeTransport()
 
-        if let currentHandle {
+        if let closingHandle {
             emitLifecycle(
                 phase: .closed,
-                handleId: currentHandle,
+                handleId: closingHandle,
                 errorDescription: nil,
                 failureClass: nil,
                 serverFrameType: nil
             )
         }
-
-        currentHandle = nil
-        failConnectWaiters(with: SignalingError.notConnected)
     }
 
     public func send(_ envelope: WebRTCSignalingEnvelope) async throws {
@@ -269,8 +359,13 @@ public actor WebSocketSignalingClient {
         guard isBound, let handleId = currentHandle else {
             throw SignalingError.sendRequiresBound
         }
+        guard Self.sessionIDsMatch(envelope.sessionId, handleId.sessionId) else {
+            throw SignalingError.protocolViolation
+        }
         let data = try JSONEncoder().encode(envelope)
-        guard let text = String(data: data, encoding: .utf8) else { return }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw SignalingError.protocolViolation
+        }
         onTrace?(
             "send session=\(Self.sensitiveLogRedaction) type=\(envelope.type.rawValue) from=\(Self.sensitiveLogRedaction) toPresent=\(envelope.to == nil ? 0 : 1) auth=\(envelope.authToken == nil ? 0 : 1) backend=\(handleId.backend.rawValue)"
         )
@@ -290,6 +385,9 @@ public actor WebSocketSignalingClient {
         case .native:
             guard let nativeClient else { throw SignalingError.notConnected }
             try await nativeClient.send(text: text)
+        }
+        guard isBound, currentHandle == handleId else {
+            throw SignalingError.notConnected
         }
     }
 
@@ -328,16 +426,20 @@ public actor WebSocketSignalingClient {
         return components.string ?? components.host ?? "<redacted>"
     }
 
-    private func performConnectSequence(timeout: Duration) async throws {
+    private func performConnectSequence(
+        timeout: Duration,
+        sequenceEpoch: UInt64
+    ) async throws {
         let attempts = transportAttempts()
         var lastError: Error = SignalingError.connectTimedOut
 
         for attempt in attempts {
+            try requireActiveConnectSequence(sequenceEpoch)
             let handleId = reserveNextHandleId(for: attempt.backend)
             currentHandle = handleId
             isBound = false
             isSocketOpen = false
-            terminalErrorsByHandle[handleId] = nil
+            terminalErrorsByHandle.removeAll(keepingCapacity: true)
 
             let phase: SignalingLifecyclePhase = hasEverBound ? .reconnecting : .connecting
             lifecyclePhase = phase
@@ -365,8 +467,11 @@ public actor WebSocketSignalingClient {
                         timeout: timeout
                     )
                 }
+                try requireActiveConnectSequence(sequenceEpoch)
+                terminalErrorsByHandle.removeValue(forKey: handleId)
                 return
             } catch {
+                try requireActiveConnectSequence(sequenceEpoch)
                 lastError = error
                 if error is CancellationError {
                     logger.debug(
@@ -379,8 +484,17 @@ public actor WebSocketSignalingClient {
                 }
                 onTrace?("connect-failed backend=\(attempt.label) err=\(Self.transportErrorLogSummary(error))")
                 await cleanupTransport(for: attempt.backend)
+                try requireActiveConnectSequence(sequenceEpoch)
+                terminalErrorsByHandle.removeValue(forKey: handleId)
                 if currentHandle == handleId {
                     currentHandle = nil
+                }
+                if error is CancellationError {
+                    throw error
+                }
+                if let signalingError = error as? SignalingError,
+                   case .protocolViolation = signalingError {
+                    throw error
                 }
             }
         }
@@ -388,9 +502,16 @@ public actor WebSocketSignalingClient {
         throw lastError
     }
 
+    private func requireActiveConnectSequence(_ sequenceEpoch: UInt64) throws {
+        guard lifecycleEpoch == sequenceEpoch,
+              activeConnectSequenceEpoch == sequenceEpoch else {
+            throw CancellationError()
+        }
+    }
+
     private func transportAttempts() -> [TransportAttempt] {
         switch selectionPolicy {
-        case .urlsession:
+        case .urlSession:
             return [.urlSession(proxyBypass: false)]
         case .native:
             return [.native(proxyBypass: false)]
@@ -443,17 +564,11 @@ public actor WebSocketSignalingClient {
             onOpen: { [weakSelf = ActorBox(self)] in
                 Task { await weakSelf.value?.handleSocketOpen(handleId: handleId) }
             },
-            onClose: { [weakSelf = ActorBox(self)] closeCode, reasonData in
+            onClose: { [weakSelf = ActorBox(self)] closeCode, _ in
                 Task {
- // 捕获服务器关闭原因（如 1008 session_token_expired / client_version_too_old / session_token_already_bound）。
- // 之前这里把 reason 丢弃，只剩关闭码，导致一切都被打码成笼统的"websocket未连接"，无从诊断。
-                    let reasonText = reasonData
-                        .flatMap { String(data: $0, encoding: .utf8) }?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    let detail = (reasonText?.isEmpty == false) ? reasonText! : "-"
                     await weakSelf.value?.handleClosed(
                         handleId: handleId,
-                        errorDescription: "websocket closed code=\(closeCode.rawValue) reason=\(detail)"
+                        errorDescription: "websocket closed code=\(closeCode.rawValue)"
                     )
                 }
             }
@@ -464,6 +579,7 @@ public actor WebSocketSignalingClient {
             request.setValue(value, forHTTPHeaderField: name)
         }
         let task = session.webSocketTask(with: request)
+        task.maximumMessageSize = Self.maximumInboundTextBytes
         urlSessionDelegate = delegate
         urlSession = session
         urlTask = task
@@ -490,9 +606,11 @@ public actor WebSocketSignalingClient {
                 Task { await weakSelf.value?.handleSocketOpen(handleId: handleId) }
             },
             onText: { [weakSelf = ActorBox(self)] text in
-                Task { await weakSelf.value?.handleText(handleId: handleId, text: text) }
+                await weakSelf.value?.handleText(handleId: handleId, text: text)
             },
-            onBinary: { _ in },
+            onBinary: { [weakSelf = ActorBox(self)] data in
+                await weakSelf.value?.handleBinary(handleId: handleId, data: data)
+            },
             onStateChange: { _ in },
             onClose: { [weakSelf = ActorBox(self)] _, _ in
                 Task { await weakSelf.value?.handleClosed(handleId: handleId, errorDescription: "native websocket closed") }
@@ -525,9 +643,7 @@ public actor WebSocketSignalingClient {
                     case .string(let text):
                         await weakSelf.value?.handleText(handleId: handleId, text: text)
                     case .data(let data):
-                        if let text = String(data: data, encoding: .utf8) {
-                            await weakSelf.value?.handleText(handleId: handleId, text: text)
-                        }
+                        await weakSelf.value?.handleBinary(handleId: handleId, data: data)
                     @unknown default:
                         break
                     }
@@ -542,15 +658,27 @@ public actor WebSocketSignalingClient {
     private func waitUntilBound(handleId: SignalingHandleID, timeout: Duration) async throws {
         let deadline = Date().addingTimeInterval(Self.durationSeconds(timeout))
         while Date() < deadline {
-            if currentHandle == handleId, isBound {
-                return
-            }
             if let error = terminalErrorsByHandle[handleId] {
                 throw error
+            }
+            guard currentHandle == handleId else {
+                throw CancellationError()
+            }
+            if isBound {
+                return
             }
             try await Task.sleep(for: .milliseconds(50))
         }
         throw SignalingError.connectTimedOut
+    }
+
+    private func handleBinary(handleId: SignalingHandleID, data: Data) async {
+        guard data.count <= Self.maximumInboundTextBytes,
+              let text = String(data: data, encoding: .utf8) else {
+            await failProtocolViolation(handleId: handleId, reasonCode: "invalid_binary_message")
+            return
+        }
+        await handleText(handleId: handleId, text: text)
     }
 
     private func waitForBound() async throws {
@@ -580,10 +708,9 @@ public actor WebSocketSignalingClient {
     }
 
     private func handleSocketOpen(handleId: SignalingHandleID) {
-        if currentHandle == handleId {
-            isSocketOpen = true
-            lifecyclePhase = .socketOpen
-        }
+        guard currentHandle == handleId else { return }
+        isSocketOpen = true
+        lifecyclePhase = .socketOpen
         emitLifecycle(
             phase: .socketOpen,
             handleId: handleId,
@@ -594,25 +721,42 @@ public actor WebSocketSignalingClient {
         onTrace?("socket-open backend=\(handleId.backend.rawValue)")
     }
 
-    private func handleText(handleId: SignalingHandleID, text: String) {
+    private func handleText(handleId: SignalingHandleID, text: String) async {
+        guard currentHandle == handleId else {
+            onTrace?("stale-callback generation=\(handleId.generation)")
+            return
+        }
+        guard text.utf8.count <= Self.maximumInboundTextBytes else {
+            await failProtocolViolation(handleId: handleId, reasonCode: "message_too_large")
+            return
+        }
+
         switch Self.parseInboundText(text) {
         case .envelope(let env):
+            guard isBound,
+                  Self.sessionIDsMatch(env.sessionId, handleId.sessionId) else {
+                await failProtocolViolation(handleId: handleId, reasonCode: "envelope_session_mismatch")
+                return
+            }
             onTrace?(
                 "recv-envelope session=\(Self.sensitiveLogRedaction) type=\(env.type.rawValue) from=\(Self.sensitiveLogRedaction) toPresent=\(env.to == nil ? 0 : 1) auth=\(env.authToken == nil ? 0 : 1)"
             )
-            onEnvelope?(env)
+            await onEnvelope?(env)
         case .serverFrame(let frame):
             onTrace?(
                 "recv-server-frame type=\(frame.type) session=\(Self.sensitiveLogRedaction) errorPresent=\(frame.error == nil ? 0 : 1)"
             )
-            onServerFrame?(frame)
             if frame.type == "bound" {
-                if currentHandle == handleId {
-                    isSocketOpen = true
-                    isBound = true
-                    hasEverBound = true
-                    lifecyclePhase = .bound
+                guard let frameSessionId = frame.sessionId,
+                      Self.sessionIDsMatch(frameSessionId, handleId.sessionId) else {
+                    await failProtocolViolation(handleId: handleId, reasonCode: "bound_session_mismatch")
+                    return
                 }
+                onServerFrame?(frame)
+                isSocketOpen = true
+                isBound = true
+                hasEverBound = true
+                lifecyclePhase = .bound
                 emitLifecycle(
                     phase: .bound,
                     handleId: handleId,
@@ -623,6 +767,12 @@ public actor WebSocketSignalingClient {
                 return
             }
             if frame.isError {
+                if let frameSessionId = frame.sessionId,
+                   !Self.sessionIDsMatch(frameSessionId, handleId.sessionId) {
+                    await failProtocolViolation(handleId: handleId, reasonCode: "error_session_mismatch")
+                    return
+                }
+                onServerFrame?(frame)
                 let reason = frame.error ?? "unknown"
  // 服务器错误原因仅用于本地分类/重连决策，绝不写入 .public 日志或对外可见的错误描述（隐私合规）。
                 let failureClass = Self.classifyServerError(reason)
@@ -641,19 +791,50 @@ public actor WebSocketSignalingClient {
                     serverFrameType: frame.type
                 )
                 logger.error("❌ signaling server error: \(redactedReason, privacy: .public)")
+            } else {
+                if let frameSessionId = frame.sessionId,
+                   !Self.sessionIDsMatch(frameSessionId, handleId.sessionId) {
+                    await failProtocolViolation(handleId: handleId, reasonCode: "server_frame_session_mismatch")
+                    return
+                }
+                onServerFrame?(frame)
             }
         case .unknown:
-            onTrace?("recv-unknown bytes=\(text.utf8.count)")
-            logger.debug("ignoring non-envelope message bytes=\(text.utf8.count, privacy: .public)")
+            await failProtocolViolation(handleId: handleId, reasonCode: "malformed_message")
         }
     }
 
+    private func failProtocolViolation(
+        handleId: SignalingHandleID,
+        reasonCode: String
+    ) async {
+        guard currentHandle == handleId else { return }
+        terminalErrorsByHandle.removeAll(keepingCapacity: true)
+        terminalErrorsByHandle[handleId] = SignalingError.protocolViolation
+        isSocketOpen = false
+        isBound = false
+        lifecyclePhase = .failed
+        // Invalidate ownership before transport teardown so the expected close
+        // callback cannot downgrade a protocol violation to a transient error.
+        currentHandle = nil
+        emitLifecycle(
+            phase: .failed,
+            handleId: handleId,
+            errorDescription: Self.redactedServerErrorReasonDescription,
+            failureClass: .protocolViolation,
+            serverFrameType: nil
+        )
+        onTrace?("protocol-violation code=\(reasonCode)")
+        logger.error("signaling protocol violation code=\(reasonCode, privacy: .public)")
+        await cleanupTransport(for: handleId.backend)
+    }
+
     private func handleClosed(handleId: SignalingHandleID, errorDescription: String) async {
-        if currentHandle == handleId {
-            isSocketOpen = false
-            isBound = false
-            lifecyclePhase = .closed
-        }
+        guard currentHandle == handleId else { return }
+        isSocketOpen = false
+        isBound = false
+        lifecyclePhase = .closed
+        terminalErrorsByHandle.removeAll(keepingCapacity: true)
         terminalErrorsByHandle[handleId] = SignalingError.notConnected
         emitLifecycle(
             phase: .closed,
@@ -668,11 +849,11 @@ public actor WebSocketSignalingClient {
     }
 
     private func handleErrored(handleId: SignalingHandleID, error: Error) async {
-        if currentHandle == handleId {
-            isSocketOpen = false
-            isBound = false
-            lifecyclePhase = .failed
-        }
+        guard currentHandle == handleId else { return }
+        isSocketOpen = false
+        isBound = false
+        lifecyclePhase = .failed
+        terminalErrorsByHandle.removeAll(keepingCapacity: true)
         terminalErrorsByHandle[handleId] = error
         emitLifecycle(
             phase: .failed,
@@ -715,10 +896,9 @@ public actor WebSocketSignalingClient {
     }
 
     private func cleanupNativeTransport() async {
-        if let nativeClient {
-            await nativeClient.close()
-        }
+        let client = nativeClient
         nativeClient = nil
+        await client?.close()
     }
 
     private func cleanupTransport(for backend: SignalingBackend) async {
@@ -807,6 +987,12 @@ public actor WebSocketSignalingClient {
         return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000.0
     }
 
+    private static func sessionIDsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        let normalizedLeft = lhs.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let normalizedRight = rhs.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return !normalizedLeft.isEmpty && normalizedLeft == normalizedRight
+    }
+
     private static func noProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
         [
             kCFProxyTypeKey as String: kCFProxyTypeNone as String,
@@ -826,6 +1012,7 @@ private final class ActorBox<T: Actor>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+#if DEBUG || SKYBRIDGE_TESTING
 @available(iOS 17.0, *)
 extension WebSocketSignalingClient {
     internal func testOnlyReserveNextHandleId(
@@ -846,6 +1033,7 @@ extension WebSocketSignalingClient {
         durationSeconds(.seconds(15))
     }
 }
+#endif
 
 private final class URLSessionSignalingDelegate: NSObject, URLSessionWebSocketDelegate {
     private let onOpen: @Sendable () -> Void

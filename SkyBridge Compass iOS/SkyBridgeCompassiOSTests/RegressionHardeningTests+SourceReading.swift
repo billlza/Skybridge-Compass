@@ -42,6 +42,16 @@ extension RegressionHardeningTests {
     return try readRepositorySource(at: sourceURL)
   }
 
+  func iosFileTransferRuntimeSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferRuntime.swift"
+    )
+    return try readRepositorySource(at: sourceURL)
+  }
+
   func remoteDesktopRuntimeModelsSource() throws -> String {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
@@ -252,12 +262,12 @@ extension RegressionHardeningTests {
     return try readRepositorySource(at: sourceURL)
   }
 
-  func smokeTraceWriterSource() throws -> String {
+  func diagnosticTraceSource() throws -> String {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
       .deletingLastPathComponent()
     let sourceURL = root.appendingPathComponent(
-      "SkyBridgeCompassiOS/Sources/Utilities/SkyBridgeSmokeTraceWriter.swift"
+      "SkyBridgeCompassiOS/Sources/Utilities/SkyBridgeDiagnosticTrace.swift"
     )
     return try readRepositorySource(at: sourceURL)
   }

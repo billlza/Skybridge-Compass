@@ -32,6 +32,30 @@ public enum RemoteControlSecurityNoticePhase: String, Codable, Sendable, Equatab
 }
 
 public struct RemoteControlSecurityIdentity: Codable, Sendable, Equatable {
+    private static let maximumAccountDisplayNameBytes = 320
+    private static let maximumNebulaIdBytes = 256
+    private static let maximumDeviceIdBytes = 256
+    private static let maximumDeviceNameBytes = 128
+
+    private enum CodingKeys: String, CodingKey {
+        case accountDisplayName
+        case nebulaId
+        case deviceId
+        case deviceName
+    }
+
+    private struct DecodedFields {
+        let accountDisplayName: String?
+        let nebulaId: String?
+        let deviceId: String?
+        let deviceName: String?
+    }
+
+    private struct ValidationFailure: Error {
+        let field: CodingKeys
+        let maximumLength: Int
+    }
+
     public let accountDisplayName: String?
     public let nebulaId: String?
     public let deviceId: String?
@@ -43,10 +67,44 @@ public struct RemoteControlSecurityIdentity: Codable, Sendable, Equatable {
         deviceId: String? = nil,
         deviceName: String? = nil
     ) {
-        self.accountDisplayName = Self.normalized(accountDisplayName)
-        self.nebulaId = Self.normalized(nebulaId)
-        self.deviceId = Self.normalized(deviceId)
-        self.deviceName = Self.normalized(deviceName)
+        self.accountDisplayName = Self.normalized(
+            accountDisplayName,
+            maximumLength: Self.maximumAccountDisplayNameBytes
+        )
+        self.nebulaId = Self.normalized(
+            nebulaId,
+            maximumLength: Self.maximumNebulaIdBytes
+        )
+        self.deviceId = Self.normalized(
+            deviceId,
+            maximumLength: Self.maximumDeviceIdBytes
+        )
+        self.deviceName = Self.normalized(
+            deviceName,
+            maximumLength: Self.maximumDeviceNameBytes
+        )
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let fields = DecodedFields(
+            accountDisplayName: try container.decodeIfPresent(
+                String.self,
+                forKey: .accountDisplayName
+            ),
+            nebulaId: try container.decodeIfPresent(String.self, forKey: .nebulaId),
+            deviceId: try container.decodeIfPresent(String.self, forKey: .deviceId),
+            deviceName: try container.decodeIfPresent(String.self, forKey: .deviceName)
+        )
+        do {
+            try self.init(validating: fields)
+        } catch let failure as ValidationFailure {
+            throw DecodingError.dataCorruptedError(
+                forKey: failure.field,
+                in: container,
+                debugDescription: "Remote-control security identity field \(failure.field.rawValue) must be non-empty, contain no control characters, and fit within \(failure.maximumLength) UTF-8 bytes."
+            )
+        }
     }
 
     public var isEmpty: Bool {
@@ -65,9 +123,50 @@ public struct RemoteControlSecurityIdentity: Codable, Sendable, Equatable {
         )
     }
 
-    private static func normalized(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
+    private init(validating fields: DecodedFields) throws {
+        accountDisplayName = try Self.validated(
+            fields.accountDisplayName,
+            field: .accountDisplayName,
+            maximumLength: Self.maximumAccountDisplayNameBytes
+        )
+        nebulaId = try Self.validated(
+            fields.nebulaId,
+            field: .nebulaId,
+            maximumLength: Self.maximumNebulaIdBytes
+        )
+        deviceId = try Self.validated(
+            fields.deviceId,
+            field: .deviceId,
+            maximumLength: Self.maximumDeviceIdBytes
+        )
+        deviceName = try Self.validated(
+            fields.deviceName,
+            field: .deviceName,
+            maximumLength: Self.maximumDeviceNameBytes
+        )
+    }
+
+    private static func validated(
+        _ value: String?,
+        field: CodingKeys,
+        maximumLength: Int
+    ) throws -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= maximumLength,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw ValidationFailure(field: field, maximumLength: maximumLength)
+        }
+        return trimmed
+    }
+
+    private static func normalized(_ value: String?, maximumLength: Int) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= maximumLength,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             return nil
         }
         return trimmed
@@ -75,6 +174,43 @@ public struct RemoteControlSecurityIdentity: Codable, Sendable, Equatable {
 }
 
 public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case sessionId
+        case transportKind
+        case remoteIPAddress
+        case remoteDeviceId
+        case remoteDeviceName
+        case remoteAccountDisplayName
+        case remoteNebulaId
+        case localAccountDisplayName
+        case localNebulaId
+        case cryptoSuite
+        case createdAt
+        case approvalTimeoutSeconds
+    }
+
+    private struct DecodedFields {
+        let id: UUID
+        let sessionId: String
+        let transportKind: RemoteControlTransportKind
+        let remoteIPAddress: String?
+        let remoteDeviceId: String?
+        let remoteDeviceName: String?
+        let remoteAccountDisplayName: String?
+        let remoteNebulaId: String?
+        let localAccountDisplayName: String?
+        let localNebulaId: String?
+        let cryptoSuite: String
+        let createdAt: Date
+        let approvalTimeoutSeconds: TimeInterval
+    }
+
+    private struct ValidationFailure: Error {
+        let field: CodingKeys
+        let maximumLength: Int
+    }
+
     public let id: UUID
     public let sessionId: String
     public let transportKind: RemoteControlTransportKind
@@ -105,18 +241,68 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         approvalTimeoutSeconds: TimeInterval = 45
     ) {
         self.id = id
-        self.sessionId = Self.normalized(sessionId) ?? id.uuidString
+        self.sessionId = Self.normalized(sessionId, maximumLength: 256) ?? ""
         self.transportKind = transportKind
-        self.remoteIPAddress = Self.normalized(remoteIPAddress)
-        self.remoteDeviceId = Self.normalized(remoteDeviceId)
-        self.remoteDeviceName = Self.normalized(remoteDeviceName)
-        self.remoteAccountDisplayName = Self.normalized(remoteAccountDisplayName)
-        self.remoteNebulaId = Self.normalized(remoteNebulaId)
-        self.localAccountDisplayName = Self.normalized(localAccountDisplayName)
-        self.localNebulaId = Self.normalized(localNebulaId)
-        self.cryptoSuite = Self.normalized(cryptoSuite) ?? "missing"
+        self.remoteIPAddress = Self.normalized(remoteIPAddress, maximumLength: 256)
+        self.remoteDeviceId = Self.normalized(remoteDeviceId, maximumLength: 256)
+        self.remoteDeviceName = Self.normalized(remoteDeviceName, maximumLength: 128)
+        self.remoteAccountDisplayName = Self.normalized(remoteAccountDisplayName, maximumLength: 320)
+        self.remoteNebulaId = Self.normalized(remoteNebulaId, maximumLength: 256)
+        self.localAccountDisplayName = Self.normalized(localAccountDisplayName, maximumLength: 320)
+        self.localNebulaId = Self.normalized(localNebulaId, maximumLength: 256)
+        self.cryptoSuite = Self.normalized(cryptoSuite, maximumLength: 64) ?? "missing"
         self.createdAt = createdAt
-        self.approvalTimeoutSeconds = max(1, approvalTimeoutSeconds)
+        let finiteTimeout = approvalTimeoutSeconds.isFinite ? approvalTimeoutSeconds : 45
+        self.approvalTimeoutSeconds = min(max(1, finiteTimeout), 120)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedApprovalTimeout = try container.decode(
+            TimeInterval.self,
+            forKey: .approvalTimeoutSeconds
+        )
+        guard decodedApprovalTimeout.isFinite,
+              (1...120).contains(decodedApprovalTimeout) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .approvalTimeoutSeconds,
+                in: container,
+                debugDescription: "Remote-control approval timeout must be finite and within 1...120 seconds."
+            )
+        }
+        let fields = DecodedFields(
+            id: try container.decode(UUID.self, forKey: .id),
+            sessionId: try container.decode(String.self, forKey: .sessionId),
+            transportKind: try container.decode(
+                RemoteControlTransportKind.self,
+                forKey: .transportKind
+            ),
+            remoteIPAddress: try container.decodeIfPresent(String.self, forKey: .remoteIPAddress),
+            remoteDeviceId: try container.decodeIfPresent(String.self, forKey: .remoteDeviceId),
+            remoteDeviceName: try container.decodeIfPresent(String.self, forKey: .remoteDeviceName),
+            remoteAccountDisplayName: try container.decodeIfPresent(
+                String.self,
+                forKey: .remoteAccountDisplayName
+            ),
+            remoteNebulaId: try container.decodeIfPresent(String.self, forKey: .remoteNebulaId),
+            localAccountDisplayName: try container.decodeIfPresent(
+                String.self,
+                forKey: .localAccountDisplayName
+            ),
+            localNebulaId: try container.decodeIfPresent(String.self, forKey: .localNebulaId),
+            cryptoSuite: try container.decode(String.self, forKey: .cryptoSuite),
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            approvalTimeoutSeconds: decodedApprovalTimeout
+        )
+        do {
+            try self.init(validating: fields)
+        } catch let failure as ValidationFailure {
+            throw DecodingError.dataCorruptedError(
+                forKey: failure.field,
+                in: container,
+                debugDescription: "Remote-control security descriptor field \(failure.field.rawValue) must be non-empty, contain no control characters, and fit within \(failure.maximumLength) UTF-8 bytes."
+            )
+        }
     }
 
     public func updatingCryptoSuite(_ cryptoSuite: String) -> Self {
@@ -139,6 +325,9 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
 
     public var missingRequiredNoticeMetadata: [String] {
         var missing: [String] = []
+        if !Self.isPresentForNotice(sessionId) {
+            missing.append("session_id")
+        }
         if !Self.isPresentForNotice(remoteIPAddress) {
             missing.append("remote_ip")
         }
@@ -158,9 +347,83 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         return missing
     }
 
-    private static func normalized(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
+    private init(validating fields: DecodedFields) throws {
+        id = fields.id
+        guard let validatedSessionId = try Self.validated(
+            fields.sessionId,
+            field: .sessionId,
+            maximumLength: 256
+        ),
+        let validatedCryptoSuite = try Self.validated(
+            fields.cryptoSuite,
+            field: .cryptoSuite,
+            maximumLength: 64
+        ) else {
+            throw ValidationFailure(field: .sessionId, maximumLength: 256)
+        }
+        sessionId = validatedSessionId
+        transportKind = fields.transportKind
+        remoteIPAddress = try Self.validated(
+            fields.remoteIPAddress,
+            field: .remoteIPAddress,
+            maximumLength: 256
+        )
+        remoteDeviceId = try Self.validated(
+            fields.remoteDeviceId,
+            field: .remoteDeviceId,
+            maximumLength: 256
+        )
+        remoteDeviceName = try Self.validated(
+            fields.remoteDeviceName,
+            field: .remoteDeviceName,
+            maximumLength: 128
+        )
+        remoteAccountDisplayName = try Self.validated(
+            fields.remoteAccountDisplayName,
+            field: .remoteAccountDisplayName,
+            maximumLength: 320
+        )
+        remoteNebulaId = try Self.validated(
+            fields.remoteNebulaId,
+            field: .remoteNebulaId,
+            maximumLength: 256
+        )
+        localAccountDisplayName = try Self.validated(
+            fields.localAccountDisplayName,
+            field: .localAccountDisplayName,
+            maximumLength: 320
+        )
+        localNebulaId = try Self.validated(
+            fields.localNebulaId,
+            field: .localNebulaId,
+            maximumLength: 256
+        )
+        cryptoSuite = validatedCryptoSuite
+        createdAt = fields.createdAt
+        approvalTimeoutSeconds = fields.approvalTimeoutSeconds
+    }
+
+    private static func validated(
+        _ value: String?,
+        field: CodingKeys,
+        maximumLength: Int
+    ) throws -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= maximumLength,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw ValidationFailure(field: field, maximumLength: maximumLength)
+        }
+        return trimmed
+    }
+
+    private static func normalized(_ value: String?, maximumLength: Int) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.utf8.count <= maximumLength,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             return nil
         }
         return trimmed
@@ -248,49 +511,285 @@ private final class RemoteControlSecurityIdentityStorage: @unchecked Sendable {
 
 private let remoteControlSecurityIdentityStorage = RemoteControlSecurityIdentityStorage()
 
-private final class RemoteControlSecurityPeerIdentityStorage: @unchecked Sendable {
-    private let lock = NSLock()
-    private var identitiesByAlias: [String: RemoteControlSecurityIdentity] = [:]
+final class RemoteControlSecurityPeerIdentityStorage: @unchecked Sendable {
+    private enum BindingStrength: Int, Hashable {
+        case weak
+        case authenticatedPrimary
+    }
 
+    private struct Binding: Hashable {
+        let primaryKey: String
+        let epoch: UUID
+        let strength: BindingStrength
+    }
+
+    private struct Record {
+        let identity: RemoteControlSecurityIdentity
+        let epoch: UUID
+        let expiresAt: Date
+        var lastAccessedAt: Date
+        let aliases: Set<String>
+    }
+
+    private let lock = NSLock()
+    private let timeToLive: TimeInterval
+    private let maximumRecordCount: Int
+    private let maximumAliasesPerRecord: Int
+    private let now: @Sendable () -> Date
+    private var recordsByPrimaryKey: [String: Record] = [:]
+    private var bindingsByAlias: [String: Set<Binding>] = [:]
+
+    init(
+        timeToLive: TimeInterval = 10 * 60,
+        maximumRecordCount: Int = 256,
+        maximumAliasesPerRecord: Int = 32,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        precondition(timeToLive.isFinite && timeToLive > 0)
+        precondition(maximumRecordCount > 0)
+        precondition(maximumAliasesPerRecord > 0)
+        self.timeToLive = timeToLive
+        self.maximumRecordCount = maximumRecordCount
+        self.maximumAliasesPerRecord = maximumAliasesPerRecord
+        self.now = now
+    }
+
+    @discardableResult
     func record(
         identity: RemoteControlSecurityIdentity,
         aliases rawAliases: [String]
-    ) {
-        guard !identity.isEmpty else { return }
-        let aliases = Self.normalizedAliases(
-            rawAliases + [identity.deviceId, identity.deviceName].compactMap { $0 }
+    ) -> Bool {
+        guard !identity.isEmpty,
+              let primary = Self.authenticatedPrimary(identity: identity, aliases: rawAliases) else {
+            return false
+        }
+        let allAliases = Self.normalizedAliases(
+            [identity.deviceId].compactMap { $0 }
+                + rawAliases
+                + [identity.deviceName].compactMap { $0 },
+            maximumCount: maximumAliasesPerRecord
         )
-        guard !aliases.isEmpty else { return }
+        guard !allAliases.isEmpty else { return false }
+        let primaryAliases = Set(
+            Self.normalizedAliases(primary.sourceAliases, maximumCount: maximumAliasesPerRecord)
+        )
+        let currentTime = now()
+        let epoch = UUID()
 
         lock.lock()
-        let merged = aliases.reduce(identity) { result, alias in
-            identitiesByAlias[alias]?.merging(result) ?? result
+        defer { lock.unlock() }
+        pruneExpiredLocked(at: currentTime)
+        removeRecordLocked(primaryKey: primary.key)
+        if recordsByPrimaryKey.count >= maximumRecordCount {
+            evictLeastRecentlyUsedLocked()
         }
-        for alias in aliases {
-            identitiesByAlias[alias] = merged
+
+        let aliasSet = Set(allAliases)
+        recordsByPrimaryKey[primary.key] = Record(
+            identity: identity,
+            epoch: epoch,
+            expiresAt: currentTime.addingTimeInterval(timeToLive),
+            lastAccessedAt: currentTime,
+            aliases: aliasSet
+        )
+        for alias in aliasSet {
+            let strength: BindingStrength = primaryAliases.contains(alias)
+                ? .authenticatedPrimary
+                : .weak
+            bindingsByAlias[alias, default: []].insert(
+                Binding(primaryKey: primary.key, epoch: epoch, strength: strength)
+            )
         }
-        lock.unlock()
+        return true
     }
 
     func identity(forAliases rawAliases: [String]) -> RemoteControlSecurityIdentity? {
-        let aliases = Self.normalizedAliases(rawAliases)
+        let aliases = Self.normalizedAliases(
+            rawAliases,
+            maximumCount: maximumAliasesPerRecord
+        )
         guard !aliases.isEmpty else { return nil }
+        let currentTime = now()
 
         lock.lock()
-        let identity = aliases.lazy
-            .compactMap { self.identitiesByAlias[$0] }
-            .first { !$0.isEmpty }
-        lock.unlock()
-        return identity
+        defer { lock.unlock() }
+        pruneExpiredLocked(at: currentTime)
+
+        let liveBindings = aliases.flatMap { alias in
+            bindingsByAlias[alias, default: []].filter(isLiveBindingLocked)
+        }
+        let strongPrimaryKeys = Set(
+            liveBindings
+                .filter { $0.strength == .authenticatedPrimary }
+                .map(\.primaryKey)
+        )
+        let candidatePrimaryKeys = strongPrimaryKeys.isEmpty
+            ? Set(liveBindings.map(\.primaryKey))
+            : strongPrimaryKeys
+        guard candidatePrimaryKeys.count == 1,
+              let primaryKey = candidatePrimaryKeys.first,
+              var record = recordsByPrimaryKey[primaryKey] else {
+            return nil
+        }
+        record.lastAccessedAt = currentTime
+        recordsByPrimaryKey[primaryKey] = record
+        return record.identity
     }
 
-    private static func normalizedAliases(_ rawAliases: [String]) -> [String] {
+    func clear(forAliases rawAliases: [String]) {
+        let aliases = Self.normalizedAliases(
+            rawAliases,
+            maximumCount: maximumAliasesPerRecord
+        )
+        guard !aliases.isEmpty else { return }
+        let currentTime = now()
+
+        lock.lock()
+        defer { lock.unlock() }
+        pruneExpiredLocked(at: currentTime)
+        let liveBindings = aliases.flatMap { alias in
+            bindingsByAlias[alias, default: []].filter(isLiveBindingLocked)
+        }
+        let strongPrimaryKeys = Set(
+            liveBindings
+                .filter { $0.strength == .authenticatedPrimary }
+                .map(\.primaryKey)
+        )
+        let candidatePrimaryKeys = strongPrimaryKeys.isEmpty
+            ? Set(liveBindings.map(\.primaryKey))
+            : strongPrimaryKeys
+        guard candidatePrimaryKeys.count == 1,
+              let primaryKey = candidatePrimaryKeys.first else {
+            return
+        }
+        removeRecordLocked(primaryKey: primaryKey)
+    }
+
+    var recordCount: Int {
+        let currentTime = now()
+        lock.lock()
+        defer { lock.unlock() }
+        pruneExpiredLocked(at: currentTime)
+        return recordsByPrimaryKey.count
+    }
+
+    private func isLiveBindingLocked(_ binding: Binding) -> Bool {
+        guard let record = recordsByPrimaryKey[binding.primaryKey] else { return false }
+        return record.epoch == binding.epoch
+    }
+
+    private func pruneExpiredLocked(at currentTime: Date) {
+        let expired = recordsByPrimaryKey.compactMap { primaryKey, record in
+            record.expiresAt <= currentTime ? primaryKey : nil
+        }
+        for primaryKey in expired {
+            removeRecordLocked(primaryKey: primaryKey)
+        }
+    }
+
+    private func evictLeastRecentlyUsedLocked() {
+        guard let primaryKey = recordsByPrimaryKey.min(by: { left, right in
+            if left.value.lastAccessedAt == right.value.lastAccessedAt {
+                return left.key < right.key
+            }
+            return left.value.lastAccessedAt < right.value.lastAccessedAt
+        })?.key else {
+            return
+        }
+        removeRecordLocked(primaryKey: primaryKey)
+    }
+
+    private func removeRecordLocked(primaryKey: String) {
+        guard let record = recordsByPrimaryKey.removeValue(forKey: primaryKey) else { return }
+        for alias in record.aliases {
+            guard var bindings = bindingsByAlias[alias] else { continue }
+            bindings = Set(bindings.filter { $0.primaryKey != primaryKey })
+            if bindings.isEmpty {
+                bindingsByAlias.removeValue(forKey: alias)
+            } else {
+                bindingsByAlias[alias] = bindings
+            }
+        }
+    }
+
+    private static func authenticatedPrimary(
+        identity: RemoteControlSecurityIdentity,
+        aliases: [String]
+    ) -> (key: String, sourceAliases: [String])? {
+        if let deviceID = normalizedStableDeviceID(identity.deviceId) {
+            return (
+                key: "device:\(deviceID)",
+                sourceAliases: [deviceID, "id:\(deviceID)"]
+            )
+        }
+        for alias in aliases {
+            if let fingerprint = normalizedFingerprint(alias) {
+                return (
+                    key: "fingerprint:\(fingerprint)",
+                    sourceAliases: [fingerprint, "fp:\(fingerprint)"]
+                )
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedStableDeviceID(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.hasPrefix("id:") {
+            value = String(value.dropFirst(3))
+        }
+        guard (8...256).contains(value.count),
+              !value.contains(where: \.isWhitespace),
+              value.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && (
+                      CharacterSet.alphanumerics.contains(scalar)
+                          || scalar == "-" || scalar == "_" || scalar == "."
+                  )
+              }),
+              !isLiteralIPv4(value) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func normalizedFingerprint(_ raw: String) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("fp:") {
+            value = String(value.dropFirst(3))
+        } else if value.hasPrefix("fingerprint:") {
+            value = String(value.dropFirst("fingerprint:".count))
+        } else {
+            return nil
+        }
+        guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+        return value
+    }
+
+    private static func isLiteralIPv4(_ raw: String) -> Bool {
+        let components = raw.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4 else { return false }
+        return components.allSatisfy { component in
+            guard let value = UInt8(component) else { return false }
+            return String(value) == component || component == "0"
+        }
+    }
+
+    private static func normalizedAliases(
+        _ rawAliases: [String],
+        maximumCount: Int
+    ) -> [String] {
         var aliases: [String] = []
         var seen = Set<String>()
 
         func append(_ raw: String?) {
             guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty else {
+                  !raw.isEmpty,
+                  raw.count <= 512,
+                  aliases.count < maximumCount,
+                  !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
                 return
             }
             let normalized = raw.lowercased()
@@ -329,11 +828,15 @@ public enum RemoteControlSecurityPeerIdentityStore {
         identity: RemoteControlSecurityIdentity,
         aliases: [String]
     ) {
-        remoteControlSecurityPeerIdentityStorage.record(identity: identity, aliases: aliases)
+        _ = remoteControlSecurityPeerIdentityStorage.record(identity: identity, aliases: aliases)
     }
 
     public static func identity(forAliases aliases: [String]) -> RemoteControlSecurityIdentity? {
         remoteControlSecurityPeerIdentityStorage.identity(forAliases: aliases)
+    }
+
+    public static func clear(forAliases aliases: [String]) {
+        remoteControlSecurityPeerIdentityStorage.clear(forAliases: aliases)
     }
 }
 
@@ -440,6 +943,12 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         disconnectHandlers[noticeId] = handler
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
+    var disconnectHandlerCountForTesting: Int {
+        disconnectHandlers.count
+    }
+#endif
+
     public func recordPanelPresentedEvidence(
         descriptor: RemoteControlSecurityDescriptor,
         phase: RemoteControlSecurityNoticePhase,
@@ -484,10 +993,38 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         if let notice = currentNotice, notice.phase == .active {
             if notice.descriptor.sessionId == descriptor.sessionId,
                notice.descriptor.transportKind == descriptor.transportKind {
+                guard Self.securityIdentityMatches(
+                    notice.descriptor,
+                    descriptor
+                ) else {
+                    appendIdentityMutationRejectedEvidence(
+                        descriptor: descriptor,
+                        activeDescriptor: notice.descriptor
+                    )
+                    cleanupIncomingNoticeState(
+                        id: descriptor.id,
+                        preservingActiveNoticeId: notice.id
+                    )
+                    disconnectCurrentNotice()
+                    return .rejected
+                }
+                guard !descriptor.missingRequiredNoticeMetadata.contains("crypto_suite") else {
+                    appendInvalidCryptoUpdateEvidence(descriptor: descriptor)
+                    cleanupIncomingNoticeState(
+                        id: descriptor.id,
+                        preservingActiveNoticeId: notice.id
+                    )
+                    disconnectCurrentNotice()
+                    return .rejected
+                }
                 updateCryptoSuite(
                     descriptor.cryptoSuite,
                     sessionId: descriptor.sessionId,
                     transportKind: descriptor.transportKind
+                )
+                cleanupIncomingNoticeState(
+                    id: descriptor.id,
+                    preservingActiveNoticeId: notice.id
                 )
                 return .approved
             }
@@ -495,6 +1032,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             appendConcurrentRequestRejectedEvidence(
                 descriptor: descriptor,
                 activeDescriptor: notice.descriptor
+            )
+            clearPeerIdentity(for: descriptor)
+            cleanupIncomingNoticeState(
+                id: descriptor.id,
+                preservingActiveNoticeId: notice.id
             )
             return .rejected
         }
@@ -505,6 +1047,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
                 descriptor: descriptor,
                 missingMetadata: missingMetadata
             )
+            clearPeerIdentity(for: descriptor)
             cleanupNoticeState(id: descriptor.id)
             return .rejected
         }
@@ -516,32 +1059,39 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             phase: .awaitingApproval
         )
 
-        if Self.shouldAutoApproveForSmoke() {
-            currentNotice = notice
-            appendEvidence(event: "Shown", descriptor: descriptor)
-            currentNotice = notice.updatingPhase(.active, approvedAt: Date())
-            appendEvidence(event: "Approved", descriptor: descriptor)
-            appendEvidence(event: "Active", descriptor: descriptor)
-            return .approved
-        }
-
-        return await withCheckedContinuation { continuation in
-            approvalContinuations[descriptor.id] = continuation
-            timeoutTasks[descriptor.id] = Task { @MainActor [weak self] in
-                let nanoseconds = UInt64(descriptor.approvalTimeoutSeconds * 1_000_000_000)
-                do {
-                    try await Task.sleep(nanoseconds: nanoseconds)
-                } catch {
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    cleanupNoticeState(id: descriptor.id)
+                    continuation.resume(returning: .disconnected)
                     return
                 }
-                guard !Task.isCancelled else { return }
-                self?.resolvePendingNotice(
+                approvalContinuations[descriptor.id] = continuation
+                timeoutTasks[descriptor.id] = Task { @MainActor [weak self] in
+                    let nanoseconds = UInt64(descriptor.approvalTimeoutSeconds * 1_000_000_000)
+                    do {
+                        try await Task.sleep(nanoseconds: nanoseconds)
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    self?.resolvePendingNotice(
+                        id: descriptor.id,
+                        decision: .timedOut
+                    )
+                }
+                currentNotice = notice
+                appendEvidence(event: "Shown", descriptor: descriptor)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.approvalContinuations[descriptor.id] != nil else { return }
+                self.resolvePendingNotice(
                     id: descriptor.id,
-                    decision: .timedOut
+                    decision: .disconnected
                 )
             }
-            currentNotice = notice
-            appendEvidence(event: "Shown", descriptor: descriptor)
         }
     }
 
@@ -553,9 +1103,35 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         resolveContinuation(id: notice.id, decision: .approved)
     }
 
+    /// Approval entry point reserved for the real user-facing panel action.
+    ///
+    /// Programmatic smoke helpers continue to use `approveCurrentNotice()` and therefore cannot
+    /// manufacture the `HumanApproved` evidence required by release acceptance.
+    private func approveCurrentNoticeFromUserInteraction() {
+        guard let notice = currentNotice, notice.phase == .awaitingApproval else { return }
+        appendEvidence(event: "HumanApproved", descriptor: notice.descriptor)
+        approveCurrentNotice()
+    }
+
+    public func approveNotice(id: UUID) {
+        guard currentNotice?.id == id else { return }
+        approveCurrentNotice()
+    }
+
+    @_spi(RemoteControlSecurityNoticeUI)
+    public func approveNoticeFromUserInteraction(id: UUID) {
+        guard currentNotice?.id == id else { return }
+        approveCurrentNoticeFromUserInteraction()
+    }
+
     public func rejectCurrentNotice() {
         guard let notice = currentNotice else { return }
         resolvePendingNotice(id: notice.id, decision: .rejected)
+    }
+
+    public func rejectNotice(id: UUID) {
+        guard currentNotice?.id == id else { return }
+        rejectCurrentNotice()
     }
 
     public func closeCurrentNoticeFailClosed() {
@@ -568,11 +1144,17 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         }
     }
 
+    public func closeNoticeFailClosed(id: UUID) {
+        guard currentNotice?.id == id else { return }
+        closeCurrentNoticeFailClosed()
+    }
+
     public func disconnectCurrentNotice() {
         guard let notice = currentNotice else { return }
         let handler = notice.phase == .active ? disconnectHandlers[notice.id] : nil
         appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
         currentNotice = nil
+        clearPeerIdentity(for: notice.descriptor)
         if notice.phase == .awaitingApproval {
             resolveContinuation(id: notice.id, decision: .disconnected)
             cleanupNoticeState(id: notice.id)
@@ -580,6 +1162,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         }
         cleanupNoticeState(id: notice.id)
         handler?()
+    }
+
+    public func disconnectNotice(id: UUID) {
+        guard currentNotice?.id == id else { return }
+        disconnectCurrentNotice()
     }
 
     public func endNotice(
@@ -596,6 +1183,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         } else {
             appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
             currentNotice = nil
+            clearPeerIdentity(for: notice.descriptor)
             cleanupNoticeState(id: notice.id)
         }
     }
@@ -611,6 +1199,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             return
         }
         let descriptor = notice.descriptor.updatingCryptoSuite(cryptoSuite)
+        guard !descriptor.missingRequiredNoticeMetadata.contains("crypto_suite") else {
+            appendInvalidCryptoUpdateEvidence(descriptor: descriptor)
+            disconnectCurrentNotice()
+            return
+        }
         currentNotice = notice.updatingDescriptor(descriptor)
         appendEvidence(event: "CryptoUpdated", descriptor: descriptor)
     }
@@ -637,12 +1230,15 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             appendEvidence(event: "Active", descriptor: notice.descriptor)
         case .rejected:
             appendEvidence(event: "Rejected", descriptor: notice.descriptor)
+            clearPeerIdentity(for: notice.descriptor)
             currentNotice = nil
         case .timedOut:
             appendEvidence(event: "TimedOut", descriptor: notice.descriptor)
+            clearPeerIdentity(for: notice.descriptor)
             currentNotice = nil
         case .disconnected:
             appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
+            clearPeerIdentity(for: notice.descriptor)
             currentNotice = nil
         }
 
@@ -666,10 +1262,12 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         disconnectHandlers.removeValue(forKey: id)
     }
 
-    private static func shouldAutoApproveForSmoke() -> Bool {
-        let environment = ProcessInfo.processInfo.environment
-        guard environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return false }
-        return environment["SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE"] == "1"
+    private func cleanupIncomingNoticeState(
+        id: UUID,
+        preservingActiveNoticeId: UUID
+    ) {
+        guard id != preservingActiveNoticeId else { return }
+        cleanupNoticeState(id: id)
     }
 
     private func appendEvidence(
@@ -681,6 +1279,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             remoteControlNotice\(event) session=\(Self.statusValue(descriptor.sessionId)) \
             transport=\(descriptor.transportKind.evidenceValue) \
             remoteIP=\(Self.statusValue(descriptor.remoteIPAddress)) \
+            remoteDeviceId=\(Self.statusValue(descriptor.remoteDeviceId)) \
             remoteAccount=\(Self.maskedStatusValue(descriptor.remoteAccountDisplayName)) \
             remoteNebula=\(Self.maskedStatusValue(descriptor.remoteNebulaId)) \
             localAccount=\(Self.maskedStatusValue(descriptor.localAccountDisplayName)) \
@@ -706,6 +1305,32 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         )
     }
 
+    private func appendIdentityMutationRejectedEvidence(
+        descriptor: RemoteControlSecurityDescriptor,
+        activeDescriptor: RemoteControlSecurityDescriptor
+    ) {
+        RemoteControlSmokeStatusWriter.append(
+            """
+            remoteControlNoticeIdentityMutationRejected session=\(Self.statusValue(descriptor.sessionId)) \
+            transport=\(descriptor.transportKind.evidenceValue) \
+            activeNotice=\(activeDescriptor.id.uuidString) \
+            reason=security_identity_changed
+            """
+        )
+    }
+
+    private func appendInvalidCryptoUpdateEvidence(
+        descriptor: RemoteControlSecurityDescriptor
+    ) {
+        RemoteControlSmokeStatusWriter.append(
+            """
+            remoteControlNoticeCryptoUpdateRejected session=\(Self.statusValue(descriptor.sessionId)) \
+            transport=\(descriptor.transportKind.evidenceValue) \
+            reason=invalid_or_non_pqc_suite
+            """
+        )
+    }
+
     private func appendMissingMetadataRejectedEvidence(
         descriptor: RemoteControlSecurityDescriptor,
         missingMetadata: [String]
@@ -718,6 +1343,30 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             missing=\(Self.statusValue(missingMetadata.joined(separator: ",")))
             """
         )
+    }
+
+    private func clearPeerIdentity(for descriptor: RemoteControlSecurityDescriptor) {
+        RemoteControlSecurityPeerIdentityStore.clear(
+            forAliases: [
+                descriptor.remoteDeviceId,
+                descriptor.sessionId,
+                descriptor.remoteIPAddress,
+                descriptor.remoteDeviceName
+            ].compactMap { $0 }
+        )
+    }
+
+    private static func securityIdentityMatches(
+        _ active: RemoteControlSecurityDescriptor,
+        _ candidate: RemoteControlSecurityDescriptor
+    ) -> Bool {
+        active.remoteIPAddress == candidate.remoteIPAddress
+            && active.remoteDeviceId == candidate.remoteDeviceId
+            && active.remoteDeviceName == candidate.remoteDeviceName
+            && active.remoteAccountDisplayName == candidate.remoteAccountDisplayName
+            && active.remoteNebulaId == candidate.remoteNebulaId
+            && active.localAccountDisplayName == candidate.localAccountDisplayName
+            && active.localNebulaId == candidate.localNebulaId
     }
 
     private static func statusValue(_ value: String?) -> String {

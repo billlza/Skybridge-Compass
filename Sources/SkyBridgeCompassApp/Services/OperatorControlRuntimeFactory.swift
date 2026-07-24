@@ -82,12 +82,25 @@ enum OperatorControlRuntimeFactory {
 
     @MainActor
     static func authState() -> CrossnetControlAuthState {
-        let accessToken = AuthenticationService.shared.currentAccessToken()
-            ?? TenantAccessController.shared.accessToken
+        let session = AuthenticationService.shared.currentSessionSnapshot()
+        let accessToken = session?.accessToken ?? TenantAccessController.shared.accessToken
         let trimmedToken = accessToken?.trimmingCharacters(in: .whitespacesAndNewlines)
         let authLoaded = trimmedToken?.isEmpty == false
-        let derivedTenant = CrossNetworkConnectionManager.deriveTenantIdentifier(accessToken: accessToken)
-        let tenantBound = !derivedTenant.isEmpty || TenantAccessController.shared.activeTenant != nil
+        let tenantBound: Bool
+        do {
+            let resolvedTenant = try CrossNetworkConnectionManager.resolveTenantIdentifier(
+                accessToken: accessToken,
+                explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"],
+                sessionTenantID: session?.nebulaId
+                    ?? TenantAccessController.shared.activeTenant?.id.uuidString,
+                sessionUserIdentifier: session?.userIdentifier
+            )
+            tenantBound = !resolvedTenant.isEmpty
+        } catch {
+            // This is a read-only status projection. Invalid identity binding is represented as
+            // unbound; admission uses the throwing resolver and preserves the concrete error.
+            tenantBound = false
+        }
         return CrossnetControlAuthState(authLoaded: authLoaded, tenantBound: tenantBound)
     }
 }

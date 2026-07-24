@@ -24,7 +24,9 @@ extension CrossNetworkWebRTCManager {
                 if Self.startsWithKnownDirectEnvelope(buffer, at: readOffset) {
                     let bufferedBytes = buffer.count - readOffset
                     let prefixEnd = min(buffer.count, readOffset + 8)
-                    let prefix = buffer[readOffset..<prefixEnd]
+                    let prefixStartIndex = buffer.index(buffer.startIndex, offsetBy: readOffset)
+                    let prefixEndIndex = buffer.index(buffer.startIndex, offsetBy: prefixEnd)
+                    let prefix = buffer[prefixStartIndex..<prefixEndIndex]
                         .map { String(format: "%02x", $0) }
                         .joined()
                     let magic = Self.knownDirectEnvelopeName(buffer, at: readOffset) ?? "unknown"
@@ -46,7 +48,9 @@ extension CrossNetworkWebRTCManager {
                 guard length > 0 && length <= maxInboundFrameBytes else {
                     let bufferedBytes = buffer.count - readOffset
                     let prefixEnd = min(buffer.count, readOffset + 8)
-                    let prefix = buffer[readOffset..<prefixEnd]
+                    let prefixStartIndex = buffer.index(buffer.startIndex, offsetBy: readOffset)
+                    let prefixEndIndex = buffer.index(buffer.startIndex, offsetBy: prefixEnd)
+                    let prefix = buffer[prefixStartIndex..<prefixEndIndex]
                         .map { String(format: "%02x", $0) }
                         .joined()
                     SkyBridgeLogger.shared.warning(
@@ -66,7 +70,9 @@ extension CrossNetworkWebRTCManager {
 
                 let start = readOffset + 4
                 let end = start + length
-                let payload = buffer.subdata(in: start..<end)
+                let payloadStart = buffer.index(buffer.startIndex, offsetBy: start)
+                let payloadEnd = buffer.index(buffer.startIndex, offsetBy: end)
+                let payload = buffer.subdata(in: payloadStart..<payloadEnd)
                 readOffset = end
                 compact()
                 return payload
@@ -83,7 +89,8 @@ extension CrossNetworkWebRTCManager {
             }
 
             if readOffset > 0, (readOffset >= 4096 || readOffset * 2 >= buffer.count) {
-                buffer.removeSubrange(0..<readOffset)
+                let consumedEnd = buffer.index(buffer.startIndex, offsetBy: readOffset)
+                buffer.removeSubrange(buffer.startIndex..<consumedEnd)
                 readOffset = 0
             }
 
@@ -113,8 +120,10 @@ extension CrossNetworkWebRTCManager {
         }
 
         static func knownDirectEnvelopeName(_ data: Data, at offset: Int = 0) -> String? {
-            guard data.count - offset >= 4 else { return nil }
-            let magic = data[offset..<offset + 4]
+            guard offset >= 0, offset <= data.count - 4 else { return nil }
+            let magicStart = data.index(data.startIndex, offsetBy: offset)
+            let magicEnd = data.index(magicStart, offsetBy: 4)
+            let magic = data[magicStart..<magicEnd]
             if magic.elementsEqual([0x53, 0x42, 0x50, 0x32]) { return "SBP2" } // traffic padding
             if magic.elementsEqual([0x53, 0x42, 0x52, 0x46]) { return "SBRF" } // screen frame
             if magic.elementsEqual([0x53, 0x42, 0x52, 0x41]) { return "SBRA" } // audio frame
@@ -280,7 +289,7 @@ extension CrossNetworkWebRTCManager {
         static func decode(_ data: Data) -> ScreenChunkedPayloadEnvelope? {
             guard data.count >= headerLength,
                   readUInt32(data, at: 0) == magic,
-                  data[4] == version,
+                  byte(in: data, at: 4) == version,
                   Int(readUInt16(data, at: 6)) == headerLength else {
                 return nil
             }
@@ -294,7 +303,8 @@ extension CrossNetworkWebRTCManager {
             let chunkCount = Int(readUInt32(data, at: 20))
             let totalBytes = Int(readUInt32(data, at: 24))
             let chunkOffset = Int(readUInt32(data, at: 28))
-            let payload = data.subdata(in: headerLength..<data.count)
+            let payloadStart = data.index(data.startIndex, offsetBy: headerLength)
+            let payload = data.subdata(in: payloadStart..<data.endIndex)
             return ScreenChunkedPayloadEnvelope(
                 frameId: frameId,
                 chunkIndex: chunkIndex,
@@ -311,6 +321,10 @@ extension CrossNetworkWebRTCManager {
                 let b1 = UInt16(ptr.load(fromByteOffset: offset + 1, as: UInt8.self))
                 return (b0 << 8) | b1
             }
+        }
+
+        private static func byte(in data: Data, at offset: Int) -> UInt8 {
+            data[data.index(data.startIndex, offsetBy: offset)]
         }
 
         private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
@@ -343,8 +357,10 @@ extension CrossNetworkWebRTCManager {
         }
 
         private let maxFrameBytes: Int
+        private let maxChunkCount = 2_048
         private var frameId: UInt64?
         private var suppressedFrameReasons: [UInt64: String] = [:]
+        private var suppressedFrameOrder: [UInt64] = []
         private var expectedChunkCount: Int = 0
         private var expectedTotalBytes: Int = 0
         private var nextChunkIndex: Int = 0
@@ -372,6 +388,7 @@ extension CrossNetworkWebRTCManager {
 
         private mutating func clearSuppressedFrame() {
             suppressedFrameReasons.removeAll(keepingCapacity: true)
+            suppressedFrameOrder.removeAll(keepingCapacity: true)
         }
 
         private mutating func drop(
@@ -381,7 +398,13 @@ extension CrossNetworkWebRTCManager {
         ) -> Result {
             reset(clearSuppression: orphanFrameIds.isEmpty)
             for orphanFrameId in orphanFrameIds {
+                if suppressedFrameReasons[orphanFrameId] == nil {
+                    suppressedFrameOrder.append(orphanFrameId)
+                }
                 suppressedFrameReasons[orphanFrameId] = reason
+            }
+            while suppressedFrameOrder.count > 2 {
+                suppressedFrameReasons.removeValue(forKey: suppressedFrameOrder.removeFirst())
             }
             return .dropped(reason: reason, frameId: droppedFrameId)
         }
@@ -419,10 +442,13 @@ extension CrossNetworkWebRTCManager {
             }
 
             guard envelope.chunkCount > 0,
+                  envelope.chunkCount <= maxChunkCount,
+                  envelope.chunkCount <= envelope.totalBytes,
                   envelope.chunkIndex >= 0,
                   envelope.chunkIndex < envelope.chunkCount,
                   envelope.totalBytes > 0,
                   envelope.totalBytes <= maxFrameBytes,
+                  !envelope.payload.isEmpty,
                   envelope.chunkOffset >= 0,
                   envelope.chunkOffset + envelope.payload.count <= envelope.totalBytes else {
                 return drop(reason: "invalid-sbc2-chunk-metadata", frameId: envelope.frameId)

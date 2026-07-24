@@ -101,7 +101,10 @@ public extension AppMessage {
         }
 
         public var authoritativeFingerprint: String? {
-            guard let algorithm = normalizedAlgorithm, !publicKey.isEmpty else { return nil }
+            guard let algorithm = normalizedAlgorithm,
+                  Self.hasValidPublicKeyLength(publicKey, algorithm: algorithm) else {
+                return nil
+            }
             return ProtocolIdentityPublicKeys(
                 protocolPublicKey: publicKey,
                 protocolAlgorithm: algorithm
@@ -123,6 +126,20 @@ public extension AppMessage {
             }
             guard !byFingerprint.isEmpty else { return nil }
             return byFingerprint.keys.sorted().compactMap { byFingerprint[$0] }
+        }
+
+        private static func hasValidPublicKeyLength(
+            _ publicKey: Data,
+            algorithm: ProtocolSigningAlgorithm
+        ) -> Bool {
+            switch algorithm {
+            case .ed25519:
+                return publicKey.count == 32
+            case .mlDSA65:
+                return publicKey.count == 1_952
+            case .mlDSA87:
+                return publicKey.count == 2_592
+            }
         }
     }
 }

@@ -11,6 +11,9 @@ struct PQCKeyTags {
     static func service(_ algorithm: String, _ variant: String, _ kind: String) -> String {
         return "SkyBridge.PQC.v1.\(algorithm).\(variant).\(kind)"
     }
+    static func serviceV1(_ algorithm: String, _ variant: String, _ kind: String) -> String {
+        return "SkyBridge.PQC.v1.\(algorithm).\(variant).\(kind)"
+    }
     static func v2Kem(_ variant: String) -> String {
         return "com.skybridge.pqc.v2.kem.\(variant)"
     }
@@ -19,15 +22,15 @@ struct PQCKeyTags {
     }
 
     static var xWingLegacyPrivate: String {
-        service(xWingAlgorithm, xWingVariant, xWingPrivateLegacyKind)
+        serviceV1(xWingAlgorithm, xWingVariant, xWingPrivateLegacyKind)
     }
 
     static var xWingLegacyPublic: String {
-        service(xWingAlgorithm, xWingVariant, xWingPublicLegacyKind)
+        serviceV1(xWingAlgorithm, xWingVariant, xWingPublicLegacyKind)
     }
 
     static var xWingRemotePublic: String {
-        service(xWingAlgorithm, xWingVariant, xWingRemotePublicKind)
+        serviceV1(xWingAlgorithm, xWingVariant, xWingRemotePublicKind)
     }
 
     static var xWingV2: String {

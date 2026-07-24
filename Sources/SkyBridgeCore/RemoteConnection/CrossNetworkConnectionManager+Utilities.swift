@@ -89,8 +89,18 @@ extension CrossNetworkConnectionManager {
         return "id:\(normalized)"
     }
 
-    public nonisolated static func deriveTenantIdentifier(accessToken: String?) -> String {
-        CrossNetworkTenantIdentifierPolicy.derive(accessToken: accessToken)
+    public nonisolated static func resolveTenantIdentifier(
+        accessToken: String?,
+        explicitTenantID: String?,
+        sessionTenantID: String?,
+        sessionUserIdentifier: String?
+    ) throws -> String {
+        try CrossNetworkTenantIdentifierPolicy.resolve(
+            accessToken: accessToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: sessionTenantID,
+            sessionUserIdentifier: sessionUserIdentifier
+        )
     }
 
     private static func deriveSharedSecret(

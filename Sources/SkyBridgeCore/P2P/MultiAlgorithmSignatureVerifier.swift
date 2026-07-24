@@ -46,20 +46,6 @@ public struct MultiAlgorithmSignatureVerifier: Sendable {
         expectedAlgorithm: SignatureAlgorithm,
         trustRecord: TrustRecord
     ) async throws -> Bool {
-        guard trustRecord.isAuthenticationEligible else {
-            SecurityEventEmitter.emitDetached(SecurityEvent(
-                type: .signatureVerificationFailed,
-                severity: .warning,
-                message: "Trust record is not eligible for authentication",
-                context: [
-                    "expectedAlgorithm": expectedAlgorithm.rawValue,
-                    "reason": "trust_record_not_authentication_eligible",
-                    "deviceId": trustRecord.deviceId
-                ]
-            ))
-            return false
-        }
-
  // 1. 从 trustRecord 获取公钥（不可误用的接口设计）
         guard let publicKey = trustRecord.getVerificationPublicKey(for: expectedAlgorithm) else {
  // 没有对应算法的公钥
@@ -150,8 +136,11 @@ public struct MultiAlgorithmSignatureVerifier: Sendable {
         case .ed25519:
             let provider = ClassicSignatureProvider()
             return try await provider.verify(data, signature: signature, publicKey: publicKey)
-        case .mlDSA65:
-            let provider = PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            guard let protocolAlgorithm = ProtocolSigningAlgorithm(from: algorithm) else {
+                throw SignatureAlignmentError.legacySignatureRejected
+            }
+            let provider = ProtocolSignatureProviderSelector.select(for: protocolAlgorithm)
             return try await provider.verify(data, signature: signature, publicKey: publicKey)
         case .p256ECDSA:
  // P-256 只用于 legacy 验证，使用 LegacySignatureVerifier

@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 import SwiftUI
 import MetalKit
@@ -106,3 +107,4 @@ struct HazeDebugTestView_Previews: PreviewProvider {
         HazeDebugTestView()
     }
 }
+#endif

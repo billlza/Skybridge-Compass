@@ -17,7 +17,7 @@ enum SignalingRetryControllerError: Error, LocalizedError, Equatable {
 
 @available(iOS 17.0, *)
 struct SignalingRetryController {
-    typealias SleepClosure = @Sendable (Duration) async -> Void
+    typealias SleepClosure = @Sendable (Duration) async throws -> Void
 
     private let retryDelay: Duration
     private let attemptTimeout: Duration
@@ -27,7 +27,7 @@ struct SignalingRetryController {
         retryDelay: Duration = .milliseconds(350),
         attemptTimeout: Duration = .seconds(15),
         sleep: @escaping SleepClosure = { duration in
-            try? await Task.sleep(for: duration)
+            try await Task.sleep(for: duration)
         }
     ) {
         self.retryDelay = retryDelay
@@ -49,7 +49,7 @@ struct SignalingRetryController {
     @MainActor
     func sendWithRetry(
         retries: Int,
-        reconnectIfNeeded: @MainActor @Sendable () async -> Void,
+        reconnectIfNeeded: @MainActor @Sendable () async throws -> Void,
         send: @escaping @MainActor @Sendable () async throws -> Void
     ) async throws {
         var attemptsLeft = max(0, retries)
@@ -57,7 +57,10 @@ struct SignalingRetryController {
             do {
                 try await runAttempt(send: send)
                 return
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 if let controllerError = error as? SignalingRetryControllerError,
                    case .invalidWebSocketURL = controllerError {
                     throw controllerError
@@ -65,20 +68,24 @@ struct SignalingRetryController {
 
                 if let signalingError = error as? WebSocketSignalingClient.SignalingError,
                    case .notConnected = signalingError {
-                    await reconnectIfNeeded()
+                    try await reconnectIfNeeded()
+                    try Task.checkCancellation()
                 }
                 guard attemptsLeft > 0 else {
                     throw error
                 }
                 attemptsLeft -= 1
-                await sleep(retryDelay)
+                try await sleep(retryDelay)
+                try Task.checkCancellation()
             }
         }
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     static func testOnlyDefaultAttemptTimeoutSeconds() -> Double {
         durationSeconds(.seconds(15))
     }
+#endif
 
     @MainActor
     private func runAttempt(send: @escaping @MainActor @Sendable () async throws -> Void) async throws {

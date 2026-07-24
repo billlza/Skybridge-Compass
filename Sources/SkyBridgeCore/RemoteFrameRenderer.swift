@@ -22,9 +22,51 @@ public enum RemoteFrameType: UInt, Sendable {
     case hevc = 2
 }
 
-public struct RenderMetrics {
+public struct RenderMetrics: Sendable {
     public let bandwidthMbps: Double
     public let latencyMilliseconds: Double
+}
+
+public enum RemoteH264FrameSubmissionResult: Sendable {
+    case awaitingParameterSets
+    case awaitingSyncFrame
+    case droppedForBackpressure
+    case submitted(RenderMetrics)
+}
+
+public enum RemoteFrameRenderError: Error, LocalizedError, Sendable {
+    case invalidFrameGeometry
+    case invalidH264AccessUnit
+    case invalidH264FormatDescription(OSStatus)
+    case unsupportedH264Dimensions(width: Int32, height: Int32)
+    case compressedSampleBufferCreationFailed(OSStatus)
+    case videoToolboxDecodeFailed(OSStatus)
+    case decodedFrameMissingImageBuffer
+    case metalTextureConversionFailed(CVReturn)
+    case decoderBackpressure
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidFrameGeometry:
+            "The remote frame dimensions, stride, or payload size are invalid."
+        case .invalidH264AccessUnit:
+            "H.264 access unit is malformed or exceeds the configured safety limits."
+        case let .invalidH264FormatDescription(status):
+            "H.264 parameter sets are invalid (VideoToolbox status \(status))."
+        case let .unsupportedH264Dimensions(width, height):
+            "H.264 dimensions \(width)×\(height) exceed the supported camera profile."
+        case let .compressedSampleBufferCreationFailed(status):
+            "Unable to create the H.264 sample buffer (status \(status))."
+        case let .videoToolboxDecodeFailed(status):
+            "VideoToolbox rejected the H.264 frame (status \(status))."
+        case .decodedFrameMissingImageBuffer:
+            "VideoToolbox completed a frame without an image buffer."
+        case let .metalTextureConversionFailed(status):
+            "The decoded camera frame could not be converted to a Metal texture (status \(status))."
+        case .decoderBackpressure:
+            "The hardware decoder queue reached its bounded in-flight limit."
+        }
+    }
 }
 
 private final class RemoteFrameBacking: @unchecked Sendable {
@@ -67,13 +109,49 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     private var decompressionSession: VTDecompressionSession?
     private var decompressionCallbackRefcon: UnsafeMutableRawPointer?
     private var formatDescription: CMVideoFormatDescription?
+    private var decompressionSessionFormatDescription: CMVideoFormatDescription?
     private var currentCodec: RemoteFrameType?
+    private var h264ParameterSetState = H264ParameterSetTransitionState()
+    private let decodeStateLock = NSLock()
+    private var decodeSubmissionState = RemoteDecodeSubmissionState()
+    private let maximumInFlightDecodeCount = 3
     private var previousFrameTimestamp: DispatchTime?
     private let log = Logger(subsystem: "com.skybridge.compass", category: "MetalRenderer")
     private let renderQueue = DispatchQueue(label: "com.skybridge.compass.metal.render")
-    public var frameHandler: ((MTLTexture, AnyObject?) -> Void)?
+    private let renderQueueKey = DispatchSpecificKey<UInt8>()
+    private let frameDeliveryLock = NSLock()
+    private var isFrameDeliveryActive = true
+    private var storedFrameHandler: ((MTLTexture, AnyObject?) -> Void)?
+    private var storedFailureHandler: (@Sendable (RemoteFrameRenderError) -> Void)?
+
+    public var frameHandler: ((MTLTexture, AnyObject?) -> Void)? {
+        get {
+            frameDeliveryLock.lock()
+            defer { frameDeliveryLock.unlock() }
+            return storedFrameHandler
+        }
+        set {
+            frameDeliveryLock.lock()
+            storedFrameHandler = isFrameDeliveryActive ? newValue : nil
+            frameDeliveryLock.unlock()
+        }
+    }
+
+    public var failureHandler: (@Sendable (RemoteFrameRenderError) -> Void)? {
+        get {
+            frameDeliveryLock.lock()
+            defer { frameDeliveryLock.unlock() }
+            return storedFailureHandler
+        }
+        set {
+            frameDeliveryLock.lock()
+            storedFailureHandler = isFrameDeliveryActive ? newValue : nil
+            frameDeliveryLock.unlock()
+        }
+    }
 
     public init() {
+        renderQueue.setSpecific(key: renderQueueKey, value: 1)
         device = MTLCreateSystemDefaultDevice()
         commandQueue = device?.makeCommandQueue()
         if let device {
@@ -82,16 +160,27 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     }
 
     public func teardown() {
+        invalidateFrameDelivery()
         deactivateDecompressionCallbackContext()
         if let decompressionSession {
             VTDecompressionSessionWaitForAsynchronousFrames(decompressionSession)
             VTDecompressionSessionInvalidate(decompressionSession)
         }
+        // VT callbacks may already have queued texture conversion work. Drain that work before
+        // releasing textureCache; otherwise teardown races the render queue.
+        if DispatchQueue.getSpecific(key: renderQueueKey) == nil {
+            renderQueue.sync {}
+        }
         decompressionSession = nil
         releaseDecompressionCallbackContext()
         formatDescription = nil
+        decompressionSessionFormatDescription = nil
         textureCache = nil
         currentCodec = nil
+        h264ParameterSetState.reset()
+        decodeStateLock.lock()
+        decodeSubmissionState.reset(waitingForSyncFrame: true)
+        decodeStateLock.unlock()
     }
 
     public func processFrame(data: Data,
@@ -116,6 +205,95 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         )
     }
 
+    /// 提交 CameraKit 产出的单个 Annex-B H.264 access unit。
+    /// 调用方必须在后台串行执行；该方法不会在缺少参数集/IDR 时伪装成已渲染。
+    public func processH264AnnexBAccessUnit(
+        data: Data
+    ) throws -> RemoteH264FrameSubmissionResult {
+        let accessUnit: H264AnnexBAccessUnit
+        do {
+            accessUnit = try H264AnnexBAccessUnit.parse(data)
+        } catch {
+            throw RemoteFrameRenderError.invalidH264AccessUnit
+        }
+
+        h264ParameterSetState.stage(
+            sequenceParameterSet: accessUnit.sequenceParameterSet,
+            pictureParameterSet: accessUnit.pictureParameterSet
+        )
+
+        // Parameter sets can arrive in separate access units. Never combine a new SPS with an
+        // old PPS (or vice versa); switch only on an IDR after a complete pair validates.
+        if let candidate = h264ParameterSetState.candidateForIDR(
+            carriesSequenceParameterSet: accessUnit.sequenceParameterSet != nil,
+            carriesPictureParameterSet: accessUnit.pictureParameterSet != nil,
+            containsIDR: accessUnit.containsIDR
+        ) {
+            let nextFormatDescription = try makeH264FormatDescription(
+                sequenceParameterSet: candidate.sequenceParameterSet,
+                pictureParameterSet: candidate.pictureParameterSet
+            )
+            h264ParameterSetState.commit(candidate)
+            formatDescription = nextFormatDescription
+            currentCodec = .h264
+            markWaitingForSyncFrame()
+        }
+
+        guard formatDescription != nil else { return .awaitingParameterSets }
+
+        guard !isWaitingForSyncFrameSnapshot() || accessUnit.containsIDR else {
+            return .awaitingSyncFrame
+        }
+
+        let sampleData: Data
+        do {
+            sampleData = try accessUnit.makeAVCCSampleData()
+        } catch H264AnnexBAccessUnitError.missingRenderableNALUnit {
+            return isWaitingForSyncFrameSnapshot() ? .awaitingSyncFrame : .awaitingParameterSets
+        } catch {
+            throw RemoteFrameRenderError.invalidH264AccessUnit
+        }
+
+        guard let formatDescription else {
+            return .awaitingParameterSets
+        }
+        ensureDecompressionSession(formatDescription: formatDescription, codec: .h264)
+        guard let decompressionSession else {
+            throw RemoteFrameRenderError.videoToolboxDecodeFailed(kVTInvalidSessionErr)
+        }
+
+        let sampleBuffer = try makeCompressedSampleBuffer(
+            data: sampleData,
+            formatDescription: formatDescription,
+            isSyncFrame: accessUnit.containsIDR
+        )
+        guard beginDecodeSubmission() else {
+            markWaitingForSyncFrame()
+            return .droppedForBackpressure
+        }
+        if accessUnit.containsIDR {
+            clearWaitingForSyncFrame()
+        }
+        var outputFlags = VTDecodeInfoFlags()
+        let decodeStatus = VTDecompressionSessionDecodeFrame(
+            decompressionSession,
+            sampleBuffer: sampleBuffer,
+            flags: ._EnableAsynchronousDecompression,
+            frameRefcon: nil,
+            infoFlagsOut: &outputFlags
+        )
+        guard decodeStatus == noErr else {
+            completeDecodeSubmission(status: decodeStatus)
+            throw RemoteFrameRenderError.videoToolboxDecodeFailed(decodeStatus)
+        }
+
+        let delta = interFrameInterval()
+        return .submitted(RenderMetrics(
+            bandwidthMbps: calculateBandwidth(bytes: data.count, delta: delta),
+            latencyMilliseconds: delta * 1_000
+        ))
+    }
+
     private func renderBGRAFrame(data: Data, width: Int, height: Int, stride: Int) -> RenderMetrics {
         guard width > 0, height > 0 else {
             return RenderMetrics(bandwidthMbps: 0, latencyMilliseconds: 0)
@@ -134,6 +312,7 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
             buffer = try BGRAFrameBuilder.buildPixelBuffer(from: frame, mode: .safeCopy)
         } catch {
             log.error("Failed to build BGRA pixel buffer: \(String(describing: error))")
+            reportFailure(.invalidFrameGeometry)
             return RenderMetrics(bandwidthMbps: baselineBandwidth, latencyMilliseconds: delta * 1000)
         }
         let effectiveDelta = max(delta, 0.001)
@@ -165,7 +344,7 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
             let backing = RemoteFrameBacking(textureRef: textureRef, imageBuffer: buffer)
             renderQueue.async { [weak self] in
-                self?.frameHandler?(texture, backing)
+                self?.deliverFrame(texture: texture, backing: backing)
             }
         }
         commandBuffer.commit()
@@ -173,7 +352,12 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     }
 
     private func renderCompressedFrame(data: Data, width: Int, height: Int, codec: RemoteFrameType) -> RenderMetrics {
-        guard width > 0, height > 0 else {
+        guard width > 0,
+              height > 0,
+              width <= BGRAFrameBuilder.maximumWidth,
+              height <= BGRAFrameBuilder.maximumHeight,
+              width <= Int(Int32.max),
+              height <= Int(Int32.max) else {
             return RenderMetrics(bandwidthMbps: 0, latencyMilliseconds: 0)
         }
         configureFormatDescriptionIfNeeded(width: width, height: height, codec: codec)
@@ -241,6 +425,10 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
+        guard beginDecodeSubmission() else {
+            reportFailure(.decoderBackpressure)
+            return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
+        }
         let decodeFlags = VTDecodeFrameFlags._EnableAsynchronousDecompression
         var outputFlags = VTDecodeInfoFlags()
         status = VTDecompressionSessionDecodeFrame(
@@ -252,6 +440,7 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         )
 
         if status != noErr {
+            completeDecodeSubmission(status: status)
             log.error("VideoToolbox decode error for codec \(String(describing: codec)) status \(status)")
         }
 
@@ -259,7 +448,13 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     }
 
     private func configureFormatDescriptionIfNeeded(width: Int, height: Int, codec: RemoteFrameType) {
-        guard codec != .bgra else { return }
+        guard codec != .bgra,
+              width > 0,
+              height > 0,
+              width <= BGRAFrameBuilder.maximumWidth,
+              height <= BGRAFrameBuilder.maximumHeight,
+              width <= Int(Int32.max),
+              height <= Int(Int32.max) else { return }
 
         var requiresNewDescription = formatDescription == nil || currentCodec != codec
         if let description = formatDescription, !requiresNewDescription {
@@ -291,16 +486,141 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         }
     }
 
+    private func makeH264FormatDescription(
+        sequenceParameterSet: Data,
+        pictureParameterSet: Data
+    ) throws -> CMVideoFormatDescription {
+        var description: CMFormatDescription?
+        let status = sequenceParameterSet.withUnsafeBytes { sequenceRaw -> OSStatus in
+            guard let sequenceBase = sequenceRaw.baseAddress else { return kCMFormatDescriptionError_InvalidParameter }
+            return pictureParameterSet.withUnsafeBytes { pictureRaw -> OSStatus in
+                guard let pictureBase = pictureRaw.baseAddress else { return kCMFormatDescriptionError_InvalidParameter }
+                let pointers: [UnsafePointer<UInt8>] = [
+                    sequenceBase.assumingMemoryBound(to: UInt8.self),
+                    pictureBase.assumingMemoryBound(to: UInt8.self)
+                ]
+                let sizes = [sequenceParameterSet.count, pictureParameterSet.count]
+                return pointers.withUnsafeBufferPointer { pointerBuffer in
+                    sizes.withUnsafeBufferPointer { sizeBuffer in
+                        guard let pointerBase = pointerBuffer.baseAddress,
+                              let sizeBase = sizeBuffer.baseAddress else {
+                            return kCMFormatDescriptionError_InvalidParameter
+                        }
+                        return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: pointerBuffer.count,
+                            parameterSetPointers: pointerBase,
+                            parameterSetSizes: sizeBase,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &description
+                        )
+                    }
+                }
+            }
+        }
+        guard status == noErr, let description else {
+            throw RemoteFrameRenderError.invalidH264FormatDescription(status)
+        }
+        let dimensions = CMVideoFormatDescriptionGetDimensions(description)
+        guard dimensions.width > 0,
+              dimensions.height > 0,
+              dimensions.width <= 3_840,
+              dimensions.height <= 2_160 else {
+            throw RemoteFrameRenderError.unsupportedH264Dimensions(
+                width: dimensions.width,
+                height: dimensions.height
+            )
+        }
+        return description
+    }
+
+    private func makeCompressedSampleBuffer(
+        data: Data,
+        formatDescription: CMVideoFormatDescription,
+        isSyncFrame: Bool
+    ) throws -> CMSampleBuffer {
+        var blockBuffer: CMBlockBuffer?
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: data.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: data.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == kCMBlockBufferNoErr, let blockBuffer else {
+            throw RemoteFrameRenderError.compressedSampleBufferCreationFailed(status)
+        }
+        status = data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                return kCMFormatDescriptionError_InvalidParameter
+            }
+            return CMBlockBufferReplaceDataBytes(
+                with: baseAddress,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: data.count
+            )
+        }
+        guard status == kCMBlockBufferNoErr else {
+            throw RemoteFrameRenderError.compressedSampleBufferCreationFailed(status)
+        }
+
+        var sampleBuffer: CMSampleBuffer?
+        var sampleSize = data.count
+        status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 0,
+            sampleTimingArray: nil,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else {
+            throw RemoteFrameRenderError.compressedSampleBufferCreationFailed(status)
+        }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: true
+        ), CFArrayGetCount(attachments) > 0 {
+            let dictionary = unsafeBitCast(
+                CFArrayGetValueAtIndex(attachments, 0),
+                to: CFMutableDictionary.self
+            )
+            CFDictionarySetValue(
+                dictionary,
+                Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
+                Unmanaged.passUnretained(isSyncFrame ? kCFBooleanFalse : kCFBooleanTrue).toOpaque()
+            )
+        }
+        return sampleBuffer
+    }
+
     private func ensureDecompressionSession(formatDescription: CMVideoFormatDescription, codec: RemoteFrameType) {
         if let existing = decompressionSession {
-            if let currentDescription = self.formatDescription,
+            if let currentDescription = decompressionSessionFormatDescription,
                CMFormatDescriptionEqual(currentDescription, otherFormatDescription: formatDescription) {
                 return
             }
             deactivateDecompressionCallbackContext()
             VTDecompressionSessionWaitForAsynchronousFrames(existing)
             VTDecompressionSessionInvalidate(existing)
+            if DispatchQueue.getSpecific(key: renderQueueKey) == nil {
+                renderQueue.sync {}
+            }
             releaseDecompressionCallbackContext()
+            decompressionSession = nil
+            decompressionSessionFormatDescription = nil
+            resetDecodeSubmissionState(waitingForSyncFrame: true)
         }
 
         var newSession: VTDecompressionSession?
@@ -345,11 +665,26 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         )
 
         if status == noErr {
+            let realtimeStatus = newSession.map {
+                VTSessionSetProperty($0, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            } ?? kVTInvalidSessionErr
+            guard realtimeStatus == noErr else {
+                if let newSession {
+                    VTDecompressionSessionInvalidate(newSession)
+                }
+                Self.releaseDecompressionCallbackRefcon(callbackRefcon)
+                decompressionSession = nil
+                decompressionSessionFormatDescription = nil
+                reportFailure(.videoToolboxDecodeFailed(realtimeStatus))
+                return
+            }
             decompressionSession = newSession
+            decompressionSessionFormatDescription = formatDescription
             decompressionCallbackRefcon = callbackRefcon
         } else {
             Self.releaseDecompressionCallbackRefcon(callbackRefcon)
             decompressionSession = nil
+            decompressionSessionFormatDescription = nil
             log.error("Failed to create VTDecompressionSession for codec \(String(describing: codec)) status \(status)")
         }
     }
@@ -371,10 +706,14 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         let context = unmanaged.takeUnretainedValue()
         defer { unmanaged.release() }
         guard let renderer = context.activeRenderer() else { return }
+        renderer.completeDecodeSubmission(status: status)
         if status != noErr {
             renderer.log.error("Decompression callback error: \(status), flags \(infoFlags.rawValue)")
+            renderer.reportFailure(.videoToolboxDecodeFailed(status))
         } else if let imageBuffer {
             renderer.handleDecompressedFrame(imageBuffer: imageBuffer, presentationTimeStamp: presentationTimeStamp)
+        } else {
+            renderer.reportFailure(.decodedFrameMissingImageBuffer)
         }
     }
 
@@ -405,6 +744,7 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
             guard let self else { return }
             guard let textureCache else {
                 self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
+                self.reportFailure(.metalTextureConversionFailed(kCVReturnInvalidArgument))
                 return
             }
             let width = CVPixelBufferGetWidth(imageBuffer)
@@ -423,9 +763,10 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
             )
             if status == kCVReturnSuccess, let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
                 let backing = RemoteFrameBacking(textureRef: textureRef, imageBuffer: imageBuffer)
-                self.frameHandler?(texture, backing)
+                self.deliverFrame(texture: texture, backing: backing)
             } else {
                 self.log.error("Failed to create Metal texture from decoded frame: \(status)")
+                self.reportFailure(.metalTextureConversionFailed(status))
             }
         }
     }
@@ -444,5 +785,69 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     private func calculateBandwidth(bytes: Int, delta: Double) -> Double {
         guard delta > 0 else { return 0 }
         return (Double(bytes) * 8.0) / (delta * 1_000_000.0)
+    }
+
+    private func invalidateFrameDelivery() {
+        frameDeliveryLock.lock()
+        isFrameDeliveryActive = false
+        storedFrameHandler = nil
+        storedFailureHandler = nil
+        frameDeliveryLock.unlock()
+    }
+
+    private func deliverFrame(texture: MTLTexture, backing: AnyObject?) {
+        frameDeliveryLock.lock()
+        guard isFrameDeliveryActive, let handler = storedFrameHandler else {
+            frameDeliveryLock.unlock()
+            return
+        }
+        // 与 teardown 串行化：teardown 返回后，不会再有迟到帧进入已失效会话的 feed。
+        handler(texture, backing)
+        frameDeliveryLock.unlock()
+    }
+
+    private func beginDecodeSubmission() -> Bool {
+        decodeStateLock.lock()
+        defer { decodeStateLock.unlock() }
+        return decodeSubmissionState.begin(
+            maximumInFlightCount: maximumInFlightDecodeCount
+        )
+    }
+
+    private func completeDecodeSubmission(status: OSStatus) {
+        decodeStateLock.lock()
+        decodeSubmissionState.complete(succeeded: status == noErr)
+        decodeStateLock.unlock()
+    }
+
+    private func isWaitingForSyncFrameSnapshot() -> Bool {
+        decodeStateLock.lock()
+        defer { decodeStateLock.unlock() }
+        return decodeSubmissionState.isWaitingForSyncFrame
+    }
+
+    private func markWaitingForSyncFrame() {
+        decodeStateLock.lock()
+        decodeSubmissionState.markWaitingForSyncFrame()
+        decodeStateLock.unlock()
+    }
+
+    private func clearWaitingForSyncFrame() {
+        decodeStateLock.lock()
+        decodeSubmissionState.clearWaitingForSyncFrame()
+        decodeStateLock.unlock()
+    }
+
+    private func resetDecodeSubmissionState(waitingForSyncFrame: Bool) {
+        decodeStateLock.lock()
+        decodeSubmissionState.reset(waitingForSyncFrame: waitingForSyncFrame)
+        decodeStateLock.unlock()
+    }
+
+    private func reportFailure(_ error: RemoteFrameRenderError) {
+        frameDeliveryLock.lock()
+        let handler = isFrameDeliveryActive ? storedFailureHandler : nil
+        frameDeliveryLock.unlock()
+        handler?(error)
     }
 }

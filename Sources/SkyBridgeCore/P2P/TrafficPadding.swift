@@ -213,7 +213,12 @@ public enum TrafficPadding {
 
         let actualLen = Int(len)
         guard actualLen >= 0, actualLen <= data.count - headerLen else { return data }
-        let payload = data.subdata(in: headerLen..<(headerLen + actualLen))
+        // Traffic payloads can be large, so avoid rebasing/copying the whole
+        // input merely to use integer offsets. Build a real Collection range
+        // relative to the slice's startIndex and copy only the unwrapped body.
+        let payloadStart = data.index(data.startIndex, offsetBy: headerLen)
+        let payloadEnd = data.index(payloadStart, offsetBy: actualLen)
+        let payload = Data(data[payloadStart..<payloadEnd])
 
         if shouldEmitDiagnostics(cfg: cfg) {
             let name = label ?? "traffic"

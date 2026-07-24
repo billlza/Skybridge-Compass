@@ -579,7 +579,7 @@ record_pqc_symbol_probe_result() {
     mode="not_run"
     sdk_version="unknown"
     swift_target="unknown"
-    if [[ "${sdk_name}" == "macosx" ]]; then
+    if [[ "${sdk_name}" == "macosx" || "${sdk_name}" == "iphoneos" ]]; then
       secure_enclave="1"
     else
       secure_enclave="0"

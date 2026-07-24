@@ -237,7 +237,6 @@ public actor CryptoProviderSelector {
         guard negotiatedSuiteName == P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue else {
             return await getKEMProvider()
         }
-        #if canImport(CQPeriapt)
         guard isQPeriaptBetaEnabled(),
               let session = QPeriaptPlatformPolicy.currentRuntimeSession() else {
             throw CryptoProviderError.providerNotAvailable(.qPeriapt)
@@ -246,9 +245,6 @@ public actor CryptoProviderSelector {
             session: session,
             applicationContext: applicationContext
         )
-        #else
-        throw CryptoProviderError.providerNotAvailable(.qPeriapt)
-        #endif
     }
 
  /// 获取签名 Provider
@@ -279,10 +275,15 @@ public actor CryptoProviderSelector {
 
  // MARK: - Capability Negotiation
 
- /// 获取本机加密能力
+    /// 获取本机加密能力
     public func getLocalCapabilities() async -> CryptoCapabilities {
+        let activeProtocolSigningAlgorithm = try? await SettingsManager.shared
+            .committedProtocolIdentityConfiguration().algorithm
         if let cached = _cachedCapabilities {
-            return capabilitiesIncludingAdmittedQPeriapt(cached)
+            return capabilitiesIncludingAdmittedQPeriapt(
+                cached,
+                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
+            )
         }
 
         let providerType = await bestAvailableProvider
@@ -372,14 +373,18 @@ public actor CryptoProviderSelector {
         )
 
         _cachedCapabilities = capabilities
-        return capabilitiesIncludingAdmittedQPeriapt(capabilities)
+        return capabilitiesIncludingAdmittedQPeriapt(
+            capabilities,
+            activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
+        )
     }
 
     private func capabilitiesIncludingAdmittedQPeriapt(
-        _ base: CryptoCapabilities
+        _ base: CryptoCapabilities,
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm?
     ) -> CryptoCapabilities {
-        #if canImport(CQPeriapt)
-        guard isQPeriaptBetaEnabled(),
+        guard activeProtocolSigningAlgorithm == .mlDSA65,
+              isQPeriaptBetaEnabled(),
               let session = QPeriaptPlatformPolicy.currentRuntimeSession() else {
             return base
         }
@@ -404,9 +409,6 @@ public actor CryptoProviderSelector {
             platformVersion: base.platformVersion,
             providerType: .qPeriapt
         )
-        #else
-        return base
-        #endif
     }
 
     private func prependingIfMissing(_ value: String, to values: [String]) -> [String] {

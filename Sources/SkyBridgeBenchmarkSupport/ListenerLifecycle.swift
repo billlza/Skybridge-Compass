@@ -54,16 +54,8 @@ final class ListenerLifecycle: Sendable {
                 connection.cancel()
                 return
             }
-            switch self.mailbox.offer(connection) {
-            case .accepted:
-                break
-            case .rejected:
-                // Capacity remains one. A late datagram-created connection is explicitly
-                // cancelled by the mailbox without revoking the connection already owned
-                // by the active iteration or poisoning the reusable listener.
-                break
-            case .terminal(let error):
-                self.readyEvent.resolve(.failure(error))
+            if let overflow = self.mailbox.offer(connection) {
+                self.readyEvent.resolve(.failure(overflow))
                 self.listener.cancel()
             }
         }

@@ -3,7 +3,7 @@ import OSLog
 import SkyBridgeProtocolCore
 
 enum CrossNetworkConnectionCodeSnapshotStore {
-    private struct Snapshot: Codable {
+    private struct Snapshot: Codable, Sendable {
         let schemaVersion: Int
         let code: String
         let sessionId: String
@@ -18,6 +18,10 @@ enum CrossNetworkConnectionCodeSnapshotStore {
     private static let logger = Logger(
         subsystem: "com.skybridge.connection",
         category: "ConnectionCodeSnapshot"
+    )
+    private static let writerQueue = DispatchQueue(
+        label: "com.skybridge.connection-code-snapshot-writer",
+        qos: .utility
     )
 
     static func write(
@@ -39,29 +43,42 @@ enum CrossNetworkConnectionCodeSnapshotStore {
             protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
             generatedAt: formatter.string(from: Date())
         )
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
         let url = snapshotURL()
-        do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: url, options: [.atomic])
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: url.path
-            )
-        } catch {
-            logger.debug(
-                "connection code snapshot write failed: \(error.localizedDescription, privacy: .public)"
-            )
+        writerQueue.async {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: url, options: [.atomic])
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: url.path
+                )
+            } catch {
+                logger.error(
+                    "Connection code snapshot write failed errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+                )
+            }
         }
 #endif
     }
 
     static func remove() {
 #if os(macOS)
-        try? FileManager.default.removeItem(at: snapshotURL())
+        let url = snapshotURL()
+        writerQueue.async {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                return
+            } catch {
+                logger.error(
+                    "Connection code snapshot removal failed errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+                )
+            }
+        }
 #endif
     }
 

@@ -73,65 +73,139 @@ public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
 }
 
 @available(iOS 17.0, *)
-private enum QPeriaptIOSPlatformPolicy {
+enum QPeriaptIOSPlatformPolicy {
     static func isPeerAppPlatformEligible(platform: String?, osVersion: String?) -> Bool {
-        switch parse(platform: platform, osVersion: osVersion) {
-        case .apple(let major):
-            return major.map { $0 >= 26 } ?? false
-        case .android(let releaseMajor, let api):
-            return releaseMajor.map { $0 >= 16 } == true && api.map { $0 >= 36 } == true
-        case .unsupported:
+        guard let platform = platform?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              let osVersion = osVersion?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !platform.isEmpty,
+              !osVersion.isEmpty else {
             return false
         }
+
+        let expectedFamily: PeerPlatformFamily
+        switch platform {
+        case "ios": expectedFamily = .iOS
+        case "macos", "mac os": expectedFamily = .macOS
+        case "android": expectedFamily = .android
+        default: return false
+        }
+
+        let fullVersion: String
+        if Self.matches(osVersion, pattern: #"^\d{1,3}(?:\.\d{1,3}){0,2}$"#) {
+            guard expectedFamily != .android else { return false }
+            fullVersion = "\(expectedFamily.capabilityName) \(osVersion)"
+        } else {
+            fullVersion = osVersion
+        }
+
+        guard let parsed = parseFullPlatformVersion(fullVersion),
+              parsed.family == expectedFamily else {
+            return false
+        }
+        return parsed.isEligible
     }
 
-    private static func parse(platform: String?, osVersion: String?) -> PeerPlatformVersion {
-        let platformValue = platform?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard let platformValue, !platformValue.isEmpty else {
-            return .unsupported
-        }
-        let versionValue = osVersion?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let combined = [platformValue, versionValue?.lowercased()]
-            .compactMap { value -> String? in
-                guard let value, !value.isEmpty else { return nil }
-                return value
-            }
-            .joined(separator: " ")
-        guard !combined.isEmpty else { return .unsupported }
+    static func isPeerHandshakePlatformVersionEligible(_ platformVersion: String) -> Bool {
+        guard let parsed = parseFullPlatformVersion(platformVersion) else { return false }
+        return parsed.isEligible
+    }
 
-        if combined.contains("android") || combined.contains("api ") {
-            return .android(
-                releaseMajor: firstMatch(in: combined, pattern: #"\bandroid\s+(\d{1,3})\b"#),
-                api: firstMatch(in: combined, pattern: #"\bapi\s*(\d{1,3})\b"#)
+    private static func parseFullPlatformVersion(
+        _ value: String
+    ) -> ParsedPeerPlatformVersion? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let match = firstMatch(
+            in: trimmed,
+            pattern: #"(?i)^(ios|macos|mac\s+os)\s+(\d{1,3})(?:\.\d{1,3}){0,2}$"#
+        ), let familyName = capturedString(in: trimmed, match: match, capture: 1)?
+            .lowercased(),
+           let major = capturedInteger(in: trimmed, match: match, capture: 2) {
+            let family: PeerPlatformFamily = familyName == "ios" ? .iOS : .macOS
+            return ParsedPeerPlatformVersion(family: family, major: major, api: nil)
+        }
+
+        if let match = firstMatch(
+            in: trimmed,
+            pattern: #"(?i)^android\s+(\d{1,3})(?:\.\d{1,3}){0,2}\s*(?:\(\s*api\s*(\d{1,3})\s*\)|api\s*(\d{1,3}))$"#
+        ), let releaseMajor = capturedInteger(in: trimmed, match: match, capture: 1),
+           let api = capturedInteger(in: trimmed, match: match, capture: 2)
+            ?? capturedInteger(in: trimmed, match: match, capture: 3) {
+            return ParsedPeerPlatformVersion(
+                family: .android,
+                major: releaseMajor,
+                api: api
             )
         }
 
-        if combined.contains("macos") ||
-            combined.contains("mac os") ||
-            combined.range(of: #"\bios\b"#, options: .regularExpression) != nil {
-            return .apple(major: firstMatch(in: versionValue ?? combined, pattern: #"\d{1,3}"#))
-        }
-
-        return .unsupported
+        return nil
     }
 
-    private static func firstMatch(in value: String, pattern: String) -> Int? {
+    private static func matches(_ value: String, pattern: String) -> Bool {
+        firstMatch(in: value, pattern: pattern) != nil
+    }
+
+    private static func firstMatch(
+        in value: String,
+        pattern: String
+    ) -> NSTextCheckingResult? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        guard let match = regex.firstMatch(in: value, range: range) else { return nil }
-        let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
-        guard captureRange.location != NSNotFound,
-              let valueRange = Range(captureRange, in: value)
-        else { return nil }
-        return Int(value[valueRange])
+        return regex.firstMatch(in: value, range: range)
     }
 
-    private enum PeerPlatformVersion {
-        case apple(major: Int?)
-        case android(releaseMajor: Int?, api: Int?)
-        case unsupported
+    private static func capturedInteger(
+        in value: String,
+        match: NSTextCheckingResult,
+        capture: Int
+    ) -> Int? {
+        capturedString(in: value, match: match, capture: capture).flatMap(Int.init)
+    }
+
+    private static func capturedString(
+        in value: String,
+        match: NSTextCheckingResult,
+        capture: Int
+    ) -> String? {
+        guard capture < match.numberOfRanges else { return nil }
+        let captureRange = match.range(at: capture)
+        guard captureRange.location != NSNotFound,
+              let valueRange = Range(captureRange, in: value) else {
+            return nil
+        }
+        return String(value[valueRange])
+    }
+
+    private enum PeerPlatformFamily: Equatable {
+        case iOS
+        case macOS
+        case android
+
+        var capabilityName: String {
+            switch self {
+            case .iOS: return "iOS"
+            case .macOS: return "macOS"
+            case .android: return "Android"
+            }
+        }
+    }
+
+    private struct ParsedPeerPlatformVersion {
+        let family: PeerPlatformFamily
+        let major: Int
+        let api: Int?
+
+        var isEligible: Bool {
+            switch family {
+            case .iOS, .macOS:
+                return major >= 26
+            case .android:
+                return major >= 16 && api.map { $0 >= 36 } == true
+            }
+        }
     }
 }

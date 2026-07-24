@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import OSLog
+import SkyBridgeProtocolCore
 
 /// macOS 文件传输入站监听器（iOS ↔ macOS 互传的“最小可用闭环”）
 ///
@@ -34,6 +35,9 @@ public final class FileTransferListenerService: ObservableObject {
     public private(set) var activePort: UInt16?
     private var listenerHealthState: ListenerHealthState = .stopped
     private var bonjourPublished = false
+    private var inboundAdmission = ClassicTransferInboundAdmission()
+    private var inboundConnections: [String: NWConnection] = [:]
+    private var inboundTasks: [String: Task<Void, Never>] = [:]
  /// 上次尝试夺回首选端口的时间；用于限频，避免在首选端口长期被占时反复 churn 监听器。
     private var lastPreferredPortReclaimAttempt: Date?
  /// 夺回首选端口的最小重试间隔。
@@ -84,7 +88,7 @@ public final class FileTransferListenerService: ObservableObject {
 
         if needsRestart {
             log.warning(
-                "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .public) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .public) bonjour=\(self.bonjourPublished, privacy: .public)"
+                "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .private) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .private) bonjour=\(self.bonjourPublished, privacy: .public)"
             )
             stop()
             try await start()
@@ -126,20 +130,29 @@ public final class FileTransferListenerService: ObservableObject {
         guard await preferredPortIsBindable() else { return }
 
         log.warning(
-            "♻️ FileTransfer 首选端口 \(self.preferredPort, privacy: .public) 现已可用，从回退端口 \(currentPort, privacy: .public) 迁回"
+            "♻️ FileTransfer 首选端口恢复可用，正在从回退监听器迁回: preferred=\(self.preferredPort, privacy: .private) current=\(currentPort, privacy: .private)"
         )
         stop()
         do {
             try await start()
         } catch {
-            log.error("❌ FileTransfer 首选端口迁回失败: \(String(describing: error), privacy: .public)")
+            let failure = error as NSError
+            log.error(
+                "❌ FileTransfer 首选端口迁回失败: domain=\(failure.domain, privacy: .public) code=\(failure.code, privacy: .public)"
+            )
         }
     }
 
  /// 用一次性探测监听器判断首选端口此刻是否可绑定。绑定成功后立即取消探测器，不影响现有监听器。
     private func preferredPortIsBindable() async -> Bool {
         let parameters = makeListenerParameters()
-        guard let probe = try? NWListener(using: parameters, on: NWEndpoint.Port.validated(preferredPort)) else {
+        let probe: NWListener
+        do {
+            probe = try NWListener(
+                using: parameters,
+                on: NWEndpoint.Port.validated(preferredPort)
+            )
+        } catch {
             return false
         }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
@@ -148,13 +161,15 @@ public final class FileTransferListenerService: ObservableObject {
                 switch update {
                 case .ready:
                     guard startupGate.observe(.ready) == .completesStartup else { return }
-                    probe.cancel()
+                    Self.cancelListener(probe)
                     continuation.resume(returning: true)
                 case .failed:
                     guard startupGate.observe(.failed) == .completesStartup else { return }
+                    Self.cancelListener(probe)
                     continuation.resume(returning: false)
                 case .cancelled:
                     guard startupGate.observe(.cancelled) == .completesStartup else { return }
+                    Self.clearListenerHandlers(probe)
                     continuation.resume(returning: false)
                 default:
                     break
@@ -164,14 +179,16 @@ public final class FileTransferListenerService: ObservableObject {
  // 兜底超时：若探测器卡在 .setup/.waiting 永不就绪，强制以“不可绑定”收尾，避免 continuation 永不 resume。
             queue.asyncAfter(deadline: .now() + 2.0) {
                 guard startupGate.claimTimeout() else { return }
-                probe.cancel()
+                Self.cancelListener(probe)
                 continuation.resume(returning: false)
             }
         }
     }
     
     public func stop() {
-        listener?.cancel()
+        if let listener {
+            Self.cancelListener(listener)
+        }
         listener = nil
         activePort = nil
         listenerHealthState = .stopped
@@ -179,6 +196,16 @@ public final class FileTransferListenerService: ObservableObject {
         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
         netService?.stop()
         netService = nil
+        for task in inboundTasks.values {
+            task.cancel()
+        }
+        inboundTasks.removeAll()
+        for connection in inboundConnections.values {
+            Self.clearConnectionHandlers(connection)
+            connection.cancel()
+        }
+        inboundConnections.removeAll()
+        inboundAdmission.removeAll()
     }
     
     /// Prefer advertising via `NWListener.service` (Network.framework) so iOS `NWBrowser` sees it reliably.
@@ -274,7 +301,7 @@ public final class FileTransferListenerService: ObservableObject {
                         let boundPort = listener.port?.rawValue ?? 0
                         guard boundPort > 0 else {
                             guard startupGate.observe(.failed) == .completesStartup else { return }
-                            listener.cancel()
+                            Self.cancelListener(listener)
                             self.listenerHealthState = .failed
                             self.activePort = nil
                             self.bonjourPublished = false
@@ -295,6 +322,7 @@ public final class FileTransferListenerService: ObservableObject {
                     case .failed(let error):
                         let observation = startupGate.observe(.failed)
                         guard observation != .ignored else { return }
+                        Self.cancelListener(listener)
                         self.listenerHealthState = .failed
                         self.activePort = nil
                         self.bonjourPublished = false
@@ -306,6 +334,7 @@ public final class FileTransferListenerService: ObservableObject {
                     case .cancelled:
                         let observation = startupGate.observe(.cancelled)
                         guard observation != .ignored else { return }
+                        Self.clearListenerHandlers(listener)
                         self.listenerHealthState = .cancelled
                         self.activePort = nil
                         self.bonjourPublished = false
@@ -334,7 +363,7 @@ public final class FileTransferListenerService: ObservableObject {
                     return
                 } catch {
                     guard startupGate.observe(.failed) == .completesStartup else { return }
-                    listener.cancel()
+                    Self.cancelListener(listener)
                     self?.listenerHealthState = .failed
                     self?.activePort = nil
                     self?.bonjourPublished = false
@@ -344,7 +373,7 @@ public final class FileTransferListenerService: ObservableObject {
                     return
                 }
                 guard startupGate.claimTimeout() else { return }
-                listener.cancel()
+                Self.cancelListener(listener)
                 self?.listenerHealthState = .failed
                 self?.activePort = nil
                 self?.bonjourPublished = false
@@ -368,6 +397,17 @@ public final class FileTransferListenerService: ObservableObject {
     }
     
     private func handleIncoming(_ connection: NWConnection) {
+        let connectionId = UUID().uuidString
+        guard inboundAdmission.reserve(connectionID: connectionId) else {
+            log.warning(
+                "FileTransfer inbound connection rejected: reason=capacity limit=\(ClassicTransferInboundPolicy.maximumConcurrentConnections, privacy: .public)"
+            )
+            Self.clearConnectionHandlers(connection)
+            connection.cancel()
+            return
+        }
+        inboundConnections[connectionId] = connection
+
         let deviceId: String
         let deviceName: String
         let endpointDescription = String(describing: connection.endpoint)
@@ -379,9 +419,7 @@ public final class FileTransferListenerService: ObservableObject {
             deviceName = "Unknown"
         }
 
-        log.info(
-            "📥 FileTransfer incoming connection accepted: peer=\(deviceId, privacy: .public) endpoint=\(endpointDescription, privacy: .public)"
-        )
+        log.info("📥 FileTransfer incoming connection accepted")
         RemoteControlSmokeStatusWriter.append(
             "file-transfer inbound-accepted endpoint=\(Self.sanitizeForSmoke(endpointDescription))"
         )
@@ -392,29 +430,51 @@ public final class FileTransferListenerService: ObservableObject {
             switch state {
             case .setup:
                 rendered = "setup"
-            case .waiting(let error):
-                rendered = "waiting \(error)"
+            case .waiting:
+                rendered = "waiting"
             case .preparing:
                 rendered = "preparing"
             case .ready:
                 rendered = "ready"
-            case .failed(let error):
-                rendered = "failed \(error)"
+            case .failed:
+                rendered = "failed"
             case .cancelled:
                 rendered = "cancelled"
             @unknown default:
                 rendered = "unknown"
             }
             self.log.info(
-                "📥 FileTransfer connection state: peer=\(deviceId, privacy: .public) state=\(rendered, privacy: .public)"
+                "📥 FileTransfer connection state: state=\(rendered, privacy: .public)"
             )
+            switch state {
+            case .failed, .cancelled:
+                Task { @MainActor [weak self] in
+                    self?.inboundTasks[connectionId]?.cancel()
+                    self?.finishInboundConnection(
+                        connectionId: connectionId,
+                        cancelConnection: false
+                    )
+                }
+            default:
+                break
+            }
         }
         
         connection.start(queue: queue)
         
-        Task { @MainActor in
+        let inboundTask = Task { @MainActor [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            defer {
+                self.finishInboundConnection(
+                    connectionId: connectionId,
+                    cancelConnection: true
+                )
+            }
             do {
-                self.log.info("📥 FileTransfer handing connection to receiveFile: peer=\(deviceId, privacy: .public)")
+                self.log.info("📥 FileTransfer handing connection to receiveFile")
                 RemoteControlSmokeStatusWriter.append(
                     "file-transfer inbound-handler-start peer=\(Self.sanitizeForSmoke(deviceId))"
                 )
@@ -428,9 +488,7 @@ public final class FileTransferListenerService: ObservableObject {
                     )
                 )
             } catch FileTransferError.inboundConnectionClosedBeforeMetadata {
-                self.log.info(
-                    "📥 FileTransfer inbound connection closed before metadata: peer=\(deviceId, privacy: .public)"
-                )
+                self.log.info("📥 FileTransfer inbound connection closed before metadata")
                 RemoteControlSmokeStatusWriter.append(
                     """
                     file-transfer inbound-pre-metadata-disconnect \
@@ -439,12 +497,8 @@ public final class FileTransferListenerService: ObservableObject {
                     endpoint=\(Self.sanitizeForSmoke(endpointDescription))
                     """
                 )
-                connection.stateUpdateHandler = nil
-                connection.cancel()
             } catch FileTransferError.inboundInvalidInitialHeader {
-                self.log.info(
-                    "📥 FileTransfer inbound connection rejected before metadata: peer=\(deviceId, privacy: .public)"
-                )
+                self.log.info("📥 FileTransfer inbound connection rejected before metadata")
                 RemoteControlSmokeStatusWriter.append(
                     """
                     file-transfer inbound-rejected \
@@ -453,18 +507,48 @@ public final class FileTransferListenerService: ObservableObject {
                     endpoint=\(Self.sanitizeForSmoke(endpointDescription))
                     """
                 )
-                connection.stateUpdateHandler = nil
-                connection.cancel()
             } catch {
                 self.log.error("❌ receiveFile failed: \(error.localizedDescription)")
                 let phase = Self.fileTransferFailurePhase(for: error)
                 RemoteControlSmokeStatusWriter.append(
                     "failed stage=file-transfer phase=\(phase) detail=\(Self.sanitizeForSmoke(error.localizedDescription))"
                 )
-                connection.stateUpdateHandler = nil
-                connection.cancel()
             }
         }
+        inboundTasks[connectionId] = inboundTask
+    }
+
+    private func finishInboundConnection(
+        connectionId: String,
+        cancelConnection: Bool
+    ) {
+        inboundAdmission.release(connectionID: connectionId)
+        guard let connection = inboundConnections.removeValue(forKey: connectionId) else {
+            inboundTasks.removeValue(forKey: connectionId)
+            return
+        }
+        inboundTasks.removeValue(forKey: connectionId)
+        Self.clearConnectionHandlers(connection)
+        if cancelConnection {
+            connection.cancel()
+        }
+    }
+
+    private nonisolated static func clearListenerHandlers(_ listener: NWListener) {
+        listener.stateUpdateHandler = nil
+        listener.newConnectionHandler = nil
+    }
+
+    private nonisolated static func cancelListener(_ listener: NWListener) {
+        clearListenerHandlers(listener)
+        listener.cancel()
+    }
+
+    private nonisolated static func clearConnectionHandlers(_ connection: NWConnection) {
+        connection.stateUpdateHandler = nil
+        connection.viabilityUpdateHandler = nil
+        connection.betterPathUpdateHandler = nil
+        connection.pathUpdateHandler = nil
     }
 
     private nonisolated static func sanitizeForSmoke(_ value: String) -> String {
@@ -502,6 +586,28 @@ public final class FileTransferListenerService: ObservableObject {
             return "mac_receive_file_secure_session_required"
         case .securityThreatDetected:
             return "mac_receive_file_security_threat_detected"
+        case .partialFileCleanupFailed:
+            return "mac_receive_file_partial_cleanup_failed"
+        case .sourceFileCloseFailed:
+            return "mac_receive_file_source_close_failed"
+        case .committedFileReleaseFailed:
+            return "mac_receive_file_committed_file_release_failed"
+        case .resumeStatePersistenceFailed:
+            return "mac_receive_file_resume_state_failed"
+        case .resumeStateCleanupFailed:
+            return "mac_receive_file_resume_state_cleanup_failed"
+        case .automaticResumeFailed:
+            return "mac_receive_file_automatic_resume_failed"
+        case .capacityExceeded:
+            return "mac_receive_file_capacity_exceeded"
+        case .ambiguousTarget:
+            return "mac_receive_file_ambiguous_target"
+        case .invalidPort:
+            return "mac_receive_file_invalid_port"
+        case .deliveryConfirmationUnknown:
+            return "mac_receive_file_delivery_confirmation_unknown"
+        case .invalidTransferState:
+            return "mac_receive_file_invalid_transfer_state"
         }
     }
 }

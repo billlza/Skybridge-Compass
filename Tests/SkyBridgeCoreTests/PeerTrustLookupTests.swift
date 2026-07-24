@@ -178,7 +178,7 @@ final class PeerTrustLookupTests: XCTestCase {
     }
 
     func testDefaultHandshakeTrustProviderUsesAuthoritativeProtocolFingerprint() async throws {
-        let protocolPublicKey = Data([0xDE, 0xAD, 0xBE, 0xEF])
+        let protocolPublicKey = Data(repeating: 0xDE, count: 1_952)
         let expectedFingerprint = try IdentityPublicKeys(
             protocolPublicKey: protocolPublicKey,
             protocolAlgorithm: .mlDSA65

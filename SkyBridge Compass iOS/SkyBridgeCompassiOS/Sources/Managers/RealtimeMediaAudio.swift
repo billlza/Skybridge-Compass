@@ -913,7 +913,7 @@ actor IOSRealtimeMediaAudioReceiver {
             "jitterEvicted=\(jitterEvicted) playbackDropped=\(playbackDropped) " +
             "lateOrDuplicate=\(lateOrDuplicate) mode=\(mode.rawValue) source=\(sourceEndpoint)"
         SkyBridgeLogger.shared.info("🎧 \(line)")
-        SkyBridgeSmokeTraceWriter.appendStatus(line)
+        SkyBridgeDiagnosticTrace.appendStatus(line)
         await IOSRealtimeMediaAudioPlayer.shared.stop()
     }
 
@@ -1036,7 +1036,11 @@ actor IOSRealtimeMediaAudioReceiver {
             while !Task.isCancelled {
                 let now = DispatchTime.now().uptimeNanoseconds
                 if nextDeadline > now {
-                    try? await Task.sleep(nanoseconds: nextDeadline - now)
+                    do {
+                        try await Task.sleep(nanoseconds: nextDeadline - now)
+                    } catch {
+                        return
+                    }
                 }
                 let wokeAt = DispatchTime.now().uptimeNanoseconds
                 let overdueNanos = wokeAt > nextDeadline ? wokeAt - nextDeadline : 0
@@ -1341,7 +1345,7 @@ actor IOSRealtimeMediaAudioReceiver {
                     "datagrams=0 recv=0 playedTotal=\(played) underflow=\(underflow) rebuffer=\(rebuffer) " +
                     "action=no-jitter-adaptation reason=transport-starved"
                 SkyBridgeLogger.shared.warning("🎧 \(message)")
-                SkyBridgeSmokeTraceWriter.appendStatus(message)
+                SkyBridgeDiagnosticTrace.appendStatus(message)
             }
             return
         }
@@ -1448,7 +1452,7 @@ actor IOSRealtimeMediaAudioReceiver {
         SkyBridgeLogger.shared.info(
             "📈 PQC media audio rx: datagrams=\(window.datagramsSeen) recv=\(window.received) decode=\(window.decoded) play=\(window.played) rejected=\(window.rejected) recvTotal=\(received) decodeTotal=\(decoded) playTotal=\(played) authRejected=\(window.authRejected) sessionHashRejected=\(window.sessionHashRejected) replayRejected=\(window.replayRejected) jitterLate=\(window.jitterLate) jitterDuplicate=\(window.jitterDuplicate) jitterEvicted=\(window.jitterEvicted) jitterGapStop=\(window.jitterGapStopped) plc=\(window.plcFrames) sourceReject=\(window.sourceRejected) sourceMigrate=\(window.sourceMigrated) playbackDrop=\(window.playbackDropped) jitter=\(jitterBuffer.bufferedFrameCount) audioJitterBufferDepthMs=\(audioJitterBufferDepthMs) codec=opus activeCodec=opus audioPath=\(audioPath) queuedMs=\(queuedMs) targetQueuedMs=\(targetQueuedMs) capacityMs=\(capacityMs) effectiveJitterTargetMs=\(effectiveJitterTargetMs) effectiveJitterMaxMs=\(effectiveJitterMaxMs) orderingJitterTargetMs=\(orderingJitterTargetMs) orderingJitterMaxMs=\(orderingJitterMaxMs) adaptationReason=\(lastJitterAdaptationReason) scheduleLeadMs=\(scheduleLeadMs) audioArrivalP50Ms=\(audioArrivalP50Ms) audioArrivalP95Ms=\(audioArrivalP95Ms) audioArrivalMaxMs=\(audioArrivalMaxMs) primed=\(primed) engineRunning=\(engineRunning) underflow=\(underflow) rebuffer=\(rebuffer) bridgedUnderflow=\(bridgedUnderflow) overflow=\(overflow) startupSilenceFrames=\(startupSilenceFrames) renderedFrames=\(renderedFrames) plcRatio=\(plcRatioText) lateRatio=\(lateRatioText)\(probableSuffix)"
         )
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx audioRxDatagrams=\(window.datagramsSeen) audioRxRecv=\(window.received) audioRxDecoded=\(window.decoded) audioRxPlayed=\(window.played) recvTotal=\(received) decodeTotal=\(decoded) playTotal=\(played) rejected=\(window.rejected) authRejected=\(window.authRejected) sessionHashRejected=\(window.sessionHashRejected) replayRejected=\(window.replayRejected) jitterLate=\(window.jitterLate) jitterDuplicate=\(window.jitterDuplicate) jitterEvicted=\(window.jitterEvicted) jitterGapStop=\(window.jitterGapStopped) plcFrames=\(window.plcFrames) plcRatio=\(plcRatioText) audioJitterBufferDepthMs=\(audioJitterBufferDepthMs) queuedMs=\(queuedMs) targetQueuedMs=\(targetQueuedMs) capacityMs=\(capacityMs) scheduleLeadMs=\(scheduleLeadMs) audioArrivalP50Ms=\(audioArrivalP50Ms) audioArrivalP95Ms=\(audioArrivalP95Ms) audioArrivalMaxMs=\(audioArrivalMaxMs) sourceReject=\(window.sourceRejected) sourceMigrate=\(window.sourceMigrated) engineRunning=\(engineRunning) renderedFrames=\(renderedFrames) underflow=\(underflow) rebuffer=\(rebuffer) bridgedUnderflow=\(bridgedUnderflow) startupSilenceFrames=\(startupSilenceFrames) playbackDrop=\(window.playbackDropped)\(probableSuffix)"
         )
         var diagnosticFields: [String: Any] = [
@@ -1500,7 +1504,7 @@ actor IOSRealtimeMediaAudioReceiver {
         if let probable {
             diagnosticFields["probable"] = probable
         }
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             diagnosticFields
         )
     }

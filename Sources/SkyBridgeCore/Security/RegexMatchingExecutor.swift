@@ -98,13 +98,18 @@ public actor RegexMatchingExecutor {
 
  /// Initialize with security limits.
  ///
- /// - Parameters:
- /// - limits: Security limits configuration
- /// - useXPCIsolation: Whether to use XPC isolation (default: true)
-    public init(limits: SecurityLimits = .default, useXPCIsolation: Bool = true) {
+ /// - Parameter limits: Security limits configuration
+    public init(limits: SecurityLimits = .default) {
+        self.limits = limits
+        self.useXPCIsolation = true
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private init(limits: SecurityLimits, useXPCIsolation: Bool) {
         self.limits = limits
         self.useXPCIsolation = useXPCIsolation
     }
+#endif
 
  // MARK: - Public API
 
@@ -453,7 +458,7 @@ public actor RegexMatchingExecutor {
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension RegexMatchingExecutor {
  /// Create an executor for testing without XPC isolation.
     public static func createForTesting(limits: SecurityLimits = .default) -> RegexMatchingExecutor {

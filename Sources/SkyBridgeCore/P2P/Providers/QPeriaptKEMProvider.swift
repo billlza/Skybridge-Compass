@@ -1,8 +1,6 @@
 import Foundation
 import SkyBridgeProtocolCore
-
-#if canImport(CQPeriapt)
-import CQPeriapt
+import SkyBridgeQPeriaptRuntime
 
 /// ABI2 policy-bound KEM adapter for call sites that use the narrow
 /// ``KEMProvider`` protocol. A verified runtime session and a protocol-derived,
@@ -63,4 +61,3 @@ public struct QPeriaptKEMProvider: KEMProvider, Sendable {
         return secret.copyData()
     }
 }
-#endif

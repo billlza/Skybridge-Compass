@@ -18,10 +18,426 @@ import AudioToolbox
 import ImageIO
 import CoreImage
 import Combine
+import SkyBridgeCameraKit
 import SkyBridgeRealtimeMedia
 #if canImport(UIKit)
 import UIKit
 #endif
+
+@available(iOS 17.0, *)
+enum CameraRemoteDesktopRuntimeError: Error, LocalizedError, Sendable, Equatable {
+    case endpointTooLong
+    case endpointContainsControlCharacters
+    case incompleteCredentials
+    case plaintextAcknowledgementRequired
+    case invalidDisplayName
+    case transportFailed
+    case streamEnded
+    case firstVisibleFrameTimedOut
+    case decodeProgressTimedOut
+    case displayProgressTimedOut
+    case watchdogFailed
+    case connectionAttemptInProgress
+    case lifecycleBusy
+    case stopped
+
+    var errorDescription: String? {
+        switch self {
+        case .endpointTooLong:
+            return "The camera endpoint exceeds the 2048-byte limit."
+        case .endpointContainsControlCharacters:
+            return "The camera endpoint contains a control character."
+        case .incompleteCredentials:
+            return "The camera username and password must be supplied together."
+        case .plaintextAcknowledgementRequired:
+            return "Plaintext RTSP requires explicit acknowledgement before connecting."
+        case .invalidDisplayName:
+            return "The camera display name is invalid or exceeds 128 bytes."
+        case .transportFailed:
+            return "The camera transport failed."
+        case .streamEnded:
+            return "The camera stream ended unexpectedly."
+        case .firstVisibleFrameTimedOut:
+            return "The camera did not produce a decodable visible frame within 20 seconds."
+        case .decodeProgressTimedOut:
+            return "Camera frames arrived without decode progress for 12 seconds."
+        case .displayProgressTimedOut:
+            return "Decoded camera frames made no display progress for 12 seconds."
+        case .watchdogFailed:
+            return "The camera progress watchdog failed."
+        case .connectionAttemptInProgress:
+            return "Another camera connection attempt is already in progress."
+        case .lifecycleBusy:
+            return "Too many camera lifecycle operations are waiting for teardown."
+        case .stopped:
+            return "The camera session was stopped."
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraVisibleProgressWatchdogPolicy {
+    enum Decision: Equatable {
+        case healthy
+        case decodeProgressTimedOut
+        case displayProgressTimedOut
+    }
+
+    static let progressTimeout: TimeInterval = 12
+
+    static func evaluate(
+        now: Date,
+        firstDisplayAwaitingSince: Date?,
+        lastFrameArrivalAt: Date?,
+        lastDecodedFrameTime: Date?,
+        lastDisplayedFrameTime: Date?
+    ) -> Decision {
+        if let firstDisplayAwaitingSince,
+           now.timeIntervalSince(firstDisplayAwaitingSince) >= progressTimeout {
+            return .displayProgressTimedOut
+        }
+
+        if let lastFrameArrivalAt,
+           let lastDecodedFrameTime,
+           lastFrameArrivalAt > lastDecodedFrameTime,
+           now.timeIntervalSince(lastDecodedFrameTime) >= progressTimeout {
+            return .decodeProgressTimedOut
+        }
+
+        if let lastDecodedFrameTime,
+           let lastDisplayedFrameTime,
+           lastDecodedFrameTime > lastDisplayedFrameTime,
+           now.timeIntervalSince(lastDisplayedFrameTime) >= progressTimeout {
+            return .displayProgressTimedOut
+        }
+
+        return .healthy
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraSessionTimingPolicy {
+    static let transportFirstFrameTimeout: Duration = .seconds(15)
+    static let transportInactivityTimeout: Duration = .seconds(12)
+    static let visibleFrameTimeout: Duration = .seconds(20)
+}
+
+@available(iOS 17.0, *)
+enum RemoteDesktopFrozenFramePolicy {
+    static func shouldCache(
+        isIndependentlyDecodableFrame: Bool,
+        renderFallbackForbidden: Bool,
+        isReadOnlyCameraSession: Bool
+    ) -> Bool {
+        isIndependentlyDecodableFrame
+            && !renderFallbackForbidden
+            && !isReadOnlyCameraSession
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraDisplayNamePolicy {
+    static func validated(_ rawValue: String?, defaultName: String) throws -> String {
+        guard let rawValue else { return defaultName }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return defaultName }
+        guard value.utf8.count <= 128,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            throw CameraRemoteDesktopRuntimeError.invalidDisplayName
+        }
+        return value
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraPassiveRecoveryReason: String, Sendable, Equatable {
+    case sequenceDiscontinuity = "sequence-discontinuity"
+    case decodeQueuePressure = "decode-queue-pressure"
+    case decodeStall = "decode-stall"
+    case decodeCompletionGap = "decode-completion-gap"
+    case decoderOrRendererReset = "decoder-or-renderer-reset"
+    case codecGovernance = "codec-governance"
+    case firstVisibleFrame = "first-visible-frame"
+    case renderContinuity = "render-continuity"
+    case other = "other"
+
+    static func classify(_ rawReason: String) -> Self {
+        switch rawReason {
+        case "decode-sequence-gap", "decode-sequence-reordered":
+            return .sequenceDiscontinuity
+        case "decode-queue-overflow", "decode-waiting-for-sync":
+            return .decodeQueuePressure
+        case "decode-stall-reset":
+            return .decodeStall
+        case "decode-completion-gap":
+            return .decodeCompletionGap
+        case "sample-buffer-decode-failed", "renderer-flush-required":
+            return .decoderOrRendererReset
+        case "codec-governance-request", "codec-governance-reenable-hevc":
+            return .codecGovernance
+        case "first-frame-timeout":
+            return .firstVisibleFrame
+        default:
+            if rawReason.hasPrefix("metal-")
+                || rawReason.hasPrefix("render-")
+                || rawReason.hasPrefix("sample-buffer-") {
+                return .renderContinuity
+            }
+            return .other
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+struct CameraPassiveRecoveryState: Sendable, Equatable {
+    let reason: CameraPassiveRecoveryReason
+    let startedAt: Date
+}
+
+@available(iOS 17.0, *)
+enum CameraPassiveRecoveryPolicy {
+    enum DeadlineDecision: Equatable {
+        case awaitingNaturalIndependentFrame
+        case timedOut
+    }
+
+    static let progressTimeout = CameraVisibleProgressWatchdogPolicy.progressTimeout
+
+    static func begin(
+        current: CameraPassiveRecoveryState?,
+        rawReason: String,
+        now: Date
+    ) -> CameraPassiveRecoveryState {
+        current ?? CameraPassiveRecoveryState(
+            reason: CameraPassiveRecoveryReason.classify(rawReason),
+            startedAt: now
+        )
+    }
+
+    static func deadlineDecision(
+        for state: CameraPassiveRecoveryState,
+        now: Date
+    ) -> DeadlineDecision {
+        now.timeIntervalSince(state.startedAt) >= progressTimeout
+            ? .timedOut
+            : .awaitingNaturalIndependentFrame
+    }
+
+    static func stateAfterDecodeProgress(
+        current: CameraPassiveRecoveryState?,
+        isReadOnlyCameraSession: Bool,
+        isIndependentlyDecodableFrame: Bool,
+        decodeWasAccepted: Bool
+    ) -> CameraPassiveRecoveryState? {
+        guard isReadOnlyCameraSession,
+              isIndependentlyDecodableFrame,
+              decodeWasAccepted else {
+            return current
+        }
+        return nil
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraTerminalFailurePresentationPolicy {
+    struct Presentation: Sendable, Equatable {
+        let state: RemoteDesktopState
+        let message: String?
+    }
+
+    static func resolve(
+        hadVisibleFrame: Bool,
+        intendedState: RemoteDesktopState,
+        terminalFailure: CameraRemoteDesktopRuntimeError?,
+        cleanupFailure: CameraRemoteDesktopRuntimeError?
+    ) -> Presentation {
+        let effectiveFailure = cleanupFailure ?? terminalFailure
+        let resolvedState = cleanupFailure.map {
+            RemoteDesktopState.error($0.localizedDescription)
+        } ?? intendedState
+        let message: String?
+        if hadVisibleFrame, let effectiveFailure, effectiveFailure != .stopped {
+            message = effectiveFailure.localizedDescription
+        } else {
+            message = nil
+        }
+        return Presentation(state: resolvedState, message: message)
+    }
+}
+
+@available(iOS 17.0, *)
+struct CameraDecodeIdentity: Sendable, Equatable {
+    let width: Int
+    let height: Int
+}
+
+@available(iOS 17.0, *)
+enum CameraDecodeIdentityPolicy {
+    static func identity(for _: CGSize) -> CameraDecodeIdentity {
+        CameraDecodeIdentity(width: 1, height: 1)
+    }
+}
+
+@available(iOS 17.0, *)
+struct CameraRTSPClientOperations: Sendable {
+    let frames: @Sendable () async -> AsyncThrowingStream<H264AccessUnit, any Error>
+    let connectAndPlay: @Sendable () async throws -> Void
+    let stop: @Sendable () async throws -> Void
+
+    init(client: RTSPInterleavedClient) {
+        frames = { await client.frames() }
+        connectAndPlay = { try await client.connectAndPlay() }
+        stop = { try await client.stop() }
+    }
+
+    init(
+        frames: @escaping @Sendable () async -> AsyncThrowingStream<H264AccessUnit, any Error>,
+        connectAndPlay: @escaping @Sendable () async throws -> Void,
+        stop: @escaping @Sendable () async throws -> Void
+    ) {
+        self.frames = frames
+        self.connectAndPlay = connectAndPlay
+        self.stop = stop
+    }
+}
+
+@available(iOS 17.0, *)
+actor CameraFrameActivationGate {
+    private enum State {
+        case pending
+        case active
+        case cancelled
+    }
+
+    private var state: State = .pending
+    private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+
+    func waitUntilActive() async throws {
+        try Task.checkCancellation()
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                switch state {
+                case .active:
+                    continuation.resume()
+                case .cancelled:
+                    continuation.resume(throwing: CancellationError())
+                case .pending:
+                    waiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(waiterID: waiterID) }
+        }
+    }
+
+    func activate() {
+        guard case .pending = state else { return }
+        state = .active
+        let pending = Array(waiters.values)
+        waiters.removeAll(keepingCapacity: false)
+        pending.forEach { $0.resume() }
+    }
+
+    func cancel() {
+        guard case .pending = state else { return }
+        state = .cancelled
+        let pending = Array(waiters.values)
+        waiters.removeAll(keepingCapacity: false)
+        pending.forEach { $0.resume(throwing: CancellationError()) }
+    }
+
+    private func cancel(waiterID: UUID) {
+        let waiter = waiters.removeValue(forKey: waiterID)
+        waiter?.resume(throwing: CancellationError())
+    }
+}
+
+@available(iOS 17.0, *)
+actor CameraVisibleFrameGate {
+    private var result: Result<Void, CameraRemoteDesktopRuntimeError>?
+    private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+
+    func wait() async throws {
+        try Task.checkCancellation()
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                if let result {
+                    continuation.resume(with: result)
+                } else {
+                    waiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(waiterID: waiterID) }
+        }
+    }
+
+    func succeed() {
+        resolve(.success(()))
+    }
+
+    func fail(_ error: CameraRemoteDesktopRuntimeError) {
+        resolve(.failure(error))
+    }
+
+    private func resolve(_ result: Result<Void, CameraRemoteDesktopRuntimeError>) {
+        guard self.result == nil else { return }
+        self.result = result
+        let pending = Array(waiters.values)
+        waiters.removeAll(keepingCapacity: false)
+        pending.forEach { $0.resume(with: result) }
+    }
+
+    private func cancel(waiterID: UUID) {
+        let waiter = waiters.removeValue(forKey: waiterID)
+        waiter?.resume(throwing: CancellationError())
+    }
+}
+
+@available(iOS 17.0, *)
+actor CameraTeardownCompletionGate {
+    private enum State {
+        case pending
+        case resolved(CameraRemoteDesktopRuntimeError?)
+    }
+
+    private let maximumWaiters = 16
+    private var state: State = .pending
+    private var waiters: [CheckedContinuation<CameraRemoteDesktopRuntimeError?, Never>] = []
+
+    func wait() async -> CameraRemoteDesktopRuntimeError? {
+        switch state {
+        case .resolved(let result):
+            return result
+        case .pending:
+            guard waiters.count < maximumWaiters else {
+                return .lifecycleBusy
+            }
+            return await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func resolve(_ result: CameraRemoteDesktopRuntimeError?) {
+        guard case .pending = state else { return }
+        state = .resolved(result)
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        pending.forEach { $0.resume(returning: result) }
+    }
+}
 
 @available(iOS 17.0, *)
 private struct LANSecureReceiveContext: @unchecked Sendable {
@@ -191,6 +607,11 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 当前连接
     @Published public private(set) var currentConnection: Connection?
+    /// A non-authoritative camera connection used only to mount the renderer while the
+    /// RTSP session is waiting for its first confirmed presentation. This must never be
+    /// interpreted as a connected or streaming session; `currentConnection` remains the
+    /// authority for that state.
+    @Published public private(set) var pendingCameraPresentationConnection: Connection?
     private var pendingConnectionTarget: DiscoveredDevice?
 
     /// 连接状态
@@ -216,6 +637,10 @@ public class RemoteDesktopManager: ObservableObject {
     @Published public private(set) var renderPipelineStatus: RemoteDesktopRenderPipeline = .waiting
     @Published public private(set) var renderOrientationStatus: RemoteDesktopRenderOrientation = .unknown
     @Published public private(set) var isUsingCrossNetworkTransport = false
+    @Published public private(set) var isReadOnlyCameraSession = false
+    @Published public private(set) var terminalCameraErrorMessage: String?
+    @Published private(set) var cameraPassiveRecoveryReason: String?
+    @Published private(set) var cameraPassiveRecoveryStartedAt: Date?
     @Published public private(set) var lastDamageRectCount: Int = 0
     @Published public private(set) var lastDamageUsesFullFrameFallback: Bool = false
     @Published private(set) var currentCursorPayload: RemoteDesktopCursorPayload?
@@ -224,17 +649,35 @@ public class RemoteDesktopManager: ObservableObject {
     @Published private(set) var currentCursorImage: UIImage?
 #endif
 
+    /// Whether the camera renderer must be mounted to complete the first-presentation gate.
+    /// The underlying published properties invalidate SwiftUI when this derived state changes.
+    public var isCameraAwaitingFirstPresentation: Bool {
+        isReadOnlyCameraSession
+            && state == .connecting
+            && pendingCameraPresentationConnection != nil
+            && currentConnection == nil
+    }
+
     /// 是否全屏
     @Published public var isFullscreen: Bool = false
 
     /// 画质设置
     @Published public var quality: StreamQuality = .auto
+    @Published public private(set) var viewerSettingsPersistenceError: String?
     @Published public var viewerSettings: RemoteDesktopViewerSettings = .init() {
         didSet {
             if oldValue.audioRedirectionEnabled && !viewerSettings.audioRedirectionEnabled {
                 teardownRemoteAudioPlayback()
             }
-            persistViewerSettings()
+            if !isApplyingPersistedViewerSettings {
+                viewerSettingsRevision &+= 1
+                let pending = (settings: viewerSettings, revision: viewerSettingsRevision)
+                if isViewerSettingsPersistenceReady {
+                    persistViewerSettings(pending.settings, revision: pending.revision)
+                } else {
+                    pendingViewerSettingsPersistence = pending
+                }
+            }
             scheduleViewerSettingsUpdate()
         }
     }
@@ -266,6 +709,33 @@ public class RemoteDesktopManager: ObservableObject {
     private var isProcessingLANReceiveBuffer = false
     private var needsLANReceiveBufferDrain = false
     private var activeTransportMode: ActiveTransportMode = .none
+    private typealias CameraClientFactory = @Sendable (RTSPClientConfiguration) -> CameraRTSPClientOperations
+    private static let productionCameraClientFactory: CameraClientFactory = { configuration in
+        CameraRTSPClientOperations(client: RTSPInterleavedClient(configuration: configuration))
+    }
+    private var cameraClientFactory: CameraClientFactory = RemoteDesktopManager.productionCameraClientFactory
+    private var cameraClient: CameraRTSPClientOperations?
+    private var activeCameraStartAttemptID: UUID?
+    private var cameraActivationGate: CameraFrameActivationGate?
+    private var cameraTeardownCompletionGate: CameraTeardownCompletionGate?
+    private var cameraFrameTask: Task<Void, Never>?
+    private var cameraFirstVisibleFrameWatchdogTask: Task<Void, Never>?
+    private var cameraVisibleProgressWatchdogTask: Task<Void, Never>?
+    private var cameraVisibleFrameGate: CameraVisibleFrameGate?
+    private var cameraSessionGeneration: UInt64 = 0
+    private var cameraFirstPresentedSessionGeneration: UInt64?
+    private var cameraPassiveRecoveryState: CameraPassiveRecoveryState?
+#if DEBUG || SKYBRIDGE_TESTING
+    private var cameraVisibleFrameTimeoutOverrideForTesting: Duration?
+    private(set) var cameraFirstPresentationCompletionCountForTesting = 0
+    var cameraStartAttemptInProgressForTesting: Bool {
+        activeCameraStartAttemptID != nil
+    }
+#endif
+#if canImport(UIKit)
+    private var cameraBackgroundObserver: (any NSObjectProtocol)?
+#endif
+    private let videoFrameClassificationWorker = RemoteDesktopVideoFrameClassificationWorker()
     private let decoder = VideoDecoder()
     private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInitiated)
     private let fallbackImageContext = CIContext(options: [.cacheIntermediates: false])
@@ -301,7 +771,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var decodeCompletionGapStartedAt: Date?
     private var decodeCompletionGapWatchdogTask: Task<Void, Never>?
     private var decodeCompletionGapWatchdogMissingOrder: UInt64?
-    private var pendingFrames: [ScreenData] = []
+    private var pendingFrames: [RemoteDesktopClassifiedScreenFrame] = []
     private var decodeQueueWaitingForSyncFrame = false
     private let metalFeedDeliveryMaxDelayMs: Double = 100.0
     private let metalFeedBackpressureRetryDelayNs: UInt64 = 4_000_000
@@ -455,10 +925,15 @@ public class RemoteDesktopManager: ObservableObject {
     private var crossNetworkFrameSubscriptionTask: Task<Void, Never>?
     private var crossNetworkFrameSubscriptionSessionId: String?
     private var activePresentationOwnerTokens: Set<UUID> = []
+    private var isViewerSettingsPersistenceReady = false
+    private var isApplyingPersistedViewerSettings = false
+    private var viewerSettingsRevision: UInt64 = 0
+    private var pendingViewerSettingsPersistence: (settings: RemoteDesktopViewerSettings, revision: UInt64)?
 
     private init() {
-        viewerSettings = Self.loadViewerSettings()
         crossNetwork.nativeAudioReceiveEnabled = RemoteDesktopManagerRuntimeConfig.crossNetworkNativeAudioReceiveEnabled
+        installCameraLifecycleObserverIfNeeded()
+        bootstrapViewerSettingsPersistence()
     }
 
     private func invalidateDecodePipelineState() {
@@ -592,7 +1067,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func updateLastGoodFrozenFrame(_ image: CGImage?) {
-        guard let image else { return }
+        guard !isReadOnlyCameraSession, let image else { return }
         lastGoodFrozenFrame = image
     }
 
@@ -718,11 +1193,793 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
+    // MARK: - Read-only camera session
+
+    private func installCameraLifecycleObserverIfNeeded() {
+#if canImport(UIKit)
+        guard cameraBackgroundObserver == nil else { return }
+        cameraBackgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isReadOnlyCameraSession else { return }
+                await self.stopCameraSessionForApplicationBackground()
+            }
+        }
+#endif
+    }
+
+    private static func validatedCameraEndpoint(
+        _ rawValue: String,
+        acknowledgesPlaintextRTSP: Bool
+    ) throws -> RTSPEndpoint {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count <= 2_048 else {
+            throw CameraRemoteDesktopRuntimeError.endpointTooLong
+        }
+        guard !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw CameraRemoteDesktopRuntimeError.endpointContainsControlCharacters
+        }
+        let endpoint = try RTSPEndpoint(value)
+        if !endpoint.isSecure, !acknowledgesPlaintextRTSP {
+            throw CameraRemoteDesktopRuntimeError.plaintextAcknowledgementRequired
+        }
+        return endpoint
+    }
+
+    private static func validatedCameraCredentials(
+        username: String?,
+        password: String?
+    ) throws -> RTSPCredentials? {
+        switch (username, password) {
+        case (nil, nil):
+            return nil
+        case let (.some(username), .some(password)):
+            return try RTSPCredentials(username: username, password: password)
+        case (.some, nil), (nil, .some):
+            throw CameraRemoteDesktopRuntimeError.incompleteCredentials
+        }
+    }
+
+    private static func validatedCameraDisplayName(_ rawValue: String?) throws -> String {
+        try CameraDisplayNamePolicy.validated(
+            rawValue,
+            defaultName: RuntimeLocalization.string("智能监控")
+        )
+    }
+
+    /// Starts a strictly read-only H.264 RTSP-over-TCP camera session.
+    /// The method does not return until the active renderer confirms that a decoded frame was presented.
+    public func startCameraStreaming(
+        endpoint rawEndpoint: String,
+        username: String? = nil,
+        password: String? = nil,
+        displayName: String? = nil,
+        acknowledgesPlaintextRTSP: Bool = false
+    ) async throws {
+        let endpoint = try Self.validatedCameraEndpoint(
+            rawEndpoint,
+            acknowledgesPlaintextRTSP: acknowledgesPlaintextRTSP
+        )
+        let credentials = try Self.validatedCameraCredentials(
+            username: username,
+            password: password
+        )
+        let resolvedDisplayName = try Self.validatedCameraDisplayName(displayName)
+        let configuration = try RTSPClientConfiguration(
+            endpoint: endpoint,
+            credentials: credentials,
+            connectTimeout: .seconds(10),
+            requestTimeout: .seconds(10),
+            firstFrameTimeout: CameraSessionTimingPolicy.transportFirstFrameTimeout,
+            streamInactivityTimeout: CameraSessionTimingPolicy.transportInactivityTimeout,
+            teardownTimeout: .seconds(1),
+            frameBufferCapacity: 3,
+            userAgent: "SkyBridgeCompass-iOS/1"
+        )
+
+        guard activeCameraStartAttemptID == nil else {
+            throw CameraRemoteDesktopRuntimeError.connectionAttemptInProgress
+        }
+        let attemptID = UUID()
+        activeCameraStartAttemptID = attemptID
+        defer {
+            if activeCameraStartAttemptID == attemptID {
+                activeCameraStartAttemptID = nil
+            }
+        }
+        if let teardownGate = cameraTeardownCompletionGate,
+           let teardownFailure = await teardownGate.wait() {
+            throw teardownFailure
+        }
+        try Task.checkCancellation()
+        guard activeCameraStartAttemptID == attemptID else {
+            throw CameraRemoteDesktopRuntimeError.stopped
+        }
+
+        if isReadOnlyCameraSession {
+            let stopError = await endCameraSession(
+                finalState: .disconnected,
+                gateFailure: .stopped
+            )
+            if let stopError {
+                throw stopError
+            }
+        } else if activeTransportMode != .none || currentConnection != nil || isStreaming {
+            await disconnect(tearDownTransport: true)
+        }
+
+        terminalCameraErrorMessage = nil
+        cameraSessionGeneration &+= 1
+        let generation = cameraSessionGeneration
+        cameraFirstPresentedSessionGeneration = nil
+#if DEBUG || SKYBRIDGE_TESTING
+        cameraFirstPresentationCompletionCountForTesting = 0
+#endif
+        let operations = cameraClientFactory(configuration)
+        let activationGate = CameraFrameActivationGate()
+        let visibleFrameGate = CameraVisibleFrameGate()
+
+        // Install complete ownership before the first suspension point. Teardown can now
+        // identify and stop this exact attempt even if `frames()` or connect is suspended.
+        cameraClient = operations
+        cameraActivationGate = activationGate
+        cameraVisibleFrameGate = visibleFrameGate
+        pendingCameraPresentationConnection = makeCameraConnection(
+            displayName: resolvedDisplayName,
+            usesTLS: endpoint.isSecure
+        )
+        isReadOnlyCameraSession = true
+        activeTransportMode = .none
+        isUsingCrossNetworkTransport = false
+        transportStatusText = endpoint.isSecure
+            ? RuntimeLocalization.string("智能监控 · RTSPS")
+            : RuntimeLocalization.string("智能监控 · RTSP（明文）")
+        state = .connecting
+        isStreaming = false
+        prepareCameraDecodePipeline()
+
+        do {
+            let frameStream = await operations.frames()
+            try Task.checkCancellation()
+            guard activeCameraStartAttemptID == attemptID,
+                  cameraSessionGeneration == generation,
+                  isReadOnlyCameraSession else {
+                throw CameraRemoteDesktopRuntimeError.stopped
+            }
+
+            let frameClassificationWorker = videoFrameClassificationWorker
+            let cameraDecodeIdentity = CameraDecodeIdentityPolicy.identity(for: .zero)
+            let frameTask = Task.detached(
+                priority: .high
+            ) { [weak self, operations, activationGate, frameStream, frameClassificationWorker] in
+                do {
+                    try await activationGate.waitUntilActive()
+                    for try await accessUnit in frameStream {
+                        try Task.checkCancellation()
+                        let screenData = ScreenData(
+                            // Camera access units intentionally keep a stable decode identity.
+                            // VideoToolbox derives real dimensions from SPS, so publishing the
+                            // decoded resolution here would create a false topology transition.
+                            width: cameraDecodeIdentity.width,
+                            height: cameraDecodeIdentity.height,
+                            imageData: accessUnit.data,
+                            timestamp: Date().timeIntervalSince1970,
+                            format: "h264",
+                            isSyncFrame: accessUnit.isKeyFrame,
+                            sequenceNumber: accessUnit.frameSequenceNumber
+                        )
+                        let classifiedFrame = try await frameClassificationWorker.classify(screenData)
+                        try Task.checkCancellation()
+                        await self?.handleCameraClassifiedFrame(
+                            classifiedFrame,
+                            generation: generation
+                        )
+                    }
+                    try Task.checkCancellation()
+                    await self?.handleCameraFrameStreamFailure(
+                        CameraRemoteDesktopRuntimeError.streamEnded,
+                        generation: generation
+                    )
+                } catch {
+                    guard !Task.isCancelled, !Self.isCameraCancellation(error) else { return }
+                    await self?.handleCameraFrameStreamFailure(error, generation: generation)
+                }
+                _ = operations
+            }
+            cameraFrameTask = frameTask
+
+            try await operations.connectAndPlay()
+            try Task.checkCancellation()
+            guard activeCameraStartAttemptID == attemptID,
+                  cameraSessionGeneration == generation,
+                  isReadOnlyCameraSession,
+                  cameraClient != nil else {
+                throw CameraRemoteDesktopRuntimeError.stopped
+            }
+
+            // The RTSP transport is ready, but neither `isStreaming` nor
+            // `currentConnection` becomes authoritative until the mounted renderer confirms
+            // that a frame was actually presented.
+            scheduleCameraFirstVisibleFrameDeadline(for: generation)
+            await activationGate.activate()
+            try await visibleFrameGate.wait()
+            try Task.checkCancellation()
+            guard activeCameraStartAttemptID == attemptID,
+                  cameraSessionGeneration == generation,
+                  state == .streaming,
+                  currentConnection != nil else {
+                throw CameraRemoteDesktopRuntimeError.stopped
+            }
+            SkyBridgeLogger.shared.info("✅ 智能监控只读会话已呈现首个画面")
+        } catch {
+            await activationGate.cancel()
+            let publicError = Self.normalizedCameraPublicError(error)
+            let gateFailure = Self.cameraGateFailure(for: publicError)
+            let finalState: RemoteDesktopState = gateFailure == .stopped
+                ? .disconnected
+                : .error(Self.safeCameraErrorDescription(publicError))
+            if cameraSessionGeneration == generation, isReadOnlyCameraSession {
+                _ = await endCameraSession(
+                    finalState: finalState,
+                    gateFailure: gateFailure,
+                    terminalFailure: gateFailure
+                )
+            }
+            throw publicError
+        }
+    }
+
+    private func makeCameraConnection(displayName: String, usesTLS: Bool) -> Connection {
+        let sessionID = UUID().uuidString
+        let device = DiscoveredDevice(
+            id: "camera-\(sessionID)",
+            name: displayName,
+            modelName: "H.264 IP Camera",
+            platform: .unknown,
+            osVersion: "",
+            ipAddress: nil,
+            services: ["rtsp"],
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: false,
+            isTrusted: false,
+            publicKey: nil,
+            advertisedCapabilities: ["camera_stream", "read_only"],
+            capabilities: ["camera_stream", "read_only"]
+        )
+        return Connection(
+            id: "camera-\(sessionID)",
+            device: device,
+            status: .connecting,
+            encryptionType: usesTLS ? .classic : .none
+        )
+    }
+
+    private static func promotedCameraConnection(from pendingConnection: Connection) -> Connection {
+        var connectedDevice = pendingConnection.device
+        connectedDevice.isConnected = true
+        return Connection(
+            id: pendingConnection.id,
+            device: connectedDevice,
+            status: .connected,
+            encryptionType: pendingConnection.encryptionType,
+            latency: pendingConnection.latency,
+            bandwidth: pendingConnection.bandwidth,
+            connectedAt: Date()
+        )
+    }
+
+    private func prepareCameraDecodePipeline() {
+        streamEpoch &+= 1
+        lastHandledSessionAuthorityLostStreamEpoch = nil
+        hasReceivedFrameInCurrentStream = false
+        lastLatencyPublishAt = .distantPast
+        lastDecoderResetTime = nil
+        lastIncomingStreamSignature = nil
+        resetRefreshDiagnostics()
+        codecGovernance = .init()
+        resetFrameTelemetry()
+        lastViewerInteractionAt = nil
+        lastContinuityRecoveryAt = nil
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = true
+        resetDecodeSequenceTracking()
+        currentFrame = nil
+        lastGoodFrozenFrame = nil
+        flushRenderedVideoFeeds()
+        renderPipelineStatus = .waiting
+        renderOrientationStatus = .unknown
+        lastDamageRectCount = 0
+        lastDamageUsesFullFrameFallback = false
+        currentCursorPayload = nil
+        currentOverlayPayload = nil
+#if canImport(UIKit)
+        currentCursorImage = nil
+#endif
+        firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
+        cameraVisibleProgressWatchdogTask?.cancel()
+        firstFrameWatchdogTask = nil
+        firstFrameContinuityTask = nil
+        interactionContinuityTask = nil
+        streamContinuityWatchdogTask = nil
+        cameraVisibleProgressWatchdogTask = nil
+        resetCameraPassiveRecoveryState()
+        teardownRemoteAudioPlayback()
+        stopRealtimeMediaAudioReceiver(reason: "camera-session-start")
+        configureSessionClipboardSync()
+    }
+
+    private func scheduleCameraFirstVisibleFrameDeadline(for generation: UInt64) {
+        cameraFirstVisibleFrameWatchdogTask?.cancel()
+        let timeout: Duration
+#if DEBUG || SKYBRIDGE_TESTING
+        timeout = cameraVisibleFrameTimeoutOverrideForTesting
+            ?? CameraSessionTimingPolicy.visibleFrameTimeout
+#else
+        timeout = CameraSessionTimingPolicy.visibleFrameTimeout
+#endif
+        cameraFirstVisibleFrameWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                await self.failCameraSession(.watchdogFailed, generation: generation)
+                return
+            }
+            guard let self,
+                  self.cameraSessionGeneration == generation,
+                  self.isReadOnlyCameraSession,
+                  self.currentConnection == nil else {
+                return
+            }
+            await self.failCameraSession(
+                .firstVisibleFrameTimedOut,
+                generation: generation
+            )
+        }
+    }
+
+    private func startCameraVisibleProgressWatchdog(for generation: UInt64) {
+        cameraVisibleProgressWatchdogTask?.cancel()
+        cameraVisibleProgressWatchdogTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    await self.failCameraSession(.watchdogFailed, generation: generation)
+                    return
+                }
+                guard self.cameraSessionGeneration == generation,
+                      self.isReadOnlyCameraSession,
+                      self.state == .streaming else {
+                    return
+                }
+                if let passiveRecoveryState = self.cameraPassiveRecoveryState,
+                   CameraPassiveRecoveryPolicy.deadlineDecision(
+                       for: passiveRecoveryState,
+                       now: Date()
+                   ) == .timedOut {
+                    await self.failCameraSession(
+                        .decodeProgressTimedOut,
+                        generation: generation
+                    )
+                    return
+                }
+                let decision = CameraVisibleProgressWatchdogPolicy.evaluate(
+                    now: Date(),
+                    firstDisplayAwaitingSince: self.metalAwaitingFirstDisplaySince,
+                    lastFrameArrivalAt: self.lastFrameArrivalAt,
+                    lastDecodedFrameTime: self.lastDecodedFrameTime,
+                    lastDisplayedFrameTime: self.lastDisplayedFrameTime
+                )
+                switch decision {
+                case .healthy:
+                    continue
+                case .decodeProgressTimedOut:
+                    await self.failCameraSession(
+                        .decodeProgressTimedOut,
+                        generation: generation
+                    )
+                    return
+                case .displayProgressTimedOut:
+                    await self.failCameraSession(
+                        .displayProgressTimedOut,
+                        generation: generation
+                    )
+                    return
+                }
+            }
+        }
+    }
+
+    private func handleCameraClassifiedFrame(
+        _ classifiedFrame: RemoteDesktopClassifiedScreenFrame,
+        generation: UInt64
+    ) async {
+        guard cameraSessionGeneration == generation,
+              isReadOnlyCameraSession,
+              state == .connecting || (isStreaming && state == .streaming) else {
+            return
+        }
+        await handleClassifiedScreenData(classifiedFrame)
+    }
+
+    private func cameraPresentationContext(
+        width: Int,
+        height: Int
+    ) -> CameraFramePresentationContext? {
+        guard isReadOnlyCameraSession,
+              width > 0,
+              height > 0,
+              let sessionID = (pendingCameraPresentationConnection ?? currentConnection)?.id else {
+            return nil
+        }
+        return CameraFramePresentationContext(
+            sessionGeneration: cameraSessionGeneration,
+            sessionID: sessionID,
+            width: width,
+            height: height
+        )
+    }
+
+    private func cameraPresentationTrackedFrame(
+        _ frame: DecodedPixelBufferFrame
+    ) -> DecodedPixelBufferFrame {
+        guard let context = cameraPresentationContext(
+            width: frame.width,
+            height: frame.height
+        ) else {
+            return frame
+        }
+        return DecodedPixelBufferFrame(
+            pixelBuffer: frame.pixelBuffer,
+            width: frame.width,
+            height: frame.height,
+            presentationTimeStamp: frame.presentationTimeStamp,
+            cameraPresentationContext: context
+        )
+    }
+
+    private func cameraPresentationTrackedFrame(
+        _ frame: DisplaySampleBufferFrame
+    ) -> DisplaySampleBufferFrame {
+        guard let context = cameraPresentationContext(
+            width: frame.width,
+            height: frame.height
+        ) else {
+            return frame
+        }
+        return DisplaySampleBufferFrame(
+            sampleBuffer: frame.sampleBuffer,
+            width: frame.width,
+            height: frame.height,
+            presentationTimeStamp: frame.presentationTimeStamp,
+            cameraPresentationContext: context
+        )
+    }
+
+    private func promoteCameraSessionAfterFirstPresentedFrame(
+        _ context: CameraFramePresentationContext?
+    ) async {
+        guard let context,
+              context.sessionGeneration == cameraSessionGeneration,
+              cameraFirstPresentedSessionGeneration != context.sessionGeneration,
+              isCameraAwaitingFirstPresentation,
+              let pendingConnection = pendingCameraPresentationConnection,
+              pendingConnection.id == context.sessionID,
+              context.width > 0,
+              context.height > 0,
+              let visibleFrameGate = cameraVisibleFrameGate else {
+            return
+        }
+        cameraFirstPresentedSessionGeneration = context.sessionGeneration
+        cameraVisibleFrameGate = nil
+        resolution = CGSize(width: context.width, height: context.height)
+        currentConnection = Self.promotedCameraConnection(from: pendingConnection)
+        isStreaming = true
+        state = .streaming
+        pendingCameraPresentationConnection = nil
+        cameraFirstVisibleFrameWatchdogTask?.cancel()
+        cameraFirstVisibleFrameWatchdogTask = nil
+        cameraVisibleProgressWatchdogTask?.cancel()
+        cameraVisibleProgressWatchdogTask = nil
+        startCameraVisibleProgressWatchdog(for: cameraSessionGeneration)
+        configureSessionClipboardSync()
+#if DEBUG || SKYBRIDGE_TESTING
+        cameraFirstPresentationCompletionCountForTesting += 1
+#endif
+        await visibleFrameGate.succeed()
+    }
+
+    private func handleCameraFrameStreamFailure(_ error: any Error, generation: UInt64) async {
+        guard cameraSessionGeneration == generation, isReadOnlyCameraSession else { return }
+        let publicError = Self.normalizedCameraPublicError(error)
+        await failCameraSession(
+            Self.cameraGateFailure(for: publicError),
+            generation: generation,
+            publicMessage: Self.safeCameraErrorDescription(publicError)
+        )
+    }
+
+    private func failCameraSession(
+        _ failure: CameraRemoteDesktopRuntimeError,
+        generation: UInt64,
+        publicMessage: String? = nil
+    ) async {
+        guard cameraSessionGeneration == generation, isReadOnlyCameraSession else { return }
+        _ = await endCameraSession(
+            finalState: .error(publicMessage ?? failure.localizedDescription),
+            gateFailure: failure,
+            terminalFailure: failure
+        )
+    }
+
+    @discardableResult
+    private func endCameraSession(
+        finalState: RemoteDesktopState,
+        gateFailure: CameraRemoteDesktopRuntimeError,
+        terminalFailure: CameraRemoteDesktopRuntimeError? = nil
+    ) async -> CameraRemoteDesktopRuntimeError? {
+        if let existingTeardownGate = cameraTeardownCompletionGate {
+            return await existingTeardownGate.wait()
+        }
+        guard isReadOnlyCameraSession || cameraClient != nil || cameraFrameTask != nil else {
+            return nil
+        }
+
+        let teardownGate = CameraTeardownCompletionGate()
+        cameraTeardownCompletionGate = teardownGate
+        let hadVisibleFrame = currentConnection != nil
+        cameraSessionGeneration &+= 1
+        let operations = cameraClient
+        let frameTask = cameraFrameTask
+        let activationGate = cameraActivationGate
+        let visibleGate = cameraVisibleFrameGate
+        cameraClient = nil
+        cameraActivationGate = nil
+        cameraVisibleFrameGate = nil
+        pendingCameraPresentationConnection = nil
+        cameraFirstPresentedSessionGeneration = nil
+        cameraFrameTask = nil
+        cameraFirstVisibleFrameWatchdogTask?.cancel()
+        cameraFirstVisibleFrameWatchdogTask = nil
+        cameraVisibleProgressWatchdogTask?.cancel()
+        cameraVisibleProgressWatchdogTask = nil
+        resetCameraPassiveRecoveryState()
+
+        // Keep the camera lifecycle authoritative until producer, transport, and decoder
+        // cleanup have all completed. New camera/LAN/WebRTC starts will join this teardown
+        // gate instead of reusing shared state while cleanup is suspended.
+        isStreaming = false
+        activeTransportMode = .none
+        isUsingCrossNetworkTransport = false
+        transportStatusText = nil
+        currentConnection = nil
+        firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
+        firstFrameWatchdogTask = nil
+        firstFrameContinuityTask = nil
+        interactionContinuityTask = nil
+        streamContinuityWatchdogTask = nil
+        configureSessionClipboardSync()
+        teardownRemoteAudioPlayback()
+        stopRealtimeMediaAudioReceiver(reason: "camera-session-stop")
+        invalidateDecodePipelineState()
+        pendingFrames.removeAll(keepingCapacity: false)
+        decodeQueueWaitingForSyncFrame = false
+        resetDecodeSequenceTracking()
+        resetFrameTelemetry()
+        currentFrame = nil
+        lastGoodFrozenFrame = nil
+        flushRenderedVideoFeeds()
+        renderPipelineStatus = .waiting
+        renderOrientationStatus = .unknown
+        lastDamageRectCount = 0
+        lastDamageUsesFullFrameFallback = false
+        currentCursorPayload = nil
+        currentOverlayPayload = nil
+#if canImport(UIKit)
+        currentCursorImage = nil
+#endif
+        latency = 0
+        resolution = .zero
+        frameTask?.cancel()
+        await activationGate?.cancel()
+        await visibleGate?.fail(gateFailure)
+
+        var stopFailure: CameraRemoteDesktopRuntimeError?
+        if let operations {
+            do {
+                try await operations.stop()
+            } catch {
+                stopFailure = .transportFailed
+                SkyBridgeLogger.shared.error("❌ 摄像头 TEARDOWN 或传输清理失败")
+            }
+        }
+        await decoder.cleanup()
+
+        let presentation = CameraTerminalFailurePresentationPolicy.resolve(
+            hadVisibleFrame: hadVisibleFrame,
+            intendedState: finalState,
+            terminalFailure: terminalFailure,
+            cleanupFailure: stopFailure
+        )
+        isReadOnlyCameraSession = false
+        terminalCameraErrorMessage = presentation.message
+        state = presentation.state
+        cameraTeardownCompletionGate = nil
+        await teardownGate.resolve(stopFailure)
+        return stopFailure
+    }
+
+    public func acknowledgeTerminalCameraError() {
+        terminalCameraErrorMessage = nil
+    }
+
+    private func beginCameraPassiveRecovery(reason rawReason: String, at now: Date) {
+        let previousState = cameraPassiveRecoveryState
+        let nextState = CameraPassiveRecoveryPolicy.begin(
+            current: previousState,
+            rawReason: rawReason,
+            now: now
+        )
+        cameraPassiveRecoveryState = nextState
+        cameraPassiveRecoveryReason = nextState.reason.rawValue
+        cameraPassiveRecoveryStartedAt = nextState.startedAt
+        guard previousState == nil else { return }
+        SkyBridgeLogger.shared.warning(
+            "⚠️ 智能监控进入被动恢复，等待摄像头自然关键帧: reason=\(nextState.reason.rawValue) timeoutSeconds=\(Int(CameraPassiveRecoveryPolicy.progressTimeout))"
+        )
+    }
+
+    private func clearCameraPassiveRecoveryAfterAcceptedDecode(
+        isIndependentlyDecodableFrame: Bool,
+        at now: Date
+    ) {
+        guard let recoveryState = cameraPassiveRecoveryState else { return }
+        let nextState = CameraPassiveRecoveryPolicy.stateAfterDecodeProgress(
+            current: recoveryState,
+            isReadOnlyCameraSession: isReadOnlyCameraSession,
+            isIndependentlyDecodableFrame: isIndependentlyDecodableFrame,
+            decodeWasAccepted: true
+        )
+        guard nextState == nil else { return }
+        cameraPassiveRecoveryState = nextState
+        cameraPassiveRecoveryReason = nil
+        cameraPassiveRecoveryStartedAt = nil
+        let elapsedMs = max(0, Int(now.timeIntervalSince(recoveryState.startedAt) * 1_000))
+        SkyBridgeLogger.shared.info(
+            "♻️ 智能监控被动恢复已由视频进度解除: reason=\(recoveryState.reason.rawValue) elapsedMs=\(elapsedMs)"
+        )
+    }
+
+    private func resetCameraPassiveRecoveryState() {
+        cameraPassiveRecoveryState = nil
+        cameraPassiveRecoveryReason = nil
+        cameraPassiveRecoveryStartedAt = nil
+    }
+
+    private func stopCameraSessionForApplicationBackground() async {
+        let stopFailure = await endCameraSession(
+            finalState: .disconnected,
+            gateFailure: .stopped
+        )
+        if stopFailure == nil {
+            SkyBridgeLogger.shared.info("⏹️ 应用进入后台，已停止智能监控会话")
+        }
+    }
+
+    private nonisolated static func isCameraCancellation(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? SkyBridgeCameraError) == .cancelled
+    }
+
+    private nonisolated static func normalizedCameraPublicError(_ error: any Error) -> any Error {
+        if error is CancellationError { return error }
+        if error is CameraRemoteDesktopRuntimeError { return error }
+        if error is SkyBridgeCameraError { return error }
+        return CameraRemoteDesktopRuntimeError.transportFailed
+    }
+
+    private nonisolated static func cameraGateFailure(
+        for error: any Error
+    ) -> CameraRemoteDesktopRuntimeError {
+        if let runtimeError = error as? CameraRemoteDesktopRuntimeError {
+            return runtimeError
+        }
+        if let cameraError = error as? SkyBridgeCameraError {
+            switch cameraError {
+            case .cancelled:
+                return .stopped
+            case .streamEnded:
+                return .streamEnded
+            default:
+                return .transportFailed
+            }
+        }
+        if error is CancellationError { return .stopped }
+        return .transportFailed
+    }
+
+    private nonisolated static func safeCameraErrorDescription(_ error: any Error) -> String {
+        if let runtimeError = error as? CameraRemoteDesktopRuntimeError {
+            return runtimeError.localizedDescription
+        }
+        if let cameraError = error as? SkyBridgeCameraError {
+            return cameraError.localizedDescription
+        }
+        if error is CancellationError {
+            return CameraRemoteDesktopRuntimeError.stopped.localizedDescription
+        }
+        return CameraRemoteDesktopRuntimeError.transportFailed.localizedDescription
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    func installCameraClientFactoryForTesting(
+        _ factory: @escaping @Sendable (RTSPClientConfiguration) -> CameraRTSPClientOperations
+    ) {
+        cameraClientFactory = factory
+    }
+
+    func restoreProductionCameraClientFactoryForTesting() {
+        cameraClientFactory = Self.productionCameraClientFactory
+        cameraVisibleFrameTimeoutOverrideForTesting = nil
+    }
+
+    func installCameraVisibleFrameTimeoutForTesting(_ timeout: Duration) {
+        cameraVisibleFrameTimeoutOverrideForTesting = timeout
+    }
+
+    func enqueueDecodedCameraFrameForTesting(
+        _ frame: DecodedPixelBufferFrame
+    ) async -> CameraFramePresentationContext? {
+        let presentationFrame = cameraPresentationTrackedFrame(frame)
+        guard let context = presentationFrame.cameraPresentationContext,
+              await enqueueMetalFrameForDisplay(
+                  presentationFrame,
+                  generation: decodeGeneration,
+                  decodedAt: Date()
+              ) else {
+            return nil
+        }
+        noteDecodedFrame(at: Date())
+        return context
+    }
+
+    func simulateCameraApplicationBackgroundForTesting() async {
+        guard isReadOnlyCameraSession else { return }
+        await stopCameraSessionForApplicationBackground()
+    }
+#endif
+
     // MARK: - Public Methods
 
     /// 连接到远程桌面
     /// - Parameter device: 目标设备
     public func connect(to device: DiscoveredDevice) async throws {
+        if isReadOnlyCameraSession {
+            let stopError = await endCameraSession(
+                finalState: .disconnected,
+                gateFailure: .stopped
+            )
+            if let stopError {
+                throw stopError
+            }
+        }
         let deviceResolver = makeDeviceResolutionCoordinator()
         let resolvedDevice = shouldUseCrossNetworkTransport(for: device)
             ? device
@@ -992,6 +2249,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 便捷入口：从 Connection 启动远程桌面（UI 侧直接调用）
     public func startStreaming(from connection: Connection) async throws {
+#if DEBUG || SKYBRIDGE_TESTING
         if ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE") {
             currentConnection = connection
             activeTransportMode = .none
@@ -1012,6 +2270,7 @@ public class RemoteDesktopManager: ObservableObject {
             configureSessionClipboardSync()
             return
         }
+#endif
 
         if currentConnection?.device.id == connection.device.id, state == .streaming {
             await pushViewerStreamConfiguration(force: true)
@@ -1058,6 +2317,13 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 停止流媒体
     public func stopStreaming() async {
+        if isReadOnlyCameraSession {
+            _ = await endCameraSession(
+                finalState: .disconnected,
+                gateFailure: .stopped
+            )
+            return
+        }
         SkyBridgeLogger.shared.info("⏹️ 停止远程桌面流")
 
         await sendViewerStreamStopConfigurationIfNeeded()
@@ -1105,6 +2371,13 @@ public class RemoteDesktopManager: ObservableObject {
     /// 断开远程桌面流。
     /// - Parameter tearDownTransport: 为 `true` 时连带关闭底层跨网会话；默认仅停止视频/控制流，保留连接。
     public func disconnect(tearDownTransport: Bool = false) async {
+        if isReadOnlyCameraSession {
+            _ = await endCameraSession(
+                finalState: .disconnected,
+                gateFailure: .stopped
+            )
+            return
+        }
         SkyBridgeLogger.shared.info(
             tearDownTransport ? "🔌 断开远程桌面连接" : "⏹️ 停止远程桌面流（保留连接）"
         )
@@ -1276,6 +2549,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func currentTransportStatusText() -> String? {
+        if isReadOnlyCameraSession {
+            return transportStatusText
+        }
         switch activeTransportMode {
         case .none:
             return nil
@@ -1504,7 +2780,7 @@ public class RemoteDesktopManager: ObservableObject {
         mimeType: String,
         fromDeviceId: String? = nil
     ) {
-        guard viewerSettings.clipboardSyncEnabled else { return }
+        guard !isReadOnlyCameraSession, viewerSettings.clipboardSyncEnabled else { return }
         configureSessionClipboardSync()
         ClipboardManager.shared.setRemoteClipboard(
             data: data,
@@ -1514,7 +2790,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     func handleInboundRemoteAudioChunk(_ payload: RemoteDesktopAudioChunkPayload) {
-        guard viewerSettings.audioRedirectionEnabled, isStreaming else { return }
+        guard !isReadOnlyCameraSession,
+              viewerSettings.audioRedirectionEnabled,
+              isStreaming else { return }
         guard acceptsLegacyRemoteAudioChunks else {
             SkyBridgeLogger.shared.debug("ℹ️ 已丢弃 legacy 远控音频块：当前会话要求 PQC media plane")
             return
@@ -1575,11 +2853,13 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     func handleInboundDamageReport(_ report: RemoteDesktopDamageReportPayload) {
+        guard !isReadOnlyCameraSession else { return }
         lastDamageRectCount = report.rects.count
         lastDamageUsesFullFrameFallback = report.fullFrameFallback
     }
 
     func handleInboundCursorUpdate(_ payload: RemoteDesktopCursorPayload) {
+        guard !isReadOnlyCameraSession else { return }
         currentCursorPayload = payload
 #if canImport(UIKit)
         if let imageData = payload.imageData,
@@ -1590,14 +2870,20 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     func handleInboundOverlayUpdate(_ payload: RemoteDesktopOverlayPayload) {
+        guard !isReadOnlyCameraSession else { return }
         currentOverlayPayload = payload
     }
 
     private func scheduleViewerSettingsUpdate() {
+        guard !isReadOnlyCameraSession else { return }
         pendingViewerSettingsTask?.cancel()
         pendingViewerSettingsTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             self.configureSessionClipboardSync()
             await self.pushViewerStreamConfiguration(force: false)
@@ -1639,6 +2925,7 @@ public class RemoteDesktopManager: ObservableObject {
         let shouldEnable = viewerSettings.clipboardSyncEnabled
             && isStreaming
             && hasReceivedFrameInCurrentStream
+            && !isReadOnlyCameraSession
 
         if shouldEnable {
             if clipboardSessionId == nil {
@@ -1668,7 +2955,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func handleLocalClipboardChange(data: Data, mimeType: String) async {
-        guard viewerSettings.clipboardSyncEnabled, isStreaming else { return }
+        guard !isReadOnlyCameraSession,
+              viewerSettings.clipboardSyncEnabled,
+              isStreaming else { return }
         do {
             let payload = RemoteClipboardMessagePayload(mimeType: mimeType, data: data)
             let encoded = try JSONEncoder().encode(payload)
@@ -1810,10 +3099,10 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.info(
                     "🎧 PQC media audio endpoint published after relay bind policy satisfied: event=audioEndpointPrepared session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx endpointPrepared session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointPrepared",
                         "session": snapshot.sessionId,
@@ -1882,7 +3171,11 @@ public class RemoteDesktopManager: ObservableObject {
                 "🎧 PQC media audio receiver ready: session=\(snapshot.sessionId) port=\(endpoint.port) mode=\(mode.rawValue) transport=\(activeTransportModeLabel()) codec=opus audioPath=pqc-opus-source-node-ring relayToken=\(endpoint.relayToken == nil ? "missing" : "present") legacyFallback=false"
             )
             Task.detached(priority: .utility) { [renderer, sessionId = snapshot.sessionId, endpoint, mode] in
-                try? await Task.sleep(for: .seconds(3))
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
                 let snapshot = await renderer.startupDiagnosticSnapshot()
                 if snapshot.received == 0 {
                     let probable: String = {
@@ -1906,10 +3199,10 @@ public class RemoteDesktopManager: ObservableObject {
                     SkyBridgeLogger.shared.warning(
                         "🎧 PQC media audio rx startup stalled: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) probable=\(probable)"
                     )
-                    SkyBridgeSmokeTraceWriter.append(
+                    SkyBridgeDiagnosticTrace.append(
                         "audio-rx session=\(sessionId) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) recvTotal=\(snapshot.received) decodeTotal=\(snapshot.decoded) playTotal=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) probable=\(probable)"
                     )
-                    SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                         [
                             "kind": "audioRxStartup",
                             "session": sessionId,
@@ -1980,7 +3273,7 @@ public class RemoteDesktopManager: ObservableObject {
                 "audioRxStop session=\(receiverSessionId) reason=\(reason) " +
                 "transport=\(activeTransportModeLabel()) endpoint=\(endpointLabel) cancelPendingStart=\(cancelPendingStart)"
             SkyBridgeLogger.shared.info("🎧 \(line)")
-            SkyBridgeSmokeTraceWriter.appendStatus(line)
+            SkyBridgeDiagnosticTrace.appendStatus(line)
         }
         if cancelPendingStart {
             realtimeMediaAudioReceiverStartGeneration &+= 1
@@ -2014,6 +3307,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async {
+        guard !isReadOnlyCameraSession else { return }
         guard isStreaming else { return }
         guard !handleCrossNetworkSessionAuthorityLostIfNeeded(source: "stream-config") else { return }
         let mediaAudioMode = preferredRealtimeMediaAudioMode()
@@ -2045,7 +3339,7 @@ public class RemoteDesktopManager: ObservableObject {
             )
         } catch {
             SkyBridgeLogger.shared.error(
-                "⛔️ 远控流配置缺少本机协议 identity snapshot，拒绝发送: \(error.localizedDescription)"
+                "⛔️ 远控流配置未发送：本机协议身份 authority 不可用 (\(error.localizedDescription))"
             )
             return
         }
@@ -2100,7 +3394,7 @@ public class RemoteDesktopManager: ObservableObject {
         let retrySuffix = retryAttempt.map { " retryAttempt=\($0)" } ?? ""
         let noticeIdentity = payload.remoteControlSecurityIdentity
         let streamConfigLine = "event=streamConfigSent\(retrySuffix) preset=\(viewerSettings.activePreset.displayName), preferred=\(payload.preferredCodec ?? "auto"), formats=\(payload.supportedVideoFormats.joined(separator: ",")), fps=\(payload.targetFrameRate), jitter=\(payload.jitterBufferFrames ?? 0), lowLatency=\(payload.lowLatencyMode) damage=\(payload.damageTrackingEnabled == true) audioMode=\(payload.audioMode ?? "nil") perf=\(payload.performanceValidationMode ?? "normal") refresh=\(payload.streamRefreshToken != nil) refreshTokenState=\(Self.streamRefreshTokenLogState(payload.streamRefreshToken)) transport=\(payload.screenFrameTransport ?? "legacy") screenChannel=\(payload.screenDataChannelEnabled == true) screenWire=\(payload.screenChannelWireFormat ?? "length-framed") nativeReady=\(payload.nativeVideoTrackReady == true) streamConfigIncludesAudio=\(payload.mediaAudioEndpoint != nil) audioEndpointAck=\(lastAcknowledgedMediaAudioEndpointPresent) audioTransport=\(payload.audioTransport ?? "nil") mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") noticeAccount=\(Self.noticeIdentityValuePresent(noticeIdentity?.accountDisplayName) ? "present" : "missing") noticeNebula=\(Self.noticeIdentityValuePresent(noticeIdentity?.nebulaId) ? "present" : "missing")"
-        SkyBridgeSmokeTraceWriter.appendStatus(streamConfigLine)
+        SkyBridgeDiagnosticTrace.appendStatus(streamConfigLine)
         SkyBridgeLogger.shared.info("📤 已发送远控流配置: \(streamConfigLine)")
     }
 
@@ -2120,7 +3414,7 @@ public class RemoteDesktopManager: ObservableObject {
         guard missing.isEmpty else {
             let missingList = missing.joined(separator: ",")
             let reason = "missing_viewer_notice_identity"
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "failed stage=remote-control phase=notice-identity reason=\(reason) missing=\(missingList) transport=\(activeTransportModeLabel())"
             )
             SkyBridgeLogger.shared.error(
@@ -2199,7 +3493,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     public func handleStreamConfigurationAck(_ ack: RemoteDesktopStreamConfigurationAckPayload) {
-        guard isStreaming else { return }
+        guard isStreaming, !isReadOnlyCameraSession else { return }
         streamConfigurationAckSatisfied = true
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
@@ -2210,6 +3504,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func sendViewerStreamStopConfigurationIfNeeded() async {
+        guard !isReadOnlyCameraSession else { return }
         let canSendOverWebRTC = activeTransportMode == .crossNetwork && currentConnection != nil
         let canSendOverLAN = activeTransportMode == .lan && networkConnection != nil
         guard canSendOverWebRTC || canSendOverLAN else { return }
@@ -2252,12 +3547,17 @@ public class RemoteDesktopManager: ObservableObject {
             supportedFormats: supportedFormats,
             at: now
         )
+#if DEBUG || SKYBRIDGE_TESTING
         let smokeDimensions = RemoteDesktopSmokeStreamOverrides.requestedDimensions()
         let smokeTargetFrameRate = RemoteDesktopSmokeStreamOverrides.targetFrameRate()
+#else
+        let smokeDimensions: (width: Int, height: Int)? = nil
+        let smokeTargetFrameRate: Int? = nil
+#endif
         let realtimeMediaAudioMode = preferredRealtimeMediaAudioMode()
         let streamRefreshToken = refreshStream ? nextStreamRefreshToken() : nil
         let localDeviceSnapshot = AppleMobileDeviceIdentity.currentSnapshot()
-        let protocolIdentity = try skyBridgeCore.requireCurrentProtocolIdentitySnapshot()
+        let protocolIdentity = try SkyBridgeiOSCore.shared.requireCurrentProtocolIdentitySnapshot()
         let securityIdentityMetadata = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
         let securityIdentity = RemoteDesktopSecurityIdentityPayload(
             accountDisplayName: securityIdentityMetadata.accountDisplayName,
@@ -2410,10 +3710,10 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.warning(
                     "🎧 PQC media audio no-traffic recovery exhausted: event=\(exhaustedEventName) session=\(sessionId) endpoint=\(endpointLabel) attempts=\(attempt - 1) action=doctor-fail transport=\(self.activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx \(exhaustedEventName) session=\(sessionId) endpoint=\(endpointLabel) attempts=\(attempt - 1) action=doctor-fail probable=\(probable)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxNoTrafficRecovery",
                         "session": sessionId,
@@ -2432,10 +3732,10 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.warning(
                     "🎧 PQC media audio relay accepted but delivered no datagrams: event=\(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=lease-refresh transport=\(self.activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx \(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=lease-refresh probable=\(probable)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxNoTrafficRecovery",
                         "session": sessionId,
@@ -2459,10 +3759,10 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.warning(
                     "🎧 PQC media audio LAN endpoint still delivered no datagrams after republish: event=\(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=receiver-rebind transport=\(self.activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx \(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=receiver-rebind probable=\(probable)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxNoTrafficRecovery",
                         "session": sessionId,
@@ -2485,10 +3785,10 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.warning(
                 "🎧 PQC media audio LAN endpoint delivered no datagrams: event=\(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=stream-config-republish transport=\(self.activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx \(eventName) session=\(sessionId) endpoint=\(endpointLabel) attempt=\(attempt) action=stream-config-republish probable=\(probable)"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxNoTrafficRecovery",
                     "session": sessionId,
@@ -2532,10 +3832,10 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.info(
             "🎧 PQC media audio relay renewal scheduled: event=relayLeaseRenewalScheduled session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) delayMs=\(delayMs) expiresInMs=\(expiresInMs) transport=\(activeTransportModeLabel())"
         )
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx relayLeaseRenewalScheduled session=\(sessionId) delayMs=\(delayMs) relay=\(endpoint.host):\(endpoint.port)"
         )
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             [
                 "kind": "audioRxEndpointRenewalScheduled",
                 "session": sessionId,
@@ -2623,10 +3923,10 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.info(
                     "🎧 PQC media audio relay renewed in place: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=present transport=\(activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) mode=in-place"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointRenewed",
                         "session": sessionId,
@@ -2649,10 +3949,10 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio relay renewal using make-before-break: event=relayLeaseRenewalRollover session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) reason=strict-make-before-break transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalRollover session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) reason=strict-make-before-break"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxEndpointRenewalRollover",
                     "session": sessionId,
@@ -2714,7 +4014,7 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio renewal config sent: event=audioRenewalConfigSent session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) audioRelayToken=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "stream-config audioRenewalSent session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
             )
         } catch {
@@ -2743,10 +4043,10 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.warning(
                 "⚠️ PQC media audio relay renewal held old transport: event=relayLeaseRenewalTrafficMissing session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayLeaseRenewalTrafficMissing session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxEndpointRenewalTrafficMissing",
                     "session": sessionId,
@@ -2768,10 +4068,10 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.info(
             "🎧 PQC media audio relay renewed after traffic: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") newTransportRecvTotal=\(observedTotal) transport=\(activeTransportModeLabel())"
         )
-        SkyBridgeSmokeTraceWriter.append(
+        SkyBridgeDiagnosticTrace.append(
             "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
         )
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             [
                 "kind": "audioRxEndpointRenewed",
                 "session": sessionId,
@@ -2786,7 +4086,12 @@ public class RemoteDesktopManager: ObservableObject {
         scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: relayEndpoint, mode: mode)
         if let oldTransport {
             Task(priority: .utility) {
-                try? await Task.sleep(for: RemoteDesktopManagerRuntimeConfig.realtimeMediaAudioRelayRolloverGraceDelay)
+                do {
+                    try await Task.sleep(for: RemoteDesktopManagerRuntimeConfig.realtimeMediaAudioRelayRolloverGraceDelay)
+                } catch {
+                    await oldTransport.stop()
+                    return
+                }
                 await oldTransport.stop()
             }
         }
@@ -2802,10 +4107,10 @@ public class RemoteDesktopManager: ObservableObject {
         while Date() < deadline {
             observedTotal = trafficCounter.snapshot()
             if observedTotal >= RemoteDesktopManagerRuntimeConfig.realtimeMediaAudioRelayRolloverMinimumObservedPackets {
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayLeaseRenewalTrafficObserved session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
                 )
-                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                     [
                         "kind": "audioRxEndpointRenewalTrafficObserved",
                         "session": sessionId,
@@ -2816,7 +4121,11 @@ public class RemoteDesktopManager: ObservableObject {
                 )
                 return observedTotal
             }
-            try? await Task.sleep(for: RemoteDesktopManagerRuntimeConfig.realtimeMediaAudioRelayRolloverTrafficObservationPoll)
+            do {
+                try await Task.sleep(for: RemoteDesktopManagerRuntimeConfig.realtimeMediaAudioRelayRolloverTrafficObservationPoll)
+            } catch {
+                return observedTotal
+            }
         }
         return observedTotal
     }
@@ -2872,7 +4181,7 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.info(
                     "🎧 PQC media audio relay bind ack timeout tolerated: event=relayBindAckGraceTrafficObserved session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=\(snapshot.received) transport=\(self.activeTransportModeLabel())"
                 )
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx relayBindAckGraceTrafficObserved session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=\(snapshot.received)"
                 )
                 return
@@ -2916,8 +4225,8 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio receiver UDP connection ready: event=udpConnectionReady session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append("audio-rx udpConnectionReady session=\(sessionId) relay=\(relay)")
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.append("audio-rx udpConnectionReady session=\(sessionId) relay=\(relay)")
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -2933,8 +4242,8 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio relay bind sent: event=relayBindSent session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindSent session=\(sessionId) relay=\(relay)")
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.append("audio-rx relayBindSent session=\(sessionId) relay=\(relay)")
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -2952,8 +4261,8 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio relay bind accepted: event=relayBindAccepted session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindAccepted session=\(sessionId) relay=\(relay)")
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.append("audio-rx relayBindAccepted session=\(sessionId) relay=\(relay)")
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -2969,10 +4278,10 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.warning(
                 "🎧 PQC media audio relay bind ack pending: event=relayBindAckTimedOut session=\(sessionId) relay=\(relay) action=optimistic-grace probable=ack-lost-or-relay-late transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayBindAckTimedOut session=\(sessionId) relay=\(relay) action=optimistic-grace probable=ack-lost-or-relay-late"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -2992,10 +4301,10 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.warning(
                 "🎧 PQC media audio relay bind rejected: event=relayBindRejected session=\(sessionId) relay=\(relay) reason=\(reason) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append(
+            SkyBridgeDiagnosticTrace.append(
                 "audio-rx relayBindRejected session=\(sessionId) relay=\(relay) reason=\(reason)"
             )
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -3015,8 +4324,8 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.warning(
                 "🎧 PQC media audio relay bind malformed: event=relayBindMalformed session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
             )
-            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindMalformed session=\(sessionId) relay=\(relay)")
-            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            SkyBridgeDiagnosticTrace.append("audio-rx relayBindMalformed session=\(sessionId) relay=\(relay)")
+            SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
                 [
                     "kind": "audioRxRelayBind",
                     "session": sessionId,
@@ -3114,10 +4423,10 @@ public class RemoteDesktopManager: ObservableObject {
         )
         let sessionId = realtimeMediaAudioReceiverSessionId ?? "-"
         let transport = activeTransportModeLabel()
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "audio-rx event=audioRxReceiverStartFailed session=\(sessionId) reason=\(reason.rawValue) stage=\(stage) mode=\(mode.rawValue) elapsedMs=\(elapsedMs) transport=\(transport) probable=receiver-start-failed"
         )
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+        SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
             [
                 "kind": "audioRxReceiverStartFailed",
                 "session": sessionId,
@@ -3208,7 +4517,7 @@ public class RemoteDesktopManager: ObservableObject {
             }
             if let binding {
                 SkyBridgeLogger.shared.info("🎧 PQC media audio receiver started: event=receiverStarted session=\(binding.mediaSessionId) relay=\(binding.endpoint.host):\(binding.endpoint.port) token=\(binding.endpoint.relayToken == nil ? "missing" : "present")")
-                SkyBridgeSmokeTraceWriter.append(
+                SkyBridgeDiagnosticTrace.append(
                     "audio-rx receiverStarted session=\(binding.mediaSessionId) relay=\(binding.endpoint.host):\(binding.endpoint.port)"
                 )
                 await self.pushViewerStreamConfiguration(force: false, refreshStream: false)
@@ -3219,6 +4528,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func activeTransportModeLabel() -> String {
+        if isReadOnlyCameraSession {
+            return "camera_rtsp_read_only"
+        }
         switch activeTransportMode {
         case .none:
             return "none"
@@ -3233,19 +4545,65 @@ public class RemoteDesktopManager: ObservableObject {
         return .metal
     }
 
-    private func persistViewerSettings() {
-        try? RemoteDesktopManagerRuntimeConfig.viewerSettingsStore.save(viewerSettings)
+    private func bootstrapViewerSettingsPersistence() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let loadedSettings = try await RemoteDesktopManagerRuntimeConfig.viewerSettingsPersistence.loadOrThrow()
+                self.finishViewerSettingsBootstrap(loadedSettings)
+            } catch {
+                self.viewerSettingsPersistenceError = "无法读取远程桌面设置；当前使用默认值。"
+                SkyBridgeLogger.shared.error("❌ 读取远程桌面设置失败: \(error.localizedDescription)")
+                self.finishViewerSettingsBootstrap(nil)
+            }
+        }
     }
 
-    private static func loadViewerSettings() -> RemoteDesktopViewerSettings {
-        guard let settings = RemoteDesktopManagerRuntimeConfig.viewerSettingsStore.load() else {
-            return RemoteDesktopViewerSettings()
+    private func finishViewerSettingsBootstrap(_ loadedSettings: RemoteDesktopViewerSettings?) {
+        isViewerSettingsPersistenceReady = true
+
+        if let pendingViewerSettingsPersistence {
+            self.pendingViewerSettingsPersistence = nil
+            persistViewerSettings(
+                pendingViewerSettingsPersistence.settings,
+                revision: pendingViewerSettingsPersistence.revision
+            )
+            return
         }
-        var migrated = settings
+
+        guard let loadedSettings else { return }
+        var migrated = loadedSettings
         if migrated.preferredCodec == .jpeg {
             migrated.preferredCodec = .hevc
         }
-        return migrated
+        isApplyingPersistedViewerSettings = true
+        viewerSettings = migrated
+        isApplyingPersistedViewerSettings = false
+
+        if migrated != loadedSettings {
+            viewerSettingsRevision &+= 1
+            persistViewerSettings(migrated, revision: viewerSettingsRevision)
+        }
+    }
+
+    private func persistViewerSettings(
+        _ settings: RemoteDesktopViewerSettings,
+        revision: UInt64
+    ) {
+        Task { [weak self] in
+            do {
+                try await RemoteDesktopManagerRuntimeConfig.viewerSettingsPersistence.save(
+                    settings,
+                    revision: revision
+                )
+                guard let self, revision == self.viewerSettingsRevision else { return }
+                self.viewerSettingsPersistenceError = nil
+            } catch {
+                guard let self, revision == self.viewerSettingsRevision else { return }
+                self.viewerSettingsPersistenceError = "远程桌面设置保存失败；更改可能在重启后丢失。"
+                SkyBridgeLogger.shared.error("❌ 保存远程桌面设置失败: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func updateRenderPipeline(_ pipeline: RemoteDesktopRenderPipeline) {
@@ -3353,7 +4711,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 发送鼠标/触控事件
     public func sendMouseEvent(_ event: MouseEvent) async {
-        guard isStreaming else { return }
+        guard isStreaming, !isReadOnlyCameraSession else { return }
 
         do {
             let data = try JSONEncoder().encode(event)
@@ -3367,7 +4725,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 发送键盘事件
     public func sendKeyboardEvent(_ event: KeyboardEvent) async {
-        guard isStreaming else { return }
+        guard isStreaming, !isReadOnlyCameraSession else { return }
 
         do {
             let data = try JSONEncoder().encode(event)
@@ -3510,11 +4868,7 @@ public class RemoteDesktopManager: ObservableObject {
         lanSecureSendCounter = 0
         lanHandshakeDriver = nil
 
-        let authorityDeviceId = try skyBridgeCore
-            .requireCurrentProtocolIdentitySnapshot().deviceId
-        let localDeviceId = PeerIdentityAliasResolver.persistentDeviceId(
-            from: authorityDeviceId
-        ) ?? authorityDeviceId
+        let localDeviceId = try resolvedLocalRemoteControlDeviceId()
         guard let localSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: localDeviceId),
               let expectedRemoteSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: trustedPeerId),
               let soaMetadata = try? HandshakeSOAMetadata(
@@ -3554,12 +4908,7 @@ public class RemoteDesktopManager: ObservableObject {
         )
 
         try ensureLANBootstrapStillActive(for: connection)
-        try installLANSecureSessionKeys(
-            keys,
-            peerId: trustedPeerId,
-            source: "performHandshake-return",
-            requiresPQC: true
-        )
+        try installLANSecureSessionKeys(keys, peerId: trustedPeerId, source: "performHandshake-return")
     }
 
     private func installLANHandshakeDriver(
@@ -3578,20 +4927,8 @@ public class RemoteDesktopManager: ObservableObject {
     private func installLANSecureSessionKeys(
         _ keys: SessionKeys,
         peerId: String,
-        source: String,
-        requiresPQC: Bool
+        source: String
     ) throws {
-        guard keys.negotiatedSuite.isNegotiable else {
-            let reason = "LAN 远控安全通道拒绝不可协商 suite: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
-            SkyBridgeLogger.shared.error("⛔️ \(reason)")
-            throw RemoteDesktopError.connectionFailed(reason)
-        }
-        if requiresPQC, !keys.negotiatedSuite.isPQCGroup {
-            let reason = "LAN 远控严格 PQC 通道拒绝 Classic suite: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
-            SkyBridgeLogger.shared.error("⛔️ \(reason)")
-            throw RemoteDesktopError.connectionFailed(reason)
-        }
-
         if let existing = lanSessionKeys {
             if Self.isSameLANSecureSession(existing, keys) {
                 lanHandshakeDriver = nil
@@ -3621,6 +4958,9 @@ public class RemoteDesktopManager: ObservableObject {
         transportStatusText = currentTransportStatusText()
         SkyBridgeLogger.shared.info(
             "🔐 LAN 远控安全通道已建立: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
+        )
+        SkyBridgeDiagnosticTrace.appendStatus(
+            "lan-remote handshake-established peer=<redacted> suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
         )
         if shouldDrainBootstrapAfterInstall,
            let connection = networkConnection,
@@ -3663,8 +5003,7 @@ public class RemoteDesktopManager: ObservableObject {
             try installLANSecureSessionKeys(
                 keys,
                 peerId: lanHandshakePeerId ?? "-",
-                source: "handshake-driver-established",
-                requiresPQC: true
+                source: "handshake-driver-established"
             )
         case .failed(let reason):
             throw RemoteDesktopError.connectionFailed("LAN 远控握手失败: \(String(describing: reason))")
@@ -3722,6 +5061,11 @@ public class RemoteDesktopManager: ObservableObject {
         return openedPayload.payload
     }
 
+    private func resolvedLocalRemoteControlDeviceId() throws -> String {
+        let raw = try skyBridgeCore.requireCurrentProtocolIdentitySnapshot().deviceId
+        return PeerIdentityAliasResolver.persistentDeviceId(from: raw) ?? raw
+    }
+
     // MARK: - Private Methods - Connection
 
     private func createConnection(toAnyOf endpoints: [NWEndpoint]) async throws -> NWConnection {
@@ -3746,8 +5090,8 @@ public class RemoteDesktopManager: ObservableObject {
             )
             let routeLine = "ios-lan-remote-route candidate=\(index + 1)/\(endpoints.count) addressClass=\(addressClass) peerToPeer=\(peerToPeer) endpoint=\(RemoteDesktopLANRoutePolicy.statusToken(endpointDescription))"
             SkyBridgeLogger.shared.info(routeLine)
-            SkyBridgeSmokeTraceWriter.appendStatus(routeLine)
-            SkyBridgeSmokeTraceWriter.append(routeLine)
+            SkyBridgeDiagnosticTrace.appendStatus(routeLine)
+            SkyBridgeDiagnosticTrace.append(routeLine)
 
             do {
                 let connection = try await createConnection(to: endpoint, timeout: perEndpointTimeout)
@@ -3807,8 +5151,8 @@ public class RemoteDesktopManager: ObservableObject {
                     let resolvedEndpoint = connection.currentPath?.remoteEndpoint
                     let routeReadyLine = "ios-lan-remote-route-ready requestedAddressClass=\(RemoteDesktopLANRoutePolicy.routeAddressClass(for: endpoint)) resolvedAddressClass=\(RemoteDesktopLANRoutePolicy.routeAddressClass(for: resolvedEndpoint)) resolvedPeerToPeer=\(RemoteDesktopLANRoutePolicy.routePrefersPeerToPeer(for: resolvedEndpoint)) requested=\(RemoteDesktopLANRoutePolicy.statusToken(endpointDescription)) resolved=\(RemoteDesktopLANRoutePolicy.statusToken(RemoteDesktopLANRoutePolicy.routeDescription(for: resolvedEndpoint)))"
                     SkyBridgeLogger.shared.info(routeReadyLine)
-                    SkyBridgeSmokeTraceWriter.appendStatus(routeReadyLine)
-                    SkyBridgeSmokeTraceWriter.append(routeReadyLine)
+                    SkyBridgeDiagnosticTrace.appendStatus(routeReadyLine)
+                    SkyBridgeDiagnosticTrace.append(routeReadyLine)
                     if let rejection = RemoteDesktopLANRoutePolicy.resolvedRouteRejection(
                         requestedEndpoint: endpoint,
                         resolvedEndpoint: resolvedEndpoint
@@ -3853,6 +5197,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func sendMessage(_ message: RemoteMessage) async throws {
+        guard !isReadOnlyCameraSession else {
+            throw RemoteDesktopError.notSupported("智能监控会话严格只读")
+        }
         // WebRTC DataChannel path
         if activeTransportMode == .crossNetwork {
             try await crossNetwork.sendRemoteDesktopMessage(message)
@@ -4573,15 +5920,75 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func handleScreenData(_ screenData: ScreenData, receivedAt: Date? = nil) async {
-        guard isStreaming, state == .streaming else {
+        guard acceptScreenFrameIfSessionActive(screenData) else { return }
+        let classificationEpoch = streamEpoch
+        do {
+            let classifiedFrame = try await videoFrameClassificationWorker.classify(screenData)
+            guard classificationEpoch == streamEpoch else { return }
+            await handleClassifiedScreenData(classifiedFrame, receivedAt: receivedAt)
+        } catch is CancellationError {
+            return
+        } catch let error as RemoteDesktopVideoFrameClassificationError {
+            guard classificationEpoch == streamEpoch,
+                  acceptScreenFrameIfSessionActive(screenData) else { return }
+            await handleRejectedVideoFrameClassification(error, screenData: screenData)
+        } catch {
+            guard classificationEpoch == streamEpoch else { return }
+            SkyBridgeLogger.shared.error(
+                "⛔️ 视频帧分类器发生未知内部错误，已终止当前远控传输"
+            )
+            await handleTransportFailure("video frame classification failed")
+        }
+    }
+
+    private func acceptScreenFrameIfSessionActive(_ screenData: ScreenData) -> Bool {
+        let acceptsCameraStartupFrame = isCameraAwaitingFirstPresentation
+        guard (isStreaming && state == .streaming) || acceptsCameraStartupFrame else {
             SkyBridgeLogger.shared.debug(
                 "ℹ️ 丢弃 streaming 启动前到达的远控屏幕帧: \(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown") dropReason=pre-streaming-frame"
             )
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "screen-drop session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") dropReason=pre-streaming-frame format=\(screenData.format ?? "unknown") size=\(screenData.width)x\(screenData.height)"
             )
-            return
+            return false
         }
+        return true
+    }
+
+    private func handleRejectedVideoFrameClassification(
+        _ error: RemoteDesktopVideoFrameClassificationError,
+        screenData: ScreenData
+    ) async {
+        let format = (screenData.format ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        SkyBridgeLogger.shared.error(
+            "⛔️ 拒绝结构无效的远控视频帧: format=\(format.isEmpty ? "unknown" : format) bytes=\(screenData.imageData.count) reason=\(error.localizedDescription)"
+        )
+        SkyBridgeDiagnosticTrace.appendStatus(
+            "screen-drop session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") dropReason=invalid-video-access-unit format=\(format.isEmpty ? "unknown" : format) bytes=\(screenData.imageData.count)"
+        )
+        invalidateDecodePipelineState()
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(format)
+        resetDecodeSequenceTracking()
+        await decoder.markStreamDisrupted(
+            format: format,
+            width: screenData.width,
+            height: screenData.height
+        )
+        await requestStreamRefreshIfNeeded(
+            reason: "invalid-video-access-unit",
+            minimumInterval: 0.25
+        )
+    }
+
+    private func handleClassifiedScreenData(
+        _ classifiedFrame: RemoteDesktopClassifiedScreenFrame,
+        receivedAt: Date? = nil
+    ) async {
+        let screenData = classifiedFrame.screenData
+        guard acceptScreenFrameIfSessionActive(screenData) else { return }
         let hasRemoteNativeVideoTrack: Bool
 #if canImport(WebRTC)
         hasRemoteNativeVideoTrack = crossNetwork.remoteVideoTrack != nil
@@ -4599,7 +6006,7 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.error(
                 "⛔️ WebRTC strict media validation failed on viewer: reason=fallback-screen-frame-received size=\(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown")"
             )
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "strict-media-failed session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=fallback-screen-frame-received format=\(screenData.format ?? "unknown") size=\(screenData.width)x\(screenData.height)"
             )
             await handleTransportFailure(reason)
@@ -4617,7 +6024,7 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.warning(
                     "⚠️ WebRTC native warmup dropped non-JPEG fallback before viewer topology/decode: \(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown") dropReason=native-warmup-non-jpeg-fallback"
                 )
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "screen-drop session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") dropReason=native-warmup-non-jpeg-fallback format=\(screenData.format ?? "unknown") size=\(screenData.width)x\(screenData.height)"
                 )
             }
@@ -4651,12 +6058,14 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "✅ 收到首帧: \(screenData.width)x\(screenData.height), format=\(screenData.format ?? "unknown"), bytes=\(screenData.imageData.count)"
             )
-            scheduleFirstFrameContinuityCheck(for: streamEpoch, firstFrameAt: receiveAccountingAt)
+            if !isReadOnlyCameraSession {
+                scheduleFirstFrameContinuityCheck(for: streamEpoch, firstFrameAt: receiveAccountingAt)
+            }
         } else {
             firstFrameContinuityTask?.cancel()
             firstFrameContinuityTask = nil
         }
-        await handleIncomingStreamTopologyChangeIfNeeded(for: screenData)
+        await handleIncomingStreamTopologyChangeIfNeeded(for: classifiedFrame)
         let frameResolution = CGSize(width: screenData.width, height: screenData.height)
         let didChangeResolution = resolution != frameResolution
         if didChangeResolution {
@@ -4674,11 +6083,14 @@ public class RemoteDesktopManager: ObservableObject {
             lastLatencyPublishAt = now
         }
 
-        enqueueFrameForDecode(screenData, receivedAt: receivedAt)
+        enqueueFrameForDecode(classifiedFrame, receivedAt: receivedAt)
     }
 
-    private func handleIncomingStreamTopologyChangeIfNeeded(for screenData: ScreenData) async {
-        let normalizedFormat = (screenData.format ?? "").lowercased()
+    private func handleIncomingStreamTopologyChangeIfNeeded(
+        for classifiedFrame: RemoteDesktopClassifiedScreenFrame
+    ) async {
+        let screenData = classifiedFrame.screenData
+        let normalizedFormat = classifiedFrame.traits.normalizedFormat
         let newSignature = IncomingStreamSignature(
             format: normalizedFormat,
             width: screenData.width,
@@ -4716,11 +6128,11 @@ public class RemoteDesktopManager: ObservableObject {
             streamTopologyFlapCount = 0
         }
 
-        let incomingFrameHasDecoderBootstrap = screenData.isDecoderBootstrapFrame
+        let incomingFrameHasDecoderBootstrap = classifiedFrame.traits.isDecoderBootstrapFrame
         let lightweightFlapTransition = isFallbackProducerFlap && incomingFrameHasDecoderBootstrap
 
         pendingFrames.removeAll(keepingCapacity: true)
-        decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(normalizedFormat)
+        decodeQueueWaitingForSyncFrame = classifiedFrame.traits.isPredictiveVideo
             && !incomingFrameHasDecoderBootstrap
         resetDecodeSequenceTracking()
         consecutiveDecodeMisses = 0
@@ -4768,9 +6180,13 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
-    private func acceptFrameSequenceForDecode(_ screenData: ScreenData, now: Date) -> Bool {
-        let isPredictiveVideo = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(screenData.format)
-        let isIndependentFrame = screenData.isIndependentlyDecodableFrame
+    private func acceptFrameSequenceForDecode(
+        _ classifiedFrame: RemoteDesktopClassifiedScreenFrame,
+        now: Date
+    ) -> Bool {
+        let screenData = classifiedFrame.screenData
+        let isPredictiveVideo = classifiedFrame.traits.isPredictiveVideo
+        let isIndependentFrame = classifiedFrame.traits.isIndependentlyDecodableFrame
         let result = RemoteDesktopDecodeQueuePolicy.validatePredictiveSequence(
             previous: lastInboundVideoFrameSequence,
             current: screenData.sequenceNumber,
@@ -4795,7 +6211,7 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.error(
                     "⛔️ 远控视频序号回退，拒绝把断链预测帧送入解码器: previous=\(previous) current=\(current) format=\(screenData.format ?? "unknown")"
                 )
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "video-sequence-gap previous=\(previous) current=\(current) missing=unknown action=wait-for-sync reason=duplicate-or-reordered format=\(screenData.format ?? "unknown")"
                 )
             }
@@ -4812,7 +6228,7 @@ public class RemoteDesktopManager: ObservableObject {
                 SkyBridgeLogger.shared.error(
                     "⛔️ 远控视频预测链缺帧，拒绝把断链预测帧送入解码器: previous=\(previous) current=\(current) missing=\(missing) format=\(screenData.format ?? "unknown")"
                 )
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "video-sequence-gap previous=\(previous) current=\(current) missing=\(missing) action=wait-for-sync reason=sender-drop-or-missing-reference format=\(screenData.format ?? "unknown")"
                 )
             }
@@ -4823,28 +6239,38 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
-    private func enqueueFrameForDecode(_ screenData: ScreenData, receivedAt: Date? = nil) {
+    private func enqueueFrameForDecode(
+        _ classifiedFrame: RemoteDesktopClassifiedScreenFrame,
+        receivedAt: Date? = nil
+    ) {
         let now = Date()
         noteLANSocketToDecodeFeed(receivedAt: receivedAt, feedStartedAt: now)
         noteLANDecodeFeedAttempt()
-        guard acceptFrameSequenceForDecode(screenData, now: now) else {
+        guard acceptFrameSequenceForDecode(classifiedFrame, now: now) else {
             noteLANDecodeFeedDropped()
             return
         }
         let progressAge = now.timeIntervalSince(lastDecodeQueueProgressAt)
-        let maxConcurrentDecodeTasks = maxConcurrentDecodeTasks(for: screenData)
+        let maxConcurrentDecodeTasks = maxConcurrentDecodeTasks(
+            for: classifiedFrame.traits
+        )
         let pendingBeforeEnqueue = pendingFrames.count
-        let decoderProgressStalled = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(screenData.format)
+        let pendingBytesBeforeEnqueue = RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(
+            in: pendingFrames
+        )
+        let decoderProgressStalled = classifiedFrame.traits.isPredictiveVideo
             && inFlightDecodeCount >= maxConcurrentDecodeTasks
             && progressAge >= RemoteDesktopDecodeQueuePolicy.progressStallThresholdSeconds
         let enqueueResult = RemoteDesktopDecodeQueuePolicy.enqueue(
-            screenData,
+            classifiedFrame,
             into: &pendingFrames,
             waitingForSyncFrame: &decodeQueueWaitingForSyncFrame,
             decoderProgressStalled: decoderProgressStalled
         )
         switch enqueueResult {
-        case .droppedIncomingPredictiveFrame, .enteredWaitingForSync:
+        case .droppedIncomingPredictiveFrame,
+             .droppedIncomingFrameExceedingByteBudget,
+             .enteredWaitingForSync:
             noteLANDecodeFeedDropped()
         default:
             noteLANDecodeFeedAccepted()
@@ -4859,6 +6285,18 @@ public class RemoteDesktopManager: ObservableObject {
             Task { @MainActor [weak self] in
                 await self?.requestStreamRefreshIfNeeded(reason: "decode-queue-overflow", minimumInterval: 0.25)
             }
+        } else if enqueueResult == .droppedIncomingFrameExceedingByteBudget {
+            if now.timeIntervalSince(lastDecodeQueueOverflowLogTime) >= 1.0 {
+                lastDecodeQueueOverflowLogTime = now
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 视频帧超出解码队列压缩字节硬上限，已拒绝入队: incomingBytes=\(classifiedFrame.screenData.imageData.count) pendingBytesBefore=\(pendingBytesBeforeEnqueue) byteCap=\(RemoteDesktopDecodeQueuePolicy.maxQueuedEncodedBytes) predictive=\(classifiedFrame.traits.isPredictiveVideo)"
+                )
+            }
+            if classifiedFrame.traits.isPredictiveVideo {
+                Task { @MainActor [weak self] in
+                    await self?.requestStreamRefreshIfNeeded(reason: "decode-frame-byte-budget", minimumInterval: 0.25)
+                }
+            }
         } else if enqueueResult == .droppedIncomingPredictiveFrame {
             if now.timeIntervalSince(lastDecodeQueueOverflowLogTime) >= 1.0 {
                 lastDecodeQueueOverflowLogTime = now
@@ -4869,11 +6307,18 @@ public class RemoteDesktopManager: ObservableObject {
             Task { @MainActor [weak self] in
                 await self?.requestStreamRefreshIfNeeded(reason: "decode-waiting-for-sync", minimumInterval: 0.25)
             }
+        } else if enqueueResult == .compactedWithIndependentFrame {
+            if now.timeIntervalSince(lastDecodeQueuePressureLogTime) >= 1.0 {
+                lastDecodeQueuePressureLogTime = now
+                SkyBridgeLogger.shared.info(
+                    "♻️ 视频解码队列已压缩陈旧 backlog 并保留最新独立帧: dropped=\(pendingBeforeEnqueue) pending=\(pendingFrames.count) pendingBytesBefore=\(pendingBytesBeforeEnqueue) pendingBytes=\(RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(in: pendingFrames)) byteCap=\(RemoteDesktopDecodeQueuePolicy.maxQueuedEncodedBytes) softMax=\(RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames) hardMax=\(RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames) inflight=\(inFlightDecodeCount) progressAgeMs=\(Int(progressAge * 1000)) stalled=\(decoderProgressStalled)"
+                )
+            }
         } else if enqueueResult == .enqueuedAboveSoftLimit {
             if now.timeIntervalSince(lastDecodeQueuePressureLogTime) >= 1.0 {
                 lastDecodeQueuePressureLogTime = now
                 SkyBridgeLogger.shared.info(
-                    "📈 视频解码队列吸收短时 burst: pending=\(pendingFrames.count) softMax=\(RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames) hardMax=\(RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames) inflight=\(inFlightDecodeCount) progressAgeMs=\(Int(progressAge * 1000))"
+                    "📈 视频解码队列吸收短时 burst: pending=\(pendingFrames.count) pendingBytes=\(RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(in: pendingFrames)) byteCap=\(RemoteDesktopDecodeQueuePolicy.maxQueuedEncodedBytes) softMax=\(RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames) hardMax=\(RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames) inflight=\(inFlightDecodeCount) progressAgeMs=\(Int(progressAge * 1000))"
                 )
             }
         } else if enqueueResult == .recoveredWithIndependentFrame {
@@ -4899,6 +6344,14 @@ public class RemoteDesktopManager: ObservableObject {
         reason: String = "unspecified",
         minimumInterval: TimeInterval = 0.5
     ) async {
+        if isReadOnlyCameraSession {
+            // RTSP cameras do not expose the desktop refresh/configuration channel.
+            // Keep the first recovery timestamp bounded, wait for the camera's
+            // next natural IDR, and let the camera-specific 12-second watchdog
+            // terminate only if independent decode/display progress never resumes.
+            beginCameraPassiveRecovery(reason: reason, at: Date())
+            return
+        }
         guard !handleCrossNetworkSessionAuthorityLostIfNeeded(source: "stream-refresh:\(reason)") else {
             return
         }
@@ -5060,7 +6513,7 @@ public class RemoteDesktopManager: ObservableObject {
         }
         guard deliveryResult.acceptedByRenderer else {
             if deliveryResult.activeConsumerCount == 0 {
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "metal-feed-awaiting-renderer-consumer consumers=\(deliveryResult.consumerCount) stale=\(deliveryResult.staleConsumerCount) version=\(deliveryResult.frameVersion) mode=direct"
                 )
                 return true
@@ -5071,7 +6524,7 @@ public class RemoteDesktopManager: ObservableObject {
                 return false
             }
             SkyBridgeLogger.shared.error("⛔️ LAN 远控 Metal feed 被 renderer 拒收，fail-fast 保留传输并请求同步帧: \(reason)")
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "failed stage=remote-desktop phase=metal_feed_not_accepted detail=\"\(reason)\" transportAction=preserve audioAction=preserve"
             )
             await failFastRemoteDesktopRenderMainPath(
@@ -5100,7 +6553,7 @@ public class RemoteDesktopManager: ObservableObject {
         for attempt in 1...metalFeedBackpressureMaxRetries {
             let elapsedMs = max(0, Date().timeIntervalSince(decodedAt) * 1_000)
             guard elapsedMs < metalFeedDeliveryMaxDelayMs else { return result }
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "metal-feed-backpressure attempt=\(attempt) waitMs=\(String(format: "%.1f", elapsedMs)) reason=\"\(result.rejectionSummary)\" mode=direct"
             )
             do {
@@ -5129,7 +6582,7 @@ public class RemoteDesktopManager: ObservableObject {
         } else {
             SkyBridgeLogger.shared.warning("⚠️ \(message)")
         }
-        SkyBridgeSmokeTraceWriter.appendStatus(message)
+        SkyBridgeDiagnosticTrace.appendStatus(message)
         await requestStreamRefreshIfNeeded(
             reason: "metal-feed-backpressure-saturated",
             minimumInterval: 0.25
@@ -5156,7 +6609,7 @@ public class RemoteDesktopManager: ObservableObject {
         } else {
             SkyBridgeLogger.shared.warning("⚠️ \(message)")
         }
-        SkyBridgeSmokeTraceWriter.appendStatus(message)
+        SkyBridgeDiagnosticTrace.appendStatus(message)
         await requestStreamRefreshIfNeeded(
             reason: "metal-feed-delivery-delay-exceeded",
             minimumInterval: 0.25
@@ -5300,7 +6753,7 @@ public class RemoteDesktopManager: ObservableObject {
             transport=lan session=\(realtimeMediaAudioReceiverSessionId ?? crossNetwork.activeRemoteDesktopSessionId ?? "-")
             """
             SkyBridgeLogger.shared.info("\(message)")
-            SkyBridgeSmokeTraceWriter.appendStatus(message)
+            SkyBridgeDiagnosticTrace.appendStatus(message)
         }
     }
 
@@ -5314,7 +6767,7 @@ public class RemoteDesktopManager: ObservableObject {
             transport=lan session=\(realtimeMediaAudioReceiverSessionId ?? crossNetwork.activeRemoteDesktopSessionId ?? "-")
             """
             SkyBridgeLogger.shared.info("\(message)")
-            SkyBridgeSmokeTraceWriter.appendStatus(message)
+            SkyBridgeDiagnosticTrace.appendStatus(message)
         }
         guard let actionableDrop else { return }
         pendingFrames.removeAll(keepingCapacity: true)
@@ -5372,7 +6825,7 @@ public class RemoteDesktopManager: ObservableObject {
         parserStagePayloadBytes=\(stageTelemetry?.payloadBytes ?? 0) parserStageBufferBytes=\(stageTelemetry?.receiveBufferBytes ?? 0)
         """
         SkyBridgeLogger.shared.warning("⚠️ \(message)")
-        SkyBridgeSmokeTraceWriter.appendStatus(message)
+        SkyBridgeDiagnosticTrace.appendStatus(message)
     }
 
     private func logLANInboundFrameTelemetryIfNeeded(at now: Date) {
@@ -5430,7 +6883,7 @@ public class RemoteDesktopManager: ObservableObject {
         readAhead=stream-parser-low-latency-256k-4frame-6ms-drain-budget rxFrameClock=socket-arrival
         """
         SkyBridgeLogger.shared.debug("📈 \(telemetryLine)")
-        SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)
+        SkyBridgeDiagnosticTrace.appendStatus(telemetryLine)
         lanInboundTelemetryWindowStartedAt = now
         lanInboundScreenFramesInWindow = 0
         lanInboundScreenBytesInWindow = 0
@@ -5580,8 +7033,8 @@ public class RemoteDesktopManager: ObservableObject {
         noteLANDecodeQueueWatermark()
     }
 
-    private func maxConcurrentDecodeTasks(for screenData: ScreenData) -> Int {
-        RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(screenData.format)
+    private func maxConcurrentDecodeTasks(for traits: RemoteDesktopVideoFrameTraits) -> Int {
+        traits.isPredictiveVideo
             ? maxConcurrentVideoDecodes
             : 1
     }
@@ -5591,7 +7044,7 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.error(
                 "⛔️ 远控渲染主路径失败，已拒绝 AVSampleBufferDisplayLayer fallback: reason=\(reason)"
             )
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "render-main-path-failed session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=\(reason) attemptedFallback=sampleBufferDisplayLayer fallbackResult=forbidden"
             )
             Task { @MainActor [weak self] in
@@ -5636,7 +7089,7 @@ public class RemoteDesktopManager: ObservableObject {
     private func activateCGImageFallbackForDecodedVideo() {
         guard !remoteDesktopRenderFallbackForbidden else {
             SkyBridgeLogger.shared.error("⛔️ 远控渲染主路径失败，已拒绝 CGImage fallback")
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "render-main-path-failed session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=cgimage-fallback-forbidden attemptedFallback=stillImageFallback fallbackResult=forbidden"
             )
             Task { @MainActor [weak self] in
@@ -5749,10 +7202,10 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.error(
             "⛔️ 远控渲染主路径失败，fail-fast 保留传输并请求同步帧: \(failureContext)"
         )
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "render-main-path-failed \(failureContext)"
         )
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "failed stage=remote-desktop phase=render_main_path detail=\"\(reason)\" attemptedFallback=\(attemptedFallback) fallbackResult=forbidden transportAction=preserve audioAction=preserve"
         )
         await requestStreamRefreshIfNeeded(
@@ -5987,7 +7440,7 @@ public class RemoteDesktopManager: ObservableObject {
             "presentationOwners=\(presentationOwners) metalConsumers=\(metalConsumers) " +
             "attemptedFallback=none fallbackResult=not-attempted"
         SkyBridgeLogger.shared.info("ℹ️ \(message)")
-        SkyBridgeSmokeTraceWriter.appendStatus(message)
+        SkyBridgeDiagnosticTrace.appendStatus(message)
     }
 
     private func shouldRequestStreamRefreshForDeferredMetalContinuityStall(
@@ -6077,7 +7530,7 @@ public class RemoteDesktopManager: ObservableObject {
                 if shouldRequestStreamRefreshForDeferredMetalContinuityStall(
                     classification: classification
                 ) {
-                    SkyBridgeSmokeTraceWriter.appendStatus(
+                    SkyBridgeDiagnosticTrace.appendStatus(
                         "render-continuity-deferred-action reason=\(reason) classification=\(classification) attemptedFallback=none fallbackResult=not-attempted streamRefresh=requested"
                     )
                     await requestStreamRefreshIfNeeded(
@@ -6085,7 +7538,7 @@ public class RemoteDesktopManager: ObservableObject {
                         minimumInterval: 0.25
                     )
                 } else {
-                    SkyBridgeSmokeTraceWriter.appendStatus(
+                    SkyBridgeDiagnosticTrace.appendStatus(
                         "render-continuity-deferred-action reason=\(reason) classification=\(classification) attemptedFallback=none fallbackResult=not-attempted streamRefresh=suppressed"
                     )
                 }
@@ -6154,19 +7607,28 @@ public class RemoteDesktopManager: ObservableObject {
     func handleVideoRendererDidEnqueueFrame(
         presentationTimeStamp _: CMTime,
         remainingQueueDepth _: Int
+    ) {
+        noteVideoRendererEnqueuedFrame(at: Date())
+    }
+
+    func handleVideoRendererDidPresentFrame(
+        cameraPresentationContext: CameraFramePresentationContext?,
+        presentedAt: Date
     ) async {
-        let now = Date()
+        guard shouldAcceptRendererPresentation(cameraPresentationContext) else { return }
         videoFrameFeed.markDisplayedFrame()
-        noteVideoRendererEnqueuedFrame(at: now)
-        noteDisplayedFrame(at: now)
-        await maybeRestoreMetalRendererAfterStableSampleBuffer(at: now)
+        noteDisplayedFrame(at: presentedAt)
+        await promoteCameraSessionAfterFirstPresentedFrame(cameraPresentationContext)
+        await maybeRestoreMetalRendererAfterStableSampleBuffer(at: presentedAt)
     }
 
     func handleMetalRendererDidDisplayFrames(
         presentationTimeStamp _: CMTime,
         displayedFrameCount: Int,
-        completedAt: Date
+        completedAt: Date,
+        cameraPresentationContext: CameraFramePresentationContext?
     ) async {
+        guard shouldAcceptRendererPresentation(cameraPresentationContext) else { return }
         metalAwaitingFirstDisplaySince = nil
         lastMetalFallbackAt = nil
         metalFallbackReason = nil
@@ -6175,6 +7637,19 @@ public class RemoteDesktopManager: ObservableObject {
         stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.markDisplayedFrame()
         noteDisplayedFrames(count: displayedFrameCount, at: completedAt)
+        await promoteCameraSessionAfterFirstPresentedFrame(cameraPresentationContext)
+    }
+
+    private func shouldAcceptRendererPresentation(
+        _ context: CameraFramePresentationContext?
+    ) -> Bool {
+        guard let context else { return true }
+        guard isReadOnlyCameraSession,
+              context.sessionGeneration == cameraSessionGeneration,
+              let activeSessionID = (pendingCameraPresentationConnection ?? currentConnection)?.id else {
+            return false
+        }
+        return context.sessionID == activeSessionID
     }
 
     nonisolated func recordMetalRendererDisplayedFramesForSmoke(
@@ -6198,7 +7673,7 @@ public class RemoteDesktopManager: ObservableObject {
     @MainActor
     private func applyDecodedOutput(
         _ decoded: DecodeOutput,
-        sourceFrame: ScreenData,
+        frameTraits: RemoteDesktopVideoFrameTraits,
         format: String,
         decoder: VideoDecoder,
         generation: UInt64,
@@ -6222,14 +7697,30 @@ public class RemoteDesktopManager: ObservableObject {
             updateLastGoodFrozenFrame(frame.image)
             updateRenderPipeline(.stillImageFallback)
             noteDecodedFrame(at: now)
-            noteDisplayedFrame(at: now)
+            if !isReadOnlyCameraSession {
+                noteDisplayedFrame(at: now)
+            }
         case .pixelBuffer(let frame):
+            if isReadOnlyCameraSession,
+               (frame.width <= 0 || frame.height <= 0 || frame.width > 7_680 || frame.height > 4_320) {
+                await failCameraSession(
+                    .transportFailed,
+                    generation: cameraSessionGeneration,
+                    publicMessage: "The camera decoder produced invalid frame dimensions."
+                )
+                return false
+            }
             guard shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
                 return false
             }
-            let independentlyDecodableFrame = sourceFrame.isIndependentlyDecodableFrame
-            let shouldCacheFrozenFrame = independentlyDecodableFrame && !remoteDesktopRenderFallbackForbidden
-            let frozenCandidate = shouldCacheFrozenFrame ? makeCGImage(from: frame) : nil
+            let presentationFrame = cameraPresentationTrackedFrame(frame)
+            let independentlyDecodableFrame = frameTraits.isIndependentlyDecodableFrame
+            let shouldCacheFrozenFrame = RemoteDesktopFrozenFramePolicy.shouldCache(
+                isIndependentlyDecodableFrame: independentlyDecodableFrame,
+                renderFallbackForbidden: remoteDesktopRenderFallbackForbidden,
+                isReadOnlyCameraSession: isReadOnlyCameraSession
+            )
+            let frozenCandidate = shouldCacheFrozenFrame ? makeCGImage(from: presentationFrame) : nil
             if shouldCacheFrozenFrame {
                 updateLastGoodFrozenFrame(frozenCandidate)
             }
@@ -6247,7 +7738,7 @@ public class RemoteDesktopManager: ObservableObject {
                     videoFrameFeed.flush(removeDisplayedImage: false)
                 }
                 guard await enqueueMetalFrameForDisplay(
-                    frame,
+                    presentationFrame,
                     generation: generation,
                     decodedAt: now
                 ) else {
@@ -6265,7 +7756,7 @@ public class RemoteDesktopManager: ObservableObject {
                 }
                 metalAwaitingFirstDisplaySince = nil
                 if let displayFrame = await decoder.makeDisplaySampleBufferFrame(
-                    from: frame,
+                    from: presentationFrame,
                     format: format
                 ) {
                     if renderPipelineStatus != .sampleBufferDisplayLayer {
@@ -6278,7 +7769,7 @@ public class RemoteDesktopManager: ObservableObject {
                         videoFrameFeed.flush(removeDisplayedImage: false)
                     }
                     guard await enqueueMetalFrameForDisplay(
-                        frame,
+                        presentationFrame,
                         generation: generation,
                         decodedAt: now
                     ) else {
@@ -6302,7 +7793,9 @@ public class RemoteDesktopManager: ObservableObject {
                     currentFrame = image
                     updateLastGoodFrozenFrame(image)
                     updateRenderPipeline(.stillImageFallback)
-                    noteDisplayedFrame(at: now)
+                    if !isReadOnlyCameraSession {
+                        noteDisplayedFrame(at: now)
+                    }
                 } else {
                     if let lastGoodFrozenFrame {
                         currentFrame = lastGoodFrozenFrame
@@ -6311,6 +7804,12 @@ public class RemoteDesktopManager: ObservableObject {
                 }
             }
             noteDecodedFrame(at: now)
+            if isReadOnlyCameraSession, currentConnection != nil {
+                let decodedResolution = CGSize(width: frame.width, height: frame.height)
+                if resolution != decodedResolution {
+                    resolution = decodedResolution
+                }
+            }
         case .sampleBuffer(let frame):
             guard !remoteDesktopRenderFallbackForbidden else {
                 await failFastRemoteDesktopRenderMainPath(
@@ -6323,8 +7822,13 @@ public class RemoteDesktopManager: ObservableObject {
             guard shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
                 return false
             }
-            if sourceFrame.isIndependentlyDecodableFrame {
-                guard let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) else {
+            let presentationFrame = cameraPresentationTrackedFrame(frame)
+            if RemoteDesktopFrozenFramePolicy.shouldCache(
+                isIndependentlyDecodableFrame: frameTraits.isIndependentlyDecodableFrame,
+                renderFallbackForbidden: remoteDesktopRenderFallbackForbidden,
+                isReadOnlyCameraSession: isReadOnlyCameraSession
+            ) {
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(presentationFrame.sampleBuffer) else {
                     SkyBridgeLogger.shared.error("❌ 解码器输出缺少图像缓冲，已丢弃该 sampleBuffer 帧")
                     return false
                 }
@@ -6332,9 +7836,9 @@ public class RemoteDesktopManager: ObservableObject {
                     makeCGImage(
                         from: DecodedPixelBufferFrame(
                             pixelBuffer: pixelBuffer,
-                            width: frame.width,
-                            height: frame.height,
-                            presentationTimeStamp: frame.presentationTimeStamp
+                            width: presentationFrame.width,
+                            height: presentationFrame.height,
+                            presentationTimeStamp: presentationFrame.presentationTimeStamp
                         )
                     )
                 )
@@ -6346,20 +7850,26 @@ public class RemoteDesktopManager: ObservableObject {
             if renderPipelineStatus != .sampleBufferDisplayLayer {
                 flushMetalVideoFrameFeed(removeDisplayedImage: true)
             }
-            videoFrameFeed.enqueue(frame: frame)
+            videoFrameFeed.enqueue(frame: presentationFrame)
             updateRenderPipeline(.sampleBufferDisplayLayer)
             noteDecodedFrame(at: now)
         }
 
+        clearCameraPassiveRecoveryAfterAcceptedDecode(
+            isIndependentlyDecodableFrame: frameTraits.isIndependentlyDecodableFrame,
+            at: now
+        )
         consecutiveDecodeMisses = 0
         return true
     }
 
     private func startDecodeLoopIfNeeded() {
         while let next = pendingFrames.first {
-            let maxConcurrentDecodeTasks = maxConcurrentDecodeTasks(for: next)
+            let maxConcurrentDecodeTasks = maxConcurrentDecodeTasks(for: next.traits)
             guard inFlightDecodeCount < maxConcurrentDecodeTasks else { return }
-            guard let screenData = RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pendingFrames) else { return }
+            guard let classifiedFrame = RemoteDesktopDecodeQueuePolicy.dequeueNext(
+                from: &pendingFrames
+            ) else { return }
             inFlightDecodeCount += 1
             noteLANDecodeQueueWatermark()
 
@@ -6369,7 +7879,7 @@ public class RemoteDesktopManager: ObservableObject {
             nextDecodeSubmissionOrder &+= 1
 
             scheduleDecodeSubmission(
-                screenData,
+                classifiedFrame,
                 decoder: decoder,
                 generation: decodeGeneration,
                 decodeOrder: decodeOrder
@@ -6378,18 +7888,21 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func scheduleDecodeSubmission(
-        _ screenData: ScreenData,
+        _ classifiedFrame: RemoteDesktopClassifiedScreenFrame,
         decoder: VideoDecoder,
         generation decodeGeneration: UInt64,
         decodeOrder: UInt64
     ) {
         let previousSubmission = decodeSubmissionChain
-        let task = Task.detached(priority: .high) { [weak self, previousSubmission, decoder, screenData, decodeGeneration, decodeOrder] in
+        let task = Task.detached(
+            priority: .high
+        ) { [weak self, previousSubmission, decoder, classifiedFrame, decodeGeneration, decodeOrder] in
             await previousSubmission?.value
             guard !Task.isCancelled else { return }
             guard await self?.isDecodeGenerationCurrent(decodeGeneration) == true else { return }
 
-            let format = (screenData.format ?? "").lowercased()
+            let screenData = classifiedFrame.screenData
+            let format = classifiedFrame.traits.normalizedFormat
             let isStillImageFrame = decoder.isStillImageFormat(format)
             let submission: VideoDecodeSubmission
             do {
@@ -6399,7 +7912,7 @@ public class RemoteDesktopManager: ObservableObject {
                     decoded: nil,
                     decodeFailureReason: error.localizedDescription,
                     isStillImageFrame: isStillImageFrame,
-                    sourceFrame: screenData,
+                    classifiedFrame: classifiedFrame,
                     format: format,
                     decoder: decoder,
                     generation: decodeGeneration,
@@ -6414,14 +7927,16 @@ public class RemoteDesktopManager: ObservableObject {
                     decoded: decoded,
                     decodeFailureReason: submission.failureReason,
                     isStillImageFrame: isStillImageFrame,
-                    sourceFrame: screenData,
+                    classifiedFrame: classifiedFrame,
                     format: format,
                     decoder: decoder,
                     generation: decodeGeneration,
                     decodeOrder: decodeOrder
                 )
             case .pending(let handle):
-                Task.detached(priority: .high) { [weak self, handle, screenData, format, decoder, decodeGeneration, decodeOrder, isStillImageFrame] in
+                Task.detached(
+                    priority: .high
+                ) { [weak self, handle, classifiedFrame, format, decoder, decodeGeneration, decodeOrder, isStillImageFrame] in
                     let decoded: DecodeOutput?
                     let decodeFailureReason: String?
                     do {
@@ -6435,7 +7950,7 @@ public class RemoteDesktopManager: ObservableObject {
                         decoded: decoded,
                         decodeFailureReason: decodeFailureReason,
                         isStillImageFrame: isStillImageFrame,
-                        sourceFrame: screenData,
+                        classifiedFrame: classifiedFrame,
                         format: format,
                         decoder: decoder,
                         generation: decodeGeneration,
@@ -6449,14 +7964,14 @@ public class RemoteDesktopManager: ObservableObject {
 
     private func decodeFailureReasonWithFrameSequence(
         _ reason: String?,
-        sourceFrame screenData: ScreenData
+        sourceFrameSequenceNumber: UInt64?
     ) -> String? {
         var parts: [String] = []
         let normalizedReason = (reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !normalizedReason.isEmpty {
             parts.append(normalizedReason)
         }
-        if let sequenceNumber = screenData.sequenceNumber {
+        if let sequenceNumber = sourceFrameSequenceNumber {
             parts.append("frameSeq=\(sequenceNumber)")
         }
         if let lastSync = lastInboundVideoSyncFrameSequence {
@@ -6470,7 +7985,7 @@ public class RemoteDesktopManager: ObservableObject {
         decoded: DecodeOutput?,
         decodeFailureReason: String?,
         isStillImageFrame: Bool,
-        sourceFrame screenData: ScreenData,
+        classifiedFrame: RemoteDesktopClassifiedScreenFrame,
         format: String,
         decoder: VideoDecoder,
         generation decodeGeneration: UInt64,
@@ -6481,7 +7996,8 @@ public class RemoteDesktopManager: ObservableObject {
             decoded: decoded,
             decodeFailureReason: decodeFailureReason,
             isStillImageFrame: isStillImageFrame,
-            sourceFrame: screenData,
+            sourceFrameSequenceNumber: classifiedFrame.screenData.sequenceNumber,
+            frameTraits: classifiedFrame.traits,
             format: format,
             decoder: decoder,
             generation: decodeGeneration
@@ -6524,7 +8040,7 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.warning(
             "⚠️ VT decode callback order gap exceeded bounds: missingOrder=\(missingOrder) backlog=\(backlog) gapMs=\(gapMs) action=reset-and-request-sync"
         )
-        SkyBridgeSmokeTraceWriter.appendStatus(
+        SkyBridgeDiagnosticTrace.appendStatus(
             "decode-completion-gap-reset session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") missingOrder=\(missingOrder) backlog=\(backlog) gapMs=\(gapMs) action=reset-and-request-sync"
         )
         invalidateDecodePipelineState()
@@ -6588,7 +8104,7 @@ public class RemoteDesktopManager: ObservableObject {
             let now = Date()
             let applied = await applyDecodedOutput(
                 decoded,
-                sourceFrame: completion.sourceFrame,
+                frameTraits: completion.frameTraits,
                 format: completion.format,
                 decoder: completion.decoder,
                 generation: completion.generation,
@@ -6612,7 +8128,7 @@ public class RemoteDesktopManager: ObservableObject {
         }
         let sequencedDecodeFailureReason = decodeFailureReasonWithFrameSequence(
             completion.decodeFailureReason,
-            sourceFrame: completion.sourceFrame
+            sourceFrameSequenceNumber: completion.sourceFrameSequenceNumber
         )
         let governanceEvent = codecGovernance.noteDecodeFailure(
             format: completion.format,

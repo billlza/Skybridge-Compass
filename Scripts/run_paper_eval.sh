@@ -269,7 +269,7 @@ log_anchor "Run configuration: ARTIFACT_DATE=${ARTIFACT_DATE:-unset}, SKYBRIDGE_
 # Handshake benchmark stability is very sensitive to debug/test harness jitter on macOS.
 # For paper evaluation we prefer a dedicated release-mode runner binary.
 run_stage "handshake-bench-runner-build" swift \
-  swift build -c release --product HandshakeBenchRunner
+  swift build -c release -Xswiftc -DSKYBRIDGE_BENCHMARKING --product HandshakeBenchRunner
 handshake_bench_bin_dir="$(swift build -c release --show-bin-path)"
 handshake_bench_runner="${handshake_bench_bin_dir}/HandshakeBenchRunner"
 if [[ ! -x "${handshake_bench_runner}" ]]; then
@@ -427,25 +427,25 @@ export SKYBRIDGE_RUN_FI=1
 export SKYBRIDGE_FI_ITERATIONS=1000
 export SKYBRIDGE_FI_PROGRESS_INTERVAL="${SKYBRIDGE_FI_PROGRESS_INTERVAL:-100}"
 run_stage "fault-injection-bench" swift \
-  swift test --filter "${test_target}.HandshakeFaultInjectionBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.HandshakeFaultInjectionBenchTests"
 
 export SKYBRIDGE_RUN_POLICY_BENCH=1
 export SKYBRIDGE_POLICY_ITERATIONS=1000
 run_stage "policy-downgrade-bench" swift \
-  swift test --filter "${test_target}.PolicyDowngradeBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.PolicyDowngradeBenchTests"
 
 export SKYBRIDGE_RUN_MIGRATION_BENCH=1
 export SKYBRIDGE_MIGRATION_ITERATIONS=1000
 run_stage "migration-coverage-bench" swift \
-  swift test --filter "${test_target}.MigrationCoverageBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.MigrationCoverageBenchTests"
 
 export SKYBRIDGE_RUN_SOA_BENCH=1
 export SKYBRIDGE_SOA_ITERATIONS="${SKYBRIDGE_SOA_ITERATIONS:-100}"
 run_stage "soa-interop-bench" swift \
-  swift test --filter "${test_target}.SOAInteroperabilityBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.SOAInteroperabilityBenchTests"
 
 run_stage "message-size-snapshot-tests" swift \
-  swift test --filter "${test_target}.MessageSizeSnapshotTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.MessageSizeSnapshotTests"
 
 run_stage "message-size-bench-build" swift \
   swift build --product MessageSizeBenchRunner
@@ -456,13 +456,13 @@ run_stage "message-size-bench-run" none \
 export SKYBRIDGE_RUN_PADDING_BENCH=1
 export SKYBRIDGE_PADDING_ITERATIONS="${SKYBRIDGE_PADDING_ITERATIONS:-2000}"
 run_stage "traffic-padding-bench" swift \
-  swift test --filter "${test_target}.TrafficPaddingBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.TrafficPaddingBenchTests"
 
 # Phase C3 (TDSC): SBP2 bucket-cap sensitivity study (64KiB/128KiB/256KiB)
 export SKYBRIDGE_RUN_PADDING_SENS=1
 export SKYBRIDGE_PADDING_SENS_ITERATIONS="${SKYBRIDGE_PADDING_SENS_ITERATIONS:-80}"
 run_stage "traffic-padding-sensitivity-bench" swift \
-  swift test --filter "${test_target}.TrafficPaddingSensitivityBenchTests"
+  bash Scripts/run_swift_test_filter.sh "${test_target}.TrafficPaddingSensitivityBenchTests"
 
 if [[ "${RUN_IOS_MICROBENCH_IMPORT:-0}" == "1" ]]; then
   run_stage "ios-microbench-import" none \

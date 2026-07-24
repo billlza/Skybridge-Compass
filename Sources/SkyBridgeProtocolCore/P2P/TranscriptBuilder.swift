@@ -485,7 +485,10 @@ public struct DeterministicDecoder {
     private var offset: Int
 
     public init(data: Data) {
-        self.data = data
+        // Data slices preserve their original collection indices. The decoder
+        // intentionally uses wire-relative integer offsets, so normalize once
+        // at this bounded control-plane boundary instead of risking a trap.
+        self.data = Data(data)
         self.offset = 0
     }
 
@@ -556,7 +559,14 @@ public struct DeterministicDecoder {
  /// 解码 Bool
     public mutating func decodeBool() throws -> Bool {
         let byte: UInt8 = try decode()
-        return byte != 0
+        switch byte {
+        case 0:
+            return false
+        case 1:
+            return true
+        default:
+            throw TranscriptError.decodingError("Non-canonical Bool value: \(byte)")
+        }
     }
 
  /// 解码 String
@@ -584,12 +594,72 @@ public struct DeterministicDecoder {
  /// 解码字符串数组
     public mutating func decodeStringArray() throws -> [String] {
         let count = try decodeUInt32()
+        // Every encoded string consumes at least its four-byte length prefix.
+        // Validate this structural bound before reserving attacker-controlled
+        // capacity, even for callers that do not impose protocol-specific caps.
+        guard Int(count) <= remainingBytes / 4 else {
+            throw TranscriptError.decodingError("String array count exceeds remaining payload")
+        }
         var result: [String] = []
         result.reserveCapacity(Int(count))
         for _ in 0..<count {
             result.append(try decodeString())
         }
         return result
+    }
+
+    /// Decode a string array under explicit protocol limits.
+    ///
+    /// `remainingTotalStringBytes` is shared by all arrays/strings in the
+    /// enclosing payload, preventing many individually-valid fields from
+    /// exceeding the aggregate admission budget.
+    public mutating func decodeStringArray(
+        maximumCount: Int,
+        maximumStringByteLength: Int,
+        remainingTotalStringBytes: inout Int
+    ) throws -> [String] {
+        guard maximumCount >= 0,
+              maximumStringByteLength >= 0,
+              remainingTotalStringBytes >= 0 else {
+            throw TranscriptError.decodingError("Invalid string decoding limits")
+        }
+
+        let count = try decodeUInt32()
+        guard Int(count) <= maximumCount,
+              Int(count) <= remainingBytes / 4 else {
+            throw TranscriptError.decodingError("String array count exceeds limit")
+        }
+
+        var result: [String] = []
+        result.reserveCapacity(Int(count))
+        for _ in 0..<count {
+            result.append(try decodeString(
+                maximumByteLength: maximumStringByteLength,
+                remainingTotalStringBytes: &remainingTotalStringBytes
+            ))
+        }
+        return result
+    }
+
+    /// Decode a string under per-field and aggregate protocol limits.
+    public mutating func decodeString(
+        maximumByteLength: Int,
+        remainingTotalStringBytes: inout Int
+    ) throws -> String {
+        guard maximumByteLength >= 0, remainingTotalStringBytes >= 0 else {
+            throw TranscriptError.decodingError("Invalid string decoding limits")
+        }
+        let length = try decodeUInt32()
+        guard Int(length) <= maximumByteLength,
+              Int(length) <= remainingTotalStringBytes else {
+            throw TranscriptError.decodingError("String length exceeds limit")
+        }
+        let stringData = try readBytes(count: Int(length))
+        guard let string = String(data: stringData, encoding: .utf8) else {
+            throw TranscriptError.decodingError("Invalid UTF-8 string")
+        }
+        remainingTotalStringBytes -= Int(length)
+        return string
     }
 
  /// 解码 Data 数组

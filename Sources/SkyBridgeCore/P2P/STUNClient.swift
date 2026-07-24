@@ -241,8 +241,9 @@ public final class STUNClient: ObservableObject, @unchecked Sendable {
         return message
     }
     
- /// 解析绑定响应
+    /// 解析绑定响应
     private func parseBindingResponse(_ data: Data, expectedTransactionId: Data) throws -> NWEndpoint {
+        let data = Data(data)
         guard data.count >= 20 else {
             throw STUNError.invalidResponse
         }
@@ -310,8 +311,9 @@ public final class STUNClient: ObservableObject, @unchecked Sendable {
         throw STUNError.noMappedAddress
     }
     
- /// 解析地址属性
+    /// 解析地址属性
     private func parseAddressAttribute(_ data: Data, isXOR: Bool) -> NWEndpoint? {
+        let data = Data(data)
         guard data.count >= 8 else { return nil }
         
  // 跳过保留字节

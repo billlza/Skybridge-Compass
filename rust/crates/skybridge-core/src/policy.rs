@@ -35,9 +35,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::{
-    CryptoSuite, ProtocolSigningAlgorithm, mldsa65_sign_detached, mldsa65_verify_detached,
-};
+use crate::{CryptoSuite, ProtocolSigningAlgorithm, mldsa_sign_detached, mldsa_verify_detached};
 
 /// Per-peer cooldown enforced between two authorized Classic fallbacks.
 ///
@@ -364,7 +362,7 @@ impl DowngradeEvent {
     }
 }
 
-/// A [`DowngradeEvent`] with a detached ML-DSA-65 signature over its canonical
+/// A [`DowngradeEvent`] with a detached ML-DSA signature over its canonical
 /// serialization, plus the signer's identity so a verifier can re-check it.
 ///
 /// This is the cryptographically tamper-evident realization of the auditable
@@ -379,12 +377,12 @@ impl DowngradeEvent {
 pub struct SignedDowngradeEvent {
     /// The structured downgrade record (its own serde encoding is unchanged).
     pub event: DowngradeEvent,
-    /// Signing algorithm — always [`ProtocolSigningAlgorithm::MlDsa65`] today.
+    /// Exact ML-DSA signing algorithm used by the active protocol identity.
     pub signer_algorithm: ProtocolSigningAlgorithm,
-    /// The signer's ML-DSA-65 public key (base64 in the serde encoding).
+    /// The signer's algorithm-matched ML-DSA public key (base64 in serde).
     #[serde(with = "base64_standard")]
     pub signer_public_key: Vec<u8>,
-    /// Detached ML-DSA-65 signature over [`DowngradeEvent::canonical_bytes`]
+    /// Detached ML-DSA signature over [`DowngradeEvent::canonical_bytes`]
     /// (base64 in the serde encoding).
     #[serde(with = "base64_standard")]
     pub signature: Vec<u8>,
@@ -393,22 +391,22 @@ pub struct SignedDowngradeEvent {
 /// Errors from signing or verifying a [`SignedDowngradeEvent`].
 #[derive(Debug, thiserror::Error)]
 pub enum DowngradeSignatureError {
-    /// The local identity did not use ML-DSA-65 (the only supported signer).
-    #[error("downgrade-event signing requires an ML-DSA-65 identity, got {0}")]
+    /// The local identity did not use a supported ML-DSA algorithm.
+    #[error("downgrade-event signing requires an ML-DSA identity, got {0}")]
     UnsupportedSignerAlgorithm(ProtocolSigningAlgorithm),
-    /// The detached ML-DSA-65 signature failed to verify against the public key.
+    /// The detached ML-DSA signature failed to verify against the public key.
     #[error("downgrade-event signature verification failed: {0}")]
     InvalidSignature(String),
-    /// The underlying ML-DSA-65 sign/verify primitive errored (e.g. malformed key).
+    /// The underlying ML-DSA sign/verify primitive errored (e.g. malformed key).
     #[error("downgrade-event crypto error: {0}")]
     Crypto(String),
 }
 
 impl SignedDowngradeEvent {
-    /// Sign `event` with the local ML-DSA-65 identity, producing a detached
+    /// Sign `event` with the local ML-DSA identity, producing a detached
     /// signature over [`DowngradeEvent::canonical_bytes`].
     ///
-    /// `public_key`/`secret_key` are the local identity's ML-DSA-65 key pair (the
+    /// `public_key`/`secret_key` are the local identity's exact ML-DSA key pair (the
     /// same material the PQC handshake signs MessageA with — see
     /// `RustPqcIdentityMaterial` / the agent's `ProtocolSigningKeyMaterial`).
     pub fn sign(
@@ -417,13 +415,13 @@ impl SignedDowngradeEvent {
         public_key: &[u8],
         secret_key: &[u8],
     ) -> Result<Self, DowngradeSignatureError> {
-        if signer_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
+        if !signer_algorithm.is_ml_dsa() {
             return Err(DowngradeSignatureError::UnsupportedSignerAlgorithm(
                 signer_algorithm,
             ));
         }
         let canonical = event.canonical_bytes();
-        let signature = mldsa65_sign_detached(&canonical, secret_key)
+        let signature = mldsa_sign_detached(signer_algorithm, &canonical, secret_key)
             .map_err(|error| DowngradeSignatureError::Crypto(error.to_string()))?;
         Ok(Self {
             event,
@@ -446,17 +444,22 @@ impl SignedDowngradeEvent {
     }
 
     /// Recompute the canonical bytes and verify the detached signature against an
-    /// externally supplied, trusted public key (e.g. the peer's pinned ML-DSA-65
+    /// externally supplied, trusted public key (e.g. the peer's pinned ML-DSA
     /// identity). A key that differs from the true signer fails verification.
     pub fn verify_with(&self, public_key: &[u8]) -> Result<(), DowngradeSignatureError> {
-        if self.signer_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
+        if !self.signer_algorithm.is_ml_dsa() {
             return Err(DowngradeSignatureError::UnsupportedSignerAlgorithm(
                 self.signer_algorithm,
             ));
         }
         let canonical = self.event.canonical_bytes();
-        mldsa65_verify_detached(&canonical, &self.signature, public_key)
-            .map_err(|error| DowngradeSignatureError::InvalidSignature(error.to_string()))
+        mldsa_verify_detached(
+            self.signer_algorithm,
+            &canonical,
+            &self.signature,
+            public_key,
+        )
+        .map_err(|error| DowngradeSignatureError::InvalidSignature(error.to_string()))
     }
 }
 
@@ -837,6 +840,21 @@ mod tests {
         // Verifies against the embedded key and against the same key supplied out-of-band.
         signed.verify().expect("self-verify");
         signed.verify_with(&public_key).expect("trusted-key verify");
+    }
+
+    #[test]
+    fn mldsa87_signed_event_round_trips_without_65_fallback() {
+        let (public_key, secret_key) = crate::mldsa87_generate_keypair();
+        let signed = SignedDowngradeEvent::sign(
+            sample_event(),
+            ProtocolSigningAlgorithm::MlDsa87,
+            &public_key,
+            &secret_key,
+        )
+        .expect("ML-DSA-87 sign");
+        assert_eq!(signed.signer_algorithm, ProtocolSigningAlgorithm::MlDsa87);
+        assert_eq!(signed.signature.len(), crate::MLDSA87_SIGNATURE_MAX_BYTES);
+        signed.verify_with(&public_key).expect("ML-DSA-87 verify");
     }
 
     #[test]

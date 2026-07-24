@@ -8,7 +8,10 @@ import Foundation
 #if canImport(WebRTC)
 @available(iOS 17.0, *)
 extension WebRTCSession {
-    struct RemoteInboundVideoStatsSample: Equatable {
+    /// libwebrtc publishes an immutable statistics snapshot whose values are
+    /// Foundation scalar objects (NSString/NSNumber). The snapshot is copied
+    /// before it crosses the callback bridge and is never mutated afterward.
+    struct RemoteInboundVideoStatsSample: Equatable, @unchecked Sendable {
         let type: String
         let values: [String: NSObject]
     }

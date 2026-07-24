@@ -66,6 +66,9 @@ public enum CryptoProviderFactory {
     
     /// 能力探测结果
     public struct Capability: Sendable {
+        /// 已验证并激活、且当前 ML-DSA-65 identity 配置允许使用 Q-Periapt
+        public let hasQPeriapt: Bool
+
         /// iOS 26+ CryptoKit PQC 是否可用
         public let hasApplePQC: Bool
         
@@ -75,9 +78,15 @@ public enum CryptoProviderFactory {
         /// 操作系统版本
         public let osVersion: String
         
-        public init(hasApplePQC: Bool, hasLiboqs: Bool, osVersion: String) {
+        public init(
+            hasApplePQC: Bool,
+            hasLiboqs: Bool,
+            hasQPeriapt: Bool = false,
+            osVersion: String
+        ) {
             self.hasApplePQC = hasApplePQC
             self.hasLiboqs = hasLiboqs
+            self.hasQPeriapt = hasQPeriapt
             self.osVersion = osVersion
         }
     }
@@ -111,6 +120,7 @@ public enum CryptoProviderFactory {
         return Capability(
             hasApplePQC: hasApplePQC,
             hasLiboqs: hasLiboqs,
+            hasQPeriapt: QPeriaptIOSRuntime.isEnabledForLocalRuntime(),
             osVersion: osVersion
         )
     }
@@ -171,7 +181,21 @@ public enum CryptoProviderFactory {
               peerSupportedSuites.allSatisfy(\.isNegotiable) else {
             return UnavailablePQCProvider()
         }
+
         let baseProvider = make(policy: policy)
+
+        if baseProvider.tier == .qperiaptPQC {
+            let peerSupportsQPeriapt = peerSupportedSuites.contains {
+                $0 == .qperiaptABI2PolicyBound
+            }
+            if peerSupportsQPeriapt {
+                return baseProvider
+            }
+            return selectStandardProvider(
+                capability: detectCapability(),
+                policy: policy
+            )
+        }
 
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
@@ -207,6 +231,22 @@ public enum CryptoProviderFactory {
     
     /// 选择 Provider
     private static func selectProvider(
+        capability: Capability,
+        policy: SelectionPolicy
+    ) -> any CryptoProvider {
+        if isQPeriaptSelectionAllowed(for: policy),
+           capability.hasQPeriapt,
+           let provider = QPeriaptIOSRuntime.makeCryptoProvider() {
+            return provider
+        }
+        return selectStandardProvider(capability: capability, policy: policy)
+    }
+
+    static func isQPeriaptSelectionAllowed(for policy: SelectionPolicy) -> Bool {
+        policy != .classicOnly
+    }
+
+    private static func selectStandardProvider(
         capability: Capability,
         policy: SelectionPolicy
     ) -> any CryptoProvider {
@@ -259,6 +299,8 @@ public enum CryptoProviderFactory {
         let fallbackFromPreferred: Bool
         
         switch selectedTier {
+        case .qperiaptPQC:
+            fallbackFromPreferred = false
         case .nativePQC:
             fallbackFromPreferred = false
         case .liboqsPQC:
@@ -277,7 +319,8 @@ public enum CryptoProviderFactory {
         SkyBridgeLogger.shared.info(
             "[\(severity)] Crypto provider selected: \(provider.providerName) " +
             "(tier=\(selectedTier.rawValue), fallback=\(fallbackFromPreferred), " +
-            "hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
+            "hasQPeriapt=\(capability.hasQPeriapt), hasApplePQC=\(capability.hasApplePQC), " +
+            "hasLiboqs=\(capability.hasLiboqs), " +
             "compiledHAS_APPLE_PQC_SDK=\(compiledWithApplePQCSDK), policy=\(policy.rawValue))"
         )
     }

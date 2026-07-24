@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use skybridge_agent::{
-    ensure_rust_pqc_identity, refresh_auth_session_if_needed, signing_binding, signing_signature,
+    ensure_rust_pqc_identity_for_algorithm, refresh_auth_session_if_needed, signing_binding,
+    signing_signature,
 };
 use skybridge_core::{
     CryptoSuite, PqcResponderConfig, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
@@ -9,15 +10,18 @@ use skybridge_core::{
 
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
 
-pub(crate) fn pqc_bridge_identity_enabled() -> bool {
-    std::env::var(ENV_PQC_BRIDGE_IDENTITY)
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
+pub(crate) fn pqc_bridge_identity_enabled() -> Result<bool> {
+    match std::env::var(ENV_PQC_BRIDGE_IDENTITY) {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{ENV_PQC_BRIDGE_IDENTITY} is not valid Unicode")
+        }
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => bail!("{ENV_PQC_BRIDGE_IDENTITY} must be one of true/false, 1/0, or yes/no"),
+        },
+    }
 }
 
 pub(crate) async fn maybe_inline_pqc_responder_config(
@@ -25,24 +29,27 @@ pub(crate) async fn maybe_inline_pqc_responder_config(
     identity: &skybridge_agent::DeviceIdentityMaterial,
     local_binding: &ProtocolIdentityBinding,
 ) -> Result<Option<PqcResponderConfig>> {
-    if local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65
-        && !pqc_bridge_identity_enabled()
-    {
+    let bridge_identity = pqc_bridge_identity_enabled()?;
+    if !local_binding.protocol_signing_algorithm.is_ml_dsa() && !bridge_identity {
         return Ok(None);
     }
 
-    let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-    let pqc_binding =
-        if local_binding.protocol_signing_algorithm == ProtocolSigningAlgorithm::MlDsa65 {
-            local_binding.clone()
-        } else {
-            ProtocolIdentityBinding::new(
-                local_binding.device_id.clone(),
-                pqc_identity.signing_algorithm,
-                pqc_identity.signing_public_key.clone(),
-                None,
-            )?
-        };
+    let handshake_algorithm = if local_binding.protocol_signing_algorithm.is_ml_dsa() {
+        local_binding.protocol_signing_algorithm
+    } else {
+        ProtocolSigningAlgorithm::MlDsa65
+    };
+    let pqc_identity = ensure_rust_pqc_identity_for_algorithm(paths, handshake_algorithm).await?;
+    let pqc_binding = if local_binding.protocol_signing_algorithm.is_ml_dsa() {
+        local_binding.clone()
+    } else {
+        ProtocolIdentityBinding::new(
+            local_binding.device_id.clone(),
+            pqc_identity.signing_algorithm,
+            pqc_identity.signing_public_key.clone(),
+            None,
+        )?
+    };
     Ok(Some(PqcResponderConfig {
         local_binding: pqc_binding,
         local_device_name: Some(identity.state.device.device_name.clone()),

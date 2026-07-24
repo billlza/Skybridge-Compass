@@ -94,25 +94,11 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             XCTAssertEqual(error as? AppMessage.KEMRefreshValidationError, .classicSuiteRejected(wireId: CryptoSuite.x25519Ed25519.wireId))
         }
 
-        let legacy = validKEMRefreshRequest(
-            requestedSuiteWireIds: [CryptoSuite.qperiaptContextBound.wireId]
-        )
+        let legacy = validKEMRefreshRequest(requestedSuiteWireIds: [CryptoSuite.qperiaptContextBound.wireId])
         XCTAssertThrowsError(try legacy.validatedStrictResponderSuites(now: now)) { error in
             XCTAssertEqual(
                 error as? AppMessage.KEMRefreshValidationError,
                 .legacySuiteRejected(wireId: CryptoSuite.qperiaptContextBound.wireId)
-            )
-        }
-
-        let qPeriaptABI2 = validKEMRefreshRequest(
-            requestedSuiteWireIds: [CryptoSuite.qperiaptABI2PolicyBound.wireId]
-        )
-        XCTAssertThrowsError(try qPeriaptABI2.validatedStrictResponderSuites(now: now)) { error in
-            XCTAssertEqual(
-                error as? AppMessage.KEMRefreshValidationError,
-                .qPeriaptPlatformMetadataUnavailable(
-                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
-                )
             )
         }
 
@@ -195,6 +181,25 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
     }
 
     func testMacResponderSignedLANRefreshRejectsTargetMismatchReplayAndRateLimitBeforeSuccess() async throws {
+        let identityContext = try DeviceIdentityKeychainTestContext()
+        defer { try? identityContext.reset() }
+        let identity = try await identityContext.manager.getProtocolSigningIdentity(
+            for: .mlDSA65,
+            protection: .softwareKeychain
+        )
+        let committedIdentity = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .mlDSA65,
+            protection: .softwareKeychain,
+            publicKey: identity.publicKey,
+            keyHandle: identity.keyHandle
+        )
+        let makePayload: (AppMessage.KEMRefreshRequestPayload) async throws -> AppMessage.SignedKEMRefreshPayload = { request in
+            try await P2PDiscoveryService.makeSignedKEMRefreshPayload(
+                for: request,
+                keyManager: identityContext.manager,
+                loadLocalIdentities: { [committedIdentity] }
+            )
+        }
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
@@ -206,7 +211,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             sentAt: Date()
         )
         do {
-            _ = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: first)
+            _ = try await makePayload(first)
             XCTFail("A target protocol identity mismatch must not serve KEM material")
         } catch {
             XCTAssertEqual(
@@ -216,7 +221,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         }
 
         do {
-            _ = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: first)
+            _ = try await makePayload(first)
             XCTFail("A repeated SKR-1 request hash must be rejected as replay")
         } catch {
             XCTAssertEqual(
@@ -233,7 +238,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
                 sentAt: Date()
             )
             do {
-                _ = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: request)
+                _ = try await makePayload(request)
                 XCTFail("Target mismatch request \(index) must not serve KEM material")
             } catch {
                 XCTAssertEqual(
@@ -249,7 +254,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             sentAt: Date()
         )
         do {
-            _ = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: rateLimited)
+            _ = try await makePayload(rateLimited)
             XCTFail("SKR-1 responder must rate-limit repeated requester refresh attempts")
         } catch {
             XCTAssertEqual(
@@ -497,48 +502,17 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         }
     }
 
-    func testStrictImportRejectsLegacyQPeriaptUnsignedPlatformClassicAndBadKEMLength() {
+    func testStrictImportRejectsLegacyClassicAndBadKEMLength() {
         let legacy = validPayload(kemPublicKeys: [
             KEMPublicKeyInfo(
                 suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
-                publicKey: Data(
-                    repeating: 0x54,
-                    count: QPeriaptPlatformPolicy.publicKeyLength
-                )
+                publicKey: Data(repeating: 0x54, count: 1216)
             )
         ])
-        XCTAssertThrowsError(
-            try legacy.validatedForStrictPQCImport(
-                now: now,
-                pinnedProtocolFingerprints: [fingerprint]
-            )
-        ) { error in
+        XCTAssertThrowsError(try legacy.validatedForStrictPQCImport(now: now, pinnedProtocolFingerprints: [fingerprint])) { error in
             XCTAssertEqual(
                 error as? AppMessage.KEMRefreshValidationError,
                 .legacySuiteRejected(wireId: CryptoSuite.qperiaptContextBound.wireId)
-            )
-        }
-
-        let qPeriaptABI2 = validPayload(kemPublicKeys: [
-            KEMPublicKeyInfo(
-                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
-                publicKey: Data(
-                    repeating: 0x56,
-                    count: QPeriaptPlatformPolicy.publicKeyLength
-                )
-            )
-        ])
-        XCTAssertThrowsError(
-            try qPeriaptABI2.validatedForStrictPQCImport(
-                now: now,
-                pinnedProtocolFingerprints: [fingerprint]
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? AppMessage.KEMRefreshValidationError,
-                .qPeriaptPlatformMetadataUnavailable(
-                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
-                )
             )
         }
 
@@ -558,6 +532,36 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
                 .invalidKEMPublicKeyLength(wireId: CryptoSuite.xwingMLDSA.wireId, expected: 1216, actual: 32)
             )
         }
+
+        let shortABI2QPeriapt = validPayload(kemPublicKeys: [
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
+                publicKey: Data(repeating: 0x56, count: 1184)
+            )
+        ])
+        XCTAssertThrowsError(try shortABI2QPeriapt.validatedForStrictPQCImport(now: now, pinnedProtocolFingerprints: [fingerprint])) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .invalidKEMPublicKeyLength(
+                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
+                    expected: 1216,
+                    actual: 1184
+                )
+            )
+        }
+
+        let validABI2QPeriapt = validPayload(kemPublicKeys: [
+            KEMPublicKeyInfo(
+                suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
+                publicKey: Data(repeating: 0x57, count: 1216)
+            )
+        ])
+        XCTAssertNoThrow(
+            try validABI2QPeriapt.validatedForStrictPQCImport(
+                now: now,
+                pinnedProtocolFingerprints: [fingerprint]
+            )
+        )
     }
 
     func testStrictImportRejectsMissingPinnedIdentityPolicyMismatchAndRollback() {
@@ -848,6 +852,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         }
 
         let wrongTarget = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: request.transactionId,
             deviceId: "id:other-mac",
             aliases: ["bonjour:other-mac@local."],
             protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
@@ -952,6 +957,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         signature: Data = Data(repeating: 0x77, count: 64)
     ) -> AppMessage.SignedProtocolIdentityBindingPayload {
         AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: request.transactionId,
             deviceId: " id:mac-1 ",
             aliases: ["id:mac-1", "bonjour:mac@local.", "id:mac-1"],
             protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,

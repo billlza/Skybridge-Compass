@@ -71,11 +71,13 @@ public actor ConnectionRateLimiter {
  /// - limits: Security limits configuration
  /// - connectionId: Unique identifier for this connection
  /// - tokenBucket: Custom token bucket instance
+#if DEBUG || SKYBRIDGE_TESTING
     internal init(limits: SecurityLimits, connectionId: String, tokenBucket: TokenBucketLimiter) {
         self.limits = limits
         self.connectionId = connectionId
         self.tokenBucket = tokenBucket
     }
+#endif
     
  // MARK: - Public Interface
     

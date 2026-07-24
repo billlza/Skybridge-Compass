@@ -15,6 +15,17 @@ public enum FileTransferError: Error, LocalizedError {
   case receiverRejected
   case secureSessionRequired
   case securityThreatDetected(threatName: String)
+  case partialFileCleanupFailed
+  case sourceFileCloseFailed
+  case committedFileReleaseFailed
+  case resumeStatePersistenceFailed
+  case resumeStateCleanupFailed
+  case automaticResumeFailed
+  case capacityExceeded
+  case ambiguousTarget
+  case invalidPort
+  case deliveryConfirmationUnknown
+  case invalidTransferState
 
   public var errorDescription: String? {
     switch self {
@@ -45,6 +56,28 @@ public enum FileTransferError: Error, LocalizedError {
       return "经典文件传输需要已认证的安全会话"
     case .securityThreatDetected(let threatName):
       return "检测到安全威胁: \(threatName)"
+    case .partialFileCleanupFailed:
+      return "文件传输失败，且未完成文件清理失败"
+    case .sourceFileCloseFailed:
+      return "文件传输失败，且源文件关闭失败"
+    case .committedFileReleaseFailed:
+      return "文件已安全落盘，但入站文件句柄释放失败"
+    case .resumeStatePersistenceFailed:
+      return "断点续传状态保存失败"
+    case .resumeStateCleanupFailed:
+      return "断点续传状态清理失败"
+    case .automaticResumeFailed:
+      return "自动断点续传失败"
+    case .capacityExceeded:
+      return "文件传输并发等待队列已满"
+    case .ambiguousTarget:
+      return "检测到多个活跃目标设备，请先明确选择接收设备"
+    case .invalidPort:
+      return "文件传输端口必须位于 1...65535"
+    case .deliveryConfirmationUnknown:
+      return "文件数据已发送，但未收到落盘确认；为避免重复文件，系统不会自动重发"
+    case .invalidTransferState:
+      return "文件传输进入了无效的控制状态"
     }
   }
 }

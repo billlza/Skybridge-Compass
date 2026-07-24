@@ -421,7 +421,7 @@ final class SignatureDBKeyManagerTests: XCTestCase {
         )
     }
     
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
  /// Test createTestDatabase helper
     func testCreateTestDatabase() {
         let database = SignatureDBKeyManager.createTestDatabase()

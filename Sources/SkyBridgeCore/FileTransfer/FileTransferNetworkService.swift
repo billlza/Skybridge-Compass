@@ -24,6 +24,16 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
     private let connectionQueue = DispatchQueue(label: "file-transfer-connections", qos: .userInitiated)
     private let maxConcurrentConnections = 5
 
+    private struct PendingConnectionAttempt {
+        let connection: NWConnection
+        let deviceId: String
+        let deviceName: String
+        let continuation: CheckedContinuation<NWConnection, Error>
+    }
+
+    private var pendingConnectionAttempts: [UUID: PendingConnectionAttempt] = [:]
+    private var outboundDeviceIDByConnectionKey: [String: String] = [:]
+
     public override init() {
         logger.info("📡 初始化文件传输网络服务")
     }
@@ -75,7 +85,10 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
  /// 停止文件传输服务监听
     public func stopListening() {
-        guard isListening else { return }
+        guard isListening else {
+            cancelAllConnections()
+            return
+        }
 
         logger.info("🛑 停止文件传输服务监听")
 
@@ -88,10 +101,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         netService = nil
 
  // 关闭所有活动连接
-        for (_, connection) in activeConnections {
-            connection.cancel()
-        }
-        activeConnections.removeAll()
+        cancelAllConnections()
 
         isListening = false
         logger.info("✅ 文件传输服务监听已停止")
@@ -99,6 +109,9 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
  /// 连接到指定设备进行文件传输
     public func connectToDevice(ipAddress: String, port: Int, deviceId: String, deviceName: String) async throws -> NWConnection {
+        guard (1...65535).contains(port) else {
+            throw FileTransferError.invalidPort
+        }
         logger.info("🔗 连接到设备: \(deviceName) (\(ipAddress))")
 
         let host = NWEndpoint.Host(ipAddress)
@@ -114,89 +127,140 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         }
 
         let connection = NWConnection(host: host, port: nwPort, using: parameters)
+        let attemptID = UUID()
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let resumeState = OSAllocatedUnfairLock(initialState: false)
-
-            connection.stateUpdateHandler = { (state: NWConnection.State) in
-                switch state {
-                case .ready:
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingConnectionAttempts[attemptID] = PendingConnectionAttempt(
+                    connection: connection,
+                    deviceId: deviceId,
+                    deviceName: deviceName,
+                    continuation: continuation
+                )
+                connection.stateUpdateHandler = { [weak self] state in
+                    Task { @MainActor [weak self] in
+                        self?.handleConnectionAttemptState(state, attemptID: attemptID)
                     }
+                }
+                connection.start(queue: connectionQueue)
 
-                    if shouldResume {
-                        Task { @MainActor in
-                            self.activeConnections[deviceId] = connection
-                            self.logger.info("✅ 成功连接到设备: \(deviceName)")
-                        }
-                        continuation.resume(returning: connection)
+                connectionQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.timeoutConnectionAttempt(attemptID)
                     }
-
-                case .failed(let error):
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
-                    }
-
-                    if shouldResume {
-                        self.logger.error("❌ 连接设备失败: \(deviceName) - \(error)")
-                        continuation.resume(throwing: error)
-                    }
-
-                case .cancelled:
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
-                    }
-
-                    if shouldResume {
-                        let error = FileTransferNetworkError.connectionCancelled
-                        continuation.resume(throwing: error)
-                    }
-
-                default:
-                    break
                 }
             }
-
-            connection.start(queue: connectionQueue)
-
- // 设置连接超时
-            connectionQueue.asyncAfter(deadline: .now() + 10.0) {
-                let shouldTimeout = resumeState.withLock { hasResumed in
-                    if !hasResumed && connection.state != .ready && connection.state != .cancelled {
-                        hasResumed = true
-                        return true
-                    }
-                    return false
-                }
-
-                if shouldTimeout {
-                    connection.cancel()
-                    continuation.resume(throwing: FileTransferNetworkError.connectionTimeout)
-                }
+        }, onCancel: {
+            connection.cancel()
+            Task { @MainActor [weak self] in
+                self?.cancelConnectionAttempt(attemptID)
             }
+        })
+    }
+
+    private func handleConnectionAttemptState(
+        _ state: NWConnection.State,
+        attemptID: UUID
+    ) {
+        switch state {
+        case .ready:
+            completeConnectionAttempt(attemptID, result: .success(()))
+        case .failed(let error):
+            completeConnectionAttempt(attemptID, result: .failure(error))
+        case .cancelled:
+            completeConnectionAttempt(
+                attemptID,
+                result: .failure(FileTransferNetworkError.connectionCancelled)
+            )
+        default:
+            break
         }
+    }
+
+    private func timeoutConnectionAttempt(_ attemptID: UUID) {
+        guard let attempt = pendingConnectionAttempts[attemptID] else { return }
+        attempt.connection.cancel()
+        completeConnectionAttempt(
+            attemptID,
+            result: .failure(FileTransferNetworkError.connectionTimeout)
+        )
+    }
+
+    private func cancelConnectionAttempt(_ attemptID: UUID) {
+        guard let attempt = pendingConnectionAttempts[attemptID] else { return }
+        attempt.connection.cancel()
+        completeConnectionAttempt(
+            attemptID,
+            result: .failure(FileTransferNetworkError.connectionCancelled)
+        )
+    }
+
+    private func completeConnectionAttempt(
+        _ attemptID: UUID,
+        result: Result<Void, Error>
+    ) {
+        guard let attempt = pendingConnectionAttempts.removeValue(forKey: attemptID) else {
+            return
+        }
+        attempt.connection.stateUpdateHandler = nil
+        switch result {
+        case .success:
+            let connectionKey = "outbound-\(attemptID.uuidString)"
+            activeConnections[connectionKey] = attempt.connection
+            outboundDeviceIDByConnectionKey[connectionKey] = attempt.deviceId
+            logger.info("✅ 成功连接到设备: \(attempt.deviceName)")
+            attempt.continuation.resume(returning: attempt.connection)
+        case .failure(let error):
+            logger.error("❌ 连接设备失败: \(attempt.deviceName) - \(error)")
+            attempt.continuation.resume(throwing: error)
+        }
+    }
+
+    func cancelPendingConnections() {
+        let attemptIDs = Array(pendingConnectionAttempts.keys)
+        for attemptID in attemptIDs {
+            cancelConnectionAttempt(attemptID)
+        }
+    }
+
+    func cancelAllConnections() {
+        cancelPendingConnections()
+        for connection in activeConnections.values {
+            connection.cancel()
+        }
+        activeConnections.removeAll()
+        outboundDeviceIDByConnectionKey.removeAll()
     }
 
  /// 断开与设备的连接
     public func disconnectFromDevice(_ deviceId: String) {
-        guard let connection = activeConnections[deviceId] else { return }
-
         logger.info("🔌 断开与设备的连接: \(deviceId)")
+        let connectionKeys = outboundDeviceIDByConnectionKey.compactMap { key, value in
+            value == deviceId ? key : nil
+        }
+        for connectionKey in connectionKeys {
+            activeConnections.removeValue(forKey: connectionKey)?.cancel()
+            outboundDeviceIDByConnectionKey.removeValue(forKey: connectionKey)
+        }
+        let pendingAttemptIDs = pendingConnectionAttempts.compactMap { key, value in
+            value.deviceId == deviceId ? key : nil
+        }
+        for attemptID in pendingAttemptIDs {
+            cancelConnectionAttempt(attemptID)
+        }
+    }
+
+    func disconnect(_ connection: NWConnection) {
+        let connectionID = ObjectIdentifier(connection)
+        let connectionKeys = activeConnections.compactMap { key, value in
+            ObjectIdentifier(value) == connectionID ? key : nil
+        }
+        for connectionKey in connectionKeys {
+            activeConnections.removeValue(forKey: connectionKey)
+            outboundDeviceIDByConnectionKey.removeValue(forKey: connectionKey)
+        }
         connection.cancel()
-        activeConnections.removeValue(forKey: deviceId)
     }
 
  /// 发送文件传输请求

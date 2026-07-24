@@ -8,7 +8,7 @@ import Foundation
 /// - No structured downgrade audit trail
 ///
 /// Release builds intentionally make this type unavailable to prevent accidental use.
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 @available(*, deprecated, message: "Legacy pre-paper handshake. Use `HandshakeDriver` + `TwoAttemptHandshakeManager` instead.")
 @MainActor
 public final class P2PHandshakeManager {

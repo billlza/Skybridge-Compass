@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = ROOT_DIR / "Scripts"
+VERIFIER = SCRIPTS_DIR / "verify_ios_distribution_product.py"
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import verify_ios_distribution_product as verifier  # noqa: E402
+
+
+class IOSDistributionProductSurfaceTests(unittest.TestCase):
+    def run_verifier(
+        self,
+        *,
+        product_surface: str,
+        compilation_conditions: str,
+        binary_test_surface: str = "0",
+        source_repository: str = "billlza/Skybridge-Compass",
+        source_commit: str = "a" * 40,
+    ) -> subprocess.CompletedProcess[str]:
+        arguments = [
+            "/missing/app-profile.mobileprovision",
+            "/missing/widget-profile.mobileprovision",
+            "/missing/app-entitlements.plist",
+            "/missing/widget-entitlements.plist",
+            "/missing/expected-entitlements.plist",
+            "/missing/app-certificate.der",
+            "/missing/widget-certificate.der",
+            "/missing/output.json",
+            "TEAM",
+            "com.example.app",
+            "com.example.app.widget",
+            "TEAM",
+            "apple-distribution",
+            "apple-distribution",
+            "Release",
+            "0",
+            source_commit,
+            "1",
+            "physical-device-id",
+            "/missing/selected-app.mobileprovision",
+            "/missing/selected-widget.mobileprovision",
+            "1",
+            "1",
+            source_repository,
+            product_surface,
+            compilation_conditions,
+            binary_test_surface,
+        ]
+        return subprocess.run(
+            ["python3", str(VERIFIER), *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    def assert_formal_surface_rejected(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("production surface without DEBUG/SKYBRIDGE_TESTING", result.stdout)
+
+    def test_formal_proof_rejects_skybridge_testing_product(self) -> None:
+        result = self.run_verifier(
+            product_surface="testing",
+            compilation_conditions="HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING",
+            binary_test_surface="1",
+        )
+        self.assert_formal_surface_rejected(result)
+
+    def test_formal_proof_rejects_debug_condition_even_if_surface_claims_production(self) -> None:
+        result = self.run_verifier(
+            product_surface="production",
+            compilation_conditions="DEBUG,HAS_APPLE_PQC_SDK",
+        )
+        self.assert_formal_surface_rejected(result)
+
+    def test_formal_proof_rejects_binary_test_hooks_even_if_metadata_claims_production(self) -> None:
+        result = self.run_verifier(
+            product_surface="production",
+            compilation_conditions="HAS_APPLE_PQC_SDK",
+            binary_test_surface="1",
+        )
+        self.assert_formal_surface_rejected(result)
+
+    def test_formal_proof_rejects_unbound_repository_or_commit(self) -> None:
+        for repository, commit in (
+            ("", "a" * 40),
+            ("../..", "a" * 40),
+            ("billlza/Skybridge-Compass", "not-a-full-sha"),
+        ):
+            with self.subTest(repository=repository, commit=commit):
+                result = self.run_verifier(
+                    product_surface="production",
+                    compilation_conditions="HAS_APPLE_PQC_SDK",
+                    source_repository=repository,
+                    source_commit=commit,
+                )
+                self.assert_formal_surface_rejected(result)
+
+    def test_rejects_malformed_compilation_condition_metadata(self) -> None:
+        result = self.run_verifier(
+            product_surface="production",
+            compilation_conditions="HAS_APPLE_PQC_SDK,HAS_APPLE_PQC_SDK",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compilation-condition metadata is malformed", result.stdout)
+
+
+class WidgetEntitlementConformanceTests(unittest.TestCase):
+    """The nested Widget must not independently carry the host App's privileged
+    entitlements. This guards against the previous always-true branch that let a
+    misconfigured Widget pass the formal proof."""
+
+    # Ground truth extracted from the Xcode-signed archive: the Widget only
+    # carries its own identity, team, keychain group, and (in dev builds)
+    # get-task-allow.
+    CONFORMING_WIDGET_ENTITLEMENTS = {
+        "application-identifier": "YKUPL7Z869.com.skybridge.compass.ios.widgets",
+        "com.apple.developer.team-identifier": "YKUPL7Z869",
+        "keychain-access-groups": [
+            "YKUPL7Z869.com.skybridge.compass.ios.widgets"
+        ],
+    }
+
+    def test_conforming_widget_entitlements_pass(self) -> None:
+        self.assertTrue(
+            verifier.widget_signed_entitlements_conform(
+                dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+            )
+        )
+
+    def test_widget_with_shared_app_group_still_conforms(self) -> None:
+        entitlements = dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+        entitlements["com.apple.security.application-groups"] = [
+            "YKUPL7Z869.group.com.skybridge.compass"
+        ]
+        self.assertTrue(verifier.widget_signed_entitlements_conform(entitlements))
+
+    def test_widget_rejects_each_disallowed_privileged_entitlement(self) -> None:
+        privileged_samples = {
+            "com.apple.developer.applesignin": ["Default"],
+            "aps-environment": "production",
+            "com.apple.developer.icloud-services": ["CloudKit", "CloudDocuments"],
+            "com.apple.developer.icloud-container-identifiers": [
+                "iCloud.com.skybridge.compass"
+            ],
+            "com.apple.developer.icloud-container-environment": [
+                "Production"
+            ],
+            "com.apple.developer.icloud-container-development-container-identifiers": [
+                "iCloud.com.skybridge.compass"
+            ],
+            "com.apple.developer.ubiquity-container-identifiers": [
+                "iCloud.com.skybridge.compass"
+            ],
+            "com.apple.developer.ubiquity-kvstore-identifier": (
+                "YKUPL7Z869.com.skybridge.compass"
+            ),
+        }
+        # Every disallowed key must have a negative sample so the guard cannot
+        # silently drop coverage of a capability.
+        self.assertEqual(
+            set(privileged_samples),
+            set(verifier.WIDGET_DISALLOWED_ENTITLEMENTS),
+        )
+        for key, value in privileged_samples.items():
+            with self.subTest(entitlement=key):
+                entitlements = dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+                entitlements[key] = value
+                self.assertFalse(
+                    verifier.widget_signed_entitlements_conform(entitlements)
+                )
+
+    def test_empty_privileged_entitlement_value_is_not_treated_as_present(self) -> None:
+        for empty_value in ([], "", {}):
+            with self.subTest(value=repr(empty_value)):
+                entitlements = dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+                entitlements["com.apple.developer.icloud-services"] = empty_value
+                self.assertTrue(
+                    verifier.widget_signed_entitlements_conform(entitlements)
+                )
+
+    def test_entitlement_value_presence_semantics(self) -> None:
+        self.assertFalse(verifier.entitlement_value_is_present(None))
+        self.assertFalse(verifier.entitlement_value_is_present(False))
+        self.assertFalse(verifier.entitlement_value_is_present([]))
+        self.assertFalse(verifier.entitlement_value_is_present(""))
+        self.assertTrue(verifier.entitlement_value_is_present(True))
+        self.assertTrue(verifier.entitlement_value_is_present(["CloudKit"]))
+        self.assertTrue(verifier.entitlement_value_is_present("production"))
+
+
+if __name__ == "__main__":
+    unittest.main()

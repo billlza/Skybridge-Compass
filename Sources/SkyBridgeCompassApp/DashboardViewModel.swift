@@ -98,6 +98,7 @@ final class DashboardViewModel: ObservableObject {
     private var presentationCancellables = Set<AnyCancellable>()
     private var authenticatedStartupTask: Task<Void, Never>?
     private var authenticatedStartupSessionKey: String?
+    private var authenticatedStartupGeneration: UUID?
     private var hasStartedServices = false
     private var isStartingServices = false
 
@@ -155,7 +156,14 @@ final class DashboardViewModel: ObservableObject {
 
         authenticatedStartupSessionKey = sessionKey
         authenticatedStartupTask?.cancel()
+        let startupGeneration = UUID()
+        authenticatedStartupGeneration = startupGeneration
         authenticatedStartupTask = Task { @MainActor [weak self] in
+            defer {
+                if self?.authenticatedStartupGeneration == startupGeneration {
+                    self?.authenticatedStartupTask = nil
+                }
+            }
             await Task.yield()
             guard let self,
                   !Task.isCancelled,
@@ -217,7 +225,12 @@ final class DashboardViewModel: ObservableObject {
 
         if !localPeerServices.hasStarted {
             guard await pauseBetweenStartupBursts() else { return }
-            await localPeerServices.startIfNeeded()
+            do {
+                try await localPeerServices.startIfNeeded()
+            } catch {
+                SkyBridgeLogger.ui.error("❌ 常驻本地服务启动失败: \(error.localizedDescription, privacy: .public)")
+                return
+            }
         }
 
         // 设备间文本消息服务：接 P2P 传输 + 离线队列投递（幂等，独立于自动扫描）。
@@ -251,7 +264,12 @@ final class DashboardViewModel: ObservableObject {
             if !p2pDiscoveryService.isAdvertising {
                 // 启动P2P广播服务（由系统分配端口，避免撞车）
                 guard await pauseBetweenStartupBursts() else { return }
-                await MainActor.run { p2pDiscoveryService.startAdvertising() }
+                do {
+                    try await p2pDiscoveryService.ensureAdvertisingHealthy()
+                } catch {
+                    SkyBridgeLogger.ui.error("❌ P2P 广播启动失败: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
                 #if DEBUG
                 SkyBridgeLogger.ui.debugOnly("✅ P2P广播已启动")
                 #endif
@@ -647,6 +665,7 @@ final class DashboardViewModel: ObservableObject {
         authenticatedStartupTask?.cancel()
         authenticatedStartupTask = nil
         authenticatedStartupSessionKey = nil
+        authenticatedStartupGeneration = nil
 
         let shouldStopStartedServices = hasStartedServices || isStartingServices
         hasStartedServices = false

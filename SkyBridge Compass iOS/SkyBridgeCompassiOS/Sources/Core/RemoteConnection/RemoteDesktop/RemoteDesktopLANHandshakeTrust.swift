@@ -5,6 +5,7 @@ struct LANRemoteControlCurrentPathAuthority: Sendable {
     let deviceId: String
     let protocolPublicKeyFingerprint: String
     let protocolPublicKeyFingerprints: Set<String>
+    let mlDSA87PublicKey: Data?
 }
 
 struct LANRemoteControlHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Sendable {
@@ -18,6 +19,17 @@ struct LANRemoteControlHandshakeTrustProvider: MultiFingerprintHandshakeTrustPro
     func trustedFingerprints(for deviceId: String) async -> Set<String> {
         guard await trustedFingerprint(for: deviceId) != nil else { return [] }
         return expectedRemoteAuthority.protocolPublicKeyFingerprints
+    }
+
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data? {
+        guard deviceId == expectedRemoteAuthority.deviceId,
+              algorithm == .mlDSA87 else {
+            return nil
+        }
+        return expectedRemoteAuthority.mlDSA87PublicKey
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
@@ -114,10 +126,21 @@ enum RemoteDesktopLANHandshakeTrust {
             }
         }
 
+        let mlDSA87Bindings = (record.protocolIdentityKeyBindings ?? []).filter {
+            $0.algorithm == ProtocolSigningAlgorithm.mlDSA87.rawValue
+                && $0.publicKeyBytes != nil
+        }
+        guard mlDSA87Bindings.count <= 1 else {
+            throw RemoteDesktopError.connectionFailed(
+                "远控目标存在冲突的 ML-DSA-87 原始公钥绑定"
+            )
+        }
+
         return LANRemoteControlCurrentPathAuthority(
             deviceId: deviceId,
             protocolPublicKeyFingerprint: primaryFingerprint,
-            protocolPublicKeyFingerprints: trustedFingerprints
+            protocolPublicKeyFingerprints: trustedFingerprints,
+            mlDSA87PublicKey: mlDSA87Bindings.first?.publicKeyBytes
         )
     }
 

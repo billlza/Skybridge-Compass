@@ -177,32 +177,34 @@ if grep -Fq "Committed all Q-Periapt vendor targets" "$rollback_failure_log"; th
   fail "rollback failure incorrectly reported success"
 fi
 
-grep -Fq 'source "$ROOT_DIR/Scripts/qperiapt_install_transaction.sh"' "$BUILD_SCRIPT" \
+LITERAL_DOLLAR='$'
+
+grep -Fq "source \"${LITERAL_DOLLAR}ROOT_DIR/Scripts/qperiapt_install_transaction.sh\"" "$BUILD_SCRIPT" \
   || fail "build script does not load the transaction helper"
 grep -Fq 'qperiapt_transaction_install_all' "$BUILD_SCRIPT" \
   || fail "build script does not install through the transaction"
 grep -Fq 'qperiapt_transaction_commit' "$BUILD_SCRIPT" \
   || fail "build script does not commit the transaction"
-grep -Fq 'QPERIAPT_RELEASE_TAG="v0.1.0-alpha.2"' "$BUILD_SCRIPT" \
+grep -Fq 'QPERIAPT_RELEASE_TAG="v0.1.0-alpha.2-r1"' "$BUILD_SCRIPT" \
   || fail "build script lost the immutable ABI2 release tag"
-grep -Fq 'QPERIAPT_SOURCE_COMMIT="f15917ee7daa7b07976ee147eb102d2afb468b76"' "$BUILD_SCRIPT" \
+grep -Fq 'QPERIAPT_SOURCE_COMMIT="5664fd86a617f92b620ea37e7692d3417d0e307d"' "$BUILD_SCRIPT" \
   || fail "build script lost the pinned ABI2 source commit"
-grep -Fq 'require_sha256 "$DOWNLOAD_DIR/CQPeriapt.xcframework.zip" "$QPERIAPT_ZIP_SHA256"' "$BUILD_SCRIPT" \
+grep -Fq "require_sha256 \"${LITERAL_DOLLAR}DOWNLOAD_DIR/CQPeriapt.xcframework.zip\" \"${LITERAL_DOLLAR}QPERIAPT_ZIP_SHA256\"" "$BUILD_SCRIPT" \
   || fail "build script lost the release archive hash gate"
 grep -Fq 'validate_release_metadata' "$BUILD_SCRIPT" \
   || fail "build script lost the signed release metadata gate"
 grep -Fq 'validate_archive_shape' "$BUILD_SCRIPT" \
   || fail "build script lost the exact archive-shape gate"
-grep -Fq 'assert_original_release "$ORIGINAL_XCFRAMEWORK"' "$BUILD_SCRIPT" \
+grep -Fq "assert_original_release \"${LITERAL_DOLLAR}ORIGINAL_XCFRAMEWORK\"" "$BUILD_SCRIPT" \
   || fail "build script lost the upstream Developer ID verification gate"
 grep -Fq 'assert_exact_symbols' "$BUILD_SCRIPT" \
   || fail "build script lost the ABI2 exact-nine symbol gate"
-grep -Fq 'assert_derivative "$STAGED_OUT"' "$BUILD_SCRIPT" \
+grep -Fq "assert_derivative \"${LITERAL_DOLLAR}STAGED_OUT\"" "$BUILD_SCRIPT" \
   || fail "build script lost the transformed derivative validation gate"
 
-staged_validation_line="$(grep -nF 'assert_derivative "$TRANSACTION_MAC_STAGED"' "$BUILD_SCRIPT" | cut -d: -f1)"
+staged_validation_line="$(grep -nF "assert_derivative \"${LITERAL_DOLLAR}TRANSACTION_MAC_STAGED\"" "$BUILD_SCRIPT" | cut -d: -f1)"
 install_line="$(grep -nF 'qperiapt_transaction_install_all' "$BUILD_SCRIPT" | cut -d: -f1)"
-installed_validation_line="$(grep -nF 'assert_derivative "$FINAL_OUT"' "$BUILD_SCRIPT" | tail -1 | cut -d: -f1)"
+installed_validation_line="$(grep -nF "assert_derivative \"${LITERAL_DOLLAR}FINAL_OUT\"" "$BUILD_SCRIPT" | tail -1 | cut -d: -f1)"
 [[ -n "$staged_validation_line" && -n "$install_line" && -n "$installed_validation_line" ]] \
   || fail "build script is missing staged/install/post-install transaction phases"
 (( staged_validation_line < install_line )) \

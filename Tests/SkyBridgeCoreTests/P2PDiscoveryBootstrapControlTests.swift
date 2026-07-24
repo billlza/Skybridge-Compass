@@ -130,6 +130,12 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
     }
 
     func testKEMRefreshRequestResponderReportsPinnedTargetReplayAndRateLimitFailures() async throws {
+        let identityContext = try DeviceIdentityKeychainTestContext()
+        _ = try await identityContext.manager.getProtocolSigningIdentity(
+            for: .mlDSA65,
+            protection: .softwareKeychain
+        )
+        defer { try? identityContext.reset() }
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
@@ -142,12 +148,14 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         )
         try await assertKEMRefreshRejected(
             first,
-            reasonCode: "pinned_protocol_identity_mismatch_requires_oob"
+            reasonCode: "pinned_protocol_identity_mismatch_requires_oob",
+            keyManager: identityContext.manager
         )
 
         try await assertKEMRefreshRejected(
             first,
-            reasonCode: "request_replay_detected"
+            reasonCode: "request_replay_detected",
+            keyManager: identityContext.manager
         )
 
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
@@ -160,7 +168,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             try await assertKEMRefreshRejected(
                 request,
                 reasonCode: "pinned_protocol_identity_mismatch_requires_oob",
-                "attempt \(index)"
+                "attempt \(index)",
+                keyManager: identityContext.manager
             )
         }
 
@@ -171,7 +180,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         )
         try await assertKEMRefreshRejected(
             rateLimited,
-            reasonCode: "requester_rate_limited"
+            reasonCode: "requester_rate_limited",
+            keyManager: identityContext.manager
         )
 
         await store.clearForTesting()
@@ -261,9 +271,37 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
     private func assertKEMRefreshRejected(
         _ request: AppMessage.KEMRefreshRequestPayload,
         reasonCode: String,
-        _ message: String = ""
+        _ message: String = "",
+        keyManager: DeviceIdentityKeyManager? = nil
     ) async throws {
-        let response = await P2PDiscoveryService.makeBootstrapControlResponse(for: .kemRefreshRequest(request))
+        let response: P2PDiscoveryService.BootstrapControlResponse?
+        if let keyManager {
+            response = await P2PDiscoveryService.makeBootstrapControlResponse(
+                for: .kemRefreshRequest(request),
+                makeSignedKEMRefreshPayload: { request in
+                    try await P2PDiscoveryService.makeSignedKEMRefreshPayload(
+                        for: request,
+                        keyManager: keyManager,
+                        loadLocalIdentities: {
+                            [
+                                try await CommittedLocalProtocolIdentitySnapshot.load(
+                                    algorithm: .mlDSA65,
+                                    protection: .softwareKeychain,
+                                    keyManager: keyManager
+                                )
+                            ]
+                        }
+                    )
+                },
+                makeSignedProtocolIdentityBindingPayload: { request in
+                    try await P2PDiscoveryService.makeSignedProtocolIdentityBindingPayload(for: request)
+                }
+            )
+        } else {
+            response = await P2PDiscoveryService.makeBootstrapControlResponse(
+                for: .kemRefreshRequest(request)
+            )
+        }
         let controlResponse = try XCTUnwrap(response, message)
         guard case .signedKEMRefreshRejected = controlResponse.kind else {
             return XCTFail("Expected SKR-1 rejection \(message)")
@@ -326,6 +364,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         for request: AppMessage.ProtocolIdentityBindingRequestPayload
     ) -> AppMessage.SignedProtocolIdentityBindingPayload {
         AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: request.transactionId,
             deviceId: "id:mac-1",
             aliases: ["id:mac-1", "bonjour:mac@local."],
             protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,

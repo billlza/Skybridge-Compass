@@ -136,15 +136,19 @@ final class SettingsViewSourceContractTests: XCTestCase {
         let settingsManagerSource = try repositorySource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
         let securitySettingsSource = try repositorySource("Sources/SkyBridgeCore/UI/SecuritySettingsView.swift")
 
-        XCTAssertTrue(settingsSource.contains(#"Text("ML-DSA-65 · 协议身份绑定")"#))
-        XCTAssertFalse(settingsSource.contains(#"Text("ML-DSA-87").tag("ML-DSA-87")"#))
+        XCTAssertTrue(settingsSource.contains(#"Text("ML-DSA-65 · Category 3")"#))
+        XCTAssertTrue(settingsSource.contains(#"Text("ML-DSA-87 · Category 5")"#))
+        XCTAssertTrue(settingsSource.contains(#".tag(ProtocolSigningAlgorithm.mlDSA87)"#))
+        XCTAssertTrue(settingsSource.contains(#""主协议 ML-DSA 私钥使用 Secure Enclave""#))
+        XCTAssertTrue(settingsSource.contains("启用失败不会回退软件密钥"))
         XCTAssertFalse(settingsSource.contains(#"Text("SLH-DSA").tag("SLH-DSA")"#))
         XCTAssertFalse(settingsSource.contains(#"Text("Falcon").tag("Falcon")"#))
         XCTAssertTrue(settingsManagerSource.contains(#"@Published public var pqcSignatureAlgorithm: String = "ML-DSA-65""#))
         XCTAssertTrue(settingsManagerSource.contains(#"case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":"#))
-        XCTAssertTrue(securitySettingsSource.contains(#"Text("ML-DSA-65 · 协议身份绑定")"#))
-        XCTAssertFalse(securitySettingsSource.contains(#"Text("ML-DSA-87 (高安全)").tag("ML-DSA-87")"#))
-        XCTAssertTrue(securitySettingsSource.contains("尚未接入生产身份信任链"))
+        XCTAssertTrue(settingsManagerSource.contains(#"case "ML-DSA-87", "MLDSA-87":"#))
+        XCTAssertTrue(securitySettingsSource.contains("仅对已认证并持久化 87 pin 的 peer 生效"))
+        XCTAssertTrue(securitySettingsSource.contains("该精确密钥槽失败时绝不回退软件密钥"))
+        XCTAssertFalse(securitySettingsSource.contains("尚未接入生产身份信任链"))
     }
 
     func testPQCEnablementIsReadOnlyRuntimePolicyNotAUserToggle() throws {

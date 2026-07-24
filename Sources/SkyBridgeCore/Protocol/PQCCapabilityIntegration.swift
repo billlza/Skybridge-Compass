@@ -3,12 +3,12 @@ import SkyBridgeProtocolCore
 
 // MARK: - PQC Capability Integration
 
-/// PQC 能力集成 - 连接现有 PQC 适配器与协议层能力协商结构。
+/// Legacy ML-DSA-65 compatibility/test capability projection.
 ///
 /// 说明：
 /// - `SkyBridgeProtocolCore` 只保留纯协议模型与协商规则。
-/// - 具体如何从本地 PQC 后端导出能力、再把协商结果应用回运行时实现，
-///   属于平台运行时职责，因此保留在 `SkyBridgeCore`。
+/// - 本类型不用于产品 capability 或设置页，也不代表当前 committed
+///   main-protocol identity；生产路径使用 exact algorithm/protection/raw-key snapshot。
 @available(macOS 14.0, *)
 public enum SBPQCCapabilityIntegration {
 

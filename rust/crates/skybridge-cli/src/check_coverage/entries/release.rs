@@ -14,7 +14,7 @@ pub(super) fn append_entries(
             &[
                 "validate_update_check_configuration",
                 "SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS",
-                "https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json",
+                "https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json",
                 "manifestSignatureVerificationFailed",
                 "published_at",
                 "expires_at",

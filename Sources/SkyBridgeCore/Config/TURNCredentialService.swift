@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import OSLog
 import SkyBridgeProtocolCore
 
@@ -11,10 +12,13 @@ public actor TURNCredentialService {
 
     private struct CachedTurnEntry: Sendable {
         let credentials: TURNCredentials
-        let turnAdmissionToken: String
+        let turnAdmissionTokenDigest: Data
     }
 
     private var cachedCredentialsBySessionID: [String: CachedTurnEntry] = [:]
+    private let maximumCachedSessions = 128
+    private let maximumResponseBytes = 64 * 1024
+    private let minimumUsableLifetime: TimeInterval = 10
     private let expirationBuffer: TimeInterval = 30
     private let logger = Logger(subsystem: "com.skybridge.turn", category: "CredentialService")
 
@@ -52,7 +56,7 @@ public actor TURNCredentialService {
         case missingTurnAdmissionToken
         case networkError(Error)
         case invalidResponse(String)
-        case serverError(Int, String?)
+        case serverError(statusCode: Int, responseBytes: Int)
         case decodingFailed(Error)
         case refreshRequiresNewTurnAdmissionToken
 
@@ -66,8 +70,8 @@ public actor TURNCredentialService {
                 return "网络请求失败: \(error.localizedDescription)"
             case .invalidResponse(let message):
                 return "无效的服务器响应: \(message)"
-            case .serverError(let code, let message):
-                return "服务器错误 (\(code)): \(message ?? "未知错误")"
+            case .serverError(let statusCode, let responseBytes):
+                return "TURN 凭据服务器返回 HTTP \(statusCode)（响应 \(responseBytes) 字节）"
             case .decodingFailed(let error):
                 return "凭据解析失败: \(error.localizedDescription)"
             case .refreshRequiresNewTurnAdmissionToken:
@@ -79,7 +83,7 @@ public actor TURNCredentialService {
     public func getCredentials(
         sessionID: String,
         turnAdmissionLease: SignalServerClient.TurnAdmissionLease?
-    ) async -> TURNCredentials {
+    ) async throws -> TURNCredentials {
         let allowStaticTURNFallback = SkyBridgeServerConfig.allowStaticTURNFallback
         if let cached = cachedCredentialsBySessionID[sessionID],
            cached.credentials.isValid(buffer: expirationBuffer) {
@@ -88,30 +92,39 @@ public actor TURNCredentialService {
         }
 
         guard let turnAdmissionLease else {
-            logger.warning(
-                "⚠️ 缺少 TURN admission lease，降级为\(allowStaticTURNFallback ? "显式允许的静态 TURN/空凭据" : "STUN-only")"
-            )
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            guard allowStaticTURNFallback else {
+                throw TURNCredentialError.missingTurnAdmissionToken
+            }
+            let fallback = fallbackCredentials(allowStaticTURN: true)
+            guard Self.hasUsableCredentials(fallback) else {
+                throw TURNCredentialError.invalidResponse("显式静态 TURN 配置缺少可用 URI 或凭据")
+            }
+            logger.warning("⚠️ 缺少 TURN admission lease，使用显式允许且已校验的静态 TURN 配置")
+            return fallback
         }
 
         let trimmedToken = turnAdmissionLease.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
+            throw TURNCredentialError.missingTurnAdmissionToken
+        }
+        let tokenDigest = Self.tokenDigest(trimmedToken)
         if let cached = cachedCredentialsBySessionID[sessionID],
-           cached.turnAdmissionToken == trimmedToken {
+           cached.turnAdmissionTokenDigest == tokenDigest {
             logger.warning(
                 "⚠️ TURN admission token 已消费且无法刷新 session=\(sessionID, privacy: .public)，请重新申请会话租约"
             )
             if cached.credentials.isValid(buffer: 0) {
                 return cached.credentials
             }
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            throw TURNCredentialError.refreshRequiresNewTurnAdmissionToken
         }
 
         do {
             let fresh = try await fetchFromServer(turnAdmissionToken: trimmedToken)
-            cachedCredentialsBySessionID[sessionID] = CachedTurnEntry(
+            storeCachedEntry(CachedTurnEntry(
                 credentials: fresh,
-                turnAdmissionToken: trimmedToken
-            )
+                turnAdmissionTokenDigest: tokenDigest
+            ), sessionID: sessionID)
             logger.info("✅ 获取到新的 TURN 凭据 session=\(sessionID, privacy: .public) ttl=\(fresh.ttl)")
             return fresh
         } catch {
@@ -122,10 +135,10 @@ public actor TURNCredentialService {
                 )
                 return cached.credentials
             }
-            logger.warning(
-                "⚠️ 动态 TURN 凭据获取失败，降级为\(allowStaticTURNFallback ? "显式允许的静态 TURN/空凭据" : "STUN-only"): \(error.localizedDescription, privacy: .public)"
+            logger.error(
+                "❌ 动态 TURN 凭据获取失败且无可用缓存 session=\(sessionID, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            throw error
         }
     }
 
@@ -140,8 +153,9 @@ public actor TURNCredentialService {
         guard !trimmedToken.isEmpty else {
             throw TURNCredentialError.missingTurnAdmissionToken
         }
+        let tokenDigest = Self.tokenDigest(trimmedToken)
         if let cached = cachedCredentialsBySessionID[sessionID],
-           cached.turnAdmissionToken == trimmedToken {
+           cached.turnAdmissionTokenDigest == tokenDigest {
             if cached.credentials.isValid(buffer: 0) {
                 return cached.credentials
             }
@@ -149,11 +163,26 @@ public actor TURNCredentialService {
         }
 
         let fresh = try await fetchFromServer(turnAdmissionToken: trimmedToken)
-        cachedCredentialsBySessionID[sessionID] = CachedTurnEntry(
+        storeCachedEntry(CachedTurnEntry(
             credentials: fresh,
-            turnAdmissionToken: trimmedToken
-        )
+            turnAdmissionTokenDigest: tokenDigest
+        ), sessionID: sessionID)
         return fresh
+    }
+
+    private func storeCachedEntry(_ entry: CachedTurnEntry, sessionID: String) {
+        if cachedCredentialsBySessionID[sessionID] == nil,
+           cachedCredentialsBySessionID.count >= maximumCachedSessions,
+           let evictionSessionID = cachedCredentialsBySessionID.min(by: {
+               $0.value.credentials.expiresAt < $1.value.credentials.expiresAt
+           })?.key {
+            cachedCredentialsBySessionID.removeValue(forKey: evictionSessionID)
+        }
+        cachedCredentialsBySessionID[sessionID] = entry
+    }
+
+    nonisolated private static func tokenDigest(_ token: String) -> Data {
+        Data(SHA256.hash(data: Data(token.utf8)))
     }
 
     public func clearCache(sessionID: String? = nil) {
@@ -190,9 +219,24 @@ public actor TURNCredentialService {
         }
         request.timeoutInterval = 10
 
-        let (data, response): (Data, URLResponse)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch {
+            throw TURNCredentialError.networkError(error)
+        }
+        var data = Data()
+        data.reserveCapacity(min(maximumResponseBytes, 4_096))
+        do {
+            for try await byte in bytes {
+                guard data.count < maximumResponseBytes else {
+                    throw TURNCredentialError.invalidResponse("TURN 响应超过大小上限")
+                }
+                data.append(byte)
+            }
+        } catch let error as TURNCredentialError {
+            throw error
         } catch {
             throw TURNCredentialError.networkError(error)
         }
@@ -202,30 +246,49 @@ public actor TURNCredentialService {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8)
-            throw TURNCredentialError.serverError(httpResponse.statusCode, body)
+            // Error bodies can contain echoed credentials, tokens, proxy
+            // diagnostics or HTML. Preserve only bounded structural metadata.
+            throw TURNCredentialError.serverError(
+                statusCode: httpResponse.statusCode,
+                responseBytes: data.count
+            )
         }
 
         do {
             let serverResponse = try JSONDecoder().decode(ServerResponse.self, from: data)
-            let ttl = max(60, serverResponse.ttl)
-            let expiresAt: Date
+            guard serverResponse.ttl > 0 else {
+                throw TURNCredentialError.invalidResponse("TURN TTL 必须大于 0")
+            }
+            let ttl = serverResponse.ttl
+            let now = Date()
+            let ttlExpiresAt = now.addingTimeInterval(TimeInterval(ttl))
+            let serverExpiresAt: Date
             if let expiresAtEpoch = serverResponse.expiresAt, expiresAtEpoch > 0 {
-                expiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
+                serverExpiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
             } else {
-                expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+                serverExpiresAt = ttlExpiresAt
+            }
+            let expiresAt = min(serverExpiresAt, ttlExpiresAt)
+            guard expiresAt.timeIntervalSince(now) >= minimumUsableLifetime else {
+                throw TURNCredentialError.invalidResponse("TURN 凭据剩余寿命不足以启动 ICE")
             }
             let uris = SkyBridgeServerConfig.preferredTurnURIs(
                 from: serverResponse.uris ?? [],
                 fallback: SkyBridgeServerConfig.turnURLs
             )
-            return TURNCredentials(
+            let credentials = TURNCredentials(
                 username: serverResponse.username,
                 password: serverResponse.password,
                 ttl: ttl,
                 uris: uris,
                 expiresAt: expiresAt
             )
+            guard Self.hasUsableCredentials(credentials) else {
+                throw TURNCredentialError.invalidResponse("TURN 响应缺少可用 URI 或凭据")
+            }
+            return credentials
+        } catch let error as TURNCredentialError {
+            throw error
         } catch {
             throw TURNCredentialError.decodingFailed(error)
         }
@@ -276,14 +339,21 @@ public actor TURNCredentialService {
     private func fallbackCredentials(allowStaticTURN: Bool) -> TURNCredentials {
         Self.resolvedFallbackCredentials(allowStaticTURN: allowStaticTURN)
     }
+
+    nonisolated private static func hasUsableCredentials(_ credentials: TURNCredentials) -> Bool {
+        credentials.isValid(buffer: 0)
+            && !credentials.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !credentials.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !SkyBridgeServerConfig.normalizedTurnURIs(credentials.uris).isEmpty
+    }
 }
 
 extension SkyBridgeServerConfig {
     public static func dynamicICEConfig(
         sessionID: String,
         turnAdmissionLease: SignalServerClient.TurnAdmissionLease?
-    ) async -> SkyBridgeICEConfiguration {
-        let credentials = await TURNCredentialService.shared.getCredentials(
+    ) async throws -> SkyBridgeICEConfiguration {
+        let credentials = try await TURNCredentialService.shared.getCredentials(
             sessionID: sessionID,
             turnAdmissionLease: turnAdmissionLease
         )
@@ -291,16 +361,21 @@ extension SkyBridgeServerConfig {
         let turnPassword = credentials.password.trimmingCharacters(in: .whitespacesAndNewlines)
         let turnURIs = preferredTurnURIs(from: credentials.uris, fallback: self.turnURLs)
         let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty && !turnURIs.isEmpty
+        guard shouldUseTURN else {
+            throw TURNCredentialService.TURNCredentialError.invalidResponse(
+                "TURN 凭据解析后不可用于 ICE"
+            )
+        }
 
         return SkyBridgeICEConfiguration(
             stunURL: stunURL,
-            turnURLs: shouldUseTURN ? turnURIs : [],
-            turnUsername: shouldUseTURN ? turnUsername : "",
-            turnPassword: shouldUseTURN ? turnPassword : ""
+            turnURLs: turnURIs,
+            turnUsername: turnUsername,
+            turnPassword: turnPassword
         )
     }
 
-    public static func dynamicICEConfig() async -> SkyBridgeICEConfiguration {
-        await dynamicICEConfig(sessionID: "fallback", turnAdmissionLease: nil)
+    public static func dynamicICEConfig() async throws -> SkyBridgeICEConfiguration {
+        try await dynamicICEConfig(sessionID: "fallback", turnAdmissionLease: nil)
     }
 }

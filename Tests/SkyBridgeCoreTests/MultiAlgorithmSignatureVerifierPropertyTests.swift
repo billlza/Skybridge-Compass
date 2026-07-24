@@ -233,8 +233,8 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
  // Ed25519 should return protocolPublicKey
         XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .ed25519), ed25519Key)
         
- // ML-DSA-65 should return protocolPublicKey
-        XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .mlDSA65), ed25519Key)
+ // An Ed25519-sized protocol key must never be reinterpreted as ML-DSA-65.
+        XCTAssertNil(trustRecord.getVerificationPublicKey(for: .mlDSA65))
         
  // P-256 ECDSA should return legacyP256PublicKey
         XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .p256ECDSA), legacyKey)

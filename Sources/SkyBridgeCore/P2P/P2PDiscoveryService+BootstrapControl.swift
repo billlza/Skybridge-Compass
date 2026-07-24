@@ -21,6 +21,7 @@ extension P2PDiscoveryService {
             case signedKEMRefreshServed
             case signedKEMRefreshRejected
             case protocolIdentityBindingServed
+            case protocolIdentityBindingConfirmed
             case protocolIdentityBindingRejected
         }
 
@@ -35,7 +36,7 @@ extension P2PDiscoveryService {
             switch kind {
             case .signedKEMRefreshRejected, .protocolIdentityBindingRejected:
                 return true
-            case .signedKEMRefreshServed, .protocolIdentityBindingServed:
+            case .signedKEMRefreshServed, .protocolIdentityBindingServed, .protocolIdentityBindingConfirmed:
                 return false
             }
         }
@@ -59,6 +60,22 @@ extension P2PDiscoveryService {
         for plaintextControl: AppMessage,
         makeSignedKEMRefreshPayload: (AppMessage.KEMRefreshRequestPayload) async throws -> AppMessage.SignedKEMRefreshPayload,
         makeSignedProtocolIdentityBindingPayload: (AppMessage.ProtocolIdentityBindingRequestPayload) async throws -> AppMessage.SignedProtocolIdentityBindingPayload
+    ) async -> BootstrapControlResponse? {
+        await makeBootstrapControlResponse(
+            for: plaintextControl,
+            makeSignedKEMRefreshPayload: makeSignedKEMRefreshPayload,
+            makeSignedProtocolIdentityBindingPayload: makeSignedProtocolIdentityBindingPayload,
+            finalizeProtocolIdentityBinding: { confirm in
+                try await Self.finalizeProtocolIdentityBinding(confirm)
+            }
+        )
+    }
+
+    nonisolated static func makeBootstrapControlResponse(
+        for plaintextControl: AppMessage,
+        makeSignedKEMRefreshPayload: (AppMessage.KEMRefreshRequestPayload) async throws -> AppMessage.SignedKEMRefreshPayload,
+        makeSignedProtocolIdentityBindingPayload: (AppMessage.ProtocolIdentityBindingRequestPayload) async throws -> AppMessage.SignedProtocolIdentityBindingPayload,
+        finalizeProtocolIdentityBinding: (AppMessage.ProtocolIdentityBindingConfirmPayload) async throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload
     ) async -> BootstrapControlResponse? {
         switch plaintextControl {
         case .kemRefreshRequest(let request):
@@ -145,6 +162,36 @@ extension P2PDiscoveryService {
                 )
             }
 
+        case .protocolIdentityBindingConfirm(let confirm):
+            do {
+                let ack = try await finalizeProtocolIdentityBinding(confirm)
+                return BootstrapControlResponse(
+                    kind: .protocolIdentityBindingConfirmed,
+                    message: .signedProtocolIdentityBindingFinalAck(ack),
+                    statusLine: "🔐 PIB-1 v3 confirmation committed and acknowledged lifecycle=identity-oob>confirmed",
+                    protocolIdentityBindingRequest: nil,
+                    protocolIdentityBindingPayload: nil,
+                    protocolIdentityBindingCode: nil
+                )
+            } catch {
+                let failure = AppMessage.KEMRefreshFailurePayload(
+                    requesterDeviceId: confirm.requesterDeviceId,
+                    targetDeviceId: confirm.responderDeviceId,
+                    stage: "identity_binding_confirm",
+                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
+                    reason: error.localizedDescription,
+                    requestHashHex: confirm.requestHashHex
+                )
+                return BootstrapControlResponse(
+                    kind: .protocolIdentityBindingRejected,
+                    message: .kemRefreshFailure(failure),
+                    statusLine: "⛔️ PIB-1 v3 confirmation rejected reasonCode=\(failure.reasonCode) lifecycle=identity-oob>confirm-rejected",
+                    protocolIdentityBindingRequest: nil,
+                    protocolIdentityBindingPayload: nil,
+                    protocolIdentityBindingCode: nil
+                )
+            }
+
         default:
             return nil
         }
@@ -156,17 +203,34 @@ extension P2PDiscoveryService {
     ) -> Bool {
         switch state {
         case .waitingFinished, .established:
-            guard let messageA = try? HandshakeMessageA.decode(from: frame) else {
-                return false
-            }
-            return messageA.hasNegotiableOfferShape
+            return (try? HandshakeMessageA.decode(from: frame)) != nil
         default:
             return false
         }
     }
 
     nonisolated static func makeSignedKEMRefreshPayload(
-        for request: AppMessage.KEMRefreshRequestPayload
+        for request: AppMessage.KEMRefreshRequestPayload,
+        keyManager: DeviceIdentityKeyManager = .shared
+    ) async throws -> AppMessage.SignedKEMRefreshPayload {
+        try await makeSignedKEMRefreshPayload(
+            for: request,
+            keyManager: keyManager,
+            loadLocalIdentities: {
+                try await CommittedLocalProtocolIdentitySnapshot
+                    .loadActiveAndCompatibility(keyManager: keyManager)
+            }
+        )
+    }
+
+    /// Core responder path with an explicit immutable identity snapshot
+    /// boundary. The production entry point above resolves the committed
+    /// configuration; focused integrations can supply the exact authority they
+    /// established without mutating process-global settings.
+    nonisolated static func makeSignedKEMRefreshPayload(
+        for request: AppMessage.KEMRefreshRequestPayload,
+        keyManager: DeviceIdentityKeyManager,
+        loadLocalIdentities: @Sendable () async throws -> [CommittedLocalProtocolIdentitySnapshot]
     ) async throws -> AppMessage.SignedKEMRefreshPayload {
         let requestedSuites: [CryptoSuite]
         do {
@@ -206,35 +270,11 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("requester rate limited")
         }
 
-        let keyManager = DeviceIdentityKeyManager.shared
-        var selectedIdentity: (
-            algorithm: ProtocolSigningAlgorithm,
-            publicKey: Data,
-            keyHandle: SigningKeyHandle,
-            fingerprint: String
-        )?
-        for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519] {
-            do {
-                let protocolPublicKey = try await keyManager.getProtocolSigningPublicKey(for: algorithm)
-                let protocolFingerprint = ProtocolIdentityPublicKeys(
-                    protocolPublicKey: protocolPublicKey,
-                    protocolAlgorithm: algorithm
-                ).authoritativeFingerprint.lowercased()
-                guard targetFingerprint == nil || targetFingerprint == protocolFingerprint else {
-                    continue
-                }
-                let protocolKeyHandle = try await keyManager.getProtocolSigningKeyHandle(for: algorithm)
-                selectedIdentity = (
-                    algorithm: algorithm,
-                    publicKey: protocolPublicKey,
-                    keyHandle: protocolKeyHandle,
-                    fingerprint: protocolFingerprint
-                )
-                break
-            } catch {
-                continue
+        let selectedIdentity = try await loadLocalIdentities()
+            .first { identity in
+                targetFingerprint == nil
+                    || targetFingerprint == identity.authoritativeFingerprint
             }
-        }
         guard let selectedIdentity else {
             throw makeSKRFailure("target protocol identity fingerprint mismatch")
         }
@@ -265,7 +305,7 @@ extension P2PDiscoveryService {
         let now = Date()
         let generation = UInt64(max(0, (now.timeIntervalSince1970 * 1000.0).rounded(.down)))
         let keyId = signedKEMRefreshKeyId(
-            protocolFingerprint: selectedIdentity.fingerprint,
+            protocolFingerprint: selectedIdentity.authoritativeFingerprint,
             kemPublicKeys: kemKeys
         )
         let aliases = PeerTrustLookup.lookupCandidates(for: localId)
@@ -274,7 +314,7 @@ extension P2PDiscoveryService {
             aliases: aliases,
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
             protocolIdentityPublicKey: selectedIdentity.publicKey,
-            protocolIdentityFingerprint: selectedIdentity.fingerprint,
+            protocolIdentityFingerprint: selectedIdentity.authoritativeFingerprint,
             kemPublicKeys: kemKeys,
             keyId: keyId,
             generation: generation,
@@ -322,6 +362,7 @@ extension P2PDiscoveryService {
     nonisolated static func makeSignedProtocolIdentityBindingPayload(
         for request: AppMessage.ProtocolIdentityBindingRequestPayload
     ) async throws -> AppMessage.SignedProtocolIdentityBindingPayload {
+        let requestValidationNow = Date()
         guard request.version == AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion else {
             throw makePIBFailure("invalid request version")
         }
@@ -334,9 +375,21 @@ extension P2PDiscoveryService {
         guard request.nonce.count >= 16 else {
             throw makePIBFailure("invalid request nonce")
         }
+        guard request.sentAt.timeIntervalSince(requestValidationNow) <= 30 else {
+            throw makePIBFailure("request timestamp is too far in the future")
+        }
+        guard requestValidationNow.timeIntervalSince(request.sentAt) <= 300 else {
+            throw makePIBFailure("request timestamp is expired")
+        }
+        let requestedAlgorithms: Set<ProtocolSigningAlgorithm>
+        do {
+            requestedAlgorithms = Set(try request.validatedRequestedProtocolSigningAlgorithms())
+        } catch {
+            throw makePIBFailure(error.localizedDescription)
+        }
         let requesterIdentity = try request.validatedRequesterProtocolIdentity()
         guard let requesterAlgorithm = requesterIdentity.normalizedAlgorithm,
-              let requesterFingerprint = requesterIdentity.authoritativeFingerprint?.lowercased(),
+              requesterIdentity.authoritativeFingerprint != nil,
               let requesterSignature = request.requesterSignature,
               !requesterSignature.isEmpty else {
             throw makePIBFailure("requester protocol identity proof invalid")
@@ -351,44 +404,11 @@ extension P2PDiscoveryService {
             throw makePIBFailure("requester protocol identity signature invalid")
         }
 
-        let requestedAlgorithms = Set(
-            request.requestedProtocolSigningAlgorithms.compactMap { raw -> ProtocolSigningAlgorithm? in
-                ProtocolSigningAlgorithm(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        let selectedIdentity = try await CommittedLocalProtocolIdentitySnapshot
+            .loadActiveAndCompatibility()
+            .first { identity in
+                requestedAlgorithms.contains(identity.algorithm)
             }
-        )
-        let candidateAlgorithms = [ProtocolSigningAlgorithm.mlDSA65, .ed25519].filter { algorithm in
-            requestedAlgorithms.isEmpty || requestedAlgorithms.contains(algorithm)
-        }
-        guard !candidateAlgorithms.isEmpty else {
-            throw makePIBFailure("no requested protocol identity algorithm available")
-        }
-
-        let keyManager = DeviceIdentityKeyManager.shared
-        var selectedIdentity: (
-            algorithm: ProtocolSigningAlgorithm,
-            publicKey: Data,
-            keyHandle: SigningKeyHandle,
-            fingerprint: String
-        )?
-        for algorithm in candidateAlgorithms {
-            do {
-                let protocolPublicKey = try await keyManager.getProtocolSigningPublicKey(for: algorithm)
-                let protocolFingerprint = ProtocolIdentityPublicKeys(
-                    protocolPublicKey: protocolPublicKey,
-                    protocolAlgorithm: algorithm
-                ).authoritativeFingerprint.lowercased()
-                let protocolKeyHandle = try await keyManager.getProtocolSigningKeyHandle(for: algorithm)
-                selectedIdentity = (
-                    algorithm: algorithm,
-                    publicKey: protocolPublicKey,
-                    keyHandle: protocolKeyHandle,
-                    fingerprint: protocolFingerprint
-                )
-                break
-            } catch {
-                continue
-            }
-        }
         guard let selectedIdentity else {
             throw makePIBFailure("local protocol identity unavailable")
         }
@@ -403,11 +423,12 @@ extension P2PDiscoveryService {
         let now = Date()
         let localPresentation = LocalDevicePresentation.current()
         let unsigned = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: request.transactionId,
             deviceId: localId,
             aliases: PeerTrustLookup.lookupCandidates(for: localId),
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
             protocolIdentityPublicKey: selectedIdentity.publicKey,
-            protocolIdentityFingerprint: selectedIdentity.fingerprint,
+            protocolIdentityFingerprint: selectedIdentity.authoritativeFingerprint,
             deviceName: localPresentation.deviceName,
             sentAt: now,
             expiresAt: now.addingTimeInterval(300),
@@ -422,6 +443,7 @@ extension P2PDiscoveryService {
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
         let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
         let signed = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: unsigned.transactionId,
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -438,22 +460,144 @@ extension P2PDiscoveryService {
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
             signature: signature
         )
-        let code = signed.shortAuthenticationCode(request: request)
-        let approval = await PairingTrustApprovalService.shared.stageProtocolIdentityBindingRequesterApproval(
-            peerEndpoint: request.bonjourEndpointDigest ?? "lan",
-            requesterDeviceIds: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId),
-            displayName: request.requesterDeviceId,
-            model: nil,
-            platform: "iOS",
-            osVersion: nil,
-            verificationCode: code,
-            requesterProtocolSigningAlgorithm: requesterAlgorithm,
-            requesterProtocolIdentityFingerprint: requesterFingerprint
+        return try await ProtocolIdentityBindingTransactionStore.shared.register(
+            request: request,
+            candidate: signed,
+            responderKeyHandle: selectedIdentity.keyHandle
         )
-        guard approval != PairingTrustApprovalService.Decision.reject else {
-            throw makePIBFailure("operator rejected requester protocol identity")
+    }
+
+    nonisolated static func finalizeProtocolIdentityBinding(
+        _ confirm: AppMessage.ProtocolIdentityBindingConfirmPayload
+    ) async throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
+        try await ProtocolIdentityBindingTransactionStore.shared.resolveConfirmation(confirm) { context in
+            let request = context.request
+            let candidate = context.candidate
+            let validatedConfirm = try confirm.validatedForCandidate(request: request, candidate: candidate)
+            let requesterIdentity = try request.validatedRequesterProtocolIdentity()
+            guard let requesterAlgorithm = requesterIdentity.normalizedAlgorithm,
+                  let requesterFingerprint = requesterIdentity.authoritativeFingerprint?.lowercased() else {
+                throw makePIBFailure("requester protocol identity proof invalid")
+            }
+            let requesterVerifier = ProtocolSignatureProviderSelector.select(for: requesterAlgorithm)
+            guard try await requesterVerifier.verify(
+                validatedConfirm.signaturePreimage,
+                signature: validatedConfirm.requesterSignature,
+                publicKey: requesterIdentity.publicKey
+            ) else {
+                throw makePIBFailure("requester confirmation signature invalid")
+            }
+
+            guard let responderAlgorithm = ProtocolSigningAlgorithm(rawValue: candidate.protocolSigningAlgorithm) else {
+                throw makePIBFailure("invalid responder signature algorithm")
+            }
+            let approval = await PairingTrustApprovalService.shared.stageProtocolIdentityBindingRequesterApproval(
+                peerEndpoint: request.bonjourEndpointDigest ?? "lan",
+                requesterDeviceIds: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId),
+                displayName: request.requesterDeviceId,
+                model: nil,
+                platform: "iOS",
+                osVersion: nil,
+                verificationCode: candidate.shortAuthenticationCode(request: request),
+                requesterProtocolSigningAlgorithm: requesterAlgorithm,
+                requesterProtocolIdentityFingerprint: requesterFingerprint,
+                requesterProtocolIdentityPublicKey: requesterIdentity.publicKey,
+                transactionId: request.transactionId,
+                requestHashHex: request.canonicalRequestHashHex,
+                candidateHashHex: candidate.canonicalCandidateHashHex,
+                sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request)
+            )
+            guard approval != .reject else {
+                throw makePIBFailure("operator rejected requester protocol identity confirmation")
+            }
+
+            // The operator can spend up to 180 seconds comparing SAS. Recheck
+            // both signed phase-one frames after that wait; an expired
+            // candidate/confirm must never lead to a pin or a final ACK.
+            let postApprovalNow = Date()
+            _ = try candidate.validatedForOOBBinding(request: request, now: postApprovalNow)
+            _ = try validatedConfirm.validatedForCandidate(
+                request: request,
+                candidate: candidate,
+                now: postApprovalNow
+            )
+            guard let responderKey = context.responderKeyHandle else {
+                throw makePIBFailure("responder signing key context unavailable")
+            }
+            let unsignedAck = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+                transactionId: request.transactionId,
+                requesterDeviceId: request.requesterDeviceId,
+                responderDeviceId: candidate.deviceId,
+                requesterProtocolIdentityFingerprint: requesterFingerprint,
+                responderProtocolIdentityFingerprint: candidate.protocolIdentityFingerprint,
+                requestNonce: request.nonce,
+                confirmationNonce: validatedConfirm.confirmationNonce,
+                requestHashHex: request.canonicalRequestHashHex,
+                candidateHashHex: candidate.canonicalCandidateHashHex,
+                sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
+                confirmHashHex: validatedConfirm.canonicalConfirmHashHex,
+                accepted: true,
+                sentAt: postApprovalNow,
+                expiresAt: postApprovalNow.addingTimeInterval(300),
+                responderSignature: Data()
+            )
+            let responderSigner = ProtocolSignatureProviderSelector.select(for: responderAlgorithm)
+            let ackSignature = try await responderSigner.sign(
+                unsignedAck.signaturePreimage,
+                key: responderKey
+            )
+            let signedAck = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+                transactionId: unsignedAck.transactionId,
+                requesterDeviceId: unsignedAck.requesterDeviceId,
+                responderDeviceId: unsignedAck.responderDeviceId,
+                requesterProtocolIdentityFingerprint: unsignedAck.requesterProtocolIdentityFingerprint,
+                responderProtocolIdentityFingerprint: unsignedAck.responderProtocolIdentityFingerprint,
+                requestNonce: unsignedAck.requestNonce,
+                confirmationNonce: unsignedAck.confirmationNonce,
+                requestHashHex: unsignedAck.requestHashHex,
+                candidateHashHex: unsignedAck.candidateHashHex,
+                sasTranscriptHashHex: unsignedAck.sasTranscriptHashHex,
+                confirmHashHex: unsignedAck.confirmHashHex,
+                accepted: true,
+                sentAt: unsignedAck.sentAt,
+                expiresAt: unsignedAck.expiresAt,
+                responderSignature: ackSignature
+            )
+
+            // Signing can cross an expiry boundary. Validate once more before
+            // committing authoritative trust; this is the last reversible
+            // point before the responder pin is installed.
+            let commitNow = Date()
+            _ = try candidate.validatedForOOBBinding(request: request, now: commitNow)
+            _ = try validatedConfirm.validatedForCandidate(
+                request: request,
+                candidate: candidate,
+                now: commitNow
+            )
+            _ = try signedAck.validatedForFinalization(
+                request: request,
+                candidate: candidate,
+                confirm: validatedConfirm,
+                now: commitNow
+            )
+            let committedDecision = await PairingTrustApprovalService.shared
+                .commitProtocolIdentityBindingRequesterApproval(
+                    decision: approval,
+                    transactionId: request.transactionId,
+                    requesterDeviceIds: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId),
+                    requesterProtocolSigningAlgorithm: requesterAlgorithm,
+                    requesterProtocolIdentityFingerprint: requesterFingerprint,
+                    requesterProtocolIdentityPublicKey: requesterIdentity.publicKey,
+                    requestHashHex: request.canonicalRequestHashHex,
+                    candidateHashHex: candidate.canonicalCandidateHashHex,
+                    sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
+                    now: commitNow
+                )
+            guard committedDecision != .reject else {
+                throw makePIBFailure("requester protocol identity pin commit failed")
+            }
+            return signedAck
         }
-        return signed
     }
 
     nonisolated private static func makePIBFailure(_ reason: String) -> NSError {

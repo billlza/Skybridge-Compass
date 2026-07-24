@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import AppKit
 import CryptoKit
 import Darwin
@@ -325,7 +326,7 @@ final class LocalP2PFileTransferSmokeHarness {
             "mac-reconnect discovery-start peer=\(Self.sanitize(peer.deviceId)) name=\(Self.sanitize(peer.deviceName ?? "-"))"
         )
 
-        _ = P2PDiscoveryService.shared.disconnectFromDevice(peer.deviceId)
+        _ = await P2PDiscoveryService.shared.disconnectFromDevice(peer.deviceId)
         try await Task.sleep(for: .seconds(2))
 
         if let target = try await waitForReconnectTarget(peer: peer, timeoutSeconds: 30) {
@@ -654,8 +655,19 @@ final class LocalP2PFileTransferSmokeHarness {
                  .inboundConnectionClosedBeforeMetadata,
                  .fileNotFound,
                  .timeout,
-                 .receiptWaitFailed:
+                 .receiptWaitFailed,
+                 .partialFileCleanupFailed,
+                 .sourceFileCloseFailed,
+                 .committedFileReleaseFailed,
+                 .resumeStatePersistenceFailed,
+                 .resumeStateCleanupFailed,
+                 .automaticResumeFailed,
+                 .capacityExceeded,
+                 .deliveryConfirmationUnknown,
+                 .invalidTransferState:
                 return "payload_framing"
+            case .ambiguousTarget, .invalidPort:
+                return "discovery"
             }
         }
         let nsError = error as NSError
@@ -737,6 +749,28 @@ final class LocalP2PFileTransferSmokeHarness {
                 return "mac_file_transfer_secure_session_required"
             case .securityThreatDetected:
                 return "mac_file_transfer_security_threat_detected"
+            case .partialFileCleanupFailed:
+                return "mac_file_transfer_partial_cleanup_failed"
+            case .sourceFileCloseFailed:
+                return "mac_file_transfer_source_close_failed"
+            case .committedFileReleaseFailed:
+                return "mac_file_transfer_committed_file_release_failed"
+            case .resumeStatePersistenceFailed:
+                return "mac_file_transfer_resume_state_persistence_failed"
+            case .resumeStateCleanupFailed:
+                return "mac_file_transfer_resume_state_cleanup_failed"
+            case .automaticResumeFailed:
+                return "mac_file_transfer_automatic_resume_failed"
+            case .capacityExceeded:
+                return "mac_file_transfer_capacity_exceeded"
+            case .ambiguousTarget:
+                return "mac_file_transfer_ambiguous_target"
+            case .invalidPort:
+                return "mac_file_transfer_invalid_port"
+            case .deliveryConfirmationUnknown:
+                return "mac_file_transfer_delivery_confirmation_unknown"
+            case .invalidTransferState:
+                return "mac_file_transfer_invalid_transfer_state"
             }
         }
 
@@ -965,7 +999,7 @@ private struct LocalP2PSmokePeerContext {
     let deviceName: String?
 }
 
-private struct LocalP2PSmokePQCReport: Encodable {
+struct LocalP2PSmokePQCReport: Encodable {
     struct PublicKeyEntry: Encodable {
         let suiteWireId: UInt16
         let publicKeyBase64: String
@@ -998,13 +1032,112 @@ private struct LocalP2PSmokeStatusReporter {
     }
 }
 
-private enum LocalP2PSmokeFiles {
+enum LocalP2PSmokeFiles {
+    private static let maximumPrecreatedOutputBytes = 1_048_576
+
     static func writeProtectedData(_ data: Data, to url: URL) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Validates an output boundary before the product smoke harness reads product credentials.
+    /// The caller must create both the private 0700 directory and its 0600 output file. This
+    /// routine deliberately never creates a path selected through the process environment.
+    static func validatePrecreatedPrivateFile(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw posixError(path: url.path)
+        }
+        defer { _ = Darwin.close(descriptor) }
+        try validatePrivateParent(of: url)
+        try validatePrivateRegularFile(descriptor, path: url.path)
+    }
+
+    /// Overwrites a pre-created private output without following symlinks or creating files.
+    static func overwritePrecreatedPrivateData(_ data: Data, at url: URL) throws {
+        guard data.count <= maximumPrecreatedOutputBytes else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EFBIG),
+                userInfo: [NSFilePathErrorKey: url.path]
+            )
+        }
+        try validatePrivateParent(of: url)
+        let descriptor = Darwin.open(url.path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw posixError(path: url.path)
+        }
+        defer { _ = Darwin.close(descriptor) }
+        try validatePrivateRegularFile(descriptor, path: url.path)
+        guard Darwin.ftruncate(descriptor, 0) == 0 else {
+            throw posixError(path: url.path)
+        }
+        try data.withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < buffer.count {
+                let written = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if written > 0 {
+                    offset += written
+                } else if written == -1, errno == EINTR {
+                    continue
+                } else {
+                    throw posixError(path: url.path)
+                }
+            }
+        }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw posixError(path: url.path)
+        }
+    }
+
+    private static func validatePrivateParent(of url: URL) throws {
+        let parent = url.deletingLastPathComponent()
+        var metadata = stat()
+        guard Darwin.lstat(parent.path, &metadata) == 0 else {
+            throw posixError(path: parent.path)
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFDIR,
+              metadata.st_uid == Darwin.geteuid(),
+              metadata.st_mode & mode_t(0o777) == mode_t(0o700) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EACCES),
+                userInfo: [NSFilePathErrorKey: parent.path]
+            )
+        }
+    }
+
+    private static func validatePrivateRegularFile(_ descriptor: Int32, path: String) throws {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else {
+            throw posixError(path: path)
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_uid == Darwin.geteuid(),
+              metadata.st_nlink == 1,
+              metadata.st_mode & mode_t(0o777) == mode_t(0o600) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EACCES),
+                userInfo: [NSFilePathErrorKey: path]
+            )
+        }
+    }
+
+    private static func posixError(path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errno),
+            userInfo: [NSFilePathErrorKey: path]
+        )
     }
 }
 
@@ -1216,3 +1349,4 @@ private final class LocalP2PBonjourFileTransferRouteResolver: NSObject, @preconc
         }
     }
 }
+#endif

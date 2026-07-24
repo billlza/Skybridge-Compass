@@ -47,6 +47,8 @@ public class DeviceClassifier {
             switch self {
             case .computer, .nas:
                 return true
+            // 摄像头分类只是设备能力提示；只有用户提供并通过安全策略校验的精确
+            // RTSP URL 才能建立只读视频会话，不能把厂商名或控制端口当作流端点。
             case .camera, .router, .printer, .speaker, .tv, .iot, .unknown:
                 return false
             }
@@ -220,7 +222,9 @@ public class DeviceClassifier {
     private static func classifyByService(_ service: String) -> DeviceType {
         let serviceLower = service.lowercased()
         
-        if serviceLower.contains("http") || serviceLower.contains("rtsp") {
+        if serviceLower.contains("rtsp")
+            || serviceLower.contains("onvif")
+            || serviceLower.contains("networkvideotransmitter") {
             return .camera
         } else if serviceLower.contains("ipp") || serviceLower.contains("printer") {
             return .printer

@@ -217,6 +217,7 @@
 "settings.general.exportSettings" = "导出设置";
 "settings.general.importSettings" = "导入设置";
 "settings.general.resetSettings" = "恢复默认设置";
+"settings.general.deduplicateKeychain" = "清理重复的钥匙串项";
 
 /* Units */
 "unit.seconds.15" = "15 秒";
@@ -533,7 +534,9 @@
 "settings.advanced.pqc.preferXWing.help" = "启动时会同时声明 ML-KEM-768 与 X-Wing；此开关仅调整套件优先级。";
 "settings.advanced.pqc.preferXWing.caption" = "启用后优先协商 X-Wing；关闭则优先 ML-KEM-768（两者能力仍会一并声明）。";
 "settings.advanced.pqc.signatureAlgorithm" = "签名算法:";
-"settings.advanced.pqc.note" = "当前运行时的 X-Wing 与 ML-DSA-65 均使用软件密钥，不宣称 Secure Enclave 保护；可用性以实际选中的运行时提供者为准。";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSA 使用 Secure Enclave";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEM 使用 Secure Enclave";
+"settings.advanced.pqc.note" = "X-Wing（混合）与 ML-KEM-768（纯 PQC）在 macOS 26+（CryptoKit）可用；Secure Enclave PQC 也仅在该条件下生效。macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
 
 "settings.advanced.smoothing.title" = "设备强度平滑";
 "settings.advanced.smoothing.alpha" = "强度平滑系数 (EMA)";
@@ -552,6 +555,8 @@
 "settings.fileTransfer.rateLimit.unlimited" = "不限速";
 "settings.fileTransfer.pathFallback.title" = "已切换默认保存位置";
 "settings.fileTransfer.pathFallback.message" = "原默认路径不可用，已自动回退到：%@";
+"settings.fileTransfer.pathFailure.title" = "无法配置文件接收目录";
+"settings.fileTransfer.pathFailure.message" = "请检查目录权限或选择其他可写入位置。原接收目录保持不变。";
 "settings.fileTransfer.options.title" = "传输选项";
 "settings.fileTransfer.options.showNotification" = "传输完成后显示通知";
 "settings.fileTransfer.options.autoRetryFailed" = "自动重试失败的传输";
@@ -560,6 +565,8 @@
 "settings.fileTransfer.options.keepAwake" = "传输时保持系统唤醒";
 "settings.fileTransfer.security.title" = "安全设置";
 "settings.fileTransfer.security.enableEncrypt" = "启用传输加密";
+"settings.fileTransfer.security.encryption.alwaysOn" = "文件传输加密始终开启";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "经典传输协议固定要求 AES-256-GCM，不允许降级为明文。";
 "settings.security.certificateValidation.alwaysOn" = "证书校验始终开启";
 "settings.security.certificateValidation.alwaysOn.detail" = "当前版本固定启用严格证书校验，无法关闭。";
 "settings.fileTransfer.security.verifyIntegrity" = "验证文件完整性";
@@ -674,15 +681,13 @@
 "fileTransfer.history.clear" = "清空历史";
 "fileTransfer.history.emptyTitle" = "没有传输历史";
 "fileTransfer.history.emptySubtitle" = "完成的传输将显示在这里";
-"fileTransfer.debug.title" = "调试面板";
-"fileTransfer.debug.hmacTagHex" = "HMAC 标记（十六进制）";
-"fileTransfer.debug.signatureResult" = "整文件签名校验结果";
 "common.none" = "无";
 "action.preview" = "预览";
 "transferStatus.preparing" = "准备中";
 "transferStatus.transferring" = "传输中";
 "transferStatus.paused" = "已暂停";
 "transferStatus.completed" = "已完成";
+"fileTransfer.receiptDeliveryUnknown" = "文件已保存，但发送端确认状态未知；请勿自动重传。";
 "transferStatus.failed" = "失败";
 "transferStatus.cancelled" = "已取消";
 "action.close" = "关闭";
@@ -1189,8 +1194,8 @@
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";
 "remoteControl.securityNotice.transport" = "传输";
-"remoteControl.securityNotice.account" = "账号";
-"remoteControl.securityNotice.nebulaID" = "NebulaID";
+"remoteControl.securityNotice.account" = "设备自报账号";
+"remoteControl.securityNotice.nebulaID" = "设备自报 Nebula ID";
 "remoteControl.securityNotice.device" = "设备身份";
 "remoteControl.securityNotice.pqc" = "PQC 套件";
 "remoteControl.securityNotice.approve" = "批准";
@@ -1230,3 +1235,17 @@
 "topbar.network.latency.help.ready" = "到 SkyBridge 官网入口的 HTTPS 响应延迟：%@ ms";
 "topbar.network.latency.help.failedUnavailable" = "公网延迟不可用";
 "topbar.network.latency.help.failed" = "公网延迟探测失败：%@";
+
+/* 本地摄像头视频流 */
+"remote.camera.connect" = "连接本地摄像头";
+"remote.camera.defaultName" = "智能监控";
+"remote.camera.name" = "摄像头名称（可选）";
+"remote.camera.endpoint" = "精确的 RTSP/RTSPS 地址";
+"remote.camera.contract" = "请输入私网 IP 字面量和精确流路径。当前版本仅支持 H.264 与 RTSP 内嵌 TCP 视频；不会猜测路径或连接厂商云中继。";
+"remote.camera.plaintextAcknowledgement" = "我了解 RTSP 的控制数据和视频没有传输加密。";
+"remote.camera.tlsNotice" = "RTSPS 使用系统证书信任和主机身份校验；无效或自签名证书会被拒绝。";
+"remote.camera.protocol" = "本地摄像头（RTSP）";
+"remote.camera.rendererUnavailable" = "无法初始化视频渲染器。";
+"remote.camera.feedUnavailable.title" = "画面不可用";
+"remote.camera.feedUnavailable.failed" = "摄像头流已失败，凭据和传输资源也已释放。请检查精确地址、凭据、H.264 编码和本地网络后重连。";
+"remote.camera.feedUnavailable.released" = "会话渲染资源已释放，请重新连接。";

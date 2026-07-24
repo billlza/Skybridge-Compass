@@ -31,11 +31,10 @@ hkdf = "0.12.4"
 hmac = "0.12.1"
 hostname = "0.4.2"
 hpke = "0.13"
+fips203 = { version = "0.4.3", default-features = false, features = ["ml-kem-768"] }
+fips204 = { version = "0.4.6", default-features = false, features = ["ml-dsa-65", "ml-dsa-87"] }
 mdns-sd = "0.20.0"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-pqcrypto-mldsa = { version = "0.1.2", default-features = false, features = ["std"] }
-pqcrypto-mlkem = { version = "0.1.1", default-features = false, features = ["std"] }
-pqcrypto-traits = "0.3.5"
 reqwest = { version = "0.12.24", default-features = false, features = ["charset", "http2", "json", "macos-system-configuration", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

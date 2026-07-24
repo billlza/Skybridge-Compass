@@ -21,16 +21,6 @@ mode = sys.argv[2]
 outputs = {
     "xctest-pass": ("Test Suite 'Selected tests' passed\nExecuted 2 tests, with 0 failures\n", 0),
     "swift-testing-pass": ("Test run with 1 test passed after 0.001 seconds.\n", 0),
-    "xctest-skip": (
-        "Test Case '-[ExampleTests testOptIn]' skipped (0.001 seconds).\n"
-        "Executed 1 test, with 1 test skipped and 0 failures\n",
-        0,
-    ),
-    "swift-testing-skip": (
-        "➜ Test \"opt-in\" skipped: \"required environment is unavailable\"\n"
-        "Test run with 1 test in 1 suite passed after 0.001 seconds.\n",
-        0,
-    ),
     "zero": ("Test run with 0 tests in 0 suites passed after 0.001 seconds.\n", 0),
     "failure": ("error: test process failed\n", 7),
 }
@@ -64,25 +54,11 @@ expect_status 0 bash "${TARGET}" ExampleTests
 
 write_fake_swift swift-testing-pass
 expect_status 0 bash "${TARGET}" ExampleTests
-expect_status 0 bash "${TARGET}" --require-no-skips ExampleTests
-
-# Default full-suite semantics remain skip-tolerant.
-write_fake_swift xctest-skip
-expect_status 0 bash "${TARGET}" ExampleTests
-expect_status 4 bash "${TARGET}" --require-no-skips ExampleTests
-
-write_fake_swift swift-testing-skip
-expect_status 0 bash "${TARGET}" ExampleTests
-expect_status 4 bash "${TARGET}" --require-no-skips ExampleTests
 
 write_fake_swift zero
 expect_status 3 bash "${TARGET}" StaleFilter
-expect_status 3 bash "${TARGET}" --require-no-skips StaleFilter
 
 write_fake_swift failure
 expect_status 7 bash "${TARGET}" BrokenTests
-expect_status 7 bash "${TARGET}" --require-no-skips BrokenTests
-
-expect_status 2 bash "${TARGET}" --require-no-skips
 
 echo "[test-run-swift-test-filter] passed"

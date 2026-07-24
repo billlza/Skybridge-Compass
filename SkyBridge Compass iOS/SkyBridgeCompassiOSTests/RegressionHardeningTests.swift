@@ -1,9 +1,151 @@
 import CryptoKit
+import Dispatch
 import Network
 import SkyBridgeRealtimeMedia
+import UIKit
 import XCTest
 
 @testable import SkyBridgeCompass_iOS
+
+final class SkyBridgeLoggerPrivacyTests: XCTestCase {
+  func testSanitizerRedactsStructuredSecretsAndIdentifiers() {
+    let message = "connected sessionId=session-123 token=secret-token fileName=private.mov host=192.168.1.20 email=person@example.com"
+
+    let sanitized = SkyBridgeLogger.sanitizedMessage(message)
+
+    XCTAssertFalse(sanitized.contains("session-123"))
+    XCTAssertFalse(sanitized.contains("secret-token"))
+    XCTAssertFalse(sanitized.contains("private.mov"))
+    XCTAssertFalse(sanitized.contains("192.168.1.20"))
+    XCTAssertFalse(sanitized.contains("person@example.com"))
+    XCTAssertTrue(sanitized.contains("sessionId=<redacted>"))
+    XCTAssertTrue(sanitized.contains("token=<redacted>"))
+    XCTAssertTrue(sanitized.contains("fileName=<redacted>"))
+    XCTAssertTrue(sanitized.contains("host=<redacted>"))
+    XCTAssertTrue(sanitized.contains("email=<redacted-email>"))
+  }
+
+  func testSanitizerRedactsBearerURLPathAndDigestButPreservesOperationalFields() {
+    let digest = String(repeating: "ab", count: 32)
+    let identifier = "C0A80114-1234-4ABC-8DEF-0123456789AB"
+    let message = "stage=handshake attempt=2 Bearer abc.def-123 rtsp://camera.local/live /private/var/mobile/secret.mov 192.168.1.20:554 [fd00::20]:554 \(identifier) \(digest)"
+
+    let sanitized = SkyBridgeLogger.sanitizedMessage(message)
+
+    XCTAssertTrue(sanitized.contains("stage=handshake attempt=2"))
+    XCTAssertTrue(sanitized.contains("Bearer <redacted>"))
+    XCTAssertTrue(sanitized.contains("<redacted-url>"))
+    XCTAssertTrue(sanitized.contains("<redacted-path>"))
+    XCTAssertTrue(sanitized.contains("<redacted-endpoint>"))
+    XCTAssertTrue(sanitized.contains("<redacted-identifier>"))
+    XCTAssertTrue(sanitized.contains("<redacted-digest>"))
+    XCTAssertFalse(sanitized.contains("abc.def-123"))
+    XCTAssertFalse(sanitized.contains("camera.local"))
+    XCTAssertFalse(sanitized.contains("secret.mov"))
+    XCTAssertFalse(sanitized.contains("192.168.1.20"))
+    XCTAssertFalse(sanitized.contains("fd00::20"))
+    XCTAssertFalse(sanitized.contains(identifier))
+    XCTAssertFalse(sanitized.contains(digest))
+  }
+}
+
+final class SecureBytesHardeningTests: XCTestCase {
+  private final class CoherenceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _observedTornCopy = false
+
+    var observedTornCopy: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return _observedTornCopy
+    }
+
+    func recordTornCopy() {
+      lock.lock()
+      _observedTornCopy = true
+      lock.unlock()
+    }
+  }
+
+  func testCopiedDataRemainsValidAfterOwnerDeinit() {
+    let expected = Data([0x10, 0x20, 0x30, 0x40])
+
+    let copy = autoreleasepool {
+      SecureBytes(data: expected).copyData()
+    }
+
+    XCTAssertEqual(copy, expected)
+  }
+
+  func testConcurrentReadsAndWritesReturnCoherentCopies() {
+    let secureBytes = SecureBytes(count: 64)
+    let probe = CoherenceProbe()
+
+    DispatchQueue.concurrentPerform(iterations: 1_000) { iteration in
+      if iteration.isMultiple(of: 2) {
+        let value = UInt8(truncatingIfNeeded: iteration)
+        secureBytes.withUnsafeMutableBytes { buffer in
+          for index in buffer.indices {
+            buffer[index] = value
+          }
+        }
+      } else {
+        let copy = secureBytes.copyData()
+        guard let first = copy.first,
+              copy.allSatisfy({ $0 == first }) else {
+          probe.recordTornCopy()
+          return
+        }
+      }
+    }
+
+    XCTAssertFalse(probe.observedTornCopy)
+  }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class PairingPromptActivationGate {
+  var allowsPresentation = false
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class PairingPromptSceneHost {
+  let viewController = UIViewController()
+
+  private let appWindow: UIWindow
+
+  init(scene: UIWindowScene) throws {
+    appWindow = try XCTUnwrap(
+      scene.windows.first { window in
+        window.isKeyWindow
+          && window.windowLevel == .normal
+          && window.rootViewController != nil
+      } ?? scene.windows.first { window in
+        !window.isHidden
+          && window.windowLevel == .normal
+          && window.rootViewController != nil
+      }
+    )
+    viewController.view.frame = .zero
+    viewController.view.isUserInteractionEnabled = false
+    viewController.view.accessibilityElementsHidden = true
+  }
+
+  func attach() {
+    guard viewController.view.superview == nil else { return }
+    // Keep the scene probe above the SwiftUI hosting controller's view. UIKit only needs the
+    // view/window relationship here; participating in controller appearance would make this
+    // fixture less faithful than the UIViewControllerRepresentable lifecycle used in production.
+    appWindow.addSubview(viewController.view)
+  }
+
+  func detach() {
+    guard viewController.view.superview != nil else { return }
+    viewController.view.removeFromSuperview()
+  }
+}
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
@@ -69,21 +211,20 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(manager.contains("stage: \"outbound-rekey\""))
   }
 
-  func testWebRTCPQCReadinessRequiresNegotiableSuite() throws {
-    let manager = try crossNetworkWebRTCManagerSource()
+  func testFileTransferCapabilityTracksHealthyListenerAndStartupFailureIsVisible() throws {
+    let runtime = try iosFileTransferRuntimeSource()
+    let manager = try p2pConnectionManagerSource()
+    let app = try skyBridgeCompassAppSource()
 
-    XCTAssertTrue(manager.contains("private static func isNegotiablePQCSuite("))
-    XCTAssertTrue(manager.contains("suite.isNegotiable && suite.isPQCGroup"))
-    XCTAssertTrue(manager.contains("private static func hasNegotiablePQCSession("))
-    XCTAssertTrue(manager.contains("let completedWithNegotiablePQC ="))
-    XCTAssertTrue(manager.contains("Self.isNegotiablePQCSuite(keys.negotiatedSuite)"))
-    XCTAssertTrue(manager.contains("Self.isNegotiablePQCSuite(rekeyed.negotiatedSuite)"))
-    XCTAssertTrue(manager.contains("!Self.hasNegotiablePQCSession(sessionKeys)"))
-    XCTAssertFalse(manager.contains("sessionKeys?.negotiatedSuite.isPQCGroup != true"))
-    XCTAssertFalse(manager.contains("!keys.negotiatedSuite.isPQCGroup"))
-    XCTAssertFalse(manager.contains("guard !establishedKeys.negotiatedSuite.isPQCGroup"))
-    XCTAssertFalse(manager.contains("let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup"))
-    XCTAssertFalse(manager.contains("let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup"))
+    XCTAssertTrue(runtime.contains("public func startIfNeeded() async throws"))
+    XCTAssertTrue(runtime.contains("@Published public private(set) var isReady = false"))
+    XCTAssertTrue(runtime.contains("isReady = false"))
+    XCTAssertTrue(runtime.contains("throw error"))
+    XCTAssertTrue(manager.contains("guard FileTransferRuntime.shared.isReady else"))
+    XCTAssertTrue(manager.contains("return (capabilities, nil, nil)"))
+    XCTAssertTrue(app.contains("try await FileTransferRuntime.shared.startIfNeeded()"))
+    XCTAssertTrue(app.contains("已撤销本机文件传输能力广告"))
+    XCTAssertFalse(app.contains("\n        await FileTransferRuntime.shared.startIfNeeded()"))
   }
 
   func testInboundFileTransferSupportStaysOutsideManager() throws {
@@ -100,14 +241,19 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(support.contains("inboundFileTransferMissingSenderIdentityMessage"))
     XCTAssertTrue(support.contains("static func requiredInboundSenderDeviceId"))
     XCTAssertTrue(support.contains("static func expectedInboundChunkSize"))
-    XCTAssertTrue(support.contains("static func sha256File"))
+    XCTAssertFalse(support.contains("static func sha256File"))
     XCTAssertTrue(manager.contains("var inboundFileTransferApprovalProvider"))
+    XCTAssertTrue(manager.contains("let inboundFileTransferIO = InboundFileTransferIOActor.shared"))
     XCTAssertTrue(fileTransfer.contains("Self.validateInboundMetadata"))
     XCTAssertTrue(fileTransfer.contains("Self.validateInboundTransferId"))
     XCTAssertTrue(fileTransfer.contains("await inboundFileTransferApprovalProvider(approvalRequest)"))
     XCTAssertTrue(fileTransfer.contains("Self.normalizedInboundApprovalRejectionMessage(reason)"))
     XCTAssertTrue(fileTransfer.contains("Self.expectedInboundChunkSize"))
-    XCTAssertTrue(fileTransfer.contains("Self.sha256File"))
+    XCTAssertFalse(fileTransfer.contains("Self.sha256File"))
+    XCTAssertFalse(fileTransfer.contains("FileHandle"))
+    XCTAssertFalse(fileTransfer.contains("FileManager.default.moveItem"))
+    XCTAssertTrue(fileTransfer.contains("inboundFileTransferIO.closeAndDigest"))
+    XCTAssertTrue(fileTransfer.contains("inboundFileTransferIO.releaseCommittedFile"))
     XCTAssertTrue(fileTransfer.contains("guard let senderId = Self.requiredInboundSenderDeviceId(msg.senderDeviceId)"))
     XCTAssertTrue(fileTransfer.contains("Self.inboundFileTransferMissingSenderIdentityMessage"))
     XCTAssertFalse(fileTransfer.contains("msg.senderDeviceId ?? (remoteDeviceId ?? \"mac\")"))
@@ -117,6 +263,175 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(" sender "), "sender")
     XCTAssertNil(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(nil))
     XCTAssertNil(CrossNetworkWebRTCManager.requiredInboundSenderDeviceId(" \n\t "))
+  }
+
+  func testInboundFileTransferMetadataHasFiniteFileAndChunkCountLimits() {
+    XCTAssertEqual(
+      CrossNetworkWebRTCManager.validateInboundMetadata(
+        fileName: "payload.bin",
+        fileSize: CrossNetworkWebRTCManager.maxInboundWebRTCFileSize + 1,
+        chunkSize: 512 * 1024,
+        totalChunks: 1
+      ),
+      "Invalid metadata (fileSize out of range)"
+    )
+    XCTAssertEqual(
+      CrossNetworkWebRTCManager.validateInboundMetadata(
+        fileName: "payload.bin",
+        fileSize: Int64(CrossNetworkWebRTCManager.maxInboundWebRTCFileTransferChunks + 1),
+        chunkSize: 1,
+        totalChunks: CrossNetworkWebRTCManager.maxInboundWebRTCFileTransferChunks + 1
+      ),
+      "Invalid metadata (totalChunks out of range)"
+    )
+  }
+
+  @MainActor
+  func testInboundFileTransferTerminalReceiptCacheIsPerSessionBoundedAndTTLBounded() {
+    let now = Date(timeIntervalSince1970: 2_000)
+    let metadata = CrossNetworkWebRTCManager.InboundFileTransferMetadataBinding(
+      version: 1,
+      senderDeviceId: "mac",
+      senderDeviceName: "Mac",
+      fileName: "payload.bin",
+      fileSize: 4,
+      chunkSize: 4,
+      totalChunks: 1,
+      mimeType: nil,
+      encryption: nil,
+      batchId: nil,
+      batchIndex: nil,
+      batchTotal: nil,
+      relativePath: nil
+    )
+    let completionMessage = CrossNetworkFileTransferMessage(
+      op: .complete,
+      transferId: "binding-only",
+      receivedBytes: 4,
+      fileSha256: Data(repeating: 9, count: 32)
+    )
+    let completion = CrossNetworkWebRTCManager.InboundFileTransferCompletionBinding(
+      message: completionMessage
+    )
+    var cache = CrossNetworkWebRTCManager.InboundFileTransferTerminalReceiptCache(
+      maxReceiptsPerSession: 1,
+      timeToLive: 10
+    )
+
+    cache.store(
+      sessionID: "session-a",
+      transferID: "transfer-a",
+      metadataBinding: metadata,
+      completionBinding: completion,
+      response: .init(op: .completeAck, transferId: "transfer-a", receivedBytes: 4),
+      label: "completeAck",
+      now: now
+    )
+    cache.store(
+      sessionID: "session-b",
+      transferID: "transfer-a",
+      metadataBinding: metadata,
+      completionBinding: completion,
+      response: .init(op: .error, transferId: "transfer-a", message: "terminal"),
+      label: "completeError",
+      now: now
+    )
+    cache.store(
+      sessionID: "session-a",
+      transferID: "transfer-b",
+      metadataBinding: metadata,
+      completionBinding: completion,
+      response: .init(op: .completeAck, transferId: "transfer-b", receivedBytes: 4),
+      label: "completeAck",
+      now: now
+    )
+
+    XCTAssertNil(cache.receipt(sessionID: "session-a", transferID: "transfer-a", now: now))
+    XCTAssertEqual(
+      cache.receipt(sessionID: "session-a", transferID: "transfer-b", now: now)?.response.op,
+      .completeAck
+    )
+    XCTAssertEqual(
+      cache.receipt(sessionID: "session-b", transferID: "transfer-a", now: now)?.response.op,
+      .error
+    )
+    XCTAssertNil(
+      cache.receipt(
+        sessionID: "session-a",
+        transferID: "transfer-b",
+        now: now.addingTimeInterval(10)
+      )
+    )
+  }
+
+  func testInboundFileTransferTerminalReceiptIsRecordedBeforeActiveStateRemoval() throws {
+    let fileTransfer = try crossNetworkWebRTCFileTransferSource()
+    let support = try crossNetworkWebRTCInboundFileTransferSupportSource()
+
+    guard let helperStart = fileTransfer.range(of: "private func terminateInboundFileTransfer("),
+          let helperEnd = fileTransfer.range(of: "private func finalizeInboundFileTransfer(", range: helperStart.upperBound..<fileTransfer.endIndex),
+          let record = fileTransfer.range(
+            of: "recordInboundFileTransferTerminalReceipt(",
+            range: helperStart.upperBound..<helperEnd.lowerBound
+          ),
+          let removal = fileTransfer.range(
+            of: "removeInboundFileTransferState(state.transferId)",
+            range: helperStart.upperBound..<helperEnd.lowerBound
+          ) else {
+      return XCTFail("terminateInboundFileTransfer must cache the exact terminal receipt before removing active state")
+    }
+
+    XCTAssertLessThan(
+      fileTransfer.distance(from: fileTransfer.startIndex, to: record.lowerBound),
+      fileTransfer.distance(from: fileTransfer.startIndex, to: removal.lowerBound)
+    )
+    XCTAssertTrue(fileTransfer.contains("receipt.completionBinding == InboundFileTransferCompletionBinding(message: msg)"))
+    XCTAssertTrue(fileTransfer.contains("receipt.metadataBinding == metadataBinding"))
+    XCTAssertTrue(fileTransfer.contains("transferId metadata conflict"))
+    XCTAssertTrue(fileTransfer.contains("scheduleInboundFileTransferIdleTimeout"))
+    XCTAssertTrue(fileTransfer.contains("current.stateToken == state.stateToken"))
+    XCTAssertTrue(fileTransfer.contains("current.revision == state.revision"))
+    XCTAssertTrue(fileTransfer.contains("activeTransfersForSession + pendingTransfersForSession < Self.maxConcurrentInboundWebRTCFileTransfersPerSession"))
+    XCTAssertTrue(fileTransfer.contains("inboundFileTransferLifecycleToken == expectedLifecycleToken"))
+    XCTAssertTrue(fileTransfer.contains("sessionKeys?.sessionId == sessionID"))
+    XCTAssertTrue(fileTransfer.contains("inboundFileTransferPendingAdmissions[msg.transferId]?.token == admissionToken"))
+    XCTAssertTrue(support.contains("struct InboundFileTransferTerminalReceiptCache"))
+    XCTAssertTrue(support.contains("maxReceiptsPerSession: Int = 128"))
+    XCTAssertTrue(support.contains("timeToLive: TimeInterval = 300"))
+    XCTAssertTrue(support.contains("maxInboundWebRTCFileSize: Int64 = 2 * 1024 * 1024 * 1024"))
+    XCTAssertTrue(support.contains("maxInboundWebRTCFileTransferChunks = 65_536"))
+  }
+
+  func testInboundFileTransferIOActorSupportsCancellationAndTwoPhaseRollback() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("iOSInboundIOActor-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let ioActor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+    let temporaryURL = directory.appendingPathComponent("payload.partial")
+    let handle = try await ioActor.createTemporaryFile(at: temporaryURL, declaredFileSize: 1)
+    _ = try await ioActor.write(Data([7]), atOffset: 0, using: handle)
+    _ = try await ioActor.closeAndDigest(using: handle)
+    let committedURL = try await ioActor.commit(
+      using: handle,
+      destinationDirectory: directory,
+      fileName: "payload.bin"
+    )
+    XCTAssertTrue(FileManager.default.fileExists(atPath: committedURL.path))
+    try await ioActor.discard(handle)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: committedURL.path))
+
+    let cancelledDigest = Task {
+      withUnsafeCurrentTask { task in task?.cancel() }
+      return try await ioActor.digest(Data([1]))
+    }
+    do {
+      _ = try await cancelledDigest.value
+      XCTFail("Cancelled digest must throw CancellationError")
+    } catch is CancellationError {
+      // Expected.
+    }
   }
 
   func testInboundFileTransferRejectsUnsafeFileNamesInsteadOfBasenameFallback() throws {
@@ -243,6 +558,25 @@ final class RegressionHardeningTests: XCTestCase {
     }
   }
 
+  func testP2PConnectionReadyGateCancellationResumesImmediately() async {
+    let gate = P2PConnectionManager.ConnectionReadyGate()
+    let waitTask = Task {
+      try await gate.waitReady(timeoutSeconds: 30)
+    }
+    await Task.yield()
+
+    let cancelledAt = Date()
+    waitTask.cancel()
+    do {
+      try await waitTask.value
+      XCTFail("Cancelled ready wait must not succeed.")
+    } catch is CancellationError {
+      XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1.0)
+    } catch {
+      XCTFail("Cancelled ready wait must preserve CancellationError, got: \(error)")
+    }
+  }
+
   func testPlainFrameReceiveGateTimeoutResumesUnresolvedReceive() async {
     let gate = P2PConnectionManager.PlainFrameReceiveGate()
     let startedAt = Date()
@@ -257,6 +591,467 @@ final class RegressionHardeningTests: XCTestCase {
         "Plain frame receive timeout must not hang behind an uncancellable continuation."
       )
     }
+  }
+
+  func testPlainFrameReceiveGateCancellationResumesImmediately() async {
+    let gate = P2PConnectionManager.PlainFrameReceiveGate()
+    let waitTask = Task {
+      try await gate.wait(timeoutSeconds: 30)
+    }
+    await Task.yield()
+
+    let cancelledAt = Date()
+    waitTask.cancel()
+    do {
+      _ = try await waitTask.value
+      XCTFail("Cancelled receive wait must not succeed.")
+    } catch is CancellationError {
+      XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1.0)
+    } catch {
+      XCTFail("Cancelled receive wait must preserve CancellationError, got: \(error)")
+    }
+  }
+
+  @MainActor
+  func testPendingPairingApprovalCancellationRejectsAndCleansExactWaiter() async {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    let approvalTask = Task { @MainActor in
+      await manager.testOnlyAwaitPairingDecision(timeout: .seconds(30))
+    }
+    for _ in 0..<20 where manager.testOnlyPendingPairingDecisionWaiterCount == 0 {
+      await Task.yield()
+    }
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 1)
+    XCTAssertTrue(manager.testOnlyHasPendingPairingApproval)
+
+    approvalTask.cancel()
+    let decision = await approvalTask.value
+
+    XCTAssertEqual(decision, .reject)
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 0)
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+  }
+
+  @MainActor
+  func testPendingPairingApprovalTimeoutCleansState() async {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    let decision = await manager.testOnlyAwaitPairingDecision(timeout: .milliseconds(20))
+
+    XCTAssertEqual(decision, .timedOut)
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 0)
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+  }
+
+  @MainActor
+  func testPendingPairingApprovalIsBoundedAndDoesNotReplaceVisiblePrompt() async {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    let firstApprovalTask = Task { @MainActor in
+      await manager.testOnlyAwaitPairingDecision(timeout: .seconds(30))
+    }
+    for _ in 0..<20 where manager.testOnlyPendingPairingDecisionWaiterCount == 0 {
+      await Task.yield()
+    }
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 1)
+
+    let secondDecision = await manager.testOnlyAwaitPairingDecision(timeout: .seconds(30))
+
+    XCTAssertEqual(secondDecision, .reject)
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 1)
+    XCTAssertTrue(manager.testOnlyHasPendingPairingApproval)
+
+    firstApprovalTask.cancel()
+    let firstDecision = await firstApprovalTask.value
+    XCTAssertEqual(firstDecision, .reject)
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 0)
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+
+    // Re-present immediately after the busy -> cancellation teardown. This exercises the same
+    // rapid state sequence that previously deallocated the prompt's hosting controller while its
+    // UIKit appearance transition was still closing.
+    let replacementApprovalTask = Task { @MainActor in
+      await manager.testOnlyAwaitPairingDecision(timeout: .seconds(30))
+    }
+    for _ in 0..<20 where manager.testOnlyPendingPairingDecisionWaiterCount == 0 {
+      await Task.yield()
+    }
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 1)
+    XCTAssertTrue(manager.testOnlyHasPendingPairingApproval)
+
+    replacementApprovalTask.cancel()
+    let replacementDecision = await replacementApprovalTask.value
+    XCTAssertEqual(replacementDecision, .reject)
+    XCTAssertEqual(manager.testOnlyPendingPairingDecisionWaiterCount, 0)
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+  }
+
+  @MainActor
+  func testStandalonePairingApprovalTimeoutCleansAllOwnedState() async throws {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    manager.testOnlyInstallStandalonePairingApproval(timeout: .milliseconds(20))
+    XCTAssertTrue(manager.testOnlyHasPendingPairingApproval)
+    XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 1)
+    let expiredRequest = try XCTUnwrap(manager.pendingPairingTrustRequest)
+
+    for _ in 0..<100 where manager.testOnlyHasPendingPairingApproval {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+    XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 0)
+
+    let replacementRequestID = manager.testOnlyInstallStandalonePairingApproval(
+      timeout: .seconds(30)
+    )
+    do {
+      try await manager.resolvePairingTrustRequest(expiredRequest, decision: .allowOnce)
+      XCTFail("An expired standalone request must not be revived by a stale UI decision.")
+    } catch let error as P2PConnectionManager.PairingTrustResolutionError {
+      XCTAssertEqual(error, .requestNoLongerPending)
+    }
+    XCTAssertEqual(manager.pendingPairingTrustRequest?.id, replacementRequestID)
+    XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 1)
+  }
+
+  @MainActor
+  func testPairingDecisionClaimRejectsASecondResolutionWithTypedError() async throws {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    let approvalTask = Task { @MainActor in
+      await manager.testOnlyAwaitPairingDecision(timeout: .seconds(30))
+    }
+    for _ in 0..<20 where manager.pendingPairingTrustRequest == nil {
+      await Task.yield()
+    }
+    let request = try XCTUnwrap(manager.pendingPairingTrustRequest)
+
+    try await manager.resolvePairingTrustRequest(request, decision: .timedOut)
+    let firstDecision = await approvalTask.value
+    XCTAssertEqual(firstDecision, .timedOut)
+
+    let replacementRequestID = manager.testOnlyInstallStandalonePairingApproval(
+      timeout: .seconds(30)
+    )
+
+    do {
+      try await manager.resolvePairingTrustRequest(request, decision: .timedOut)
+      XCTFail("A pairing request must be atomically claimed at most once.")
+    } catch let error as P2PConnectionManager.PairingTrustResolutionError {
+      XCTAssertEqual(error, .requestNoLongerPending)
+    }
+    XCTAssertEqual(manager.pendingPairingTrustRequest?.id, replacementRequestID)
+    XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 1)
+  }
+
+  @MainActor
+  func testPairingTrustPromptWindowPresenterKeepsStableControllerAcrossRapidTeardown() async throws {
+    let coordinator = PairingTrustPromptWindowPresenter.Coordinator(
+      sceneActivationEvaluator: { _ in true }
+    )
+
+    func makeRequest(id: UUID, name: String) -> P2PConnectionManager.PairingTrustRequest {
+      P2PConnectionManager.PairingTrustRequest(
+        id: id,
+        purpose: .protocolIdentityBinding,
+        peerId: "peer-\(id.uuidString)",
+        declaredDeviceId: "device-\(id.uuidString)",
+        deviceName: name,
+        platform: .macOS,
+        modelName: "Test Mac",
+        osVersion: "TestOS",
+        kemKeyCount: 0,
+        verificationCode: "000000",
+        protocolIdentityFingerprint: "test-fingerprint",
+        receivedAt: Date()
+      )
+    }
+
+    func drainMainQueue() async {
+      await withCheckedContinuation { continuation in
+        DispatchQueue.main.async {
+          continuation.resume()
+        }
+      }
+    }
+
+    let firstRequest = makeRequest(id: UUID(), name: "First Peer")
+    let replacementRequest = makeRequest(id: UUID(), name: "Replacement Peer")
+    let hostScene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    )
+    let sceneHost = try PairingPromptSceneHost(scene: hostScene)
+    let hostViewController = sceneHost.viewController
+    var forwardedRequestIDs: [UUID] = []
+    var forwardedDecisions: [P2PConnectionManager.PairingTrustDecision] = []
+    let forwardDecision: @MainActor (
+      P2PConnectionManager.PairingTrustRequest,
+      P2PConnectionManager.PairingTrustDecision
+    ) -> Void = { request, decision in
+      forwardedRequestIDs.append(request.id)
+      forwardedDecisions.append(decision)
+    }
+
+    // A request can arrive before SwiftUI has attached the representable host to a scene. It must
+    // remain pending without guessing a global scene, then present when this exact host is mounted.
+    coordinator.update(
+      request: firstRequest,
+      hostViewController: hostViewController,
+      sceneIsActive: true,
+      onDecision: forwardDecision
+    )
+    XCTAssertNil(coordinator.testOnlyWindowIdentifier)
+
+    sceneHost.attach()
+    await drainMainQueue()
+    XCTAssertTrue(hostViewController.view.window?.windowScene === hostScene)
+    defer {
+      coordinator.retireWindow()
+      sceneHost.detach()
+    }
+
+    coordinator.hostWindowSceneDidChange(hostScene)
+    let windowIdentifier = try XCTUnwrap(coordinator.testOnlyWindowIdentifier)
+    let hostingControllerIdentifier = try XCTUnwrap(
+      coordinator.testOnlyHostingControllerIdentifier)
+    let staleDecisionHandler = try XCTUnwrap(coordinator.testOnlyDecisionHandler())
+    XCTAssertEqual(coordinator.testOnlyIsWindowHidden, false)
+    XCTAssertTrue(coordinator.testOnlyHasPromptContent)
+
+    coordinator.update(
+      request: firstRequest,
+      hostViewController: hostViewController,
+      sceneIsActive: false,
+      onDecision: forwardDecision
+    )
+    XCTAssertEqual(coordinator.testOnlyWindowIdentifier, windowIdentifier)
+    XCTAssertTrue(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertEqual(coordinator.testOnlyIsWindowKey, false)
+    XCTAssertTrue(
+      hostScene.windows.contains { window in
+        window.isKeyWindow && window !== coordinator.testOnlyWindowObject
+      }
+    )
+    staleDecisionHandler(.allowOnce)
+    XCTAssertTrue(forwardedRequestIDs.isEmpty)
+
+    coordinator.update(
+      request: firstRequest,
+      hostViewController: hostViewController,
+      sceneIsActive: true,
+      onDecision: forwardDecision
+    )
+    XCTAssertEqual(coordinator.testOnlyWindowIdentifier, windowIdentifier)
+    XCTAssertEqual(
+      coordinator.testOnlyHostingControllerIdentifier,
+      hostingControllerIdentifier
+    )
+    XCTAssertFalse(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertEqual(coordinator.testOnlyIsWindowKey, true)
+    let reactivatedDecisionHandler = try XCTUnwrap(coordinator.testOnlyDecisionHandler())
+
+    coordinator.dismissWindow()
+    XCTAssertEqual(coordinator.testOnlyIsWindowHidden, false)
+    XCTAssertTrue(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertEqual(coordinator.testOnlyIsWindowKey, false)
+    XCTAssertTrue(
+      hostScene.windows.contains { window in
+        window.isKeyWindow && window !== coordinator.testOnlyWindowObject
+      }
+    )
+    XCTAssertTrue(
+      coordinator.testOnlyHasPromptContent,
+      "Prompt content must remain retained until UIKit can finish its appearance transition."
+    )
+
+    // Reuse the hidden window before its deferred cleanup runs. The old cleanup must be scoped to
+    // the dismissed presentation and must not clear or hide this replacement request.
+    coordinator.update(
+      request: replacementRequest,
+      hostViewController: hostViewController,
+      sceneIsActive: true,
+      onDecision: forwardDecision
+    )
+    await drainMainQueue()
+
+    XCTAssertEqual(coordinator.testOnlyWindowIdentifier, windowIdentifier)
+    XCTAssertEqual(
+      coordinator.testOnlyHostingControllerIdentifier,
+      hostingControllerIdentifier
+    )
+    XCTAssertEqual(coordinator.testOnlyIsWindowHidden, false)
+    XCTAssertFalse(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertTrue(coordinator.testOnlyHasPromptContent)
+
+    staleDecisionHandler(.reject)
+    reactivatedDecisionHandler(.reject)
+    XCTAssertTrue(forwardedRequestIDs.isEmpty)
+    XCTAssertEqual(coordinator.testOnlyIsWindowHidden, false)
+    XCTAssertFalse(coordinator.testOnlyIsWindowConcealed)
+
+    let replacementDecisionHandler = try XCTUnwrap(coordinator.testOnlyDecisionHandler())
+    replacementDecisionHandler(.allowOnce)
+    replacementDecisionHandler(.reject)
+    XCTAssertEqual(forwardedRequestIDs, [replacementRequest.id])
+    XCTAssertEqual(forwardedDecisions, [.allowOnce])
+    XCTAssertTrue(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertEqual(coordinator.testOnlyIsWindowKey, false)
+    XCTAssertTrue(
+      hostScene.windows.contains { window in
+        window.isKeyWindow && window !== coordinator.testOnlyWindowObject
+      }
+    )
+
+    // SwiftUI may deliver one more update before the manager publishes nil. A settled request must
+    // remain concealed and must never mint a fresh decision token.
+    coordinator.update(
+      request: replacementRequest,
+      hostViewController: hostViewController,
+      sceneIsActive: true,
+      onDecision: forwardDecision
+    )
+    XCTAssertTrue(coordinator.testOnlyIsWindowConcealed)
+    replacementDecisionHandler(.alwaysAllow)
+    XCTAssertEqual(forwardedRequestIDs, [replacementRequest.id])
+    XCTAssertEqual(forwardedDecisions, [.allowOnce])
+
+    for _ in 0..<100 where coordinator.testOnlyHasPromptContent {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertFalse(coordinator.testOnlyHasPromptContent)
+    XCTAssertEqual(coordinator.testOnlyIsWindowHidden, false)
+    XCTAssertTrue(coordinator.testOnlyIsWindowConcealed)
+    XCTAssertEqual(coordinator.testOnlyWindowIdentifier, windowIdentifier)
+    XCTAssertEqual(
+      coordinator.testOnlyHostingControllerIdentifier,
+      hostingControllerIdentifier
+    )
+
+    weak var retiredPromptWindow: UIWindow?
+    weak var retiredHostingController: UIViewController?
+    retiredPromptWindow = coordinator.testOnlyWindowObject
+    retiredHostingController = coordinator.testOnlyHostingControllerObject
+    coordinator.retireWindow()
+    XCTAssertNil(coordinator.testOnlyWindowIdentifier)
+    XCTAssertNil(coordinator.testOnlyHostingControllerIdentifier)
+    for _ in 0..<100 where retiredPromptWindow != nil || retiredHostingController != nil {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertNil(retiredPromptWindow)
+    XCTAssertNil(retiredHostingController)
+  }
+
+  @MainActor
+  func testPairingTrustPromptWaitsForBothActivationSignalsAndRebindsAfterDetach()
+    async throws
+  {
+    let activationGate = PairingPromptActivationGate()
+    let coordinator = PairingTrustPromptWindowPresenter.Coordinator(
+      sceneActivationEvaluator: { _ in activationGate.allowsPresentation }
+    )
+    let hostScene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    )
+    let sceneHost = try PairingPromptSceneHost(scene: hostScene)
+    let hostViewController = sceneHost.viewController
+    sceneHost.attach()
+    defer {
+      coordinator.retireWindow()
+      sceneHost.detach()
+    }
+
+    let request = P2PConnectionManager.PairingTrustRequest(
+      id: UUID(),
+      purpose: .protocolIdentityBinding,
+      peerId: "activation-test-peer",
+      declaredDeviceId: "activation-test-device",
+      deviceName: "Activation Test Peer",
+      platform: .macOS,
+      modelName: "Test Mac",
+      osVersion: "TestOS",
+      kemKeyCount: 0,
+      verificationCode: "000000",
+      protocolIdentityFingerprint: "activation-test-fingerprint",
+      receivedAt: Date()
+    )
+    var forwardedDecisions: [P2PConnectionManager.PairingTrustDecision] = []
+    let forwardDecision: @MainActor (
+      P2PConnectionManager.PairingTrustRequest,
+      P2PConnectionManager.PairingTrustDecision
+    ) -> Void = { _, decision in
+      forwardedDecisions.append(decision)
+    }
+
+    coordinator.update(
+      request: request,
+      hostViewController: hostViewController,
+      sceneIsActive: false,
+      onDecision: forwardDecision
+    )
+    coordinator.hostWindowSceneDidChange(hostScene)
+    XCTAssertNil(coordinator.testOnlyWindowIdentifier)
+
+    activationGate.allowsPresentation = true
+    coordinator.update(
+      request: request,
+      hostViewController: hostViewController,
+      sceneIsActive: false,
+      onDecision: forwardDecision
+    )
+    XCTAssertNil(coordinator.testOnlyWindowIdentifier)
+
+    coordinator.update(
+      request: request,
+      hostViewController: hostViewController,
+      sceneIsActive: true,
+      onDecision: forwardDecision
+    )
+    let originalWindow = try XCTUnwrap(coordinator.testOnlyWindowObject)
+    let detachedHandler = try XCTUnwrap(coordinator.testOnlyDecisionHandler())
+
+    sceneHost.detach()
+    coordinator.hostWindowSceneDidChange(nil)
+    XCTAssertNil(coordinator.testOnlyWindowIdentifier)
+    XCTAssertFalse(originalWindow.isKeyWindow)
+    XCTAssertEqual(originalWindow.alpha, 0)
+    XCTAssertFalse(originalWindow.isUserInteractionEnabled)
+    XCTAssertTrue(originalWindow.accessibilityElementsHidden)
+    detachedHandler(.allowOnce)
+    XCTAssertTrue(forwardedDecisions.isEmpty)
+
+    sceneHost.attach()
+    coordinator.hostWindowSceneDidChange(hostScene)
+    let reboundWindow = try XCTUnwrap(coordinator.testOnlyWindowObject)
+    XCTAssertFalse(reboundWindow === originalWindow)
+    XCTAssertTrue(reboundWindow.windowScene === hostScene)
+
+    for _ in 0..<100
+      where !originalWindow.isHidden || originalWindow.rootViewController != nil
+    {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(originalWindow.isHidden)
+    XCTAssertNil(originalWindow.rootViewController)
+    XCTAssertTrue(coordinator.testOnlyWindowObject === reboundWindow)
+    XCTAssertFalse(reboundWindow.isHidden)
+    XCTAssertEqual(reboundWindow.alpha, 1)
+    XCTAssertTrue(reboundWindow.isUserInteractionEnabled)
+
+    let reboundHandler = try XCTUnwrap(coordinator.testOnlyDecisionHandler())
+    reboundHandler(.reject)
+    XCTAssertEqual(forwardedDecisions, [.reject])
   }
 
   func testRealDeviceSmokeUsesDynamicMacControlPortForPIBRoute() throws {
@@ -275,9 +1070,13 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(smokeScript.contains("MAC_CONTROL_PORT="))
-    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-direct"))
-    XCTAssertTrue(smokeScript.contains("MAC_DIRECT_BIN=\"$ROOT_DIR/.build/debug/LocalLanInteropHost\""))
+    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-packaged"))
+    XCTAssertTrue(smokeScript.contains("acceptance_violations+=(\"SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged\")"))
+    XCTAssertTrue(smokeScript.contains("SMOKE_BUILD_DIR=\"${SKYBRIDGE_P2P_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-p2p-smoke}\""))
+    XCTAssertTrue(smokeScript.contains("MAC_DIRECT_BIN=\"$SMOKE_BUILD_DIR/debug/LocalLanInteropHost\""))
+    XCTAssertTrue(smokeScript.contains("MAC_SOURCE_DIRECT_BIN=\"$SMOKE_BUILD_DIR/debug/LocalLanSmokeSourceHost\""))
     XCTAssertTrue(smokeScript.contains("if [[ \"$MAC_HOST_LAUNCH_MODE\" == \"direct\" ]]"))
+    XCTAssertTrue(smokeScript.contains("if [[ \"$LAB_RUN\" != \"1\" ]]"))
     XCTAssertTrue(smokeScript.contains("\"$MAC_DIRECT_BIN\" >\"$HOST_STDOUT\" 2>&1 &"))
     XCTAssertTrue(smokeScript.contains("launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"))
     XCTAssertFalse(smokeScript.contains("fallbackFrom=open-app-bundle"))
@@ -295,6 +1094,77 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       p2pSource.contains("connectionEndpointCandidates(for: device, preferDirectHostPort: true)"),
       "PIB-1 OOB binding should try the pinned direct LAN route before Bonjour service fallback."
+    )
+  }
+
+  func testIOSSmokeRuntimeIsCompileIsolatedAndReleaseSmokeScriptsOptInExplicitly() throws {
+    let smokeRuntimePaths = [
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift",
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalWebRTCSmokeHarness.swift",
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/SmokeStatusReporter.swift",
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/SmokeSupport.swift",
+    ]
+
+    for path in smokeRuntimePaths {
+      let source = try repositoryScriptSource(path)
+      XCTAssertTrue(
+        source.hasPrefix("#if DEBUG || SKYBRIDGE_TESTING\n"),
+        "\(path) must be absent from an ordinary Release compilation."
+      )
+    }
+
+    let p2pScript = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+    let webRTCScript = try repositoryScriptSource("Scripts/run_real_device_webrtc_smoke.sh")
+    let releaseOptIn = "OTHER_SWIFT_FLAGS=\\$(inherited) -D SKYBRIDGE_TESTING"
+
+    XCTAssertTrue(p2pScript.contains(releaseOptIn))
+    XCTAssertTrue(webRTCScript.contains(releaseOptIn))
+  }
+
+  func testRealDeviceSmokeRejectsStalePIBV3MacClientAndPreservesIOSProtocolTrace() throws {
+    let smokeScript = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+    let freshnessGate = try sourceSlice(
+      from: "verify_macos_online_ipad_pib_v3_wire_freshness()",
+      to: "verify_macos_online_ipad_app_bundle()",
+      in: smokeScript
+    )
+    let appVerification = try sourceSlice(
+      from: "verify_macos_online_ipad_app_bundle()",
+      to: "verify_macos_online_ipad_framework_resolution()",
+      in: smokeScript
+    )
+    let cleanup = try sourceSlice(
+      from: "cleanup()",
+      to: "trap cleanup EXIT",
+      in: smokeScript
+    )
+
+    XCTAssertTrue(freshnessGate.contains("SkyBridge-PIB-1-V3-Confirm"))
+    XCTAssertTrue(freshnessGate.contains("SkyBridge-PIB-1-V3-SignedFinalAck"))
+    XCTAssertTrue(
+      freshnessGate.contains("LC_ALL=C /usr/bin/grep -aFq -- \"$marker\" \"$MAC_ONLINE_APP_BIN\"")
+    )
+    XCTAssertTrue(freshnessGate.contains("[[ \"$wire_source\" -nt \"$MAC_ONLINE_APP_BIN\" ]]"))
+    XCTAssertTrue(
+      freshnessGate.contains("Refusing a protocol-incompatible packaged client that iOS must reject fail closed.")
+    )
+    XCTAssertTrue(appVerification.contains("verify_macos_online_ipad_pib_v3_wire_freshness"))
+
+    XCTAssertTrue(smokeScript.contains("IOS_TRACE_NAME=\"${IOS_STATUS_NAME}.trace.log\""))
+    XCTAssertTrue(
+      smokeScript.contains(
+        "IOS_TRACE_LOCAL=\"$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.trace.log\""
+      )
+    )
+    XCTAssertTrue(
+      smokeScript.contains(
+        "copy_ios_app_cache_file \"$IOS_TRACE_NAME\" \"$IOS_TRACE_LOCAL\" \"trace\""
+      )
+    )
+    XCTAssertTrue(cleanup.contains("copy_ios_trace || true"))
+    XCTAssertFalse(
+      freshnessGate.contains("PIB-1-v2"),
+      "A stale packaged client must be rebuilt; the release smoke must not enable a PIB-v2 compatibility path."
     )
   }
 
@@ -473,7 +1343,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("event=receiverStartFailed"))
     XCTAssertTrue(source.contains("event=audioPresentConfigSent"))
     XCTAssertTrue(source.contains("event=streamConfigSent"))
-    XCTAssertTrue(source.contains("SkyBridgeSmokeTraceWriter.appendStatus(streamConfigLine)"))
+    XCTAssertTrue(source.contains("SkyBridgeDiagnosticTrace.appendStatus(streamConfigLine)"))
     XCTAssertFalse(
       source.contains("event=receiverStartTimeout"),
       "The 3s receiver startup diagnostic must no longer hard-cancel or report timeout; it is only receiverStartSlow."
@@ -645,9 +1515,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(failureBody.contains("event=receiverStartFailed"))
     XCTAssertTrue(failureBody.contains("reason=\\(reason.rawValue)"))
     XCTAssertTrue(failureBody.contains("stage=\\(stage)"))
-    XCTAssertTrue(failureBody.contains("SkyBridgeSmokeTraceWriter.appendStatus("))
+    XCTAssertTrue(failureBody.contains("SkyBridgeDiagnosticTrace.appendStatus("))
     XCTAssertTrue(failureBody.contains("audioRxReceiverStartFailed"))
-    XCTAssertTrue(failureBody.contains("SkyBridgeSmokeTraceWriter.appendMediaDiagnostic("))
+    XCTAssertTrue(failureBody.contains("SkyBridgeDiagnosticTrace.appendMediaDiagnostic("))
     XCTAssertFalse(
       failureBody.contains("pushViewerStreamConfiguration"),
       "Audio receiver startup failures must not send stream configuration updates."
@@ -1031,9 +1901,16 @@ final class RegressionHardeningTests: XCTestCase {
   @MainActor
   func testVerifiedV7QRCodeWithKEMDoesNotMutateTrustStores() async throws {
     let deviceId = "id:qr-stateful-mac-1"
+    let trustedDeviceStore = TrustedDeviceStore.shared
+    let originalTrustedDevices = trustedDeviceStore.trustedDevices
+    try trustedDeviceStore.replaceTrustedDevicesForTesting([])
+    defer {
+      XCTAssertNoThrow(
+        try trustedDeviceStore.replaceTrustedDevicesForTesting(originalTrustedDevices)
+      )
+    }
     await KEMTrustStore.shared.clearForTesting()
     await ProtocolIdentityTrustStore.shared.clearForTesting()
-    TrustedDeviceStore.shared.clearAll()
 
     let signingKey = Curve25519.Signing.PrivateKey()
     let publicKey = signingKey.publicKey.rawRepresentation
@@ -1072,7 +1949,6 @@ final class RegressionHardeningTests: XCTestCase {
 
     await KEMTrustStore.shared.clearForTesting()
     await ProtocolIdentityTrustStore.shared.clearForTesting()
-    TrustedDeviceStore.shared.clearAll()
   }
 
   func testRemoteDesktopSelectionOverlayIsDiagnosticOnlyByDefault() throws {
@@ -1208,7 +2084,12 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(scriptSource.contains("Unsupported SKYBRIDGE_SMOKE_IOS_LAUNCH_TIMEOUT_SECONDS"))
     XCTAssertTrue(
-      scriptSource.contains("PQC_TRUST_MODE=\"${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-injected}\""))
+      scriptSource.contains("PQC_TRUST_MODE=\"${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-actual}\""))
+    XCTAssertTrue(scriptSource.contains("if [[ \"$LAB_RUN\" != \"1\" ]]; then"))
+    XCTAssertTrue(
+      scriptSource.contains("SKYBRIDGE_SMOKE_PQC_TRUST_MODE=user|actual"),
+      "Injected trust must remain a lab-only diagnostic and cannot satisfy release acceptance."
+    )
     XCTAssertTrue(
       scriptSource.contains(
         "SMOKE_REQUIRE_SIGNED_KEM_REFRESH=\"${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}\""))
@@ -1216,20 +2097,17 @@ final class RegressionHardeningTests: XCTestCase {
       scriptSource.contains(
         "SMOKE_FORCE_SIGNED_KEM_REFRESH=\"${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$SMOKE_REQUIRE_SIGNED_KEM_REFRESH}\""
       ))
-    XCTAssertTrue(
-      scriptSource.contains(
-        "SMOKE_AUTO_APPROVE_PAIRING=\"${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-1}\""))
+    XCTAssertFalse(scriptSource.contains("SMOKE_AUTO_APPROVE_PAIRING=\"${"))
     XCTAssertTrue(
       scriptSource.contains(
         "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH=\"$SMOKE_REQUIRE_SIGNED_KEM_REFRESH\""))
     XCTAssertTrue(
       scriptSource.contains(
         "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH=\"$SMOKE_FORCE_SIGNED_KEM_REFRESH\""))
-    XCTAssertTrue(
-      scriptSource.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=\"$SMOKE_AUTO_APPROVE_PAIRING\""))
+    XCTAssertFalse(scriptSource.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=\"$SMOKE_AUTO_APPROVE_PAIRING\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH\""))
-    XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING\""))
+    XCTAssertFalse(scriptSource.contains("\"SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB\": \"1\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW\": \"1\""))
     XCTAssertTrue(
@@ -1525,18 +2403,27 @@ final class RegressionHardeningTests: XCTestCase {
       scriptSource.contains(
         "Mac HEVC SCK display cadence exceeded bounded producer recovery inside final pass window"))
     XCTAssertFalse(scriptSource.contains("SKYBRIDGE_SMOKE_REMOTE_ANIMATION=1"))
-    XCTAssertTrue(scriptSource.contains("MAC_APP_BUNDLE=\"$ARTIFACT_DIR/LocalLanInteropHost.app\""))
+    XCTAssertTrue(scriptSource.contains("MAC_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_DIR/LocalLanInteropHost.app\""))
     XCTAssertTrue(scriptSource.contains("prepare_macos_smoke_host_app_bundle()"))
     XCTAssertTrue(scriptSource.contains("start_macos_smoke_host()"))
     XCTAssertTrue(scriptSource.contains("/usr/bin/open"))
     XCTAssertTrue(scriptSource.contains("register_macos_smoke_host_app_bundle()"))
-    XCTAssertTrue(scriptSource.contains("LocalLanInteropHostSmoke.${RUN_ID}"))
-    XCTAssertTrue(scriptSource.contains("fallback=direct-app-binary"))
+    XCTAssertTrue(scriptSource.contains("MAC_HOST_PRODUCT_APP_BUNDLE=\"$ROOT_DIR/dist/SkyBridge Compass Pro.app\""))
+    XCTAssertTrue(scriptSource.contains("MAC_HOST_PRODUCT_BUNDLE_ID=\"com.skybridge.compass.pro\""))
+    XCTAssertTrue(scriptSource.contains("skybridge_resolve_profile_bound_codesign_identity_hash"))
+    XCTAssertTrue(scriptSource.contains("derive_macos_smoke_host_minimal_entitlements"))
+    XCTAssertFalse(scriptSource.contains("LocalLanInteropHostSmoke.${RUN_ID}"))
+    XCTAssertFalse(scriptSource.contains("fallback=direct-app-binary"))
     XCTAssertTrue(scriptSource.contains("SKYBRIDGE_SMOKE_ROLE=mac-smoke-source"))
     XCTAssertTrue(scriptSource.contains("windowOcclusionVisible=1"))
-    XCTAssertTrue(scriptSource.contains("local source_webrtc_framework=\"$ROOT_DIR/.build/debug/WebRTC.framework\""))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "local source_webrtc_framework=\"$SMOKE_BUILD_DIR/debug/WebRTC.framework\""))
     XCTAssertTrue(scriptSource.contains("cp -R \"$source_webrtc_framework\" \"$macos_dir/WebRTC.framework\""))
-    XCTAssertTrue(scriptSource.contains("/usr/bin/codesign --force --deep --sign - \"$MAC_APP_BUNDLE\""))
+    XCTAssertTrue(scriptSource.contains("cp \"$MAC_HOST_PRODUCT_PROFILE\" \"$embedded_profile\""))
+    XCTAssertTrue(scriptSource.contains("--sign \"$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH\""))
+    XCTAssertTrue(scriptSource.contains("--entitlements \"$MAC_HOST_HELPER_ENTITLEMENTS\""))
+    XCTAssertFalse(scriptSource.contains("/usr/bin/codesign --force --deep --sign - \"$MAC_APP_BUNDLE\""))
     XCTAssertTrue(scriptSource.contains("-c 'Add :CFBundlePackageType string APPL'"))
     XCTAssertTrue(scriptSource.contains("-c 'Add :NSPrincipalClass string NSApplication'"))
     XCTAssertFalse(scriptSource.contains("-c 'Add :LSUIElement bool true'"))
@@ -1617,7 +2504,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       scriptSource.contains("too few Metal render telemetry samples inside final pass window"))
     XCTAssertTrue(
-      remoteViewSource.contains("SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)"))
+      remoteViewSource.contains("SkyBridgeDiagnosticTrace.appendStatus(telemetryLine)"))
     XCTAssertTrue(
       scriptSource.contains(
         "for key in (\"queueDrop\", \"drawableSkip\", \"inflightSkip\", \"failureSkip\"):"))
@@ -2042,7 +2929,11 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(inboundBody.contains("strictInboundHandshakeTrustContext("))
     XCTAssertTrue(inboundBody.contains("messageA: messageA"))
     XCTAssertTrue(inboundBody.contains("trustProvider: strictTrustContext?.provider"))
-    XCTAssertTrue(inboundBody.contains("expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId)"))
+    XCTAssertTrue(
+      inboundBody.contains(
+        "expectedRemoteSOAPeerId: soaPeerIdBytes(for: stablePeerId)"
+      )
+    )
     XCTAssertTrue(messageASOACandidateBody.contains("soa.initiatorPeerId"))
     XCTAssertTrue(messageASOACandidateBody.contains("TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint)"))
     XCTAssertTrue(messageASOACandidateBody.contains("ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)"))
@@ -2802,7 +3693,7 @@ final class RegressionHardeningTests: XCTestCase {
     let wireSource = try remoteDesktopScreenFrameWireSource()
     let wireBody = try sourceSlice(
       from: "enum RemoteDesktopScreenFrameWire",
-      to: "extension ScreenData",
+      to: "enum RemoteDesktopDecodeQueuePolicy",
       in: wireSource
     )
     let unwrapBody = try sourceSlice(
@@ -2884,27 +3775,26 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("decodeInFlightMax="))
     XCTAssertTrue(source.contains("decodeWaitingSyncSamples="))
     XCTAssertTrue(source.contains("decodeResets="))
-    XCTAssertTrue(source.contains("SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)"))
+    XCTAssertTrue(source.contains("SkyBridgeDiagnosticTrace.appendStatus(telemetryLine)"))
   }
 
   func testSmokeTraceWriterKeepsStatusFileIOOffMediaHotPaths() throws {
-    let writerBody = try smokeTraceWriterSource()
+    let writerBody = try diagnosticTraceSource()
     let appendStatusBody = try sourceSlice(
-      from: "static func appendStatus(_ line: String)",
-      to: "static func append(_ line: String)",
+      from: "static func appendStatus(_ line: @autoclosure () -> String)",
+      to: "static func append(_ line: @autoclosure () -> String)",
       in: writerBody
     )
     let mediaDiagnosticBody = try sourceSlice(
-      from: "static func appendMediaDiagnostic(_ fields: [String: Any])",
+      from: "static func appendMediaDiagnostic(_ fields: @autoclosure () -> [String: Any])",
       to: "private static func write(_ data: Data, to url: URL)",
       in: writerBody
     )
 
     XCTAssertTrue(writerBody.contains("private static let writerQueue"))
     XCTAssertTrue(writerBody.contains("private final class WriterState: @unchecked Sendable"))
-    XCTAssertTrue(writerBody.contains("private var cachedHandles"))
     XCTAssertTrue(writerBody.contains("writerQueue.async"))
-    XCTAssertTrue(writerBody.contains("private static func cachedHandle(for url: URL)"))
+    XCTAssertTrue(writerBody.contains("try SmokeArtifactFileIO.appendProtectedData(data, to: url)"))
     XCTAssertFalse(appendStatusBody.contains("FileHandle"))
     XCTAssertFalse(appendStatusBody.contains("ISO8601DateFormatter().string"))
     XCTAssertFalse(mediaDiagnosticBody.contains("FileHandle"))
@@ -2917,6 +3807,60 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       mediaDiagnosticBody.contains("writerQueue.async"),
       "Smoke media diagnostics must serialize JSON and write JSONL on the writer queue, not on the remote desktop receive/render path."
+    )
+  }
+
+  func testViewerSettingsPersistenceIsSerializedOffMainActorAndReportsFailures() throws {
+    let managerSource = try remoteDesktopManagerSource()
+    let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
+
+    XCTAssertFalse(managerSource.contains("try? RemoteDesktopManagerRuntimeConfig.viewerSettingsStore.save"))
+    XCTAssertFalse(managerSource.contains("viewerSettingsStore.load()"))
+    XCTAssertTrue(runtimeModelsSource.contains("actor RemoteDesktopViewerSettingsPersistenceCoordinator"))
+    XCTAssertTrue(runtimeModelsSource.contains("try store.loadOrThrow()"))
+    XCTAssertTrue(runtimeModelsSource.contains("guard revision > latestSavedRevision else { return }"))
+    XCTAssertTrue(managerSource.contains("pendingViewerSettingsPersistence"))
+    XCTAssertTrue(managerSource.contains("viewerSettingsPersistenceError"))
+    XCTAssertTrue(managerSource.contains("revision == self.viewerSettingsRevision"))
+  }
+
+  func testSampleBufferFramePumpDoesNotRetainCoordinatorAcrossSuspension() throws {
+    let source = try remoteDesktopViewSource()
+    let framePumpBody = try sourceSlice(
+      from: "private func ensureFramePumpRunning()",
+      to: "private func scheduleBufferedFrameDrain()",
+      in: source
+    )
+
+    XCTAssertTrue(framePumpBody.contains("Task { @MainActor [weak self] in"))
+    XCTAssertTrue(framePumpBody.contains("guard self != nil else { return }"))
+    XCTAssertFalse(
+      framePumpBody.contains("guard let self else { return }"),
+      "The coordinator-owned frame pump must not promote weak self for the lifetime of its infinite loop."
+    )
+  }
+
+  func testReleaseStartupAndTrustMigrationConstantsRemainAvailableWithoutTestHooks() throws {
+    let appSource = try skyBridgeCompassAppSource()
+    let startupPolicyBody = try sourceSlice(
+      from: "private var shouldSkipInteractiveStartup: Bool",
+      to: "private var shouldDisableAnimationsForUITests: Bool",
+      in: appSource
+    )
+    let trustedDeviceStoreSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/TrustedDeviceStore.swift"
+    )
+
+    XCTAssertTrue(startupPolicyBody.contains("#if DEBUG || SKYBRIDGE_TESTING"))
+    XCTAssertTrue(startupPolicyBody.contains("SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup"))
+    XCTAssertTrue(startupPolicyBody.contains("#else\n        false"))
+    XCTAssertTrue(
+      trustedDeviceStoreSource.contains(
+        "private nonisolated static let authenticatedHandshakePinSource"
+      )
+    )
+    XCTAssertTrue(
+      trustedDeviceStoreSource.contains("private nonisolated static let legacyMigrationPinSource")
     )
   }
 
@@ -3113,11 +4057,25 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(decodedOutputBody.contains("static-image-fallback-forbidden"))
     XCTAssertTrue(
       decodedOutputBody.contains(
-        "let shouldCacheFrozenFrame = independentlyDecodableFrame && !remoteDesktopRenderFallbackForbidden"
+        "let shouldCacheFrozenFrame = RemoteDesktopFrozenFramePolicy.shouldCache("
       ))
     XCTAssertTrue(
       decodedOutputBody.contains(
-        "let frozenCandidate = shouldCacheFrozenFrame ? makeCGImage(from: frame) : nil"))
+        "renderFallbackForbidden: remoteDesktopRenderFallbackForbidden"
+      ))
+    XCTAssertTrue(
+      decodedOutputBody.contains(
+        "isReadOnlyCameraSession: isReadOnlyCameraSession"
+      ),
+      "Read-only camera sessions must skip the MainActor still-image cache as well as strict desktop sessions."
+    )
+    XCTAssertTrue(
+      source.contains("&& !isReadOnlyCameraSession"),
+      "The centralized frozen-frame policy must reject camera frames before CI-to-CGImage allocation."
+    )
+    XCTAssertTrue(
+      decodedOutputBody.contains(
+        "let frozenCandidate = shouldCacheFrozenFrame ? makeCGImage(from: presentationFrame) : nil"))
     XCTAssertFalse(
       decodedOutputBody.contains(
         "let frozenCandidate = independentlyDecodableFrame ? makeCGImage(from: frame) : nil"),
@@ -3597,13 +4555,12 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testTrustedDeviceStoreTreatsDiscoveryIdAsTrustedAlias() {
+  func testTrustedDeviceStoreTreatsDiscoveryIdAsTrustedAlias() throws {
     let store = TrustedDeviceStore.shared
     let original = store.trustedDevices
-    store.clearAll()
+    try store.replaceTrustedDevicesForTesting([])
     defer {
-      store.clearAll()
-      store.mergeFromCloud(original)
+      XCTAssertNoThrow(try store.replaceTrustedDevicesForTesting(original))
     }
 
     let rawDeviceId = UUID().uuidString.lowercased()
@@ -3623,13 +4580,12 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testTrustedDeviceStoreResolvesHostAliasBackToCanonicalTrustedID() {
+  func testTrustedDeviceStoreResolvesHostAliasBackToCanonicalTrustedID() throws {
     let store = TrustedDeviceStore.shared
     let original = store.trustedDevices
-    store.clearAll()
+    try store.replaceTrustedDevicesForTesting([])
     defer {
-      store.clearAll()
-      store.mergeFromCloud(original)
+      XCTAssertNoThrow(try store.replaceTrustedDevicesForTesting(original))
     }
 
     let rawDeviceId = UUID().uuidString.lowercased()
@@ -3692,7 +4648,7 @@ final class RegressionHardeningTests: XCTestCase {
       port: NWEndpoint.Port(integerLiteral: 9527)
     )
     let linkLocalHost = NWEndpoint.hostPort(
-      host: NWEndpoint.Host("fe80::468:f5a1:462b:29d3%bridge100"),
+      host: NWEndpoint.Host("fe80::468:f5a1:462b:29d3%lo0"),
       port: NWEndpoint.Port(integerLiteral: 9527)
     )
     let bonjour = NWEndpoint.service(
@@ -3796,7 +4752,7 @@ final class RegressionHardeningTests: XCTestCase {
       remoteDesktopSource.contains("addressClass=\\(addressClass) peerToPeer=\\(peerToPeer)"))
     XCTAssertTrue(remoteDesktopSource.contains("let routeLine = \"ios-lan-remote-route candidate="))
     XCTAssertTrue(remoteDesktopSource.contains("SkyBridgeLogger.shared.info(routeLine)"))
-    XCTAssertTrue(remoteDesktopSource.contains("SkyBridgeSmokeTraceWriter.appendStatus(routeLine)"))
+    XCTAssertTrue(remoteDesktopSource.contains("SkyBridgeDiagnosticTrace.appendStatus(routeLine)"))
 
     let fileTransferSource = try iosFileTransferManagerSource()
     let fileTransferRoutePolicySource = try iosFileTransferLANRoutePolicySource()
@@ -3905,17 +4861,180 @@ final class RegressionHardeningTests: XCTestCase {
       p2pManagerSource.contains("if discoveryManager.isAdvertising {\n            isListening = true\n            return"),
       "P2PConnectionManager must not treat a discovery flag alone as full listener readiness."
     )
-    XCTAssertTrue(p2pManagerSource.contains("let beforeStart = discoveryManager.advertisingReadinessSnapshot"))
-    XCTAssertTrue(p2pManagerSource.contains("beforeStart.isReady(for: controlPort)"))
+    XCTAssertTrue(
+      p2pManagerSource.contains(
+        "let beforeStart = self.discoveryManager.advertisingReadinessSnapshot"
+      ))
+    XCTAssertTrue(p2pManagerSource.contains("IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()"))
+    XCTAssertTrue(p2pManagerSource.contains("P2PAdvertisingAuthorityStabilizer.applyLatest("))
+    XCTAssertTrue(p2pManagerSource.contains("authority: authority"))
+    XCTAssertTrue(
+      p2pManagerSource.contains(
+        "readiness.isReady(for: controlPort, authority: latestAuthority)"
+      ))
     XCTAssertTrue(p2pManagerSource.contains("let readiness = discoveryManager.advertisingReadinessSnapshot"))
-    XCTAssertTrue(p2pManagerSource.contains("readiness.isReady(for: controlPort)"))
-    XCTAssertTrue(p2pManagerSource.contains("try await discoveryManager.startAdvertising(port: controlPort)"))
+    XCTAssertTrue(p2pManagerSource.contains("refreshAdvertisingAuthorityIfActive"))
+    XCTAssertTrue(p2pManagerSource.contains("try await self.discoveryManager.startAdvertising("))
     XCTAssertTrue(p2pManagerSource.contains("P2P 监听状态与 Bonjour 广播状态不一致"))
     XCTAssertTrue(appSource.contains("try await connectionManager.startListening()"))
     XCTAssertTrue(appSource.contains("前台恢复 P2P 监听器失败"))
     XCTAssertFalse(
       appSource.contains("try? await connectionManager.startListening()"),
       "Foreground recovery must log listener startup failures instead of swallowing them."
+    )
+  }
+
+  @MainActor
+  func testIOSBonjourTXTUsesTheExplicitCommittedMLDSA87Authority() async throws {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let publicKey = Data(repeating: 0x87, count: 2_592)
+    let authority = ProtocolIdentitySnapshot(
+      deviceId: "device-authority-87",
+      signingAlgorithm: .mlDSA87,
+      signingPublicKey: publicKey,
+      signingPublicKeyFingerprint: CurrentPathSecurityCompat.computeFingerprint(
+        algorithm: .mlDSA87,
+        publicKeyBytes: publicKey
+      )
+    )
+
+    let record = try await manager.debugCreateAdvertisingTXTRecord(
+      port: 9_527,
+      authority: authority
+    )
+    let dictionary = try XCTUnwrap(record.dictionary)
+    XCTAssertEqual(dictionary["deviceId"], authority.deviceId)
+    XCTAssertEqual(
+      dictionary["protocolSigningAlgorithm"],
+      ProtocolSigningAlgorithm.mlDSA87.rawValue
+    )
+    XCTAssertEqual(
+      dictionary["identityFingerprint"],
+      authority.signingPublicKeyFingerprint
+    )
+    XCTAssertEqual(
+      dictionary["protocolIdentityFingerprint"],
+      authority.signingPublicKeyFingerprint
+    )
+    XCTAssertEqual(dictionary["controlPort"], "9527")
+  }
+
+  @MainActor
+  func testIOSBonjourTXTRejectsMismatchedAuthorityFingerprint() async throws {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let authority = ProtocolIdentitySnapshot(
+      deviceId: "device-authority-87",
+      signingAlgorithm: .mlDSA87,
+      signingPublicKey: Data(repeating: 0x87, count: 2_592),
+      signingPublicKeyFingerprint: String(repeating: "0", count: 64)
+    )
+
+    do {
+      _ = try await manager.debugCreateAdvertisingTXTRecord(
+        port: 9_527,
+        authority: authority
+      )
+      XCTFail("A mismatched authority fingerprint must fail before Bonjour publication")
+    } catch {
+      XCTAssertTrue(
+        error.localizedDescription.contains(
+          "fingerprint does not match its algorithm-tagged public key"
+        )
+      )
+    }
+  }
+
+  func testIOSAdvertisingReadinessIncludesExactAuthority() {
+    let publicKey = Data(repeating: 0x87, count: 2_592)
+    let authority = ProtocolIdentitySnapshot(
+      deviceId: "device-authority-87",
+      signingAlgorithm: .mlDSA87,
+      signingPublicKey: publicKey,
+      signingPublicKeyFingerprint: CurrentPathSecurityCompat.computeFingerprint(
+        algorithm: .mlDSA87,
+        publicKeyBytes: publicKey
+      )
+    )
+    let readiness = DeviceDiscoveryManager.AdvertisingReadinessSnapshot(
+      isAdvertising: true,
+      listenerPresent: true,
+      handlerInstalled: true,
+      requestedPort: 9_527,
+      actualPort: 9_527,
+      serviceType: DiscoveryServiceType.skybridge.rawValue,
+      readyGeneration: 1,
+      authorityDeviceID: authority.deviceId,
+      authorityAlgorithm: authority.signingAlgorithm,
+      authorityFingerprint: authority.signingPublicKeyFingerprint
+    )
+    let replacement = ProtocolIdentitySnapshot(
+      deviceId: authority.deviceId,
+      signingAlgorithm: .mlDSA65,
+      signingPublicKey: Data(repeating: 0x65, count: 1_952),
+      signingPublicKeyFingerprint: String(repeating: "c", count: 64)
+    )
+
+    XCTAssertTrue(readiness.isReady(for: 9_527, authority: authority))
+    XCTAssertFalse(readiness.isReady(for: 9_527, authority: replacement))
+  }
+
+  @MainActor
+  func testP2PAdvertisingStartupConvergesToAuthorityCommittedDuringAsyncApply() async throws {
+    func authority(fill: UInt8) -> ProtocolIdentitySnapshot {
+      let publicKey = Data(repeating: fill, count: 2_592)
+      return ProtocolIdentitySnapshot(
+        deviceId: "device-authority-87",
+        signingAlgorithm: .mlDSA87,
+        signingPublicKey: publicKey,
+        signingPublicKeyFingerprint: CurrentPathSecurityCompat.computeFingerprint(
+          algorithm: .mlDSA87,
+          publicKeyBytes: publicKey
+        )
+      )
+    }
+
+    let authorityA = authority(fill: 0xA1)
+    let authorityB = authority(fill: 0xB2)
+    var committedLoads = [authorityA, authorityB, authorityB, authorityB]
+    var appliedAuthorities: [ProtocolIdentitySnapshot] = []
+
+    let stabilized = try await P2PAdvertisingAuthorityStabilizer.applyLatest(
+      loadCommittedAuthority: {
+        XCTAssertFalse(committedLoads.isEmpty)
+        return committedLoads.removeFirst()
+      },
+      applyAuthority: { authority in
+        appliedAuthorities.append(authority)
+        await Task.yield()
+      }
+    )
+
+    XCTAssertEqual(stabilized, authorityB)
+    XCTAssertEqual(appliedAuthorities, [authorityA, authorityB])
+    XCTAssertTrue(committedLoads.isEmpty)
+  }
+
+  func testSupersededBonjourAuthorityUpdateCannotStopTheNewListener() {
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldFailClosedAfterAuthorityUpdateFailure(
+        failedGeneration: 7,
+        currentGeneration: 8,
+        listenerStillMatches: true
+      )
+    )
+    XCTAssertTrue(
+      DeviceDiscoveryManager.shouldFailClosedAfterAuthorityUpdateFailure(
+        failedGeneration: 8,
+        currentGeneration: 8,
+        listenerStillMatches: true
+      )
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldFailClosedAfterAuthorityUpdateFailure(
+        failedGeneration: 8,
+        currentGeneration: 8,
+        listenerStillMatches: false
+      )
     )
   }
 
@@ -3989,8 +5108,12 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(
-      fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer,\\(ClassicTransferCapability.classicResume)\".utf8)"),
-      "iOS file-transfer Bonjour TXT must advertise both file aliases and classic resume support."
+      fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer\".utf8)"),
+      "iOS file-transfer Bonjour TXT must advertise both interoperable file aliases."
+    )
+    XCTAssertFalse(
+      fileTransferSource.contains("ClassicTransferCapability.classicResume"),
+      "iOS must not advertise classic resume until its inbound protocol implements resume semantics."
     )
     XCTAssertTrue(discoverySource.contains("return [\"file\", \"file_transfer\"]"))
     XCTAssertTrue(
@@ -4474,8 +5597,8 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testViewerStreamConfigurationRespectsAudioRedirectionPreference() async throws {
-    let manager = RemoteDesktopManager.instance
     try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
+    let manager = RemoteDesktopManager.instance
     let originalSettings = manager.viewerSettings
     defer { manager.viewerSettings = originalSettings }
 
@@ -4576,10 +5699,10 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testViewerStreamConfigurationKeepsAudioOnStableFallbackPath() async throws {
+    try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
     // 无媒体音频绑定时（测试环境默认态），音频字段必须显式广告为关闭，
     // 不得提前广告 pqc-media-v1 或采样率（媒体就绪门控语义；端点就绪路径由
     // RemoteDesktopViewerStreamConfigurationFactoryTests 锁定）。
-    try await SkyBridgeiOSCore.shared.initialize(policy: .classicOnly)
     let payload = try RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
 
     XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
@@ -4689,7 +5812,7 @@ final class RegressionHardeningTests: XCTestCase {
     let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let source = try remoteDesktopVideoDecoderSource()
     let decodeBody = try sourceSlice(
-      from: "private func decodeToPixelBufferFrame(",
+      from: "private func submitPixelBufferDecode(",
       to: "private func makeSampleBuffer(",
       in: source
     )
@@ -4755,7 +5878,7 @@ final class RegressionHardeningTests: XCTestCase {
   func testHEVCDecoderDoesNotTrustAdvertisedSyncAndAnnotatesSampleDependencies() throws {
     let source = try remoteDesktopVideoDecoderSource()
     let decodeBody = try sourceSlice(
-      from: "private func decodeVideoFrame(",
+      from: "private func submitVideoFrame(",
       to: "private func resetDecoderState(",
       in: source
     )
@@ -4790,7 +5913,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(sampleBody.contains("kCMSampleAttachmentKey_NotSync"))
     XCTAssertTrue(sampleBody.contains("kCMSampleAttachmentKey_DependsOnOthers"))
     XCTAssertTrue(
-      resetBody.contains("clearVideoParameterSets()"),
+      resetBody.contains("clearVideoParameterSets(requiresCompleteSyncSet: true)"),
       "After a decoder reset, HEVC/H.264 must require fresh VPS/SPS/PPS before accepting the next sync frame."
     )
   }
@@ -5005,10 +6128,8 @@ final class RegressionHardeningTests: XCTestCase {
   func testNativeVideoFallbackScreenGuardRunsBeforeTopologyHandling() throws {
     let remoteDesktopSource = try remoteDesktopManagerSource()
     let handleScreenDataBody = try sourceSlice(
-      from:
-        "private func handleScreenData(_ screenData: ScreenData, receivedAt: Date? = nil) async",
-      to:
-        "private func handleIncomingStreamTopologyChangeIfNeeded(for screenData: ScreenData) async",
+      from: "private func acceptScreenFrameIfSessionActive",
+      to: "private func handleIncomingStreamTopologyChangeIfNeeded(",
       in: remoteDesktopSource
     )
     guard
@@ -5071,20 +6192,20 @@ final class RegressionHardeningTests: XCTestCase {
   func testTopologyChangeWaitsForDecoderBootstrapBeforeRecoveringPredictiveStream() throws {
     let remoteDesktopSource = try remoteDesktopManagerSource()
     let topologyBody = try sourceSlice(
-      from:
-        "private func handleIncomingStreamTopologyChangeIfNeeded(for screenData: ScreenData) async",
-      to: "private func acceptFrameSequenceForDecode(_ screenData: ScreenData, now: Date) -> Bool",
+      from: "private func handleIncomingStreamTopologyChangeIfNeeded(",
+      to: "private func acceptFrameSequenceForDecode(",
       in: remoteDesktopSource
     )
 
     XCTAssertTrue(
-      topologyBody.contains("let incomingFrameHasDecoderBootstrap = screenData.isDecoderBootstrapFrame"))
+      topologyBody.contains(
+        "let incomingFrameHasDecoderBootstrap = classifiedFrame.traits.isDecoderBootstrapFrame"))
     XCTAssertTrue(
       topologyBody.contains(
         "let lightweightFlapTransition = isFallbackProducerFlap && incomingFrameHasDecoderBootstrap"))
     XCTAssertTrue(
       topologyBody.contains(
-        "decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(normalizedFormat)"))
+        "decodeQueueWaitingForSyncFrame = classifiedFrame.traits.isPredictiveVideo"))
     XCTAssertTrue(topologyBody.contains("&& !incomingFrameHasDecoderBootstrap"))
     XCTAssertFalse(
       topologyBody.contains("RemoteDesktopScreenFrameWire.containsSyncFrame"),
@@ -5096,7 +6217,7 @@ final class RegressionHardeningTests: XCTestCase {
     let remoteDesktopSource = try remoteDesktopManagerSource()
     let gapBody = try sourceSlice(
       from: "case .gapRequiresSync(let previous, let current, let missing):",
-      to: "private func enqueueFrameForDecode(_ screenData: ScreenData, receivedAt: Date? = nil)",
+      to: "private func enqueueFrameForDecode(",
       in: remoteDesktopSource
     )
 
@@ -5707,13 +6828,12 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testTrustResolvedPeerPersistsDeclaredDeviceIdForFutureBootstrap() {
+  func testTrustResolvedPeerPersistsDeclaredDeviceIdForFutureBootstrap() throws {
     let store = TrustedDeviceStore.shared
     let original = store.trustedDevices
-    store.clearAll()
+    try store.replaceTrustedDevicesForTesting([])
     defer {
-      store.clearAll()
-      store.mergeFromCloud(original)
+      XCTAssertNoThrow(try store.replaceTrustedDevicesForTesting(original))
     }
 
     let declaredDeviceId = "id:\(UUID().uuidString.lowercased())"
@@ -5726,7 +6846,7 @@ final class RegressionHardeningTests: XCTestCase {
       ipAddress: "fe80::81d:bb45:8c18:6d6a%en0"
     )
 
-    store.trustResolvedPeer(runtimeAliasDevice, declaredDeviceId: declaredDeviceId)
+    try store.trustResolvedPeer(runtimeAliasDevice, declaredDeviceId: declaredDeviceId)
 
     XCTAssertTrue(store.isTrusted(deviceId: "host:fe80::81d:bb45:8c18:6d6a%en0"))
     XCTAssertEqual(
@@ -5761,6 +6881,109 @@ final class RegressionHardeningTests: XCTestCase {
 
     try? store.remove()
     defaults.removePersistentDomain(forName: suiteName)
+  }
+
+  @MainActor
+  func testCodablePersistenceStoreDoesNotFallBackToLegacyWhenPrimaryIsCorrupt() throws {
+    let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+    let legacyKey = "legacy.persistence.payload"
+    let rootDirectoryName = "SkyBridgeStateTests-\(UUID().uuidString)"
+    let relativePath = "Tests/authority.json"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      XCTFail("Expected isolated UserDefaults suite")
+      return
+    }
+
+    let fileManager = FileManager.default
+    let applicationSupport = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+    let rootURL = applicationSupport
+      .appendingPathComponent(bundleIdentifier, isDirectory: true)
+      .appendingPathComponent(rootDirectoryName, isDirectory: true)
+    let primaryURL = rootURL.appendingPathComponent(relativePath, isDirectory: false)
+    try fileManager.createDirectory(
+      at: primaryURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data("not-json".utf8).write(to: primaryURL, options: .atomic)
+    defaults.set(try JSONEncoder().encode(["stale-legacy-authority"]), forKey: legacyKey)
+    defer {
+      if fileManager.fileExists(atPath: rootURL.path) {
+        XCTAssertNoThrow(try fileManager.removeItem(at: rootURL))
+      }
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = CodablePersistenceStore<[String]>(
+      location: .protectedApplicationSupport(
+        path: relativePath,
+        legacyUserDefaultsKey: legacyKey
+      ),
+      rootDirectoryName: rootDirectoryName,
+      defaults: defaults,
+      fileManager: fileManager
+    )
+
+    XCTAssertThrowsError(try store.loadOrThrow())
+    XCTAssertNotNil(defaults.data(forKey: legacyKey))
+    XCTAssertEqual(try Data(contentsOf: primaryURL), Data("not-json".utf8))
+  }
+
+  @MainActor
+  func testCodablePersistenceStoreKeepsLegacyWhenMigrationSaveFails() throws {
+    let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+    let legacyKey = "legacy.persistence.payload"
+    let rootDirectoryName = "SkyBridgeStateTests-\(UUID().uuidString)"
+    let relativePath = "Tests/authority.json"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      XCTFail("Expected isolated UserDefaults suite")
+      return
+    }
+
+    let fileManager = FileManager.default
+    let applicationSupport = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+    let rootURL = applicationSupport
+      .appendingPathComponent(bundleIdentifier, isDirectory: true)
+      .appendingPathComponent(rootDirectoryName, isDirectory: true)
+    try fileManager.createDirectory(
+      at: rootURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data("blocks-directory-creation".utf8).write(to: rootURL, options: .atomic)
+    let legacyValue = ["legacy-authority-must-survive"]
+    let legacyData = try JSONEncoder().encode(legacyValue)
+    defaults.set(legacyData, forKey: legacyKey)
+    defer {
+      if fileManager.fileExists(atPath: rootURL.path) {
+        XCTAssertNoThrow(try fileManager.removeItem(at: rootURL))
+      }
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = CodablePersistenceStore<[String]>(
+      location: .protectedApplicationSupport(
+        path: relativePath,
+        legacyUserDefaultsKey: legacyKey
+      ),
+      rootDirectoryName: rootDirectoryName,
+      defaults: defaults,
+      fileManager: fileManager
+    )
+
+    XCTAssertThrowsError(try store.loadOrThrow())
+    XCTAssertEqual(defaults.data(forKey: legacyKey), legacyData)
+    XCTAssertEqual(try Data(contentsOf: rootURL), Data("blocks-directory-creation".utf8))
   }
 
   @MainActor
@@ -6026,19 +7249,6 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testSettingsPQCPolicyStatusRejectsDecodeOnlyABI1EvenWhenTierIsPQC() {
-    let status = SettingsView.pqcPolicyStatusPresentation(
-      enforcePQCHandshake: true,
-      currentTier: .nativePQC,
-      currentSuite: .qperiaptContextBound,
-      hasKeyPair: true
-    )
-
-    XCTAssertEqual(status.label, "PQC 不可用")
-    XCTAssertEqual(status.tone, .unavailable)
-  }
-
-  @MainActor
   func testDashboardViewModelPreservesClassicPresentationWhenActiveConnectionsTemporarilyClear()
     async
   {
@@ -6231,6 +7441,103 @@ final class RegressionHardeningTests: XCTestCase {
     }
   }
 
+  func testHandshakeControlPlaneWireDecodersAcceptNonZeroStartIndexSlices() throws {
+    func offsetSlice(_ payload: Data, prefixCount: Int = 17) -> Data {
+      var storage = Data(repeating: 0xEE, count: prefixCount)
+      storage.append(payload)
+      let slice = storage.dropFirst(prefixCount)
+      XCTAssertNotEqual(slice.startIndex, 0)
+      return slice
+    }
+
+    let capabilities = CryptoCapabilities(
+      supportedKEM: ["X25519"],
+      supportedSignature: ["Ed25519"],
+      supportedAuthProfiles: ["Classic"],
+      supportedAEAD: ["AES-256-GCM"],
+      pqcAvailable: false,
+      platformVersion: "iOS 17.0",
+      providerType: .classic
+    )
+    let messageA = HandshakeMessageA(
+      supportedSuites: [.x25519Ed25519],
+      keyShares: [
+        HandshakeKeyShare(
+          suite: .x25519Ed25519,
+          shareBytes: Data(repeating: 0x11, count: 32)
+        )
+      ],
+      clientNonce: Data(repeating: 0x22, count: HandshakeConstants.nonceSize),
+      policy: .default,
+      capabilities: capabilities,
+      signature: Data(repeating: 0x33, count: 64),
+      identityPublicKey: Data(repeating: 0x44, count: 32)
+    )
+    let decodedA = try HandshakeMessageA.decode(from: offsetSlice(messageA.encoded))
+    XCTAssertEqual(decodedA.supportedSuites, messageA.supportedSuites)
+    XCTAssertEqual(decodedA.capabilities.supportedKEM, capabilities.supportedKEM)
+    XCTAssertEqual(decodedA.capabilities.providerType, capabilities.providerType)
+
+    let messageB = makeMinimalMessageB()
+    let decodedB = try HandshakeMessageB.decode(from: offsetSlice(messageB.encoded))
+    XCTAssertEqual(decodedB.selectedSuite, messageB.selectedSuite)
+    XCTAssertEqual(decodedB.encryptedPayload.ciphertext, messageB.encryptedPayload.ciphertext)
+
+    let finished = HandshakeFinished(
+      direction: .responderToInitiator,
+      mac: Data(repeating: 0x55, count: 32)
+    )
+    XCTAssertEqual(try HandshakeFinished.decode(from: offsetSlice(finished.encoded)).mac, finished.mac)
+
+    let identity = IdentityPublicKeys(
+      protocolPublicKey: Data(repeating: 0x66, count: 32),
+      protocolAlgorithm: .ed25519,
+      secureEnclavePublicKey: Data(repeating: 0x67, count: 65)
+    )
+    let decodedIdentity = try IdentityPublicKeys.decode(from: offsetSlice(identity.encoded))
+    XCTAssertEqual(decodedIdentity.protocolPublicKey, identity.protocolPublicKey)
+    XCTAssertEqual(decodedIdentity.secureEnclavePublicKey, identity.secureEnclavePublicKey)
+
+    let soa = try HandshakeSOAExtension(
+      initiatorPeerId: Data(repeating: 0x71, count: HandshakeSOAExtension.initiatorPeerIdLength),
+      targetPeerId: Data(repeating: 0x72, count: HandshakeSOAExtension.targetPeerIdLength),
+      attemptId: Data(repeating: 0x73, count: HandshakeSOAExtension.attemptIdLength)
+    )
+    let decodedSOA = try HandshakeSOAExtension.decodeValue(offsetSlice(soa.encodedValue))
+    XCTAssertEqual(decodedSOA.initiatorPeerId, soa.initiatorPeerId)
+    XCTAssertEqual(decodedSOA.targetPeerId, soa.targetPeerId)
+    XCTAssertEqual(decodedSOA.attemptId, soa.attemptId)
+
+    let sealedBoxWire = messageB.encryptedPayload.combinedWithHeader(suite: messageB.selectedSuite)
+    let decodedBox = try HPKESealedBox(combined: offsetSlice(sealedBoxWire), isHandshake: true)
+    XCTAssertEqual(decodedBox.encapsulatedKey, messageB.encryptedPayload.encapsulatedKey)
+    XCTAssertEqual(decodedBox.nonce, messageB.encryptedPayload.nonce)
+    XCTAssertEqual(decodedBox.ciphertext, messageB.encryptedPayload.ciphertext)
+    XCTAssertEqual(decodedBox.tag, messageB.encryptedPayload.tag)
+    XCTAssertEqual(decodedBox.encapsulatedKey.startIndex, 0)
+    XCTAssertEqual(decodedBox.nonce.startIndex, 0)
+    XCTAssertEqual(decodedBox.ciphertext.startIndex, 0)
+    XCTAssertEqual(decodedBox.tag.startIndex, 0)
+
+    var padded = Data([0x53, 0x42, 0x50, 0x31])
+    var messageLength = UInt32(messageA.encoded.count).bigEndian
+    padded.append(Data(bytes: &messageLength, count: 4))
+    padded.append(messageA.encoded)
+    padded.append(Data(repeating: 0xA5, count: 24))
+    XCTAssertEqual(
+      try HandshakeMessageA.decode(from: offsetSlice(padded)).supportedSuites,
+      messageA.supportedSuites
+    )
+
+    let truncated = offsetSlice(Data(messageA.encoded.dropLast()))
+    XCTAssertThrowsError(try HandshakeMessageA.decode(from: truncated)) { error in
+      guard case HandshakeError.failed = error else {
+        XCTFail("Expected HandshakeError.failed, got \(error)")
+        return
+      }
+    }
+  }
+
   func testTrafficPaddingRoundTripAndMalformedFrameBehavior() {
     let defaults = UserDefaults.standard
     let enabledKey = "sb_traffic_padding_enabled"
@@ -6256,6 +7563,11 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(wrapped.count, 128)
     XCTAssertEqual(TrafficPadding.unwrapIfNeeded(wrapped, label: "unit"), payload)
+    var offsetStorage = Data(repeating: 0xEE, count: 17)
+    offsetStorage.append(wrapped)
+    let wrappedSlice = offsetStorage.dropFirst(17)
+    XCTAssertNotEqual(wrappedSlice.startIndex, 0)
+    XCTAssertEqual(TrafficPadding.unwrapIfNeeded(wrappedSlice, label: "unit/slice"), payload)
 
     var malformed = Data([0x53, 0x42, 0x50, 0x32])
     var declaredLen = UInt32(512).bigEndian
@@ -6297,7 +7609,16 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(
       iosP2P.contains(
-        "protocolIdentityPublicKeys: await localProtocolIdentityPublicKeysForPairing()"))
+        "protocolIdentityPublicKeys: try await localProtocolIdentityPublicKeysForPairing()"))
+    XCTAssertTrue(
+      iosP2P.contains("let configuration = try ProtocolSigningIdentityPolicy.requiredConfiguration()"),
+      "iOS pairing advertisements must resolve the committed protocol-identity algorithm, not an implicit default.")
+    XCTAssertTrue(
+      iosP2P.contains("let active = try await skyBridgeCore.committedActiveProtocolIdentitySnapshot()"),
+      "The configured identity must be loaded before optional compatibility identities.")
+    XCTAssertTrue(
+      iosP2P.contains("Configured protocol identity is missing from the pairing advertisement"),
+      "A missing active identity must fail the advertisement instead of silently publishing compatibility-only keys.")
     XCTAssertTrue(iosP2P.contains("ProtocolIdentityTrustStore.shared.upsert"))
     XCTAssertTrue(macP2P.contains("protocolIdentityPublicKeys: protocolIdentityPublicKeys"))
   }
@@ -6333,13 +7654,30 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(iosSender.contains("completionAck.receivedBytes == metadata.fileSize"))
     XCTAssertTrue(iosSender.contains("completionAck.fileSha256 == fileSha256"))
-    XCTAssertTrue(
-      iosReceiver.contains(
-        "op: .completeAck,\n                                transferId: st.transferId,\n                                receivedBytes: st.receivedBytes,\n                                fileSha256:"
-      ))
+    XCTAssertTrue(iosReceiver.contains("op: .completeAck"))
+    XCTAssertTrue(iosReceiver.contains("receivedBytes: state.receivedBytes"))
+    XCTAssertTrue(iosReceiver.contains("fileSha256: actualFileSHA256"))
     XCTAssertTrue(macConnection.contains("WebRTCOutboundFileTransferSupport.validateCompletionAck"))
     XCTAssertTrue(macConnection.contains("ack.receivedBytes == expectedFileSize"))
     XCTAssertTrue(macConnection.contains("ack.fileSha256 == expectedFileSha256"))
+  }
+
+  func testClassicFileTransferCompressionNeverChangesWireEncodingAfterFailure() throws {
+    let iosSender = try iosFileTransferManagerSource()
+
+    XCTAssertTrue(
+      iosSender.contains("ClassicTransferZlibCompressionWorker.shared.compress"),
+      "A zlib-advertised chunk must be bounded and fail explicitly when compression fails."
+    )
+    XCTAssertFalse(
+      iosSender.contains("(try? compressData(chunkData)) ?? chunkData"),
+      "The sender must never advertise zlib while silently sending plaintext bytes."
+    )
+    XCTAssertTrue(iosSender.contains("if metadata.compression == \"zlib\""))
+    XCTAssertFalse(
+      iosSender.contains("(try? decompressData(decrypted)) ?? decrypted"),
+      "The receiver must derive decoding exclusively from authenticated transfer metadata."
+    )
   }
 
   func testWebRTCFileTransferIntegrityValidationStaysCentralized() throws {
@@ -6350,8 +7688,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(integrity.contains("static func verifiedChunkHash"))
     XCTAssertTrue(integrity.contains("static func validateMerkleProof"))
     XCTAssertTrue(integrity.contains("CrossNetworkMerkleAuthCompat.signatureAlgV1"))
-    XCTAssertTrue(
+    XCTAssertFalse(
       iosReceiver.contains("CrossNetworkFileTransferIntegrityValidator.verifiedChunkHash"))
+    XCTAssertTrue(iosReceiver.contains("expectedSHA256: msg.chunkSha256"))
     XCTAssertTrue(
       iosReceiver.contains("CrossNetworkFileTransferIntegrityValidator.validateMerkleProof"))
     XCTAssertTrue(
@@ -6584,6 +7923,24 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  func testClassicTransferSenderDeviceIdPrefersStableKeychainIdentity() {
+    let resolved = FileTransferClassicPeerResolutionPolicy.preferredSenderDeviceId(
+      stableDeviceId: "keychain-device-id",
+      vendorDeviceId: "vendor-id"
+    )
+
+    XCTAssertEqual(resolved, "keychain-device-id")
+  }
+
+  func testClassicTransferSenderDeviceIdFallsBackToVendorWhenStableIdentityMissing() {
+    let resolved = FileTransferClassicPeerResolutionPolicy.preferredSenderDeviceId(
+      stableDeviceId: "   ",
+      vendorDeviceId: "vendor-id"
+    )
+
+    XCTAssertEqual(resolved, "vendor-id")
+  }
+
   func testSinglePeerTransferSecurityFallbackFailsClosedWhenNoHintsExist() {
     let fallback = FileTransferClassicPeerResolutionPolicy.singlePeerFallbackDeviceId(
       requestedCandidates: [],
@@ -6776,6 +8133,127 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  func testIOSWebRTCStatsCallbackBridgeAcceptsOnlyFirstCompletion() async {
+    let outcome = await WebRTCSession.awaitBoundedStatsCallback(
+      timeoutSeconds: 0.5
+    ) { completion in
+      completion(7)
+      completion(9)
+    }
+
+    guard case .completed(let value) = outcome else {
+      XCTFail("The first callback must complete the bounded bridge")
+      return
+    }
+    XCTAssertEqual(value, 7)
+  }
+
+  func testIOSWebRTCStatsCallbackBridgeTimesOutWhenCallbackNeverArrives() async {
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    let outcome: WebRTCSession.BoundedCallbackOutcome<Int> =
+      await WebRTCSession.awaitBoundedStatsCallback(timeoutSeconds: 0.03) { _ in }
+    let elapsed = startedAt.duration(to: clock.now)
+
+    guard case .timedOut = outcome else {
+      XCTFail("A missing libwebrtc callback must resolve as an explicit timeout")
+      return
+    }
+    XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(20))
+    XCTAssertLessThan(elapsed, .seconds(1))
+  }
+
+  func testIOSWebRTCStatsCallbackBridgeCancellationResumesWaiter() async {
+    let (started, startedContinuation) = AsyncStream.makeStream(of: Void.self)
+    let task = Task<WebRTCSession.BoundedCallbackOutcome<Int>, Never> {
+      await WebRTCSession.awaitBoundedStatsCallback(
+        timeoutSeconds: 5
+      ) { _ in
+        startedContinuation.yield(())
+      }
+    }
+
+    for await _ in started {
+      break
+    }
+    startedContinuation.finish()
+    task.cancel()
+    let outcome = await task.value
+
+    guard case .cancelled = outcome else {
+      XCTFail("Cancellation must resume the callback waiter without waiting for timeout")
+      return
+    }
+  }
+
+  func testIOSWebRTCQueuedCallbacksAreLifecycleGatedAtExecution() throws {
+    let source = try webRTCSessionSource()
+    let callbackBody = try sourceSlice(
+      from: "private func dispatchActiveLifecycleCallback",
+      to: "public nonisolated static let screenChunkedWireFormat",
+      in: source
+    )
+
+    XCTAssertTrue(callbackBody.contains("let expectedLifecycleToken = withState { lifecycleToken }"))
+    XCTAssertTrue(callbackBody.contains("Self.lifecycleGuardAllowsCallback("))
+    XCTAssertTrue(callbackBody.contains("currentLifecycleToken: self.lifecycleToken"))
+    XCTAssertTrue(callbackBody.contains("expectedLifecycleToken: expectedLifecycleToken"))
+    XCTAssertTrue(callbackBody.contains("guard remainsActive else { return }"))
+    XCTAssertTrue(source.contains("lifecycleToken &+= 1"))
+    XCTAssertTrue(source.contains("dispatchActiveLifecycleCallback {"))
+  }
+
+  func testIOSWebRTCDisconnectJoinsReceiveLoopsWithoutSelfAwait() throws {
+    let source = try crossNetworkWebRTCManagerSource()
+    let disconnectBody = try sourceSlice(
+      from: "private func disconnectInternal(",
+      to: "private func rollbackFailedSessionSetup",
+      in: source
+    )
+    let failureBody = try sourceSlice(
+      from: "private func failAuthenticatedWebRTCChannel(",
+      to: "nonisolated func receiveScreenLoop",
+      in: source
+    )
+
+    XCTAssertTrue(disconnectBody.contains("originatingReceiveLoop: ReceiveLoopTaskKind? = nil"))
+    XCTAssertTrue(disconnectBody.contains("controlReceiveTask?.cancel()"))
+    XCTAssertTrue(disconnectBody.contains("videoReceiveTask?.cancel()"))
+    XCTAssertTrue(disconnectBody.contains("await controlInboundQueue.finish()"))
+    XCTAssertTrue(disconnectBody.contains("await videoInboundQueue.finish()"))
+    XCTAssertTrue(disconnectBody.contains("if originatingReceiveLoop != .control"))
+    XCTAssertTrue(disconnectBody.contains("await controlReceiveTask?.value"))
+    XCTAssertTrue(disconnectBody.contains("if originatingReceiveLoop != .screen"))
+    XCTAssertTrue(disconnectBody.contains("await videoReceiveTask?.value"))
+    XCTAssertTrue(failureBody.contains("originatingReceiveLoop: ReceiveLoopTaskKind"))
+    XCTAssertTrue(failureBody.contains("sessionObjectIdentifier: ObjectIdentifier"))
+    XCTAssertTrue(failureBody.contains("ObjectIdentifier(currentSession) == sessionObjectIdentifier"))
+    XCTAssertTrue(failureBody.contains("originatingReceiveLoop: originatingReceiveLoop"))
+    XCTAssertFalse(failureBody.contains("await disconnect(clearSnapshot: true)"))
+
+    let controlJoin = try XCTUnwrap(disconnectBody.range(of: "await controlReceiveTask?.value"))
+    let transferCleanup = try XCTUnwrap(disconnectBody.range(of: "await cleanupInboundFileTransfers()"))
+    let keyClear = try XCTUnwrap(disconnectBody.range(of: "sessionKeys = nil"))
+    XCTAssertLessThan(controlJoin.lowerBound, transferCleanup.lowerBound)
+    XCTAssertLessThan(transferCleanup.lowerBound, keyClear.lowerBound)
+  }
+
+  func testIOSInboundFileTransferAckFailureClosesAuthenticatedControlChannel() throws {
+    let source = try crossNetworkWebRTCFileTransferSource()
+    let sendAckBody = try sourceSlice(
+      from: "func sendAck(_ ack: CrossNetworkFileTransferMessage, label: String) async",
+      to: "if let validationError = Self.validateInboundTransferId",
+      in: source
+    )
+
+    XCTAssertTrue(sendAckBody.contains("try await sendFileTransferMessage(ack)"))
+    XCTAssertTrue(sendAckBody.contains("failInboundFileTransferControlChannel("))
+    XCTAssertTrue(
+      sendAckBody.contains("WebRTC file-transfer acknowledgement delivery failed"),
+      "A failed authenticated ACK must be surfaced as a session failure instead of being logged and ignored."
+    )
+  }
+
   func testIOSWebRTCSessionPendingInboundBufferPlansRespectHandlerAvailability() {
     XCTAssertEqual(
       WebRTCSession.pendingInboundFlushPlan(
@@ -6864,6 +8342,14 @@ final class RegressionHardeningTests: XCTestCase {
         pendingCount: 1
       ),
       .applyImmediately
+    )
+    XCTAssertEqual(
+      WebRTCSession.pendingRemoteICEPlan(
+        isDuplicate: false,
+        hasRemoteDescription: false,
+        pendingCount: 256
+      ),
+      .overflow
     )
   }
 
@@ -7866,27 +9352,85 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(afterLateCleanup, newerSnapshot)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyPreservesPredictiveVideoOrder() {
-    var pending: [ScreenData] = []
+  private func makeH264BootstrapScreenData(
+    sequence: UInt64,
+    encodedByteCount: Int? = nil
+  ) -> ScreenData {
+    var imageData = Data([
+      0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+      0x00, 0x00, 0x00, 0x01, 0x68, 0xCE,
+      0x00, 0x00, 0x00, 0x01, 0x65, UInt8(truncatingIfNeeded: sequence),
+    ])
+    if let encodedByteCount {
+      precondition(encodedByteCount >= imageData.count)
+      imageData.append(
+        Data(repeating: 0xAB, count: encodedByteCount - imageData.count)
+      )
+    }
+    return ScreenData(
+      width: 1280,
+      height: 720,
+      imageData: imageData,
+      timestamp: TimeInterval(sequence),
+      format: "h264",
+      isSyncFrame: false,
+      sequenceNumber: sequence
+    )
+  }
+
+  private func makeH264PredictiveScreenData(
+    sequence: UInt64,
+    encodedByteCount: Int
+  ) -> ScreenData {
+    var imageData = Data([0x00, 0x00, 0x00, 0x01, 0x41, 0x55])
+    precondition(encodedByteCount >= imageData.count)
+    imageData.append(
+      Data(repeating: 0xAB, count: encodedByteCount - imageData.count)
+    )
+    return ScreenData(
+      width: 1280,
+      height: 720,
+      imageData: imageData,
+      timestamp: TimeInterval(sequence),
+      format: "h264",
+      isSyncFrame: false,
+      sequenceNumber: sequence
+    )
+  }
+
+  private func classifiedScreenFrame(
+    _ screenData: ScreenData
+  ) throws -> RemoteDesktopClassifiedScreenFrame {
+    RemoteDesktopClassifiedScreenFrame(
+      screenData: screenData,
+      traits: try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+        format: screenData.format,
+        imageData: screenData.imageData
+      )
+    )
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyPreservesPredictiveVideoOrder() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = false
     let first = ScreenData(
       width: 1280,
       height: 720,
-      imageData: Data([0x01]),
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x41, 0x01]),
       timestamp: 1,
       format: "h264"
     )
     let second = ScreenData(
       width: 1280,
       height: 720,
-      imageData: Data([0x02]),
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x41, 0x02]),
       timestamp: 2,
       format: "h264"
     )
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        first,
+        try classifiedScreenFrame(first),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -7894,7 +9438,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        second,
+        try classifiedScreenFrame(second),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -7902,13 +9446,15 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.imageData, first.imageData)
+      RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.screenData.imageData,
+      first.imageData)
     XCTAssertEqual(
-      RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.imageData, second.imageData)
+      RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.screenData.imageData,
+      second.imageData)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyDoesNotDropPendingFramesOnNormalSyncFrame() {
-    var pending: [ScreenData] = []
+  func testRemoteDesktopDecodeQueuePolicyDoesNotDropPendingFramesOnNormalSyncFrame() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = false
     let firstPredictive = ScreenData(
       width: 1280,
@@ -7935,7 +9481,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        firstPredictive,
+        try classifiedScreenFrame(firstPredictive),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -7943,7 +9489,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        secondPredictive,
+        try classifiedScreenFrame(secondPredictive),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -7951,7 +9497,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        normalSyncFrame,
+        try classifiedScreenFrame(normalSyncFrame),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -7959,7 +9505,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      pending.map(\.imageData),
+      pending.map(\.screenData.imageData),
       [
         firstPredictive.imageData,
         secondPredictive.imageData,
@@ -7968,8 +9514,349 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyStillImagesReplaceLatestFrame() {
-    var pending: [ScreenData] = []
+  func testRemoteDesktopDecodeQueuePolicyKeepsNormalIndependentBurstInOrder() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let frames = (0..<(RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames - 1)).map {
+      makeH264BootstrapScreenData(sequence: UInt64($0))
+    }
+
+    for frame in frames {
+      XCTAssertEqual(
+        RemoteDesktopDecodeQueuePolicy.enqueue(
+          try classifiedScreenFrame(frame),
+          into: &pending,
+          waitingForSyncFrame: &waitingForSyncFrame,
+          decoderProgressStalled: false
+        ),
+        .enqueued
+      )
+    }
+
+    XCTAssertEqual(
+      pending.compactMap(\.screenData.sequenceNumber),
+      frames.compactMap(\.sequenceNumber)
+    )
+    XCTAssertFalse(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyAcceptsExactEncodedByteBudget() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let byteBudget = 64
+    let first = makeH264PredictiveScreenData(sequence: 1, encodedByteCount: 31)
+    let second = makeH264PredictiveScreenData(sequence: 2, encodedByteCount: 33)
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(first),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .enqueued
+    )
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(second),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .enqueued
+    )
+
+    XCTAssertEqual(RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(in: pending), byteBudget)
+    XCTAssertEqual(pending.compactMap(\.screenData.sequenceNumber), [1, 2])
+    XCTAssertFalse(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyRejectsProspectiveBudgetByOneByte() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let byteBudget = 64
+    let first = makeH264PredictiveScreenData(sequence: 1, encodedByteCount: 31)
+    let overflow = makeH264PredictiveScreenData(sequence: 2, encodedByteCount: 34)
+
+    _ = RemoteDesktopDecodeQueuePolicy.enqueue(
+      try classifiedScreenFrame(first),
+      into: &pending,
+      waitingForSyncFrame: &waitingForSyncFrame,
+      decoderProgressStalled: false,
+      maxPredictiveVideoFrames: 100,
+      hardMaxPredictiveVideoFrames: 100,
+      maxQueuedEncodedBytes: byteBudget
+    )
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(overflow),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .enteredWaitingForSync
+    )
+
+    XCTAssertTrue(pending.isEmpty)
+    XCTAssertTrue(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyCompactsContinuousLargeIndependentFramesByBytes() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let frameBytes = 64
+    let byteBudget = frameBytes * 3
+    var sawCompaction = false
+
+    for sequence in 0..<11 {
+      let result = RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(
+          makeH264BootstrapScreenData(
+            sequence: UInt64(sequence),
+            encodedByteCount: frameBytes
+          )
+        ),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      )
+      sawCompaction = sawCompaction || result == .compactedWithIndependentFrame
+      XCTAssertLessThanOrEqual(
+        RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(in: pending),
+        byteBudget
+      )
+      XCTAssertLessThanOrEqual(pending.count, 3)
+      XCTAssertFalse(waitingForSyncFrame)
+    }
+
+    XCTAssertTrue(sawCompaction)
+    XCTAssertEqual(pending.last?.screenData.sequenceNumber, 10)
+    XCTAssertTrue(pending.last?.traits.isDecoderBootstrapFrame == true)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyBytePressureClearsPredictiveChainAndRequiresBootstrap() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let byteBudget = 64
+
+    _ = RemoteDesktopDecodeQueuePolicy.enqueue(
+      try classifiedScreenFrame(
+        makeH264PredictiveScreenData(sequence: 1, encodedByteCount: byteBudget)
+      ),
+      into: &pending,
+      waitingForSyncFrame: &waitingForSyncFrame,
+      decoderProgressStalled: false,
+      maxPredictiveVideoFrames: 100,
+      hardMaxPredictiveVideoFrames: 100,
+      maxQueuedEncodedBytes: byteBudget
+    )
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(
+          makeH264PredictiveScreenData(sequence: 2, encodedByteCount: 6)
+        ),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .enteredWaitingForSync
+    )
+    XCTAssertTrue(pending.isEmpty)
+    XCTAssertTrue(waitingForSyncFrame)
+
+    let idrWithoutParameterSets = ScreenData(
+      width: 1280,
+      height: 720,
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]),
+      timestamp: 3,
+      format: "h264",
+      isSyncFrame: true,
+      sequenceNumber: 3
+    )
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(idrWithoutParameterSets),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .droppedIncomingPredictiveFrame
+    )
+
+    let bootstrap = makeH264BootstrapScreenData(sequence: 4, encodedByteCount: byteBudget)
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(bootstrap),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false,
+        maxPredictiveVideoFrames: 100,
+        hardMaxPredictiveVideoFrames: 100,
+        maxQueuedEncodedBytes: byteBudget
+      ),
+      .recoveredWithIndependentFrame
+    )
+    XCTAssertEqual(RemoteDesktopDecodeQueuePolicy.queuedEncodedByteCount(in: pending), byteBudget)
+    XCTAssertEqual(pending.first?.screenData.sequenceNumber, 4)
+    XCTAssertFalse(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyRejectsSingleFrameLargerThanByteBudget() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    let oversizedBootstrap = makeH264BootstrapScreenData(sequence: 1)
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(oversizedBootstrap),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        maxQueuedEncodedBytes: oversizedBootstrap.imageData.count - 1
+      ),
+      .droppedIncomingFrameExceedingByteBudget
+    )
+    XCTAssertTrue(pending.isEmpty)
+    XCTAssertTrue(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueueBudgetArithmeticDoesNotOverflow() {
+    XCTAssertFalse(
+      RemoteDesktopDecodeQueuePolicy.exceedsEncodedByteBudget(
+        queuedEncodedByteCounts: [Int.max - 2],
+        incomingEncodedBytes: 2,
+        maximumEncodedBytes: Int.max
+      )
+    )
+    XCTAssertTrue(
+      RemoteDesktopDecodeQueuePolicy.exceedsEncodedByteBudget(
+        queuedEncodedByteCounts: [Int.max - 2],
+        incomingEncodedBytes: 3,
+        maximumEncodedBytes: Int.max
+      )
+    )
+    XCTAssertTrue(
+      RemoteDesktopDecodeQueuePolicy.exceedsEncodedByteBudget(
+        queuedEncodedByteCounts: [Int.max],
+        incomingEncodedBytes: 1,
+        maximumEncodedBytes: Int.max
+      )
+    )
+  }
+
+  func testPendingDecodeCompletionRetainsOnlySourceFrameSequenceMetadata() {
+    let completion = RemoteDesktopManager.PendingDecodeCompletion(
+      decoded: nil,
+      decodeFailureReason: "callback-no-image",
+      isStillImageFrame: false,
+      sourceFrameSequenceNumber: 42,
+      frameTraits: RemoteDesktopVideoFrameTraits(
+        normalizedFormat: "h264",
+        isPredictiveVideo: true,
+        isIndependentlyDecodableFrame: false,
+        isDecoderBootstrapFrame: false
+      ),
+      format: "h264",
+      decoder: VideoDecoder(),
+      generation: 7
+    )
+
+    XCTAssertEqual(completion.sourceFrameSequenceNumber, 42)
+    XCTAssertEqual(completion.decodeFailureReason, "callback-no-image")
+    XCTAssertEqual(completion.generation, 7)
+  }
+
+  func testCameraWatchdogFailureIsTypedAndTerminatesVisibleSession() {
+    let failure = CameraRemoteDesktopRuntimeError.watchdogFailed
+    let presentation = CameraTerminalFailurePresentationPolicy.resolve(
+      hadVisibleFrame: true,
+      intendedState: .error(failure.localizedDescription),
+      terminalFailure: failure,
+      cleanupFailure: nil
+    )
+
+    XCTAssertEqual(failure.localizedDescription, "The camera progress watchdog failed.")
+    XCTAssertEqual(presentation.state, .error(failure.localizedDescription))
+    XCTAssertEqual(presentation.message, failure.localizedDescription)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyBoundsContinuousIndependentFramesAndKeepsNewest() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
+    var waitingForSyncFrame = false
+    var sawCompaction = false
+    let frameCount = RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames * 4 + 7
+
+    for index in 0..<frameCount {
+      let frame = makeH264BootstrapScreenData(sequence: UInt64(index))
+      let result = RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(frame),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false
+      )
+      if result == .compactedWithIndependentFrame {
+        sawCompaction = true
+        XCTAssertEqual(pending.count, 1)
+      }
+      XCTAssertLessThanOrEqual(
+        pending.count,
+        RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames
+      )
+      XCTAssertFalse(waitingForSyncFrame)
+    }
+
+    XCTAssertTrue(sawCompaction)
+    XCTAssertEqual(pending.last?.screenData.sequenceNumber, UInt64(frameCount - 1))
+    XCTAssertTrue(pending.last?.traits.isDecoderBootstrapFrame == true)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyCompactsToIndependentFrameWhenProgressStalls() throws {
+    var pending = try (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
+      try classifiedScreenFrame(ScreenData(
+        width: 1280,
+        height: 720,
+        imageData: Data([0x00, 0x00, 0x00, 0x01, 0x41, UInt8(index)]),
+        timestamp: TimeInterval(index),
+        format: "h264"
+      ))
+    }
+    var waitingForSyncFrame = false
+    let newestIndependentFrame = makeH264BootstrapScreenData(sequence: 10_000)
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(newestIndependentFrame),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: true
+      ),
+      .compactedWithIndependentFrame
+    )
+    XCTAssertEqual(pending.count, 1)
+    XCTAssertEqual(pending.first?.screenData.sequenceNumber, newestIndependentFrame.sequenceNumber)
+    XCTAssertTrue(pending.first?.traits.isDecoderBootstrapFrame == true)
+    XCTAssertFalse(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyStillImagesReplaceLatestFrame() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = false
     let stale = ScreenData(
       width: 1206,
@@ -7987,13 +9874,13 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     _ = RemoteDesktopDecodeQueuePolicy.enqueue(
-      stale,
+      try classifiedScreenFrame(stale),
       into: &pending,
       waitingForSyncFrame: &waitingForSyncFrame
     )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        latest,
+        try classifiedScreenFrame(latest),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -8001,32 +9888,32 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertEqual(pending.count, 1)
-    XCTAssertEqual(pending.first?.imageData, latest.imageData)
+    XCTAssertEqual(pending.first?.screenData.imageData, latest.imageData)
     XCTAssertFalse(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyAbsorbsShortBurstWhileDecoderProgresses() {
-    var pending = (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
-      ScreenData(
+  func testRemoteDesktopDecodeQueuePolicyAbsorbsShortBurstWhileDecoderProgresses() throws {
+    var pending = try (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
+      try classifiedScreenFrame(ScreenData(
         width: 1280,
         height: 720,
-        imageData: Data([UInt8(index)]),
+        imageData: Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, UInt8(index)]),
         timestamp: TimeInterval(index),
         format: "hevc"
-      )
+      ))
     }
     var waitingForSyncFrame = false
     let overflow = ScreenData(
       width: 1280,
       height: 720,
-      imageData: Data([0xFE]),
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0xFE]),
       timestamp: 99,
       format: "hevc"
     )
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        overflow,
+        try classifiedScreenFrame(overflow),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame,
         decoderProgressStalled: false
@@ -8037,28 +9924,28 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyEntersWaitingForSyncOnlyWhenProgressStalls() {
-    var pending = (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
-      ScreenData(
+  func testRemoteDesktopDecodeQueuePolicyEntersWaitingForSyncOnlyWhenProgressStalls() throws {
+    var pending = try (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
+      try classifiedScreenFrame(ScreenData(
         width: 1280,
         height: 720,
-        imageData: Data([UInt8(index)]),
+        imageData: Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, UInt8(index)]),
         timestamp: TimeInterval(index),
         format: "hevc"
-      )
+      ))
     }
     var waitingForSyncFrame = false
     let overflow = ScreenData(
       width: 1280,
       height: 720,
-      imageData: Data([0xFE]),
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0xFE]),
       timestamp: 99,
       format: "hevc"
     )
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        overflow,
+        try classifiedScreenFrame(overflow),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame,
         decoderProgressStalled: true
@@ -8069,8 +9956,40 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopDecodeQueuePolicyRecoversWhenSyncFrameArrives() {
-    var pending: [ScreenData] = []
+  func testRemoteDesktopDecodeQueuePolicyPredictiveFrameStillEntersWaitingAtHardLimit() throws {
+    var pending = try (0..<RemoteDesktopDecodeQueuePolicy.hardMaxPredictiveVideoFrames).map { index in
+      try classifiedScreenFrame(ScreenData(
+        width: 1280,
+        height: 720,
+        imageData: Data([0x00, 0x00, 0x00, 0x01, 0x41, UInt8(index)]),
+        timestamp: TimeInterval(index),
+        format: "h264"
+      ))
+    }
+    var waitingForSyncFrame = false
+    let predictiveFrame = ScreenData(
+      width: 1280,
+      height: 720,
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x41, 0xFE]),
+      timestamp: 100,
+      format: "h264"
+    )
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        try classifiedScreenFrame(predictiveFrame),
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame,
+        decoderProgressStalled: false
+      ),
+      .enteredWaitingForSync
+    )
+    XCTAssertTrue(pending.isEmpty)
+    XCTAssertTrue(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueuePolicyRecoversWhenSyncFrameArrives() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = true
     let syncFrame = ScreenData(
       width: 1280,
@@ -8087,19 +10006,19 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        syncFrame,
+        try classifiedScreenFrame(syncFrame),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
       .recoveredWithIndependentFrame
     )
     XCTAssertEqual(pending.count, 1)
-    XCTAssertEqual(pending.first?.imageData, syncFrame.imageData)
+    XCTAssertEqual(pending.first?.screenData.imageData, syncFrame.imageData)
     XCTAssertFalse(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopDecodeQueueDoesNotRecoverFromH264IDRWithoutParameterSets() {
-    var pending: [ScreenData] = []
+  func testRemoteDesktopDecodeQueueDoesNotRecoverFromH264IDRWithoutParameterSets() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = true
     let idrOnlyFrame = ScreenData(
       width: 1280,
@@ -8112,7 +10031,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        idrOnlyFrame,
+        try classifiedScreenFrame(idrOnlyFrame),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -8122,28 +10041,24 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(waitingForSyncFrame)
   }
 
-  func testRemoteDesktopScreenFrameWireDoesNotTrustAdvertisedHEVCSyncWithoutIRAPNAL() {
+  func testRemoteDesktopScreenFrameWireDoesNotTrustAdvertisedHEVCSyncWithoutIRAPNAL() throws {
     let predictiveHEVC = Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0x88])
 
-    XCTAssertFalse(
-      RemoteDesktopScreenFrameWire.containsSyncFrame(
-        format: "hevc",
-        imageData: predictiveHEVC,
-        advertisedSyncFrame: true
-      )
+    let traits = try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+      format: "hevc",
+      imageData: predictiveHEVC
     )
+    XCTAssertFalse(traits.isIndependentlyDecodableFrame)
   }
 
-  func testRemoteDesktopScreenFrameWireDetectsHEVCIRAPWhenAdvertisedFalse() {
+  func testRemoteDesktopScreenFrameWireDetectsHEVCIRAPWhenAdvertisedFalse() throws {
     let hevcIRAP = Data([0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88])
 
-    XCTAssertTrue(
-      RemoteDesktopScreenFrameWire.containsSyncFrame(
-        format: "hevc",
-        imageData: hevcIRAP,
-        advertisedSyncFrame: false
-      )
+    let traits = try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+      format: "hevc",
+      imageData: hevcIRAP
     )
+    XCTAssertTrue(traits.isIndependentlyDecodableFrame)
   }
 
   func testRemoteDesktopScreenFrameWireRejectsMalformedOneByteHEVCNALHeaders() {
@@ -8155,24 +10070,98 @@ final class RegressionHardeningTests: XCTestCase {
       0x00, 0x00, 0x00, 0x01, 0x26
     ])
 
-    XCTAssertFalse(
-      RemoteDesktopScreenFrameWire.containsSyncFrame(
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
         format: "hevc",
-        imageData: malformedIRAP,
-        advertisedSyncFrame: true
+        imageData: malformedIRAP
       )
     )
-    XCTAssertFalse(
-      RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
         format: "hevc",
-        imageData: malformedBootstrap,
-        advertisedSyncFrame: true
+        imageData: malformedBootstrap
       )
     )
   }
 
-  func testRemoteDesktopDecodeQueueRequiresHEVCParameterSetsForSyncRecovery() {
-    var pending: [ScreenData] = []
+  func testRemoteDesktopScreenFrameWireRejectsMaliciousH264AndHEVCNALHeaders() {
+    let maliciousFrames: [(format: String, data: Data)] = [
+      ("h264", Data([0x00, 0x00, 0x00, 0x01, 0xE5, 0x88])),
+      ("h264", Data([0x00, 0x00, 0x00, 0x01, 0x78, 0x88])),
+      ("hevc", Data([0x00, 0x00, 0x00, 0x01, 0xA6, 0x01, 0x88])),
+      ("hevc", Data([0x00, 0x00, 0x00, 0x01, 0x26, 0x00, 0x88])),
+    ]
+
+    for frame in maliciousFrames {
+      XCTAssertThrowsError(
+        try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+          format: frame.format,
+          imageData: frame.data
+        )
+      ) { error in
+        XCTAssertEqual(
+          error as? RemoteDesktopVideoFrameClassificationError,
+          .invalidNALHeader
+        )
+      }
+    }
+  }
+
+  func testRemoteDesktopScreenFrameWireClassifierEnforcesStructuralAndAllocationBounds() {
+    let oversizedAccessUnit = Data(repeating: 0, count: 8 * 1_024 * 1_024 + 1)
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+        format: "h264",
+        imageData: oversizedAccessUnit
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? RemoteDesktopVideoFrameClassificationError,
+        .accessUnitTooLarge(actualBytes: 8 * 1_024 * 1_024 + 1, maximumBytes: 8 * 1_024 * 1_024)
+      )
+    }
+
+    let truncatedLengthPrefixed = Data([0x00, 0x00, 0x00, 0x02, 0x65])
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+        format: "h264",
+        imageData: truncatedLengthPrefixed
+      )
+    )
+
+    var tooManyNALUnits = Data()
+    for _ in 0...512 {
+      tooManyNALUnits.append(contentsOf: [0x00, 0x00, 0x00, 0x01, 0x41])
+    }
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+        format: "h264",
+        imageData: tooManyNALUnits
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? RemoteDesktopVideoFrameClassificationError,
+        .tooManyNALUnits(actual: 513, maximum: 512)
+      )
+    }
+
+    var oversizedSPS = Data([0x00, 0x00, 0x00, 0x01, 0x67])
+    oversizedSPS.append(Data(repeating: 0, count: 65_536))
+    XCTAssertThrowsError(
+      try RemoteDesktopScreenFrameWire.classifyVideoFrame(
+        format: "h264",
+        imageData: oversizedSPS
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? RemoteDesktopVideoFrameClassificationError,
+        .parameterSetTooLarge(actualBytes: 65_537, maximumBytes: 65_536)
+      )
+    }
+  }
+
+  func testRemoteDesktopDecodeQueueRequiresHEVCParameterSetsForSyncRecovery() throws {
+    var pending: [RemoteDesktopClassifiedScreenFrame] = []
     var waitingForSyncFrame = true
     let hevcIRAPWithoutParameterSets = ScreenData(
       width: 2056,
@@ -8185,7 +10174,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        hevcIRAPWithoutParameterSets,
+        try classifiedScreenFrame(hevcIRAPWithoutParameterSets),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
@@ -8210,14 +10199,14 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.enqueue(
-        hevcBootstrap,
+        try classifiedScreenFrame(hevcBootstrap),
         into: &pending,
         waitingForSyncFrame: &waitingForSyncFrame
       ),
       .recoveredWithIndependentFrame
     )
     XCTAssertFalse(waitingForSyncFrame)
-    XCTAssertEqual(pending.first?.imageData, hevcBootstrap.imageData)
+    XCTAssertEqual(pending.first?.screenData.imageData, hevcBootstrap.imageData)
   }
 
   func testRemoteDesktopScreenFrameWireDecodesV2FrameSequenceNumber() {
@@ -8254,9 +10243,84 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(decoded?.height, 1329)
     XCTAssertEqual(decoded?.imageData, payload)
     XCTAssertEqual(decoded?.sequenceNumber, 987_654_321)
+
+    var storage = Data([0xA0, 0xA1, 0xA2])
+    storage.append(wire)
+    storage.append(0xA3)
+    let wireSlice = storage[3..<(3 + wire.count)]
+    XCTAssertEqual(wireSlice.startIndex, 3)
+
+    let slicedDecoded = RemoteDesktopScreenFrameWire.decodeIfPresent(wireSlice)
+    XCTAssertEqual(slicedDecoded?.format, "hevc")
+    XCTAssertEqual(slicedDecoded?.imageData, payload)
+    XCTAssertEqual(slicedDecoded?.sequenceNumber, 987_654_321)
+    XCTAssertNil(RemoteDesktopScreenFrameWire.decodeIfPresent(wireSlice.dropLast()))
+  }
+
+  func testRemoteDesktopAudioChunkWireDecodesNonZeroStartIndexSliceAndRejectsTruncation() {
+    func appendUInt32(_ value: UInt32, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func appendUInt64(_ value: UInt64, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+
+    let magicCookie = Data([0x11, 0x22])
+    let audioPayload = Data([0xDE, 0xAD, 0xBE, 0xEF])
+    var wire = Data()
+    appendUInt32(0x5342_5241, to: &wire)
+    wire.append(2)
+    wire.append(2)
+    wire.append(2)
+    wire.append(0)
+    appendUInt32(48_000, to: &wire)
+    appendUInt32(1_024, to: &wire)
+    appendUInt32(1, to: &wire)
+    appendUInt64(55, to: &wire)
+    appendUInt64(123_500_000, to: &wire)
+    appendUInt32(UInt32(magicCookie.count), to: &wire)
+    appendUInt32(1, to: &wire)
+    appendUInt32(UInt32(audioPayload.count), to: &wire)
+    wire.append(magicCookie)
+    appendUInt32(0, to: &wire)
+    appendUInt32(1_024, to: &wire)
+    appendUInt32(UInt32(audioPayload.count), to: &wire)
+    wire.append(audioPayload)
+
+    var storage = Data([0xB0, 0xB1])
+    storage.append(wire)
+    storage.append(0xB2)
+    let wireSlice = storage[2..<(2 + wire.count)]
+    XCTAssertEqual(wireSlice.startIndex, 2)
+
+    let decoded = RemoteDesktopAudioChunkWire.decodeIfPresent(wireSlice)
+    XCTAssertEqual(decoded?.encoding, .aacLC)
+    XCTAssertEqual(decoded?.sampleRate, 48_000)
+    XCTAssertEqual(decoded?.channelCount, 2)
+    XCTAssertEqual(decoded?.frameCount, 1_024)
+    XCTAssertEqual(decoded?.packetCount, 1)
+    XCTAssertEqual(decoded?.packetDescriptions?.first?.startOffset, 0)
+    XCTAssertEqual(decoded?.packetDescriptions?.first?.variableFramesInPacket, 1_024)
+    XCTAssertEqual(decoded?.packetDescriptions?.first?.dataByteSize, 4)
+    XCTAssertEqual(decoded?.magicCookie, magicCookie)
+    XCTAssertEqual(decoded?.sequenceNumber, 55)
+    XCTAssertEqual(decoded?.sentAt, 123.5)
+    XCTAssertEqual(decoded?.data, audioPayload)
+    XCTAssertNil(RemoteDesktopAudioChunkWire.decodeIfPresent(wireSlice.dropLast()))
   }
 
   func testRemoteDesktopDecodeQueuePolicyRequiresSyncAfterPredictiveSequenceGap() {
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.validatePredictiveSequence(
+        previous: 0,
+        current: 1,
+        isPredictiveVideo: true,
+        isIndependentFrame: false
+      ),
+      .accepted
+    )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.validatePredictiveSequence(
         previous: 100,
@@ -8737,20 +10801,6 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testP2PConnectionManagerStrictInboundRejectsDecodeOnlyQABI1() {
-    let manager = P2PConnectionManager.instance
-    let original = PQCCryptoManager.instance.enforcePQCHandshake
-    defer { PQCCryptoManager.instance.enforcePQCHandshake = original }
-    PQCCryptoManager.instance.enforcePQCHandshake = true
-
-    XCTAssertTrue(
-      manager.testOnlyStrictPQCRejectsInboundHandshake(
-        supportedSuites: [.qperiaptContextBound]
-      )
-    )
-  }
-
-  @MainActor
   func testP2PConnectionManagerStrictInboundRejectsWhenLocalPQCUnavailable() {
     let manager = P2PConnectionManager.instance
     let original = PQCCryptoManager.instance.enforcePQCHandshake
@@ -8881,8 +10931,8 @@ final class RegressionHardeningTests: XCTestCase {
       activeSuite: .x25519Ed25519,
       supportedSuites: [.x25519Ed25519]
     )
-    let initiatorIdentity = Data([0x10, 0x20, 0x30, 0x40])
-    let responderIdentity = Data([0x50, 0x60, 0x70, 0x80])
+    let initiatorIdentity = Data(repeating: 0x10, count: 1_952)
+    let responderIdentity = Data(repeating: 0x50, count: 1_952)
     let transport = CaptureOnlyDiscoveryTransport()
     let initiator = HandshakeDriver(
       transport: transport,
@@ -8890,6 +10940,7 @@ final class RegressionHardeningTests: XCTestCase {
       protocolSignatureProvider: signatureProvider,
       identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xAA]))),
       sigAAlgorithm: .mlDSA65,
+      protocolSigningKeyProtection: .softwareKeychain,
       identityPublicKey: initiatorIdentity
     )
     let handshakeTask = Task {
@@ -8945,6 +10996,121 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  func testLocalHandshakeContextRetainsValidatedResponderCapabilities() async throws {
+    let signatureProvider = LocalHandshakeTestSignatureProvider()
+    let provider = LocalHandshakeTestCryptoProvider(
+      tier: .classic,
+      activeSuite: .x25519Ed25519,
+      supportedSuites: [.x25519Ed25519]
+    )
+    let initiator = HandshakeContext(
+      role: .initiator,
+      cryptoProvider: provider,
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0xA1]))),
+      identityPublicKey: Data(repeating: 0x01, count: 1_952),
+      policy: .default
+    )
+    let responder = HandshakeContext(
+      role: .responder,
+      cryptoProvider: provider,
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0xB1]))),
+      identityPublicKey: Data(repeating: 0x05, count: 1_952),
+      policy: .default
+    )
+
+    let messageA = try await initiator.buildMessageA()
+    let suiteBeforeMessageB = await initiator.negotiatedSuite
+    XCTAssertNil(
+      suiteBeforeMessageB,
+      "An offered suite must not be published as negotiated before MessageB validation"
+    )
+    try await responder.processMessageA(messageA)
+    let response = try await responder.buildMessageB()
+    defer { response.sharedSecret.zeroize() }
+    // Exercise nested Data slices produced by the real wire decoder. Their
+    // startIndex is not guaranteed to be zero.
+    let decodedMessageB = try HandshakeMessageB.decode(from: response.message.encoded)
+    _ = try await initiator.processMessageB(decodedMessageB)
+
+    let capabilities = await initiator.peerCapabilities
+    XCTAssertTrue(capabilities?.supportedKEM.contains("X25519") == true)
+    XCTAssertTrue(capabilities?.supportedAuthProfiles.contains("Classic") == true)
+    await initiator.zeroize()
+    await responder.zeroize()
+  }
+
+  func testLocalHandshakeContextRejectsResponderCapabilitiesThatContradictSelectedSuite()
+    async throws
+  {
+    let signatureProvider = LocalHandshakeTestSignatureProvider()
+    let provider = LocalHandshakeTestCryptoProvider(
+      tier: .classic,
+      activeSuite: .x25519Ed25519,
+      supportedSuites: [.x25519Ed25519]
+    )
+    let initiator = HandshakeContext(
+      role: .initiator,
+      cryptoProvider: provider,
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0xA2]))),
+      identityPublicKey: Data(repeating: 0x11, count: 1_952),
+      policy: .default
+    )
+    _ = try await initiator.buildMessageA()
+
+    let contradictoryCapabilities = CryptoCapabilities(
+      supportedKEM: ["ML-KEM-768"],
+      supportedSignature: ["Ed25519"],
+      supportedAuthProfiles: ["Classic"],
+      supportedAEAD: ["AES-256-GCM"],
+      pqcAvailable: false,
+      platformVersion: "iOS 26.0",
+      providerType: .classic
+    )
+    let encapsulatedKey = Data(repeating: 0x31, count: 32)
+    let sealedBox = HPKESealedBox(
+      encapsulatedKey: encapsulatedKey,
+      ciphertext: try contradictoryCapabilities.deterministicEncode(),
+      tag: Data(repeating: 0x32, count: 16),
+      nonce: Data(repeating: 0x33, count: 12)
+    )
+    let responderIdentity = IdentityPublicKeys(
+      protocolPublicKey: Data(repeating: 0x21, count: 1_952),
+      protocolAlgorithm: signatureProvider.signatureAlgorithm.wire,
+      secureEnclavePublicKey: nil
+    )
+    let messageB = HandshakeMessageB(
+      selectedSuite: .x25519Ed25519,
+      responderShare: encapsulatedKey,
+      serverNonce: Data(repeating: 0x34, count: HandshakeConstants.nonceSize),
+      encryptedPayload: sealedBox,
+      signature: Data([0x35]),
+      identityPublicKeys: responderIdentity
+    )
+
+    do {
+      _ = try await initiator.processMessageB(messageB)
+      XCTFail("Authenticated capabilities that omit the selected KEM must fail closed")
+    } catch let HandshakeError.failed(reason) {
+      guard case .invalidMessageFormat(let message) = reason else {
+        XCTFail("Expected invalidMessageFormat, got \(reason)")
+        return
+      }
+      XCTAssertTrue(message.contains("Responder capabilities do not match MessageB"))
+    }
+    let acceptedCapabilities = await initiator.peerCapabilities
+    XCTAssertNil(acceptedCapabilities)
+    let acceptedAuthority = await initiator.getAuthenticatedRemoteAuthority()
+    XCTAssertNil(acceptedAuthority)
+    let isZeroized = await initiator.isZeroized
+    let negotiatedSuite = await initiator.negotiatedSuite
+    XCTAssertTrue(isZeroized)
+    XCTAssertNil(negotiatedSuite)
+    await initiator.zeroize()
+  }
+
   func testHandshakeDriverClearsAuthenticatedAuthorityAfterCancellation() async throws {
     let provider = LocalHandshakeTestCryptoProvider(
       tier: .classic,
@@ -8952,8 +11118,8 @@ final class RegressionHardeningTests: XCTestCase {
       supportedSuites: [.x25519Ed25519]
     )
     let signatureProvider = LocalHandshakeTestSignatureProvider()
-    let initiatorIdentity = Data([0x01, 0x23, 0x45, 0x67])
-    let responderIdentity = Data([0x89, 0xAB, 0xCD, 0xEF])
+    let initiatorIdentity = Data(repeating: 0x01, count: 1_952)
+    let responderIdentity = Data(repeating: 0x89, count: 1_952)
     let transport = CaptureOnlyDiscoveryTransport()
     let initiator = HandshakeDriver(
       transport: transport,
@@ -8961,6 +11127,7 @@ final class RegressionHardeningTests: XCTestCase {
       protocolSignatureProvider: signatureProvider,
       identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xCC]))),
       sigAAlgorithm: .mlDSA65,
+      protocolSigningKeyProtection: .softwareKeychain,
       identityPublicKey: initiatorIdentity
     )
     let handshakeTask = Task {
@@ -9029,12 +11196,12 @@ final class RegressionHardeningTests: XCTestCase {
     let source = try crossNetworkWebRTCManagerSource()
     let highThroughputPublisher = try sourceSlice(
       from: "private func publishHighThroughputRemoteDesktopPayloadIfCurrent",
-      to: "@discardableResult\n    private func handleDecodedControlPlaintext",
+      to: "private func handleDecodedControlPlaintext(",
       in: source
     )
     let receiveLoopProbe = try sourceSlice(
       from: "let openedPayload = try await decrypt(ciphertext: trafficUnwrapped, with: keys)",
-      to: "self.appendSmokeTrace(\"rx frame len=\\(length) keys=\\(hasSessionKeys)\")",
+      to: "self.appendSmokeTrace(\"rx frame len=\\(length) keys=false\")",
       in: source
     )
     let screenPublisher = try sourceSlice(
@@ -9275,7 +11442,8 @@ private enum LocalHandshakeAuthorityHelper {
     )
     return AuthenticatedRemoteAuthority(
       protocolSigningAlgorithm: identityKeys.protocolAlgorithm.rawValue,
-      protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+      protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased(),
+      protocolPublicKeyBytes: identityKeys.protocolPublicKey
     )
   }
 }

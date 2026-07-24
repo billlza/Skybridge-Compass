@@ -53,6 +53,7 @@
 		<string>_sftp-ssh._tcp</string>
 		<string>_smb._tcp</string>
 		<string>_http._tcp</string>
+		<string>_rtsp._tcp</string>
 		<string>_rdlink._tcp</string>
 		<string>_androidshare._tcp</string>
 	</array>

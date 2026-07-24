@@ -50,6 +50,7 @@ HEAD_BRANCH="release/os27"
 ARTIFACT_NAMES=(
   "real-device-connectivity-matrix-public-redacted"
   "real-device-p2p-remote-smoke-public-redacted"
+  "real-device-webrtc-smoke-public-redacted"
   "real-device-file-transfer-smoke-public-redacted"
   "real-device-p2p-security-notice-public-redacted"
   "local-webrtc-security-notice-public-redacted"
@@ -165,6 +166,7 @@ run_target() {
       --artifact "${ARTIFACT_NAMES[3]}" \
       --artifact "${ARTIFACT_NAMES[4]}" \
       --artifact "${ARTIFACT_NAMES[5]}" \
+      --artifact "${ARTIFACT_NAMES[6]}" \
       --require-public-redacted-artifacts \
       --provenance-output "${output_path}" \
       "$@"

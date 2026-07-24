@@ -246,8 +246,11 @@ public enum HandshakeConstants {
     public static let maxTimeout: Duration = .seconds(120)
     public static let timeoutTolerance: Duration = .milliseconds(100)
     public static let protocolVersion: UInt8 = 1
-    public static let maxMessageALength = 8192
-    public static let maxMessageBLength = 16384
+    /// 16 KiB admits a bounded ML-DSA-87 MessageA (2,592-byte identity key,
+    /// 4,627-byte signature, and up to two PQC key shares) without allowing an
+    /// unbounded allocation surface at the network decoder.
+    public static let maxMessageALength = 16 * 1024
+    public static let maxMessageBLength = 16 * 1024
     public static let maxSupportedSuites: UInt16 = 8
     public static let maxSupportedAuthProfiles: UInt8 = 3
     public static let maxKeyShareCount: UInt16 = 2

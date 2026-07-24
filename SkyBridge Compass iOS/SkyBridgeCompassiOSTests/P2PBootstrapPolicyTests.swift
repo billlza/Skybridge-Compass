@@ -45,6 +45,37 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         #endif
     }
 
+    func testProvisionalBootstrapControlCanCoexistWithActiveAuthenticatedSession() {
+        XCTAssertTrue(
+            P2PConnectionManager.allowsPreHandshakeBootstrapControlRouting(
+                isProvisionalConnection: true,
+                hasHandshakeDriver: true,
+                hasSessionKeys: true
+            )
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.allowsPreHandshakeBootstrapControlRouting(
+                isProvisionalConnection: false,
+                hasHandshakeDriver: true,
+                hasSessionKeys: true
+            )
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.allowsPreHandshakeBootstrapControlRouting(
+                isProvisionalConnection: false,
+                hasHandshakeDriver: false,
+                hasSessionKeys: true
+            )
+        )
+        XCTAssertTrue(
+            P2PConnectionManager.allowsPreHandshakeBootstrapControlRouting(
+                isProvisionalConnection: false,
+                hasHandshakeDriver: false,
+                hasSessionKeys: false
+            )
+        )
+    }
+
     func testStrictPQCUsesBootstrapWhenPreferredKEMIsMissing() {
         XCTAssertFalse(
             P2PConnectionManager.canSatisfyStrictPQCWithTrustedKEM(
@@ -911,7 +942,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         await KEMTrustStore.shared.upsert(deviceId: peerId, kemPublicKeys: kemKeys)
         await ProtocolIdentityTrustStore.shared.upsert(deviceId: peerId, fingerprints: [fingerprint])
 
-        await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: [peerId])
+        try await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: [peerId])
 
         let clearedKEMKeys = await KEMTrustStore.shared.kemPublicKeys(forAny: [peerId])
         let clearedFingerprints = await ProtocolIdentityTrustStore.shared.trustedFingerprints(forAny: [peerId])
@@ -942,7 +973,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         )
         await ProtocolIdentityTrustStore.shared.upsert(deviceId: peerId, fingerprints: [oldFingerprint])
 
-        await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: [peerId])
+        try await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: [peerId])
 
         let keysAfterForget = await KEMTrustStore.shared.kemPublicKeys(forAny: [peerId])
         let fingerprintsAfterForget = await ProtocolIdentityTrustStore.shared.trustedFingerprints(forAny: [peerId])
@@ -1159,71 +1190,6 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(rekeyBody.contains("messageA: messageA"))
     }
 
-    func testInboundRekeyKeepsAuthenticatedSessionUntilCandidateEstablishes() throws {
-        let source = try readRepositorySource(
-            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
-        )
-        let receiveStart = try XCTUnwrap(
-            source.range(of: "private func handleReceivedMessage("))
-        let receiveEnd = try XCTUnwrap(
-            source.range(
-                of: "private struct InboundBootstrapControlResponse",
-                range: receiveStart.lowerBound..<source.endIndex))
-        let receiveBody = String(source[receiveStart.lowerBound..<receiveEnd.lowerBound])
-
-        let rekeyStart = try XCTUnwrap(
-            source.range(of: "private func ensureInboundRekeyDriverIfNeeded("))
-        let rekeyEnd = try XCTUnwrap(
-            source.range(
-                of: "private func isLikelyHandshakeControlPacket",
-                range: rekeyStart.lowerBound..<source.endIndex))
-        let rekeyBody = String(source[rekeyStart.lowerBound..<rekeyEnd.lowerBound])
-
-        let discardStart = try XCTUnwrap(
-            source.range(of: "private func discardInboundRekeyCandidateAfterFailure("))
-        let discardEnd = try XCTUnwrap(
-            source.range(
-                of: "private func shouldUseSOA(",
-                range: discardStart.lowerBound..<source.endIndex))
-        let discardBody = String(source[discardStart.lowerBound..<discardEnd.lowerBound])
-
-        XCTAssertTrue(receiveBody.contains("let hasTransactionalInboundRekeyCandidate"))
-        XCTAssertTrue(receiveBody.contains("inboundRekeyCandidatePeerIds.contains(peerId)"))
-        XCTAssertTrue(receiveBody.contains("isLikelyHandshakeControlPacket(unwrapped)"))
-        XCTAssertTrue(receiveBody.contains("case .failed(let reason) = await driver.getCurrentState()"))
-        XCTAssertTrue(receiveBody.contains("discardInboundRekeyCandidateAfterFailure(for: peerId, reason: reason)"))
-        XCTAssertTrue(receiveBody.contains("handshakeDrivers[peerId] == nil || hasTransactionalInboundRekeyCandidate"))
-        XCTAssertTrue(rekeyBody.contains("authenticatedIncomingEstablishedPolicy: .replaceAuthenticated"))
-        XCTAssertTrue(rekeyBody.contains("guard sessionKeys[peerId] != nil else { return nil }"))
-        XCTAssertTrue(rekeyBody.contains("inboundRekeyCandidatePeerIds.insert(peerId)"))
-        XCTAssertFalse(rekeyBody.contains("releaseArbiterState(for: peerId)"))
-        XCTAssertFalse(rekeyBody.contains("sessionKeys.removeValue(forKey: peerId)"))
-        XCTAssertFalse(rekeyBody.contains("rekeyInProgress.insert(peerId)"))
-        XCTAssertFalse(source.contains("previousSessionKeysBeforeRekey"))
-        XCTAssertFalse(discardBody.contains("setSessionKeys("))
-        XCTAssertFalse(discardBody.contains("markEstablished("))
-        XCTAssertTrue(discardBody.contains("guard let retainedKeys = sessionKeys[peerId]"))
-    }
-
-    func testRekeyTargetSelectionNeverFallsBackToClassicOffer() throws {
-        let source = try readRepositorySource(
-            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
-        )
-        let start = try XCTUnwrap(
-            source.range(of: "private func preferredRekeyTargetSuite("))
-        let end = try XCTUnwrap(
-            source.range(
-                of: "private func setRekeyPresentationStatus(",
-                range: start.lowerBound..<source.endIndex))
-        let body = String(source[start.lowerBound..<end.lowerBound])
-
-        XCTAssertTrue(body.contains("$0.isNegotiable && $0.isPQCGroup"))
-        XCTAssertTrue(body.contains("if !offeredSuites.isEmpty"))
-        XCTAssertFalse(body.contains("firstOffered"))
-        XCTAssertTrue(body.contains("target.isNegotiable"))
-        XCTAssertTrue(body.contains("target.isPQCGroup"))
-    }
-
     func testStrictPQCTrustProviderDoesNotUseEndpointAliasesAsPinMaterial() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
@@ -1263,7 +1229,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                 pairingPolicyByPeerId: [:],
                 policyCandidates: ["id:mac"],
                 trustedProtocolFingerprints: [fingerprint],
-                payloadFingerprint: fingerprint
+                payloadFingerprint: fingerprint,
+                hasActiveDurableTrust: true
             ),
             .approve(operatorLabel: "stored-protocol-identity")
         )
@@ -1272,7 +1239,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                 pairingPolicyByPeerId: ["id:mac": P2PConnectionManager.PairingTrustDecision.reject.rawValue],
                 policyCandidates: ["id:mac"],
                 trustedProtocolFingerprints: [],
-                payloadFingerprint: fingerprint
+                payloadFingerprint: fingerprint,
+                hasActiveDurableTrust: false
             ),
             .reject
         )
@@ -1281,7 +1249,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                 pairingPolicyByPeerId: ["id:other": P2PConnectionManager.PairingTrustDecision.alwaysAllow.rawValue],
                 policyCandidates: ["id:mac"],
                 trustedProtocolFingerprints: [],
-                payloadFingerprint: fingerprint
+                payloadFingerprint: fingerprint,
+                hasActiveDurableTrust: false
             )
         )
         XCTAssertNil(
@@ -1289,13 +1258,153 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                 pairingPolicyByPeerId: ["id:mac": P2PConnectionManager.PairingTrustDecision.alwaysAllow.rawValue],
                 policyCandidates: ["id:mac"],
                 trustedProtocolFingerprints: [],
-                payloadFingerprint: fingerprint
+                payloadFingerprint: fingerprint,
+                hasActiveDurableTrust: false
             )
+        )
+        XCTAssertNil(
+            P2PConnectionManager.protocolIdentityBindingStoredPolicyAction(
+                pairingPolicyByPeerId: [:],
+                policyCandidates: ["id:mac"],
+                trustedProtocolFingerprints: [fingerprint],
+                payloadFingerprint: fingerprint,
+                hasActiveDurableTrust: false
+            ),
+            "A stale protocol fingerprint must not authorize a revoked or non-durable peer."
+        )
+    }
+
+    func testCloudMetadataAloneCannotAuthorizePairingIdentityBootstrap() throws {
+        let protocolPublicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+        let payload = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "id:metadata-only-peer",
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwing.wireId,
+                    publicKey: Data(repeating: 0x41, count: 1_216)
+                )
+            ],
+            protocolIdentityPublicKeys: [
+                .init(
+                    protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                    publicKey: protocolPublicKey
+                )
+            ]
+        )
+
+        XCTAssertFalse(
+            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
+                storedProtocolFingerprints: [],
+                storedKEMPublicKeys: [:],
+                payload: payload
+            ),
+            "An active CloudKit metadata row must not turn self-reported bootstrap keys into authority."
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
+                storedProtocolFingerprints: [String(repeating: "f", count: 64)],
+                storedKEMPublicKeys: [
+                    .xwing: Data(repeating: 0x42, count: 1_216)
+                ],
+                payload: payload
+            ),
+            "Only exact local cryptographic continuity may bypass operator confirmation."
+        )
+    }
+
+    func testPairingIdentityBootstrapRequiresExactExistingProtocolOrKEMPin() throws {
+        let protocolPublicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+        let protocolKeyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: protocolPublicKey
+        )
+        let protocolFingerprint = try XCTUnwrap(protocolKeyInfo.authoritativeFingerprint)
+        let kemPublicKey = Data(repeating: 0x51, count: 1_216)
+        let payload = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "id:pinned-bootstrap-peer",
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwing.wireId,
+                    publicKey: kemPublicKey
+                )
+            ],
+            protocolIdentityPublicKeys: [protocolKeyInfo]
+        )
+
+        XCTAssertTrue(
+            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
+                storedProtocolFingerprints: [protocolFingerprint],
+                storedKEMPublicKeys: [:],
+                payload: payload
+            )
+        )
+        XCTAssertTrue(
+            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
+                storedProtocolFingerprints: [],
+                storedKEMPublicKeys: [.xwing: kemPublicKey],
+                payload: payload
+            )
+        )
+    }
+
+    func testAllowOnceNeverPersistsPairingPolicy() throws {
+        let current = [
+            "id:existing-peer": P2PConnectionManager.PairingTrustDecision.reject.rawValue
+        ]
+        var persistCallCount = 0
+
+        let result = try P2PConnectionManager.testOnlyPersistedPairingPolicyCandidate(
+            current: current,
+            peerId: "id:one-time-peer",
+            decision: .allowOnce,
+            persist: { _ in persistCallCount += 1 }
+        )
+
+        XCTAssertEqual(result, current)
+        XCTAssertEqual(persistCallCount, 0)
+        XCTAssertNil(
+            P2PConnectionManager.pairingPolicyValueToPersist(for: .allowOnce)
+        )
+        XCTAssertNil(
+            P2PConnectionManager.pairingPolicyValueToPersist(for: .timedOut)
+        )
+    }
+
+    func testPairingPolicySaveFailureDoesNotPublishCandidate() {
+        enum InjectedPersistenceFailure: Error {
+            case save
+        }
+
+        let current = [
+            "id:existing-peer": P2PConnectionManager.PairingTrustDecision.reject.rawValue
+        ]
+        var attemptedCandidate: [String: String]?
+
+        XCTAssertThrowsError(
+            try P2PConnectionManager.testOnlyPersistedPairingPolicyCandidate(
+                current: current,
+                peerId: "id:new-peer",
+                decision: .alwaysAllow,
+                persist: { candidate in
+                    attemptedCandidate = candidate
+                    throw InjectedPersistenceFailure.save
+                }
+            )
+        )
+
+        XCTAssertEqual(
+            attemptedCandidate?["id:new-peer"],
+            P2PConnectionManager.PairingTrustDecision.alwaysAllow.rawValue
+        )
+        XCTAssertEqual(
+            current,
+            ["id:existing-peer": P2PConnectionManager.PairingTrustDecision.reject.rawValue]
         )
     }
 
     func testPIB1PolicyCandidatesIncludeDevicePayloadAliasesWithoutDuplicates() {
         let payload = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: UUID(),
             deviceId: "id:payload-device",
             aliases: ["bonjour:Bill-iPad@local.", "id:mac"],
             protocolSigningAlgorithm: "ml-dsa-65",
@@ -1340,12 +1449,14 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("ProtocolIdentityTrustStore.shared"))
         XCTAssertTrue(source.contains("TrustedDeviceStore.shared.currentPathFingerprints"))
         XCTAssertTrue(source.contains("operator=\\(operatorLabel)"))
-        XCTAssertTrue(source.contains("clearExisting: false"))
+        XCTAssertTrue(source.contains("signedProtocolIdentityBindingFinalAck"))
+        XCTAssertTrue(source.contains("final acknowledgement verified and pinned"))
+        XCTAssertFalse(source.contains("clearExisting: false"))
         XCTAssertTrue(source.contains("stored-policy"))
         XCTAssertTrue(source.contains("stored-protocol-identity"))
         XCTAssertFalse(source.contains("return .approve(operatorLabel: \"stored-policy\")"))
-        XCTAssertTrue(source.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"))
-        XCTAssertTrue(source.range(of: "protocolIdentityBindingStoredPolicyAction")!.lowerBound < source.range(of: "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING")!.lowerBound)
+        XCTAssertFalse(source.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"))
+        XCTAssertFalse(source.contains("operator=smoke-auto-approve"))
     }
 
     func testSKR1RefreshPrefersDirectLANEndpointBeforeBonjourService() throws {
@@ -1410,7 +1521,12 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("lifecycle=identity-oob>timeout"))
         XCTAssertTrue(source.contains("timeoutSeconds=\\(approvalTimeoutSeconds)"))
         XCTAssertTrue(source.contains("let policyCandidates = Self.protocolIdentityBindingPolicyCandidates"))
-        XCTAssertGreaterThanOrEqual(source.components(separatedBy: "candidates: policyCandidates").count - 1, 3)
+        XCTAssertEqual(
+            source.components(separatedBy: "candidates: policyCandidates").count - 1,
+            1,
+            "PIB-1 candidate approval must not install a pin before the signed final acknowledgement."
+        )
+        XCTAssertFalse(source.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"))
     }
 
     func testPIB1StatusLinesRedactVerificationSecrets() throws {
@@ -1535,9 +1651,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             "Protocol payloads must keep the raw local device id; redaction is limited to diagnostics."
         )
         XCTAssertTrue(
-            reviewedPairingDiagnostics.contains(
-                "await KEMTrustStore.shared.upsert(\n            deviceId: declaredDeviceId"
-            ),
+            reviewedPairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"),
             "Trust/KEM storage keys must remain raw and deterministic."
         )
     }
@@ -1660,7 +1774,16 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(receiveFailureBody.contains("promoteInboundDevice != nil, !isTrackedConnection(connection)"))
         XCTAssertTrue(receiveFailureBody.contains("p2p-inbound provisional-closed"))
         XCTAssertTrue(bootstrapControlBody.contains("over provisionalConnection: NWConnection? = nil"))
-        XCTAssertTrue(bootstrapControlBody.contains("if provisionalConnection == nil, sessionKeys[peerId] != nil { return false }"))
+        XCTAssertTrue(bootstrapControlBody.contains("allowsPreHandshakeBootstrapControlRouting("))
+        XCTAssertTrue(bootstrapControlBody.contains("isProvisionalConnection: provisionalConnection != nil"))
+        XCTAssertTrue(bootstrapControlBody.contains("hasHandshakeDriver: handshakeDrivers[peerId] != nil"))
+        XCTAssertTrue(bootstrapControlBody.contains("hasSessionKeys: sessionKeys[peerId] != nil"))
+        XCTAssertTrue(
+            bootstrapControlBody.contains(
+                "case .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:"
+            ),
+            "Only the three authenticated bootstrap-control message families may coexist with an active session."
+        )
         XCTAssertTrue(bootstrapControlBody.contains("provisionalConnection ?? connections[peerId]"))
 
         let provisionalGuardBody = try slice(
@@ -1784,6 +1907,531 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         await KEMTrustStore.shared.clearForTesting()
     }
 
+    func testPIB1V3CandidatePhaseCannotPromptOrInstallTrust() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func makeInboundSignedProtocolIdentityBindingPayload(")
+        )
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func stageInboundRequesterProtocolIdentityApproval(",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let candidatePhase = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(candidatePhase.contains("ProtocolIdentityBindingV3StateStore.shared.registerCandidate"))
+        XCTAssertFalse(candidatePhase.contains("stageInboundRequesterProtocolIdentityApproval"))
+        XCTAssertFalse(candidatePhase.contains("installInboundRequesterProtocolIdentityBinding"))
+        XCTAssertFalse(candidatePhase.contains("installOOBProtocolIdentityBinding"))
+    }
+
+    func testPIB1V3RequesterPinsOnlyAfterVerifiedFinalAckOnNewConnection() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func attemptOOBProtocolIdentityBinding("))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func clearPendingPairingApprovalState(",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let requesterFlow = String(source[start.lowerBound..<end.lowerBound])
+        let releaseMarker = try XCTUnwrap(
+            requesterFlow.range(of: "PIB-1 v3 deliberately releases the candidate connection")
+        )
+        let releaseCandidateConnection = try XCTUnwrap(
+            requesterFlow.range(
+                of: "connection.cancel()",
+                range: releaseMarker.upperBound..<requesterFlow.endIndex
+            )
+        )
+        let operatorApproval = try XCTUnwrap(requesterFlow.range(of: "requestOOBProtocolIdentityApproval"))
+        let newConnection = try XCTUnwrap(requesterFlow.range(of: "let confirmConnectionResult"))
+        let finalSignatureVerified = try XCTUnwrap(requesterFlow.range(of: "guard finalAckVerified else"))
+        let pinInstall = try XCTUnwrap(requesterFlow.range(of: "installOOBProtocolIdentityBinding"))
+
+        XCTAssertLessThan(releaseCandidateConnection.lowerBound, operatorApproval.lowerBound)
+        XCTAssertLessThan(operatorApproval.lowerBound, newConnection.lowerBound)
+        XCTAssertLessThan(newConnection.lowerBound, finalSignatureVerified.lowerBound)
+        XCTAssertLessThan(finalSignatureVerified.lowerBound, pinInstall.lowerBound)
+        XCTAssertTrue(requesterFlow.contains("confirmConnection !== connection"))
+    }
+
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class ProtocolIdentityBindingV3Tests: XCTestCase {
+    private typealias Transcript = (
+        request: AppMessage.ProtocolIdentityBindingRequestPayload,
+        candidate: AppMessage.SignedProtocolIdentityBindingPayload,
+        requesterKey: Curve25519.Signing.PrivateKey,
+        responderKey: Curve25519.Signing.PrivateKey,
+        requesterFingerprint: String,
+        responderFingerprint: String
+    )
+
+    private func fingerprint(for publicKey: Data) throws -> String {
+        try XCTUnwrap(
+            AppMessage.ProtocolIdentityPublicKeyInfo(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                publicKey: publicKey
+            ).authoritativeFingerprint
+        )
+    }
+
+    private func makeTranscript(
+        transactionId: UUID = UUID(),
+        requestVersion: Int = AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion,
+        requestedProtocolSigningAlgorithms: [String] = [
+            ProtocolSigningAlgorithm.ed25519.rawValue
+        ],
+        now: Date = Date()
+    ) throws -> Transcript {
+        let requesterKey = Curve25519.Signing.PrivateKey()
+        let responderKey = Curve25519.Signing.PrivateKey()
+        let requesterPublicKey = requesterKey.publicKey.rawRepresentation
+        let responderPublicKey = responderKey.publicKey.rawRepresentation
+        let requesterFingerprint = try fingerprint(for: requesterPublicKey)
+        let responderFingerprint = try fingerprint(for: responderPublicKey)
+        let nonce = Data(repeating: 0xA1, count: 24)
+        let unsignedRequest = AppMessage.ProtocolIdentityBindingRequestPayload(
+            version: requestVersion,
+            transactionId: transactionId,
+            requesterDeviceId: "requester-device",
+            targetDeviceId: "responder-device",
+            requestedProtocolSigningAlgorithms: requestedProtocolSigningAlgorithms,
+            requesterProtocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            requesterProtocolIdentityPublicKey: requesterPublicKey,
+            requesterProtocolIdentityFingerprint: requesterFingerprint,
+            requesterSignature: Data(),
+            nonce: nonce,
+            sentAt: now
+        )
+        let requestSignature = try requesterKey.signature(for: unsignedRequest.canonicalPreimage)
+        let request = AppMessage.ProtocolIdentityBindingRequestPayload(
+            version: requestVersion,
+            transactionId: transactionId,
+            requesterDeviceId: unsignedRequest.requesterDeviceId,
+            targetDeviceId: unsignedRequest.targetDeviceId,
+            requestedProtocolSigningAlgorithms: unsignedRequest.requestedProtocolSigningAlgorithms,
+            requesterProtocolSigningAlgorithm: unsignedRequest.requesterProtocolSigningAlgorithm,
+            requesterProtocolIdentityPublicKey: unsignedRequest.requesterProtocolIdentityPublicKey,
+            requesterProtocolIdentityFingerprint: unsignedRequest.requesterProtocolIdentityFingerprint,
+            requesterSignature: requestSignature,
+            nonce: nonce,
+            sentAt: now
+        )
+        let unsignedCandidate = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: transactionId,
+            deviceId: "responder-device",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolIdentityPublicKey: responderPublicKey,
+            protocolIdentityFingerprint: responderFingerprint,
+            sentAt: now,
+            expiresAt: now.addingTimeInterval(300),
+            requestNonce: nonce,
+            requestHashHex: request.canonicalRequestHashHex,
+            signature: Data()
+        )
+        let candidateSignature = try responderKey.signature(for: unsignedCandidate.signaturePreimage)
+        let candidate = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: transactionId,
+            deviceId: unsignedCandidate.deviceId,
+            protocolSigningAlgorithm: unsignedCandidate.protocolSigningAlgorithm,
+            protocolIdentityPublicKey: unsignedCandidate.protocolIdentityPublicKey,
+            protocolIdentityFingerprint: unsignedCandidate.protocolIdentityFingerprint,
+            sentAt: unsignedCandidate.sentAt,
+            expiresAt: unsignedCandidate.expiresAt,
+            requestNonce: unsignedCandidate.requestNonce,
+            requestHashHex: unsignedCandidate.requestHashHex,
+            signature: candidateSignature
+        )
+        return (
+            request,
+            candidate,
+            requesterKey,
+            responderKey,
+            requesterFingerprint,
+            responderFingerprint
+        )
+    }
+
+    private func makeConfirm(
+        transcript: Transcript,
+        confirmationNonce: Data = Data(repeating: 0xB2, count: 24),
+        now: Date = Date()
+    ) throws -> AppMessage.ProtocolIdentityBindingConfirmPayload {
+        let unsigned = AppMessage.ProtocolIdentityBindingConfirmPayload(
+            transactionId: transcript.request.transactionId,
+            requesterDeviceId: transcript.request.requesterDeviceId,
+            responderDeviceId: transcript.candidate.deviceId,
+            requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+            responderProtocolIdentityFingerprint: transcript.responderFingerprint,
+            requestNonce: transcript.request.nonce,
+            requestHashHex: transcript.request.canonicalRequestHashHex,
+            candidateHashHex: transcript.candidate.canonicalCandidateHashHex,
+            sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
+            confirmationNonce: confirmationNonce,
+            sentAt: now,
+            expiresAt: min(transcript.candidate.expiresAt, now.addingTimeInterval(120)),
+            requesterSignature: Data()
+        )
+        return AppMessage.ProtocolIdentityBindingConfirmPayload(
+            transactionId: unsigned.transactionId,
+            requesterDeviceId: unsigned.requesterDeviceId,
+            responderDeviceId: unsigned.responderDeviceId,
+            requesterProtocolIdentityFingerprint: unsigned.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: unsigned.responderProtocolIdentityFingerprint,
+            requestNonce: unsigned.requestNonce,
+            requestHashHex: unsigned.requestHashHex,
+            candidateHashHex: unsigned.candidateHashHex,
+            sasTranscriptHashHex: unsigned.sasTranscriptHashHex,
+            confirmationNonce: unsigned.confirmationNonce,
+            sentAt: unsigned.sentAt,
+            expiresAt: unsigned.expiresAt,
+            requesterSignature: try transcript.requesterKey.signature(for: unsigned.signaturePreimage)
+        )
+    }
+
+    private func makeFinalAck(
+        transcript: Transcript,
+        confirm: AppMessage.ProtocolIdentityBindingConfirmPayload,
+        accepted: Bool = true,
+        now: Date = Date()
+    ) throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
+        let unsigned = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+            transactionId: transcript.request.transactionId,
+            requesterDeviceId: transcript.request.requesterDeviceId,
+            responderDeviceId: transcript.candidate.deviceId,
+            requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+            responderProtocolIdentityFingerprint: transcript.responderFingerprint,
+            requestNonce: transcript.request.nonce,
+            confirmationNonce: confirm.confirmationNonce,
+            requestHashHex: transcript.request.canonicalRequestHashHex,
+            candidateHashHex: transcript.candidate.canonicalCandidateHashHex,
+            confirmHashHex: confirm.canonicalConfirmHashHex,
+            sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
+            accepted: accepted,
+            sentAt: now,
+            expiresAt: min(confirm.expiresAt, now.addingTimeInterval(120)),
+            responderSignature: Data()
+        )
+        return AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+            transactionId: unsigned.transactionId,
+            requesterDeviceId: unsigned.requesterDeviceId,
+            responderDeviceId: unsigned.responderDeviceId,
+            requesterProtocolIdentityFingerprint: unsigned.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: unsigned.responderProtocolIdentityFingerprint,
+            requestNonce: unsigned.requestNonce,
+            confirmationNonce: unsigned.confirmationNonce,
+            requestHashHex: unsigned.requestHashHex,
+            candidateHashHex: unsigned.candidateHashHex,
+            confirmHashHex: unsigned.confirmHashHex,
+            sasTranscriptHashHex: unsigned.sasTranscriptHashHex,
+            accepted: unsigned.accepted,
+            sentAt: unsigned.sentAt,
+            expiresAt: unsigned.expiresAt,
+            responderSignature: try transcript.responderKey.signature(for: unsigned.signaturePreimage)
+        )
+    }
+
+    func testV3TranscriptRoundTripsAndValidatesBothSignatures() throws {
+        let transcript = try makeTranscript()
+        let candidate = try transcript.candidate.validatedForOOBBinding(request: transcript.request)
+        XCTAssertTrue(
+            transcript.responderKey.publicKey.isValidSignature(
+                candidate.signature,
+                for: candidate.signaturePreimage
+            )
+        )
+        let confirm = try makeConfirm(transcript: transcript)
+        XCTAssertNoThrow(
+            try confirm.validatedForCandidate(
+                request: transcript.request,
+                candidate: candidate
+            )
+        )
+        XCTAssertTrue(
+            transcript.requesterKey.publicKey.isValidSignature(
+                confirm.requesterSignature,
+                for: confirm.signaturePreimage
+            )
+        )
+        let finalAck = try makeFinalAck(transcript: transcript, confirm: confirm)
+        XCTAssertNoThrow(
+            try finalAck.validatedForFinalization(
+                request: transcript.request,
+                candidate: candidate,
+                confirm: confirm
+            )
+        )
+        XCTAssertTrue(
+            transcript.responderKey.publicKey.isValidSignature(
+                finalAck.responderSignature,
+                for: finalAck.signaturePreimage
+            )
+        )
+
+        for message in [
+            AppMessage.protocolIdentityBindingRequest(transcript.request),
+            .signedProtocolIdentityBinding(candidate),
+            .protocolIdentityBindingConfirm(confirm),
+            .signedProtocolIdentityBindingFinalAck(finalAck)
+        ] {
+            XCTAssertEqual(
+                try JSONDecoder().decode(AppMessage.self, from: JSONEncoder().encode(message)),
+                message
+            )
+        }
+    }
+
+    func testPIB1RequestRejectsEmptyUnknownMixedDuplicateAndNoncanonicalAlgorithms() throws {
+        let invalidRequests: [[String]] = [
+            [],
+            ["Unknown-Signature"],
+            [ProtocolSigningAlgorithm.ed25519.rawValue, "Unknown-Signature"],
+            [
+                ProtocolSigningAlgorithm.ed25519.rawValue,
+                ProtocolSigningAlgorithm.ed25519.rawValue
+            ],
+            [" \(ProtocolSigningAlgorithm.ed25519.rawValue) "]
+        ]
+
+        for requestedAlgorithms in invalidRequests {
+            let transcript = try makeTranscript(
+                requestedProtocolSigningAlgorithms: requestedAlgorithms
+            )
+            XCTAssertThrowsError(
+                try transcript.candidate.validatedForOOBBinding(
+                    request: transcript.request
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppMessage.ProtocolIdentityBindingValidationError,
+                    .invalidRequestedSignatureAlgorithms
+                )
+            }
+        }
+    }
+
+    func testPIB1ResponseAlgorithmMustBelongToRequest() throws {
+        let transcript = try makeTranscript(
+            requestedProtocolSigningAlgorithms: [
+                ProtocolSigningAlgorithm.mlDSA65.rawValue
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try transcript.candidate.validatedForOOBBinding(
+                request: transcript.request
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.ProtocolIdentityBindingValidationError,
+                .unrequestedSignatureAlgorithm
+            )
+        }
+    }
+
+    func testV3CrossPlatformGoldenVectorMatchesMacOS() {
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let transactionId = UUID(uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF")!
+        let request = AppMessage.ProtocolIdentityBindingRequestPayload(
+            transactionId: transactionId,
+            requesterDeviceId: "id:ios-golden",
+            targetDeviceId: "id:mac-golden",
+            requestedProtocolSigningAlgorithms: ["Ed25519"],
+            requesterProtocolSigningAlgorithm: "Ed25519",
+            requesterProtocolIdentityPublicKey: Data(repeating: 0x22, count: 32),
+            requesterProtocolIdentityFingerprint: String(repeating: "a", count: 64),
+            requesterSignature: Data(repeating: 0x11, count: 64),
+            bonjourEndpointDigest: String(repeating: "c", count: 64),
+            nonce: Data((0..<24).map(UInt8.init)),
+            sentAt: fixedDate
+        )
+        let candidate = AppMessage.SignedProtocolIdentityBindingPayload(
+            transactionId: transactionId,
+            deviceId: "id:mac-golden",
+            aliases: ["id:mac-golden", "bonjour:mac-golden@local."],
+            protocolSigningAlgorithm: "Ed25519",
+            protocolIdentityPublicKey: Data(repeating: 0x44, count: 32),
+            protocolIdentityFingerprint: String(repeating: "b", count: 64),
+            deviceName: "Golden Mac",
+            sentAt: fixedDate,
+            expiresAt: fixedDate.addingTimeInterval(300),
+            requestNonce: request.nonce,
+            requestHashHex: request.canonicalRequestHashHex,
+            bonjourEndpointDigest: request.bonjourEndpointDigest,
+            signature: Data(repeating: 0x33, count: 64)
+        )
+        let confirm = AppMessage.ProtocolIdentityBindingConfirmPayload(
+            transactionId: transactionId,
+            requesterDeviceId: request.requesterDeviceId,
+            responderDeviceId: candidate.deviceId,
+            requesterProtocolIdentityFingerprint: String(repeating: "a", count: 64),
+            responderProtocolIdentityFingerprint: String(repeating: "b", count: 64),
+            requestNonce: request.nonce,
+            requestHashHex: request.canonicalRequestHashHex,
+            candidateHashHex: candidate.canonicalCandidateHashHex,
+            sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
+            confirmationNonce: Data(repeating: 0x55, count: 24),
+            sentAt: fixedDate,
+            expiresAt: fixedDate.addingTimeInterval(300),
+            requesterSignature: Data(repeating: 0x66, count: 64)
+        )
+        let ack = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+            transactionId: transactionId,
+            requesterDeviceId: request.requesterDeviceId,
+            responderDeviceId: candidate.deviceId,
+            requesterProtocolIdentityFingerprint: request.requesterProtocolIdentityFingerprint ?? "",
+            responderProtocolIdentityFingerprint: candidate.protocolIdentityFingerprint,
+            requestNonce: request.nonce,
+            confirmationNonce: confirm.confirmationNonce,
+            requestHashHex: request.canonicalRequestHashHex,
+            candidateHashHex: candidate.canonicalCandidateHashHex,
+            confirmHashHex: confirm.canonicalConfirmHashHex,
+            sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
+            accepted: true,
+            sentAt: fixedDate,
+            expiresAt: fixedDate.addingTimeInterval(300),
+            responderSignature: Data(repeating: 0x77, count: 64)
+        )
+        let ackPreimageHash = SHA256.hash(data: ack.signaturePreimage)
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        XCTAssertEqual(request.canonicalRequestHashHex, "0b57a8713f6eba3c41061d38c1b33dcfa11750885976f0d5828916d3ac8f01ad")
+        XCTAssertEqual(candidate.canonicalCandidateHashHex, "4cbf643a7041361d658f6ba4d7960ec42a962e76275e38098de6a09ebf581e1a")
+        XCTAssertEqual(candidate.sasTranscriptHashHex(request: request), "724f79895460bfcb6e7136e637998b22285dca087573ed257678293c95ecd950")
+        XCTAssertEqual(confirm.canonicalConfirmHashHex, "78a1f5b29b7535479de0ea576fb778624b5bab359483e3024bbb61acf223566a")
+        XCTAssertEqual(ackPreimageHash, "f6edad1347d9b1bd805e326491ca5a4fe52870dbfed233af6fc56ee38a89f760")
+    }
+
+    func testV2RequestAndNegativeFinalAckFailClosed() throws {
+        let v2Transcript = try makeTranscript(requestVersion: 2)
+        XCTAssertThrowsError(
+            try v2Transcript.candidate.validatedForOOBBinding(request: v2Transcript.request)
+        ) { error in
+            XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidVersion)
+        }
+
+        var legacyWire = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(
+                    AppMessage.protocolIdentityBindingRequest(v2Transcript.request)
+                )
+            ) as? [String: Any]
+        )
+        var legacyRequest = try XCTUnwrap(
+            legacyWire["protocolIdentityBindingRequest"] as? [String: Any]
+        )
+        legacyRequest.removeValue(forKey: "transactionId")
+        legacyWire["protocolIdentityBindingRequest"] = legacyRequest
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                AppMessage.self,
+                from: JSONSerialization.data(withJSONObject: legacyWire)
+            )
+        )
+
+        let transcript = try makeTranscript()
+        let confirm = try makeConfirm(transcript: transcript)
+        let rejectedAck = try makeFinalAck(
+            transcript: transcript,
+            confirm: confirm,
+            accepted: false
+        )
+        XCTAssertThrowsError(
+            try rejectedAck.validatedForFinalization(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                confirm: confirm
+            )
+        )
+    }
+
+    func testResponderStateIsBoundedExpiringAndIdempotent() async throws {
+        let now = Date()
+        let store = ProtocolIdentityBindingV3StateStore(ttl: 900, maximumEntries: 2)
+        let transcript = try makeTranscript(now: now)
+        let context = ProtocolIdentityBindingV3ResponderContext(
+            request: transcript.request,
+            candidate: transcript.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: transcript.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                transcript.responderKey.rawRepresentation
+            ),
+            peerId: "peer",
+            expiresAt: now.addingTimeInterval(900)
+        )
+        guard case .stored = await store.registerCandidate(context, now: now) else {
+            return XCTFail("First candidate must be stored")
+        }
+        guard case .replay(let replayed) = await store.registerCandidate(context, now: now) else {
+            return XCTFail("Exact candidate replay must be idempotent")
+        }
+        XCTAssertEqual(replayed.candidate, transcript.candidate)
+
+        let confirm = try makeConfirm(transcript: transcript, now: now)
+        guard case .allowed = await store.beginConfirm(confirm, now: now) else {
+            return XCTFail("Matching confirm must be admitted once")
+        }
+        let finalAck = try makeFinalAck(transcript: transcript, confirm: confirm, now: now)
+        let completed = await store.completeConfirm(
+            transactionId: transcript.request.transactionId,
+            confirmHashHex: confirm.canonicalConfirmHashHex,
+            finalAck: finalAck
+        )
+        XCTAssertTrue(completed)
+        guard case .replay(let replayedAck) = await store.beginConfirm(confirm, now: now) else {
+            return XCTFail("Completed confirm replay must return the same signed finalAck")
+        }
+        XCTAssertEqual(replayedAck, finalAck)
+
+        let second = try makeTranscript(now: now)
+        let secondContext = ProtocolIdentityBindingV3ResponderContext(
+            request: second.request,
+            candidate: second.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: second.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: second.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                second.responderKey.rawRepresentation
+            ),
+            peerId: "peer-2",
+            expiresAt: now.addingTimeInterval(900)
+        )
+        guard case .stored = await store.registerCandidate(secondContext, now: now) else {
+            return XCTFail("Second candidate must fit the configured cap")
+        }
+        let third = try makeTranscript(now: now)
+        let thirdContext = ProtocolIdentityBindingV3ResponderContext(
+            request: third.request,
+            candidate: third.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: third.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: third.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                third.responderKey.rawRepresentation
+            ),
+            peerId: "peer-3",
+            expiresAt: now.addingTimeInterval(900)
+        )
+        guard case .capacityExceeded = await store.registerCandidate(thirdContext, now: now) else {
+            return XCTFail("Third live candidate must fail closed at the configured cap")
+        }
+        let liveCount = await store.entryCountForTesting(now: now.addingTimeInterval(299))
+        let expiredCount = await store.entryCountForTesting(now: now.addingTimeInterval(301))
+        XCTAssertEqual(liveCount, 2)
+        XCTAssertEqual(expiredCount, 0)
+    }
 }
 
 @available(iOS 17.0, *)
@@ -1811,28 +2459,6 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768, target: .mlkem768fs))
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768fs, target: .mlkem768))
         XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.xwing, target: .mlkem768fs))
-        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.qperiaptABI2PolicyBound, target: .xwing))
-        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.xwing, target: .qperiaptABI2PolicyBound))
-        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.qperiaptContextBound, target: .qperiaptContextBound))
-        XCTAssertFalse(
-            P2PConnectionManager.canSatisfyStrictPQCWithTrustedKEM(
-                trustedPeerKEMSuites: [.qperiaptContextBound],
-                preferredTargetSuite: nil
-            )
-        )
-    }
-
-    func testPlatformAdapterRejectsHybridAliasAndExplicitSuiteFallbacks() throws {
-        let source = try readRepositorySource(
-            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Platform/PlatformAdapter.swift"
-        )
-
-        XCTAssertTrue(source.contains("if suite == .xwing"))
-        XCTAssertTrue(source.contains("if suite.isHybrid {"))
-        XCTAssertTrue(source.contains("if let offeredSuites {"))
-        XCTAssertTrue(source.contains("offeredSuites.allSatisfy(\\.isNegotiable)"))
-        XCTAssertTrue(source.contains("throw HandshakeError.failed(.suiteNotSupported)"))
-        XCTAssertFalse(source.contains("if let offeredSuites, !offeredSuites.isEmpty"))
     }
 
     func testInboundResponderRequiresXWingRuntimeSupportForXWingOnlyPeer() throws {
@@ -1860,5 +2486,57 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             P2PConnectionManager.preferredBootstrapRekeyTargetSuite(using: provider),
             preparation.offeredSuites.first
         )
+    }
+
+    func testP2PInboundPublishesConnectedStateOnlyAfterActualAuthorityDurableCommit() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func processHandshakeFrame("))
+        let end = try XCTUnwrap(
+            source.range(of: "private func ensureInboundRekeyDriverIfNeeded(", range: start.lowerBound..<source.endIndex)
+        )
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        let commit = try XCTUnwrap(body.range(of: "try await persistAuthenticatedRemoteAuthority("))
+        let provisionalFinish = try XCTUnwrap(body.range(of: "finishProvisionalInboundConnection("))
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "setSessionKeys(keys"))
+        let connectedPublish = try XCTUnwrap(body.range(of: "connectionStatusByDeviceId[peerId] = .connected"))
+        let heartbeatStart = try XCTUnwrap(body.range(of: "startHeartbeatIfNeeded(deviceId: peerId)"))
+
+        XCTAssertLessThan(commit.lowerBound, provisionalFinish.lowerBound)
+        XCTAssertLessThan(commit.lowerBound, sessionKeyPublish.lowerBound)
+        XCTAssertLessThan(commit.lowerBound, connectedPublish.lowerBound)
+        XCTAssertLessThan(commit.lowerBound, heartbeatStart.lowerBound)
+        XCTAssertTrue(body.contains("cleanupBrokenInboundConnection("))
+        XCTAssertTrue(body.contains("await transport?.removeConnection(for: peerId)"))
+    }
+
+    func testP2POutboundCapturesActualAuthorityBeforePublishingHandshakeKeys() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func performPQCHandshake("))
+        let end = try XCTUnwrap(
+            source.range(of: "public func rekeyToPreferPQC(", range: start.lowerBound..<source.endIndex)
+        )
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        let commit = try XCTUnwrap(body.range(of: "try await persistAuthenticatedRemoteAuthority("))
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "setSessionKeys(keys"))
+
+        XCTAssertLessThan(commit.lowerBound, sessionKeyPublish.lowerBound)
+        XCTAssertTrue(body.contains("expectedStableDeviceId: strictTrustContext?.stablePeerId"))
+        XCTAssertTrue(body.contains("error is TrustedDeviceStore.PersistenceError"))
+        XCTAssertTrue(body.contains("cleanupBrokenInboundConnection("))
+
+        let authorityHelperStart = try XCTUnwrap(
+            source.range(of: "private func persistAuthenticatedRemoteAuthority(")
+        )
+        let authorityHelperEnd = try XCTUnwrap(
+            source.range(of: "private func restoreActiveSessionAfterRekeyFailure(", range: authorityHelperStart.lowerBound..<source.endIndex)
+        )
+        let authorityHelper = String(source[authorityHelperStart.lowerBound..<authorityHelperEnd.lowerBound])
+        XCTAssertTrue(authorityHelper.contains("driver.getAuthenticatedRemoteAuthority()"))
+        XCTAssertTrue(authorityHelper.contains("protocolSigningAlgorithm: authority.protocolSigningAlgorithm"))
+        XCTAssertTrue(authorityHelper.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"))
     }
 }

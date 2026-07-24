@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 
 enum RemoteDesktopSmokeStreamOverrides {
@@ -34,3 +35,4 @@ enum RemoteDesktopSmokeStreamOverrides {
         return value
     }
 }
+#endif

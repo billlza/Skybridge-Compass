@@ -158,13 +158,18 @@ public struct TwoAttemptHandshakeManager: Sendable {
     public static func prepareAttempt(
         strategy: HandshakeAttemptStrategy,
         cryptoProvider: any CryptoProvider,
-        pqcOfferMode: PQCOfferMode = .preferredSingle
+        pqcOfferMode: PQCOfferMode = .preferredSingle,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
     ) throws -> AttemptPreparation {
         let attemptProvider: any CryptoProvider
         let offeredSuites: [CryptoSuite]
         switch strategy {
         case .pqcOnly:
-            let pqcSuites = offeredPQCSuites(using: cryptoProvider, mode: pqcOfferMode)
+            let pqcSuites = offeredPQCSuites(
+                using: cryptoProvider,
+                mode: pqcOfferMode,
+                pqcSignatureAlgorithm: pqcSignatureAlgorithm
+            )
             guard !pqcSuites.isEmpty else {
                 throw AttemptPreparationError.pqcProviderUnavailable
             }
@@ -184,7 +189,11 @@ public struct TwoAttemptHandshakeManager: Sendable {
         let sigAAlgorithm: ProtocolSigningAlgorithm
         switch strategy {
         case .pqcOnly:
-            sigAAlgorithm = .mlDSA65
+            guard pqcSignatureAlgorithm == .mlDSA65
+                    || pqcSignatureAlgorithm == .mlDSA87 else {
+                throw AttemptPreparationError.pqcProviderUnavailable
+            }
+            sigAAlgorithm = pqcSignatureAlgorithm
         case .classicOnly:
             sigAAlgorithm = .ed25519
         }
@@ -204,9 +213,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
     private static func offeredPQCSuites(
         using cryptoProvider: any CryptoProvider,
-        mode: PQCOfferMode
+        mode: PQCOfferMode,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm
     ) -> [CryptoSuite] {
-        let pqcSuites = availableSuitesForNegotiation(using: cryptoProvider).filter {
+        let pqcSuites = availableSuitesForNegotiation(
+            using: cryptoProvider,
+            pqcSignatureAlgorithm: pqcSignatureAlgorithm
+        ).filter {
             $0.isPQCGroup && $0.isNegotiable
         }
         guard !pqcSuites.isEmpty else { return [] }
@@ -223,9 +236,15 @@ public struct TwoAttemptHandshakeManager: Sendable {
     }
 
     private static func availableSuitesForNegotiation(
-        using cryptoProvider: any CryptoProvider
+        using cryptoProvider: any CryptoProvider,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm
     ) -> [CryptoSuite] {
         var suites = cryptoProvider.supportedSuites.filter(\.isNegotiable)
+        if pqcSignatureAlgorithm == .mlDSA87 {
+            suites.removeAll {
+                $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+            }
+        }
         let explicitXWingPreference = explicitlyPrefersXWingHybridSuite()
         guard cryptoProvider.tier == .nativePQC else {
             if explicitXWingPreference {
@@ -311,8 +330,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
         preferPQC: Bool = true,
         policy: HandshakePolicy = .default,
         cryptoProvider: any CryptoProvider,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65,
         executor: PreparedHandshakeExecutor
     ) async throws -> SessionKeys {
+        let isQPeriaptAttempt = isQPeriaptBoundProvider(cryptoProvider)
+        if isQPeriaptAttempt, !preferPQC {
+            throw HandshakeError.failed(.pqcProviderUnavailable)
+        }
+        if pqcSignatureAlgorithm == .mlDSA87, !preferPQC {
+            throw HandshakeError.failed(.pqcProviderUnavailable)
+        }
         if policy.requirePQC, !preferPQC {
             throw HandshakeError.failed(.pqcProviderUnavailable)
         }
@@ -323,10 +350,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 let preparation = try prepareAttempt(
                     strategy: .pqcOnly,
                     cryptoProvider: cryptoProvider,
-                    pqcOfferMode: .preferredSingle
+                    pqcOfferMode: .preferredSingle,
+                    pqcSignatureAlgorithm: pqcSignatureAlgorithm
                 )
                 return try await executor(preparation)
             } catch let error as AttemptPreparationError {
+                guard !isQPeriaptAttempt else { throw error }
                 // PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
                     if !policy.requirePQC,
@@ -335,9 +364,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: .pqcProviderUnavailable,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
+                        pqcSignatureAlgorithm: pqcSignatureAlgorithm,
                         executor: executor
                     ) {
                         return bridged
+                    }
+                    guard pqcSignatureAlgorithm != .mlDSA87 else {
+                        throw error
                     }
                     guard policy.allowClassicFallback else {
                         throw error
@@ -352,6 +385,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 }
                 throw error
             } catch let error as HandshakeError {
+                guard !isQPeriaptAttempt else { throw error }
                 // 检查是否允许 fallback
                 if case .failed(let reason) = error {
                     if !policy.requirePQC,
@@ -360,11 +394,15 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: reason,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
+                        pqcSignatureAlgorithm: pqcSignatureAlgorithm,
                         executor: executor
                     ) {
                         return bridged
                     }
                     if shouldAllowFallback(reason) {
+                        guard pqcSignatureAlgorithm != .mlDSA87 else {
+                            throw error
+                        }
                         guard policy.allowClassicFallback else {
                             throw error
                         }
@@ -381,6 +419,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
             }
         } else {
             // 直接使用 Classic
+            guard !isQPeriaptAttempt else {
+                throw HandshakeError.failed(.pqcProviderUnavailable)
+            }
             let preparation = try prepareAttempt(strategy: .classicOnly, cryptoProvider: cryptoProvider)
             return try await executor(preparation)
         }
@@ -420,8 +461,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
         reason: HandshakeFailureReason,
         policy: HandshakePolicy,
         cryptoProvider: any CryptoProvider,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm,
         executor: PreparedHandshakeExecutor
     ) async throws -> SessionKeys? {
+        guard !isQPeriaptBoundProvider(cryptoProvider) else {
+            return nil
+        }
         guard shouldAttemptPQCCompatibilityRetry(reason) else {
             return nil
         }
@@ -431,7 +476,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             bridgePreparation = try prepareAttempt(
                 strategy: .pqcOnly,
                 cryptoProvider: cryptoProvider,
-                pqcOfferMode: .compatRetry
+                pqcOfferMode: .compatRetry,
+                pqcSignatureAlgorithm: pqcSignatureAlgorithm
             )
         } catch {
             return nil
@@ -465,6 +511,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
         cryptoProvider: any CryptoProvider,
         executor: PreparedHandshakeExecutor
     ) async throws -> SessionKeys {
+        guard !isQPeriaptBoundProvider(cryptoProvider) else {
+            throw HandshakeError.failed(reason)
+        }
         // Defense-in-depth: strict PQC forbids all fallback edges (paper semantics).
         if policy.requirePQC {
             throw HandshakeError.failed(reason)
@@ -558,6 +607,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
              .secureEnclaveSignatureInvalid, .keyConfirmationFailed, .suiteSignatureMismatch:
             return false
         }
+    }
+
+    private static func isQPeriaptBoundProvider(
+        _ cryptoProvider: any CryptoProvider
+    ) -> Bool {
+        cryptoProvider.tier == .qperiaptPQC
+            || cryptoProvider is any QPeriaptRuntimeBoundCryptoProvider
+            || cryptoProvider.supportedSuites.contains {
+                $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+            }
     }
 
     // MARK: - Trust Gate Helper

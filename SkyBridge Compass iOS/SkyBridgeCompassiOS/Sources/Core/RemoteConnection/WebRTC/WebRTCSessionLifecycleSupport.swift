@@ -6,6 +6,68 @@ import Foundation
 
 @available(iOS 17.0, *)
 extension WebRTCSession {
+    enum BoundedCallbackOutcome<Value: Sendable>: Sendable {
+        case completed(Value)
+        case timedOut
+        case cancelled
+    }
+}
+
+@available(iOS 17.0, *)
+private final class WebRTCBoundedCallbackGate<Value: Sendable>: @unchecked Sendable {
+    typealias Outcome = WebRTCSession.BoundedCallbackOutcome<Value>
+
+    private let lock = NSLock()
+    private var resolution: Outcome?
+    private var continuation: CheckedContinuation<Outcome, Never>?
+    private var timeoutTimer: DispatchSourceTimer?
+
+    func install(
+        _ continuation: CheckedContinuation<Outcome, Never>,
+        timeoutSeconds: TimeInterval
+    ) -> Bool {
+        lock.lock()
+        if let resolution {
+            lock.unlock()
+            continuation.resume(returning: resolution)
+            return false
+        }
+
+        precondition(self.continuation == nil, "A bounded callback gate supports exactly one waiter")
+        self.continuation = continuation
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.setEventHandler { [weak self] in
+            self?.resolve(.timedOut)
+        }
+        timer.schedule(deadline: .now() + timeoutSeconds)
+        timeoutTimer = timer
+        timer.activate()
+        lock.unlock()
+        return true
+    }
+
+    func resolve(_ outcome: Outcome) {
+        let continuationToResume: CheckedContinuation<Outcome, Never>?
+        let timerToCancel: DispatchSourceTimer?
+        lock.lock()
+        guard resolution == nil else {
+            lock.unlock()
+            return
+        }
+        resolution = outcome
+        continuationToResume = continuation
+        continuation = nil
+        timerToCancel = timeoutTimer
+        timeoutTimer = nil
+        lock.unlock()
+
+        timerToCancel?.cancel()
+        continuationToResume?.resume(returning: outcome)
+    }
+}
+
+@available(iOS 17.0, *)
+extension WebRTCSession {
     enum RemoteVideoTrackRefreshAction: Equatable {
         case noOp
         case rebind
@@ -40,6 +102,7 @@ extension WebRTCSession {
         case ignoreDuplicate
         case queueCandidate(nextPendingCount: Int)
         case applyImmediately
+        case overflow
     }
 
     nonisolated static func receiverStatsProbeRemoteVideoTrackRefreshAction(
@@ -76,6 +139,33 @@ extension WebRTCSession {
         expectedLifecycleToken: UInt64
     ) -> Bool {
         peerConnectionMatches && !isClosed && currentLifecycleToken == expectedLifecycleToken
+    }
+
+    /// Bridges a third-party callback without trusting that the callback will
+    /// arrive. Timeout, task cancellation, and callback completion race through
+    /// one lock-protected resolution, so the continuation is resumed exactly
+    /// once and never remains suspended indefinitely.
+    nonisolated static func awaitBoundedStatsCallback<Value: Sendable>(
+        timeoutSeconds: TimeInterval,
+        start: (@escaping @Sendable (Value) -> Void) -> Void
+    ) async -> BoundedCallbackOutcome<Value> {
+        precondition(
+            timeoutSeconds.isFinite && timeoutSeconds >= 0,
+            "Stats callback timeout must be finite and non-negative"
+        )
+        let gate = WebRTCBoundedCallbackGate<Value>()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard gate.install(continuation, timeoutSeconds: timeoutSeconds) else {
+                    return
+                }
+                start { value in
+                    gate.resolve(.completed(value))
+                }
+            }
+        } onCancel: {
+            gate.resolve(.cancelled)
+        }
     }
 
     nonisolated static func pendingInboundFlushPlan(
@@ -116,13 +206,17 @@ extension WebRTCSession {
     nonisolated static func pendingRemoteICEPlan(
         isDuplicate: Bool,
         hasRemoteDescription: Bool,
-        pendingCount: Int
+        pendingCount: Int,
+        maxPendingCount: Int = 256
     ) -> PendingRemoteICEPlan {
         if isDuplicate {
             return .ignoreDuplicate
         }
         if hasRemoteDescription {
             return .applyImmediately
+        }
+        guard pendingCount < maxPendingCount else {
+            return .overflow
         }
         return .queueCandidate(nextPendingCount: pendingCount + 1)
     }

@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/skybridge-cli-*"
+      - "Scripts/test_skybridge_cli_release_workflow_contract.py"
+      - "rust-toolchain.toml"
       - "rust/**"
       - "Docs/cli-install-release.md"
       - "Docs/signaling-lifecycle-contract.md"
@@ -15,6 +17,8 @@ on:
       - master
     paths:
       - ".github/workflows/skybridge-cli-*"
+      - "Scripts/test_skybridge_cli_release_workflow_contract.py"
+      - "rust-toolchain.toml"
       - "rust/**"
       - "Docs/cli-install-release.md"
       - "Docs/signaling-lifecycle-contract.md"
@@ -27,18 +31,28 @@ permissions:
 jobs:
   packaging-check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.x"
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component llvm-tools-preview
+          rustup override set 1.94.0
+          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          node-version: 20
+          python-version: "3.13.5"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
 
       - name: Read workspace version
         run: python rust/scripts/workspace_version.py
@@ -57,7 +71,7 @@ jobs:
           node --check rust/packaging/npm/skybridge-cli/bin/skybridge.js
           node --check rust/packaging/npm/skybridge-cli/lib/platform.js
           node --check rust/packaging/npm/skybridge-cli/lib/install.js
-          SKYBRIDGE_NPM_SKIP_DOWNLOAD=1 node rust/packaging/npm/skybridge-cli/lib/install.js
+          node --test rust/packaging/npm/skybridge-cli/test/install.test.js
 
       - name: Build Linux release archive
         env:
@@ -72,10 +86,18 @@ jobs:
       - name: Stage npm package
         run: |
           VERSION="$(python rust/scripts/workspace_version.py)"
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          mkdir -p /tmp/skybridge-npm-native-assets
+          printf 'darwin\n' > /tmp/skybridge-npm-native-assets/skybridge-aarch64-apple-darwin.tar.gz
+          printf 'linux-arm64\n' > /tmp/skybridge-npm-native-assets/skybridge-aarch64-unknown-linux-gnu.tar.gz
+          printf 'linux-x64\n' > /tmp/skybridge-npm-native-assets/skybridge-x86_64-unknown-linux-gnu.tar.gz
+          printf 'windows-x64\n' > /tmp/skybridge-npm-native-assets/skybridge-x86_64-pc-windows-msvc.zip
           python rust/scripts/prepare_npm_package.py \
             --source-dir rust/packaging/npm/skybridge-cli \
             --output-dir /tmp/skybridge-npm-stage \
-            --version "${VERSION}"
+            --version "${VERSION}" \
+            --source-sha "${SOURCE_SHA}" \
+            --assets-dir /tmp/skybridge-npm-native-assets
           test -f /tmp/skybridge-npm-stage/package.json
           python - <<'PY'
           import json
@@ -90,6 +112,7 @@ jobs:
           VERSION="$(python rust/scripts/workspace_version.py)"
           SKYBRIDGE_VERSION="${VERSION}" \
           SKYBRIDGE_DARWIN_ARM64_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          SKYBRIDGE_RELEASE_BASE_URL="https://github.com/billlza/Skybridge-Compass/releases/download/skybridge-cli-v${VERSION}" \
           bash rust/scripts/render_homebrew_formula.sh /tmp/skybridge.rb
           test -f /tmp/skybridge.rb
 
@@ -98,4 +121,23 @@ jobs:
           bash -n rust/scripts/build_release_artifact.sh
           bash -n rust/scripts/assemble_release_assets.sh
           bash -n rust/scripts/render_homebrew_formula.sh
+          bash -n rust/scripts/publish_cli_github_release.sh
           bash -n rust/scripts/publish_homebrew_formula.sh
+          shellcheck \
+            rust/scripts/build_release_artifact.sh \
+            rust/scripts/assemble_release_assets.sh \
+            rust/scripts/render_homebrew_formula.sh \
+            rust/scripts/publish_cli_github_release.sh \
+            rust/scripts/publish_homebrew_formula.sh
+
+      - name: Run release contract and fault-injection tests
+        run: |
+          python -m unittest \
+            Scripts/test_skybridge_cli_release_workflow_contract.py \
+            rust/scripts/test_finalize_cli_release_assets.py \
+            rust/scripts/test_cli_release_handoff.py \
+            rust/scripts/test_publish_cli_github_release.py \
+            rust/scripts/test_publish_cli_npm.py \
+            rust/scripts/test_publish_homebrew_formula.py \
+            rust/scripts/test_validate_cli_native_archive.py \
+            rust/scripts/test_verify_cli_release_proof.py

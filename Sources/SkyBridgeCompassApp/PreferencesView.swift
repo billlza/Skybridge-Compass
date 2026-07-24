@@ -428,8 +428,17 @@ struct NetworkPreferencesView: View {
                        in: 1...10)
                     .help("连接失败时的最大重试次数")
 
-                Toggle("启用连接加密", isOn: $settingsManager.enableConnectionEncryption)
-                    .help("对连接数据进行加密")
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lock.fill")
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("连接加密始终开启")
+                            .font(.subheadline)
+                        Text("已认证连接和文件传输不允许关闭加密。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
 
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "lock.shield")
@@ -1039,7 +1048,11 @@ struct AdvancedPreferencesView: View {
     @AppStorage("ssh.trustOnFirstUse") private var trustOnFirstUse: Bool = false
     @State private var knownHosts: [SSHKnownHostEntry] = []
     @State private var showingKnownHostsImporter = false
+    @State private var showingKnownHostsClearConfirmation = false
+    @State private var showingKnownHostsResetConfirmation = false
     @State private var knownHostsMessage: String?
+    @State private var knownHostsOperationGeneration = 0
+    @State private var isKnownHostsOperationInProgress = false
 
     var body: some View {
         ScrollView {
@@ -1092,15 +1105,8 @@ struct AdvancedPreferencesView: View {
                 Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
                     .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
                 Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                    .disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)
-                    .help("仅当已安装并验证签名策略、信任根与 ABI2 运行时会话后才可启用；开关本身不会配置或信任策略。")
-                Text(
-                    QPeriaptPlatformPolicy.isLocalRuntimeSupported
-                        ? "已验证签名策略运行时；仅在对端具备完全相同的策略身份时协商。"
-                        : "暂不可用：当前尚未安装并验证 Q-Periapt 签名策略与信任根，功能保持关闭。"
-                )
-                .font(.caption)
-                .foregroundColor(.secondary)
+                    .disabled(!settingsManager.qPeriaptRuntimeSupported)
+                    .help("实验性：只有签名策略、独立验证密钥 pin、可信状态持久化与 ABI2 自检全部通过后才可启用；双方策略身份必须完全一致。")
             }
 
             Section("性能优化") {
@@ -1207,10 +1213,17 @@ struct AdvancedPreferencesView: View {
                         reloadKnownHosts()
                     }
                     Button("清空已信任主机") {
-                        SSHKnownHostsStore.shared.removeAll()
-                        knownHostsMessage = "已清空所有主机密钥"
-                        reloadKnownHosts()
+                        showingKnownHostsClearConfirmation = true
                     }
+                    Button("安全重置信任库", role: .destructive) {
+                        showingKnownHostsResetConfirmation = true
+                    }
+                }
+                .disabled(isKnownHostsOperationInProgress)
+
+                if isKnownHostsOperationInProgress {
+                    ProgressView()
+                        .controlSize(.small)
                 }
 
                 if let message = knownHostsMessage {
@@ -1236,11 +1249,13 @@ struct AdvancedPreferencesView: View {
                                 }
                                 Spacer()
                                 Button("删除") {
-                                    SSHKnownHostsStore.shared.remove(entry: entry)
-                                    knownHostsMessage = "已删除 \(entry.host):\(entry.port)"
-                                    reloadKnownHosts()
+                                    runKnownHostsOperation {
+                                        try SSHKnownHostsStore.shared.remove(entry: entry)
+                                        return "已删除 \(entry.host):\(entry.port)"
+                                    }
                                 }
                                 .buttonStyle(.bordered)
+                                .disabled(isKnownHostsOperationInProgress)
                             }
                         }
                     }
@@ -1392,21 +1407,119 @@ struct AdvancedPreferencesView: View {
                 knownHostsMessage = "导入失败：\(error.localizedDescription)"
             }
         }
+        .confirmationDialog(
+            "清空所有已信任的 SSH 主机密钥？",
+            isPresented: $showingKnownHostsClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("关闭 TOFU 并清空全部信任", role: .destructive) {
+                trustOnFirstUse = false
+                runKnownHostsOperation {
+                    try SSHKnownHostsStore.shared.removeAll()
+                    return "已关闭 TOFU 并清空所有主机密钥"
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("清空后所有 SSH 主机都将变为未知。为避免下一次连接自动建立未验证信任，此操作会同时关闭 TOFU。")
+        }
+        .confirmationDialog(
+            "安全重置 SSH 主机密钥信任库？",
+            isPresented: $showingKnownHostsResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("重置并删除全部信任", role: .destructive) {
+                trustOnFirstUse = false
+                runKnownHostsOperation {
+                    try SSHKnownHostsStore.shared.resetAuthorityAfterUserConfirmation()
+                    return "SSH 主机密钥信任库已安全重置，TOFU 已关闭"
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此操作会删除全部已记录的 SSH 主机密钥并关闭 TOFU，仅用于从损坏或不可用的信任库中显式恢复。")
+        }
         .padding()
     }
 
     private func reloadKnownHosts() {
-        knownHosts = SSHKnownHostsStore.shared.allEntries()
+        knownHostsOperationGeneration += 1
+        let generation = knownHostsOperationGeneration
+        isKnownHostsOperationInProgress = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    return KnownHostsUIOutcome(
+                        entries: try SSHKnownHostsStore.shared.allEntries(),
+                        message: nil
+                    )
+                } catch {
+                    return KnownHostsUIOutcome(
+                        entries: [],
+                        message: "读取失败：\(error.localizedDescription)"
+                    )
+                }
+            }.value
+            guard generation == knownHostsOperationGeneration else { return }
+            knownHosts = outcome.entries ?? []
+            if let message = outcome.message {
+                knownHostsMessage = message
+            }
+            isKnownHostsOperationInProgress = false
+        }
     }
 
     private func importKnownHosts(from url: URL) {
-        do {
+        runKnownHostsOperation {
+            let accessedSecurityScope = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessedSecurityScope {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
             let result = try SSHKnownHostsStore.shared.importKnownHostsFile(from: url)
-            knownHostsMessage = "导入完成：新增 \(result.added) 条，跳过 \(result.skipped) 条"
-            reloadKnownHosts()
-        } catch {
-            knownHostsMessage = "导入失败：\(error.localizedDescription)"
+            return "导入完成：新增 \(result.added) 条，跳过 \(result.skipped) 条"
         }
+    }
+
+    private func runKnownHostsOperation(
+        _ operation: @escaping @Sendable () throws -> String
+    ) {
+        knownHostsOperationGeneration += 1
+        let generation = knownHostsOperationGeneration
+        isKnownHostsOperationInProgress = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    let message = try operation()
+                    do {
+                        let entries = try SSHKnownHostsStore.shared.allEntries()
+                        return KnownHostsUIOutcome(entries: entries, message: message)
+                    } catch {
+                        return KnownHostsUIOutcome(
+                            entries: nil,
+                            message: "操作已提交，但重新读取信任库失败：\(error.localizedDescription)"
+                        )
+                    }
+                } catch {
+                    return KnownHostsUIOutcome(
+                        entries: nil,
+                        message: "操作失败：\(error.localizedDescription)"
+                    )
+                }
+            }.value
+            guard generation == knownHostsOperationGeneration else { return }
+            if let entries = outcome.entries {
+                knownHosts = entries
+            }
+            knownHostsMessage = outcome.message
+            isKnownHostsOperationInProgress = false
+        }
+    }
+
+    private struct KnownHostsUIOutcome: Sendable {
+        let entries: [SSHKnownHostEntry]?
+        let message: String?
     }
 }
 

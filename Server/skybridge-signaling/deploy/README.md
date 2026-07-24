@@ -13,7 +13,9 @@ Auth email/SMS production runbook:
 
 ## 1. Prepare the server
 
-1. Install Node.js 20+ and npm.
+1. Install the current patched Node.js 24.x LTS and npm (minimum accepted:
+   24.6.0, the first runtime with the native ML-DSA key import, signing, and
+   verification used by admission).
 2. Create runtime config:
    - `sudo mkdir -p /opt/skybridge-signaling/shared/config`
    - `sudo cp production.env.example /opt/skybridge-signaling/shared/config/production.env`
@@ -21,6 +23,54 @@ Auth email/SMS production runbook:
 3. Ensure Nginx reverse proxy is configured using `deploy/nginx/skybridge-signaling.conf`
    for single-instance deployments, or `deploy/nginx/skybridge-signaling-multi-instance-sticky.conf`
    for low-risk multi-instance sticky deployments.
+
+### 1.1 Device identity-rotation database prerequisite
+
+Identity rotation fails closed until the v6 schema is present. Apply database
+changes before deploying a server build that exposes the rotation endpoints:
+
+1. Take and verify a restorable database backup.
+2. Confirm the existing Supabase migration chain, including the v5 hardening
+   migration, is already applied.
+3. Apply the canonical
+   `supabase/migrations/20260722041138_device_identity_rotation_v6.sql` through
+   the approved Supabase migration pipeline. The migration contains its own
+   `BEGIN`/`COMMIT`, lock timeout, statement timeout, privilege assertions, and
+   audit-trigger assertion; never split it into autocommitted statements.
+4. Verify all of the following before starting the new server:
+   - `registered_devices.identity_generation` is non-null and existing rows are generation 1.
+   - `device_identity_rotations`, `device_identity_history`, and
+     `device_identity_rotation_audit` have RLS enabled.
+   - anon/authenticated cannot execute the v6 issue/commit/expiry RPCs and
+     `service_role` can execute them.
+   - `device_identity_rotation_audit_immutable_v6` exists.
+   - the partial unique indexes allow only one active history identity per
+     device and one issued owner per candidate key.
+5. Only then roll out Node instances. Probe challenge idempotency in staging
+   with a persisted UUIDv4 `Idempotency-Key`; do not commit a production device
+   rotation as a deployment smoke test.
+
+`supabase/migrations/20260722041138_device_identity_rotation_v6.sql` is the
+canonical schema source. `sql/security_v6.sql` is a byte-for-byte operational
+mirror for server-only recovery and review workflows. The Node migration
+contract test rejects any drift; never edit or deploy the mirror independently.
+
+The v6 change is additive, so a server rollback may leave the schema installed.
+Do not down-migrate identity history after any rotation has committed. Restore a
+verified pre-migration backup only when no post-migration authority changes must
+be preserved; otherwise use a reviewed forward repair.
+
+Operational maintenance:
+
+- Run `expire_device_identity_grace_v6(<bounded batch size>)` periodically to
+  transition elapsed grace metadata to revoked. Grace records are never valid
+  for new admission; they only describe authority already frozen into existing
+  session tokens.
+- The RPC limits new rotation records to 8 per device and 64 per user in 24
+  hours. Monitor those errors and table growth.
+- Rotation/history/audit evidence is security-sensitive. Archive it under the
+  organization's audit-retention policy through a separately reviewed migration;
+  never update or delete the immutable audit table ad hoc.
 
 ## 2. Deploy from local workspace
 

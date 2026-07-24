@@ -4,6 +4,16 @@ import Testing
 
 @Suite("KeychainManager Supabase Config Tests", .serialized)
 struct KeychainManagerSupabaseConfigTests {
+    @Test("Keychain actor executor leaves MainActor")
+    @MainActor
+    func testKeychainActorExecutorRunsOffMainThread() async {
+        let probe = KeychainExecutorProbe(
+            executor: KeychainSerialExecutor(label: "com.skybridge.tests.keychain")
+        )
+
+        #expect(await probe.isExecutingOnMainThread() == false)
+    }
+
     @Test("Supabase client config strips legacy service-role storage on write")
     func testStoreSupabaseConfigPurgesLegacyServiceRoleKey() throws {
         guard #available(macOS 14.0, *) else { return }
@@ -139,5 +149,21 @@ struct KeychainManagerSupabaseConfigTests {
         try keychain.deleteAPIKey(service: "SkyBridge.Supabase", account: "URL")
         try keychain.deleteAPIKey(service: "SkyBridge.Supabase", account: "AnonKey")
         try keychain.deleteAPIKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+    }
+}
+
+private actor KeychainExecutorProbe {
+    private nonisolated let executor: KeychainSerialExecutor
+
+    init(executor: KeychainSerialExecutor) {
+        self.executor = executor
+    }
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
+    func isExecutingOnMainThread() -> Bool {
+        Thread.isMainThread
     }
 }

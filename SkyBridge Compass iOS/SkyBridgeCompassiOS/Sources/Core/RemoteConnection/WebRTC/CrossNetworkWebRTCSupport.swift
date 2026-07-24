@@ -10,10 +10,12 @@ enum CrossNetworkNotificationUserInfoKey {
 }
 
 enum CrossNetworkWebRTCHandshakeLimits {
-    /// padded 帧上限：8192 - 4 字节长度前缀 = 8188
+    /// Legacy padding target: a small handshake plus the 4-byte stream prefix
+    /// fits one 8 KiB DataChannel message. A larger bounded ML-DSA-87 frame is
+    /// not truncated; `sendFramedPayloadAsync` fragments it below.
     static let maxPaddedPayloadBytes = (8 * 1024) - 4
-    /// 控制帧分片上限：一个完整 padded 帧 + 4 字节长度前缀恰好为一条 DataChannel 消息。
-    /// 两端接收侧均为流式重组（不校验单条消息大小），与旧版 1024 分片互操作安全。
+    /// Per-message control-channel limit. Both peers stream-reassemble the
+    /// 4-byte length-prefixed payload, including a 16 KiB-bounded MessageA.
     static let maxControlFrameChunkBytes = maxPaddedPayloadBytes + 4
     static let maxBufferedAmountBytes: UInt64 = 256 * 1024
     static let strictPQCClassicBootstrapTimeoutSeconds: TimeInterval = 30.0

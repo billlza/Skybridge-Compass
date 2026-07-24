@@ -371,6 +371,20 @@ public struct ServiceAdvertisementSnapshot: Sendable, Equatable {
 }
 
 public actor ServiceAdvertiserCenter {
+    public enum AdvertisingError: LocalizedError, Sendable {
+        case listenerEndedBeforeReady
+        case timedOut
+
+        public var errorDescription: String? {
+            switch self {
+            case .listenerEndedBeforeReady:
+                return "Bonjour listener ended before becoming ready"
+            case .timedOut:
+                return "Bonjour listener did not become ready before the startup deadline"
+            }
+        }
+    }
+
     private let logger = Logger(
         subsystem: "com.skybridge.Compass",
         category: "ServiceAdvertiserCenter"
@@ -476,27 +490,13 @@ public actor ServiceAdvertiserCenter {
             port: nil
         )
         listener.start(queue: .global(qos: .utility))
-        let port = listener.port?.rawValue ?? 0
-        if port > 0 {
-            Self.attachAdvertisedPort(
-                UInt16(port),
-                serviceType: serviceType,
-                to: &finalTXT
-            )
-            listener.service = NWListener.Service(
-                name: serviceName,
-                type: serviceType,
-                domain: "local.",
-                txtRecord: finalTXT
-            )
-            records[serviceType]?.port = UInt16(port)
-        }
-        if port > 0 {
-            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 端口 \(port, privacy: .public) peerToPeer=\(includePeerToPeer, privacy: .public)")
-        } else {
-            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 系统分配端口 peerToPeer=\(includePeerToPeer, privacy: .public)")
-        }
-        return UInt16(port)
+        let readyPort = try await waitForAdvertisingReady(
+            serviceType: serviceType,
+            token: token,
+            cancelRecordOnFailure: true
+        )
+        logger.info("📡 广播服务已就绪: \(serviceType, privacy: .public) 端口 \(readyPort, privacy: .public) peerToPeer=\(includePeerToPeer, privacy: .public)")
+        return readyPort
     }
 
  /// 仅在未运行时启动指定服务类型的广播，避免重复启动造成的 stop→start 风暴
@@ -509,8 +509,16 @@ public actor ServiceAdvertiserCenter {
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) async throws -> UInt16 {
-        if isAdvertising(serviceType) {
-            return records[serviceType]?.port ?? UInt16(records[serviceType]?.listener.port?.rawValue ?? 0)
+        if let record = records[serviceType] {
+            if record.state == .ready,
+               let port = record.port ?? record.listener.port?.rawValue,
+               port > 0 {
+                return port
+            }
+            return try await waitForAdvertisingReady(
+                serviceType: serviceType,
+                token: record.token
+            )
         }
         return try await startAdvertising(
             serviceName: serviceName,
@@ -554,8 +562,8 @@ public actor ServiceAdvertiserCenter {
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
         let classic = ClassicCryptoProvider()
         var suiteIds: [UInt16] = []
-        suiteIds.append(contentsOf: provider.supportedSuites.filter(\.isNegotiable).map(\.wireId))
-        suiteIds.append(contentsOf: classic.supportedSuites.filter(\.isNegotiable).map(\.wireId))
+        suiteIds.append(contentsOf: provider.supportedSuites.map { $0.wireId })
+        suiteIds.append(contentsOf: classic.supportedSuites.map { $0.wireId })
         var seen = Set<UInt16>()
         let uniqueSuites = suiteIds.filter { seen.insert($0).inserted }
         if !uniqueSuites.isEmpty {
@@ -605,10 +613,7 @@ public actor ServiceAdvertiserCenter {
             return nil
         }
         let keys = KEMPublicKeyInfo.normalizedValidKeys(rawKeys)
-            .filter {
-                let suite = CryptoSuite(wireId: $0.suiteWireId)
-                return suite.isNegotiable && suite.isPQCGroup
-            }
+            .filter { CryptoSuite(wireId: $0.suiteWireId).isPQCGroup }
             .sorted { $0.suiteWireId < $1.suiteWireId }
         guard !keys.isEmpty else { return nil }
 
@@ -635,6 +640,20 @@ public actor ServiceAdvertiserCenter {
             owner: record.owner,
             port: record.port ?? record.listener.port?.rawValue,
             state: record.state
+        )
+    }
+
+    public func waitUntilReady(
+        _ serviceType: String,
+        timeout: Duration = .seconds(8)
+    ) async throws -> UInt16 {
+        guard let record = records[serviceType] else {
+            throw AdvertisingError.listenerEndedBeforeReady
+        }
+        return try await waitForAdvertisingReady(
+            serviceType: serviceType,
+            token: record.token,
+            timeout: timeout
         )
     }
 
@@ -678,5 +697,45 @@ public actor ServiceAdvertiserCenter {
         default:
             break
         }
+    }
+
+    private func waitForAdvertisingReady(
+        serviceType: String,
+        token: UUID,
+        timeout: Duration = .seconds(8),
+        cancelRecordOnFailure: Bool = false
+    ) async throws -> UInt16 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+
+        while clock.now < deadline {
+            guard let record = records[serviceType], record.token == token else {
+                throw AdvertisingError.listenerEndedBeforeReady
+            }
+            if record.state == .ready,
+               let port = record.port ?? record.listener.port?.rawValue,
+               port > 0 {
+                return port
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                if cancelRecordOnFailure {
+                    cancelRecord(serviceType: serviceType, token: token)
+                }
+                throw error
+            }
+        }
+
+        if cancelRecordOnFailure {
+            cancelRecord(serviceType: serviceType, token: token)
+        }
+        throw AdvertisingError.timedOut
+    }
+
+    private func cancelRecord(serviceType: String, token: UUID) {
+        guard let record = records[serviceType], record.token == token else { return }
+        record.listener.cancel()
+        records.removeValue(forKey: serviceType)
     }
 }

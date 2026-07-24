@@ -87,15 +87,26 @@ public enum CryptoProviderFactory {
  /// 创建 Provider
  /// - Parameters:
  /// - policy: 选择策略
- /// - environment: 运行环境（用于测试注入）
  /// - Returns: 选中的 Provider
  ///
  /// 注意：使用 `any CryptoEnvironment` 和 `any CryptoProvider` 以支持协议类型
     public static func make(
-        policy: SelectionPolicy = .preferPQC,
-        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
+        policy: SelectionPolicy = .preferPQC
     ) -> any CryptoProvider {
-        let capability = detectCapability(environment: environment)
+        makeProvider(policy: policy, environment: SystemCryptoEnvironment.system)
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    public static func make(policy: SelectionPolicy = .preferPQC, environment: any CryptoEnvironment) -> any CryptoProvider {
+        makeProvider(policy: policy, environment: environment)
+    }
+#endif
+
+    private static func makeProvider(
+        policy: SelectionPolicy,
+        environment: any CryptoEnvironment
+    ) -> any CryptoProvider {
+        let capability = capability(environment: environment)
         let provider = selectProvider(capability: capability, policy: policy)
 
  // 发射选择事件（可观测性）
@@ -109,9 +120,17 @@ public enum CryptoProviderFactory {
     }
 
  /// 仅探测能力（不创建 Provider）
-    public static func detectCapability(
-        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
-    ) -> Capability {
+    public static func detectCapability() -> Capability {
+        capability(environment: SystemCryptoEnvironment.system)
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    public static func detectCapability(environment: any CryptoEnvironment) -> Capability {
+        capability(environment: environment)
+    }
+#endif
+
+    private static func capability(environment: any CryptoEnvironment) -> Capability {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
 
         var hasApplePQC = false
@@ -206,14 +225,31 @@ public enum CryptoProviderFactory {
 
     public static func makeInboundPQCResponderProvider(
         policy: SelectionPolicy,
-        peerSupportedSuites: [CryptoSuite],
-        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
+        peerSupportedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        guard !peerSupportedSuites.isEmpty,
-              peerSupportedSuites.allSatisfy(\.isNegotiable) else {
-            return UnavailablePQCProvider()
-        }
-        let baseProvider = make(policy: policy, environment: environment)
+        makeInboundPQCResponderProvider(
+            policy: policy,
+            peerSupportedSuites: peerSupportedSuites,
+            using: SystemCryptoEnvironment.system
+        )
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    public static func makeInboundPQCResponderProvider(policy: SelectionPolicy, peerSupportedSuites: [CryptoSuite], environment: any CryptoEnvironment) -> any CryptoProvider {
+        makeInboundPQCResponderProvider(
+            policy: policy,
+            peerSupportedSuites: peerSupportedSuites,
+            using: environment
+        )
+    }
+#endif
+
+    private static func makeInboundPQCResponderProvider(
+        policy: SelectionPolicy,
+        peerSupportedSuites: [CryptoSuite],
+        using environment: any CryptoEnvironment
+    ) -> any CryptoProvider {
+        let baseProvider = makeProvider(policy: policy, environment: environment)
 
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
@@ -256,14 +292,31 @@ public enum CryptoProviderFactory {
     /// negotiates X-Wing. `peerAdvertisedSuites` MUST come from the authority-bound/signed trust store.
     public static func makeOutboundPQCInitiatorProvider(
         policy: SelectionPolicy,
-        peerAdvertisedSuites: [CryptoSuite],
-        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
+        peerAdvertisedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        guard !peerAdvertisedSuites.isEmpty,
-              peerAdvertisedSuites.allSatisfy(\.isNegotiable) else {
-            return UnavailablePQCProvider()
-        }
-        let baseProvider = make(policy: policy, environment: environment)
+        makeOutboundPQCInitiatorProvider(
+            policy: policy,
+            peerAdvertisedSuites: peerAdvertisedSuites,
+            using: SystemCryptoEnvironment.system
+        )
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    public static func makeOutboundPQCInitiatorProvider(policy: SelectionPolicy, peerAdvertisedSuites: [CryptoSuite], environment: any CryptoEnvironment) -> any CryptoProvider {
+        makeOutboundPQCInitiatorProvider(
+            policy: policy,
+            peerAdvertisedSuites: peerAdvertisedSuites,
+            using: environment
+        )
+    }
+#endif
+
+    private static func makeOutboundPQCInitiatorProvider(
+        policy: SelectionPolicy,
+        peerAdvertisedSuites: [CryptoSuite],
+        using environment: any CryptoEnvironment
+    ) -> any CryptoProvider {
+        let baseProvider = makeProvider(policy: policy, environment: environment)
 
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
@@ -453,7 +506,7 @@ public struct SystemCryptoEnvironment: CryptoEnvironment, Sendable {
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 /// 测试用环境（可注入能力）
 public struct MockCryptoEnvironment: CryptoEnvironment, Sendable {
     public let hasApplePQC: Bool

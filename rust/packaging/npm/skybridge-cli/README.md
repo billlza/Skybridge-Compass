@@ -15,11 +15,10 @@ Thin npm wrapper for the signed Rust `skybridge` binary.
 ## Environment overrides
 
 - `SKYBRIDGE_NPM_BASE_URL`
-  - override the release asset base URL
-- `SKYBRIDGE_NPM_SKIP_DOWNLOAD=1`
-  - skip downloading during `postinstall`
-- `SKYBRIDGE_NPM_SKIP_CHECKSUM=1`
-  - bypass `SHA256SUMS.txt` verification
+  - override the HTTPS release asset base URL
+
+Every installation downloads and verifies `SHA256SUMS.txt`. Checksum verification
+cannot be disabled, redirects are bounded, and HTTPS downgrade is rejected.
 
 ## Release asset contract
 

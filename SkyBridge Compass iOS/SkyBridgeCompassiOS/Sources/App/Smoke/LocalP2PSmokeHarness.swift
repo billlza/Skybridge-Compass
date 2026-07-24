@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import CryptoKit
 import Foundation
 import Network
@@ -187,8 +188,14 @@ final class LocalP2PSmokeHarness {
         guard isEnabled, !didStart else { return }
         didStart = true
 
-        let reporter = SmokeStatusReporter(statusURL: statusURL())
-        reporter.reset()
+        let reporter: SmokeStatusReporter
+        do {
+            reporter = SmokeStatusReporter(statusURL: try statusURL())
+            try reporter.reset()
+        } catch {
+            SkyBridgeLogger.shared.error("P2P smoke status sink initialization failed")
+            return
+        }
         PQCCryptoManager.instance.allowClassicFallbackForCompatibility = false
         reporter.append(
             """
@@ -595,22 +602,27 @@ final class LocalP2PSmokeHarness {
         return "count=\(devices.count) peers=\(preview)\(suffix)"
     }
 
-    private func statusURL() -> URL? {
-        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-status.log"
-        guard !fileName.isEmpty else { return nil }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName)
+    private func statusURL() throws -> URL {
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let basename = try SmokeArtifactBasename.resolve(
+                environmentValue: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"],
+                defaultValue: "skybridge-smoke-status.log"
+              ) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return basename.url(in: cachesURL)
     }
 
-    private func pqcReportURL() -> URL? {
-        guard let fileName = environmentValue("SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME") else {
+    private func pqcReportURL() throws -> URL? {
+        guard let basename = try SmokeArtifactBasename.resolve(
+            environmentValue: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME"]
+        ) else {
             return nil
         }
-        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName)
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return basename.url(in: cachesURL)
     }
 
     private func resolvedLocalDeviceID() async throws -> String {
@@ -897,11 +909,14 @@ final class LocalP2PSmokeHarness {
 
     private func decodeBase64Key(
         _ name: String,
+        expectedByteCount: Int,
         reporter: SmokeStatusReporter
     ) -> Data? {
         guard let raw = environmentValue(name) else { return nil }
-        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
-            reporter.append("failed stage=pqc-preseed error=invalid_base64_\(name)")
+        guard raw.utf8.count <= 4_096,
+              let data = Data(base64Encoded: raw),
+              data.count == expectedByteCount else {
+            reporter.append("failed stage=pqc-preseed error=invalid_key_encoding_or_length_\(name)")
             return nil
         }
         return data
@@ -913,13 +928,21 @@ final class LocalP2PSmokeHarness {
         }
 
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
-        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let xwing = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_216,
+            reporter: reporter
+        ) {
             keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.xwingSuiteWireID,
                 publicKey: xwing
             )
         }
-        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768 = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768SuiteWireID,
                 publicKey: mlkem768
@@ -931,7 +954,11 @@ final class LocalP2PSmokeHarness {
                 )
             }
         }
-        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768fs = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768FSSuiteWireID,
                 publicKey: mlkem768fs
@@ -950,8 +977,6 @@ final class LocalP2PSmokeHarness {
     }
 
     private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async {
-        guard let reportURL = pqcReportURL() else { return }
-
         struct LocalPQCReport: Encodable {
             struct PublicKeyEntry: Encodable {
                 let suiteWireId: UInt16
@@ -963,6 +988,7 @@ final class LocalP2PSmokeHarness {
         }
 
         do {
+            guard let reportURL = try pqcReportURL() else { return }
             let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
             let report = LocalPQCReport(
                 deviceId: try await resolvedLocalDeviceID(),
@@ -990,13 +1016,21 @@ final class LocalP2PSmokeHarness {
         reporter: SmokeStatusReporter
     ) async {
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
-        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let xwing = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_216,
+            reporter: reporter
+        ) {
             keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.xwingSuiteWireID,
                 publicKey: xwing
             )
         }
-        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768 = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768SuiteWireID,
                 publicKey: mlkem768
@@ -1008,7 +1042,11 @@ final class LocalP2PSmokeHarness {
                 )
             }
         }
-        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+        if let mlkem768fs = decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184,
+            reporter: reporter
+        ) {
             keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: Self.mlkem768FSSuiteWireID,
                 publicKey: mlkem768fs
@@ -1354,7 +1392,7 @@ final class LocalP2PSmokeHarness {
             isIncoming: true,
             timeoutSeconds: 90
         )
-        guard let localURL = FileTransferManager.instance.resolveExistingLocalFileURL(for: inboundTransfer),
+        guard let localURL = try await FileTransferManager.instance.resolveExistingLocalFileURL(for: inboundTransfer),
               FileManager.default.fileExists(atPath: localURL.path) else {
             throw NSError(
                 domain: "SkyBridge.Smoke",
@@ -1383,7 +1421,7 @@ final class LocalP2PSmokeHarness {
             isIncoming: true,
             timeoutSeconds: 120
         )
-        guard let localURL = FileTransferManager.instance.resolveExistingLocalFileURL(for: inboundTransfer),
+        guard let localURL = try await FileTransferManager.instance.resolveExistingLocalFileURL(for: inboundTransfer),
               FileManager.default.fileExists(atPath: localURL.path) else {
             throw NSError(
                 domain: "SkyBridge.Smoke",
@@ -1569,6 +1607,36 @@ final class LocalP2PSmokeHarness {
                     category: "secure_channel",
                     error: transferError.localizedDescription
                 )
+            case .capacityExceeded:
+                return fileTransferFailureLine(
+                    phase: "capacity_exceeded",
+                    category: "resource_policy",
+                    error: transferError.localizedDescription
+                )
+            case .invalidTransferState:
+                return fileTransferFailureLine(
+                    phase: "invalid_transfer_state",
+                    category: "resource_policy",
+                    error: transferError.localizedDescription
+                )
+            case .deliveryConfirmationUnknown:
+                return fileTransferFailureLine(
+                    phase: "delivery_confirmation_unknown",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
+            case .partialFileCleanupFailed:
+                return fileTransferFailureLine(
+                    phase: "partial_file_cleanup_failed",
+                    category: "resource_policy",
+                    error: transferError.localizedDescription
+                )
+            case .committedFileReleaseFailed:
+                return fileTransferFailureLine(
+                    phase: "committed_file_release_failed",
+                    category: "resource_policy",
+                    error: transferError.localizedDescription
+                )
             }
         }
         let nsError = error as NSError
@@ -1655,3 +1723,4 @@ final class LocalP2PSmokeHarness {
     }
 
 }
+#endif

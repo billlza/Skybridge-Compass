@@ -2,12 +2,21 @@ import Foundation
 
 @available(macOS 14.0, iOS 17.0, *)
 public enum PeerBootstrapTrustMaterialCleanup {
-    public static func forgetDevice(deviceIds rawDeviceIds: [String]) async {
+    @discardableResult
+    public static func forgetDevice(deviceIds rawDeviceIds: [String]) async -> Bool {
         let deviceIds = normalizedUniqueIds(rawDeviceIds)
-        guard !deviceIds.isEmpty else { return }
+        guard !deviceIds.isEmpty else { return false }
 
         await PeerKEMBootstrapStore.shared.clear(deviceIds: deviceIds)
-        await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: deviceIds)
+        let protocolIdentityCacheCleared = await PeerProtocolIdentityBootstrapStore.shared.clear(
+            deviceIds: deviceIds
+        )
+        if !protocolIdentityCacheCleared {
+            SkyBridgeLogger.p2p.error(
+                "Failed to persist protocol identity bootstrap cache removal while forgetting peer trust"
+            )
+        }
+        return protocolIdentityCacheCleared
     }
 
     public static func repairP2PTrust(deviceIds rawDeviceIds: [String]) async {

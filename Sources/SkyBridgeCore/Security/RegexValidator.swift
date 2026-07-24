@@ -739,14 +739,16 @@ internal actor RegexPatternCounter {
     }
     
  /// Reset the counter (for testing or new database load).
+#if DEBUG || SKYBRIDGE_TESTING
     func reset() {
         validatedCount = 0
     }
+#endif
 }
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension RegexValidator {
  /// Create a validator with custom limits for testing.
     static func createForTesting(limits: SecurityLimits) -> RegexValidator {

@@ -222,7 +222,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         encapsulatedKey: Data,
         privateKey: SecureBytes
     ) async throws -> SecureBytes {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let myPrivateKey: MLKEM768.PrivateKey
         do {
             myPrivateKey = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
@@ -252,7 +252,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes,
         info: Data
     ) async throws -> Data {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let myPrivateKey: MLKEM768.PrivateKey
         do {
             myPrivateKey = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
@@ -297,7 +297,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes,
         info: Data
     ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let myPrivateKey: MLKEM768.PrivateKey
         do {
             myPrivateKey = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
@@ -503,7 +503,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes,
         info: Data
     ) async throws -> Data {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
         let sharedSecret = try privateKeyObj.decapsulate(sealedBox.encapsulatedKey)
         let derivedKey = HKDF<SHA256>.deriveKey(
@@ -556,7 +556,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes,
         info: Data
     ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
         let sharedSecret = try privateKeyObj.decapsulate(sealedBox.encapsulatedKey)
         let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }
@@ -596,7 +596,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         encapsulatedKey: Data,
         privateKey: SecureBytes
     ) async throws -> SecureBytes {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
         let sharedSecret = try privateKeyObj.decapsulate(encapsulatedKey)
         let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }

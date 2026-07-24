@@ -3,9 +3,49 @@ import OSLog
 import XCTest
 @testable import SkyBridgeCore
 import SkyBridgeProtocolCore
+import SkyBridgeRealtimeMedia
 
 @MainActor
 final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
+    @available(macOS 14.0, *)
+    func testMakeSenderPropagatesCancellationWithoutUnavailableDiagnostic() async throws {
+        var diagnostics: [String] = []
+        let coordinator = makeCoordinator(
+            reusableAdmissionLease: { _ in .init(token: "cached-token", expiresIn: 60) },
+            requestMediaRelayLease: { _ in
+                throw CancellationError()
+            },
+            appendSessionDiagnostic: { line, _ in diagnostics.append(line) }
+        )
+        let config = RemoteDesktopStreamConfiguration(
+            targetFrameRate: 60,
+            keyFrameInterval: 120,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: false,
+            audioRedirectionEnabled: true,
+            audioTransport: SkyBridgeRealtimeMediaConstants.audioTransportPQCv1,
+            mediaSessionId: "media-session",
+            mediaAudioEndpoint: SkyBridgeMediaEndpoint(host: "127.0.0.1", port: 55_560),
+            compatibilityAudioFallbackEnabled: false
+        )
+
+        do {
+            _ = try await coordinator.makeSenderIfNeeded(
+                sessionID: "session-1",
+                keys: Self.sessionKeys(),
+                config: config,
+                relayBindPolicy: .requireAcknowledgement
+            )
+            XCTFail("Expected cancellation to propagate")
+        } catch {
+            // The typed-throws contract guarantees this is CancellationError.
+        }
+
+        XCTAssertFalse(diagnostics.contains { $0.contains("audioTxUnavailable") })
+    }
+
     @available(macOS 14.0, *)
     func testReusableAdmissionLeaseRequestsRelayWithoutRefresh() async throws {
         var requestedTokens: [String] = []
@@ -276,6 +316,18 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             expiresAt: Date().addingTimeInterval(60).timeIntervalSince1970,
             ttl: 60,
             maxPacketBytes: 1_200
+        )
+    }
+
+    private static func sessionKeys() -> SessionKeys {
+        SessionKeys(
+            sendKey: Data(repeating: 0x11, count: 32),
+            receiveKey: Data(repeating: 0x22, count: 32),
+            negotiatedSuite: .x25519Ed25519,
+            role: .initiator,
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            sessionId: "session-1",
+            createdAt: Date()
         )
     }
 }

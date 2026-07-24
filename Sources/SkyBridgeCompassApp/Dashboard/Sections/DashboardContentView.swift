@@ -15,6 +15,7 @@ public struct DashboardContentView: View {
     @Binding var showManualConnectSheet: Bool
     @Binding var extendedSearchCountdown: Int
     @Binding var systemPerformanceMonitor: SystemPerformanceMonitor?
+    let showDeferredContent: Bool
     
     private let cardSpacing: CGFloat = 20
     private let sectionSpacing: CGFloat = 24
@@ -27,7 +28,8 @@ public struct DashboardContentView: View {
         isSearching: Binding<Bool>,
         showManualConnectSheet: Binding<Bool>,
         extendedSearchCountdown: Binding<Int>,
-        systemPerformanceMonitor: Binding<SystemPerformanceMonitor?>
+        systemPerformanceMonitor: Binding<SystemPerformanceMonitor?>,
+        showDeferredContent: Bool
     ) {
         self._selectedNavigation = selectedNavigation
         self._selectedSession = selectedSession
@@ -37,18 +39,19 @@ public struct DashboardContentView: View {
         self._showManualConnectSheet = showManualConnectSheet
         self._extendedSearchCountdown = extendedSearchCountdown
         self._systemPerformanceMonitor = systemPerformanceMonitor
+        self.showDeferredContent = showDeferredContent
     }
     
     public var body: some View {
-        ScrollView {
-            VStack(spacing: sectionSpacing) {
+        LazyVStack(spacing: sectionSpacing) {
  // 顶部统计卡片行 - 4个卡片等宽排列
-                topStatsRow
-                
+            topStatsRow
+
+            if showDeferredContent {
  // 🌦️ 液态玻璃天气卡片（全宽）
                 WeatherDashboardCard()
                     .frame(height: 180)
-                
+
  // 主要内容区域 - 2x2网格布局
                 LazyVGrid(columns: [
                     GridItem(.flexible()),
@@ -68,9 +71,13 @@ public struct DashboardContentView: View {
                     
                     AppleSiliconInfoCardView()
                 }
+            } else {
+                Color.clear
+                    .frame(height: 180)
+                    .accessibilityHidden(true)
             }
-            .padding(.bottom, 24)
         }
+        .padding(.bottom, 24)
     }
     
  // MARK: - 顶部统计卡片行
@@ -153,4 +160,3 @@ public struct DashboardContentView: View {
         }
     }
 }
-

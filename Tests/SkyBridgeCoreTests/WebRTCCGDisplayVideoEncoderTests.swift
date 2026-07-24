@@ -44,6 +44,36 @@ final class WebRTCCGDisplayVideoEncoderTests: XCTestCase {
         )
     }
 
+    func testLifecycleAndVideoToolboxStateShareSerialExecutorAndGeneration() throws {
+        let source = try webRTCCGDisplayVideoEncoderSource()
+        let stopBody = try sourceSlice(
+            from: "private func stopOnEncodeQueue() {",
+            to: "func encode(image: CGImage, timestamp: TimeInterval) {",
+            in: source
+        )
+        let callbackBody = try sourceSlice(
+            from: "private static func handleCompressionCallback(",
+            to: "private func makePixelBuffer(from image: CGImage)",
+            in: source
+        )
+
+        XCTAssertTrue(source.contains("private var pendingEncode: PendingEncode?"))
+        XCTAssertTrue(source.contains("private var admissionGeneration: UInt64 = 0"))
+        XCTAssertTrue(source.contains("pending.generation == activeGeneration"))
+        XCTAssertTrue(source.contains("encodeQueue.sync(execute: operation)"))
+        XCTAssertTrue(stopBody.contains("deactivateCompressionCallbackContext()"))
+        XCTAssertTrue(stopBody.contains("VTCompressionSessionCompleteFrames"))
+        XCTAssertTrue(stopBody.contains("VTCompressionSessionInvalidate"))
+        XCTAssertTrue(stopBody.contains("releaseCompressionCallbackContext()"))
+        XCTAssertLessThan(
+            try XCTUnwrap(stopBody.range(of: "deactivateCompressionCallbackContext()")?.lowerBound),
+            try XCTUnwrap(stopBody.range(of: "VTCompressionSessionInvalidate")?.lowerBound)
+        )
+        XCTAssertTrue(callbackBody.contains("encoder.encodeQueue.async"))
+        XCTAssertTrue(callbackBody.contains("encoder.activeGeneration == delivery.context.generation"))
+        XCTAssertFalse(source.contains("stateLock"))
+    }
+
     private func makeTwoRowTestImage() throws -> CGImage {
         let width = 2
         let height = 2

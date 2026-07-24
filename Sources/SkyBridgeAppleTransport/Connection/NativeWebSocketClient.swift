@@ -2,6 +2,36 @@ import Foundation
 import Network
 import OSLog
 
+private final class NativeWebSocketSendGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func install(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
 // MARK: - 原生高性能 WebSocket 客户端（基于 Network.framework）
 // 说明：
 // - 适配 macOS 14+，使用 NWProtocolWebSocket 提供系统级高性能与稳定性。
@@ -13,9 +43,9 @@ public struct NativeWebSocketCallbacks: Sendable {
  /// 连接就绪回调
     public var onOpen: (@Sendable () -> Void)?
  /// 收到文本消息回调
-    public var onText: (@Sendable (String) -> Void)?
+    public var onText: (@Sendable (String) async -> Void)?
  /// 收到二进制消息回调
-    public var onBinary: (@Sendable (Data) -> Void)?
+    public var onBinary: (@Sendable (Data) async -> Void)?
  /// 连接状态变化（ready/waiting/failed/cancelled）
     public var onStateChange: (@Sendable (NWConnection.State) -> Void)?
  /// 连接关闭回调（包含关闭码与原因）
@@ -25,8 +55,8 @@ public struct NativeWebSocketCallbacks: Sendable {
 
     public init(
         onOpen: (@Sendable () -> Void)? = nil,
-        onText: (@Sendable (String) -> Void)? = nil,
-        onBinary: (@Sendable (Data) -> Void)? = nil,
+        onText: (@Sendable (String) async -> Void)? = nil,
+        onBinary: (@Sendable (Data) async -> Void)? = nil,
         onStateChange: (@Sendable (NWConnection.State) -> Void)? = nil,
         onClose: (@Sendable (NWProtocolWebSocket.CloseCode?, Data?) -> Void)? = nil,
         onError: (@Sendable (NWError) -> Void)? = nil
@@ -49,7 +79,8 @@ public actor NativeWebSocketClient {
     private let callbacks: NativeWebSocketCallbacks
     private let preferNoProxies: Bool
     private var connection: NWConnection?
-    private var isReceiving: Bool = false
+    private var connectionGeneration: UInt64 = 0
+    private var receivingGeneration: UInt64?
     private var reconnectPolicy: ReconnectPolicy?
 
  /// 指数退避重连策略
@@ -113,6 +144,7 @@ public actor NativeWebSocketClient {
  // 配置 WebSocket 选项
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true // 自动回复 Ping，降低心跳管理复杂度
+        wsOptions.maximumMessageSize = 64 * 1024
         if !additionalHeaders.isEmpty {
             wsOptions.setAdditionalHeaders(
                 additionalHeaders
@@ -134,23 +166,32 @@ public actor NativeWebSocketClient {
             case .ready, .preparing, .setup, .waiting(_):
                 return
             default:
-                break
+                _ = retireCurrentConnection(
+                    conn,
+                    generation: connectionGeneration,
+                    cancel: true
+                )
             }
         }
 
+        connectionGeneration &+= 1
+        let generation = connectionGeneration
         let conn = NWConnection(to: endpoint, using: parameters)
         self.connection = conn
+        receivingGeneration = nil
 
  // 连接状态回调（跨 actor 闭包，内部用 切回 actor）
-        conn.stateUpdateHandler = { [weak self] state in
+        conn.stateUpdateHandler = { [weak self, weak conn] state in
+            guard let conn else { return }
  // 将状态处理封装为 actor 方法，外部仅调用一次 await，避免出现“await 中无异步操作”的警告
-            Task { await self?.handleStateUpdate(state) }
+            Task { await self?.handleStateUpdate(state, from: conn, generation: generation) }
         }
 
  // 更佳路径迁移（蜂窝/有线/无线切换时优化连接质量）
-        conn.betterPathUpdateHandler = { [weak self] _ in
+        conn.betterPathUpdateHandler = { [weak self, weak conn] _ in
+            guard let conn else { return }
  // 路径优化事件也封装到 actor 方法，统一并发处理
-            Task { await self?.handleBetterPathUpdate() }
+            Task { await self?.handleBetterPathUpdate(from: conn, generation: generation) }
         }
 
  // 启动连接（使用系统全局队列即可，实际状态回调会切回 actor）
@@ -158,79 +199,129 @@ public actor NativeWebSocketClient {
     }
 
  /// 关闭连接
- /// 部分系统版本的 CloseCode 常量集不完整，这里允许传入可选关闭码，缺省为 nil 以兼容 macOS 14。
+    /// 部分系统版本的 CloseCode 常量集不完整，这里允许传入可选关闭码，缺省为 nil 以兼容 macOS 14。
     public func close(code: NWProtocolWebSocket.CloseCode? = nil, reason: Data? = nil) {
-        guard let conn = connection else { return }
+        guard let conn = connection else {
+            connectionGeneration &+= 1
+            receivingGeneration = nil
+            return
+        }
+        let generation = connectionGeneration
+        guard retireCurrentConnection(conn, generation: generation, cancel: false) != nil else { return }
  // macOS 14 的 Metadata 仅支持通过 opcode 指定关闭帧，不支持在初始化时直接设置关闭码与原因
         let metadata = NWProtocolWebSocket.Metadata(opcode: .close)
         let context = NWConnection.ContentContext(identifier: "close", metadata: [metadata])
  // 在 macOS 14 上使用 NWConnection.SendCompletion.contentProcessed 处理发送完成
         conn.send(content: reason, contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
         conn.cancel()
-        self.connection = nil
-        self.isReceiving = false
     }
 
  // MARK: 发送消息
  /// 发送文本消息
     public func send(text: String) async throws {
         guard let conn = connection else { throw NativeWebSocketError.notConnected }
+        let generation = connectionGeneration
         let data = text.data(using: .utf8) ?? Data()
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "text", metadata: [metadata])
         try await sendInternal(conn: conn, data: data, context: context)
+        guard isCurrentConnection(conn, generation: generation) else {
+            throw NativeWebSocketError.connectionSuperseded
+        }
     }
 
  /// 发送二进制消息
     public func send(binary data: Data) async throws {
         guard let conn = connection else { throw NativeWebSocketError.notConnected }
+        let generation = connectionGeneration
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "binary", metadata: [metadata])
         try await sendInternal(conn: conn, data: data, context: context)
+        guard isCurrentConnection(conn, generation: generation) else {
+            throw NativeWebSocketError.connectionSuperseded
+        }
     }
 
  /// 主动发送 Ping（通常无需主动调用，系统会自动回复 Ping）
     public func ping() async throws {
         guard let conn = connection else { throw NativeWebSocketError.notConnected }
+        let generation = connectionGeneration
         let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
         let context = NWConnection.ContentContext(identifier: "ping", metadata: [metadata])
         try await sendInternal(conn: conn, data: nil, context: context)
+        guard isCurrentConnection(conn, generation: generation) else {
+            throw NativeWebSocketError.connectionSuperseded
+        }
     }
 
  // 内部发送封装（使用 continuation 将回调转为 async）
     private func sendInternal(conn: NWConnection, data: Data?, context: NWConnection.ContentContext) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let gate = NativeWebSocketSendGate()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                gate.install(continuation)
  // macOS 14 的 NWConnection.send 使用 NWConnection.SendCompletion 枚举进行完成回调
-            conn.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
+                conn.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
+                    if let error {
+                        gate.finish(.failure(error))
+                    } else {
+                        gate.finish(.success(()))
+                    }
+                })
+            }
+        } onCancel: {
+            gate.finish(.failure(CancellationError()))
+            conn.cancel()
         }
     }
 
  // MARK: 接收消息循环
-    private func startReceiveLoopIfNeeded() async {
-        guard !isReceiving, let conn = connection else { return }
-        isReceiving = true
-        receiveNext(on: conn)
+    private func startReceiveLoopIfNeeded(on conn: NWConnection, generation: UInt64) {
+        guard isCurrentConnection(conn, generation: generation),
+              receivingGeneration != generation else { return }
+        receivingGeneration = generation
+        receiveNext(on: conn, generation: generation)
     }
 
  /// 使用递归方式连续接收消息（Network 的 receiveMessage 为回调式）
-    private func receiveNext(on conn: NWConnection) {
-        conn.receiveMessage { [weak self] (data, context, _, error) in
+    private func receiveNext(on conn: NWConnection, generation: UInt64) {
+        conn.receiveMessage { [weak self, weak conn] (data, context, _, error) in
+            guard let conn else { return }
  // 消息处理封装到 actor 方法，避免在闭包中直接跨 actor 访问属性
-            Task { await self?.processReceive(data: data, context: context, error: error) }
+            Task {
+                await self?.processReceive(
+                    data: data,
+                    context: context,
+                    error: error,
+                    from: conn,
+                    generation: generation
+                )
+            }
         }
     }
 
  /// 在 actor 内部处理收到的消息，避免跨 actor 属性访问产生冗余 await 警告
-    private func processReceive(data: Data?, context: NWConnection.ContentContext?, error: NWError?) async {
+    private func processReceive(
+        data: Data?,
+        context: NWConnection.ContentContext?,
+        error: NWError?,
+        from conn: NWConnection,
+        generation: UInt64
+    ) async {
+        guard isCurrentConnection(conn, generation: generation),
+              receivingGeneration == generation else { return }
         let callbacks = self.callbacks
         if let error = error {
+            let reconnectGeneration = retireCurrentConnection(
+                conn,
+                generation: generation,
+                cancel: true
+            )
             callbacks.onError?(error)
+            if let reconnectGeneration {
+                await scheduleReconnectIfNeeded(expectedGeneration: reconnectGeneration)
+            }
+            return
         }
 
  // 解析 WebSocket 元数据，识别帧类型
@@ -238,15 +329,14 @@ public actor NativeWebSocketClient {
             switch wsMeta.opcode {
             case .text:
                 if let data, let text = String(data: data, encoding: .utf8) {
-                    callbacks.onText?(text)
+                    await callbacks.onText?(text)
                 }
             case .binary:
-                if let data { callbacks.onBinary?(data) }
+                if let data { await callbacks.onBinary?(data) }
             case .close:
  // macOS 14 的 Metadata 未暴露 closeReason 字段，这里仅回传关闭码，并以 1000 作为默认正常关闭码
+                _ = retireCurrentConnection(conn, generation: generation, cancel: true)
                 callbacks.onClose?(wsMeta.closeCode, nil)
- // 在 actor 内部直接关闭，无需 await
-                self.close(code: wsMeta.closeCode, reason: nil)
                 return
             case .cont:
  // Fragment 帧（continuation）；此处暂不处理，按需扩展聚合消息片段
@@ -260,26 +350,37 @@ public actor NativeWebSocketClient {
         }
 
  // 继续接收后续消息
-        await self.continueReceiveIfNeeded()
+        continueReceiveIfNeeded(on: conn, generation: generation)
     }
 
  /// 封装状态更新到 actor 内部，消除闭包中对 actor 属性的直接跨越访问
-    private func handleStateUpdate(_ state: NWConnection.State) async {
+    private func handleStateUpdate(
+        _ state: NWConnection.State,
+        from conn: NWConnection,
+        generation: UInt64
+    ) async {
+        guard isCurrentConnection(conn, generation: generation) else { return }
         let callbacks = self.callbacks
         callbacks.onStateChange?(state)
         switch state {
         case .ready:
             callbacks.onOpen?()
-            if let conn = connection {
-                requestEstablishmentReport(for: conn)
-            }
-            await self.startReceiveLoopIfNeeded()
+            requestEstablishmentReport(for: conn, generation: generation)
+            startReceiveLoopIfNeeded(on: conn, generation: generation)
         case .failed(let error):
+            let reconnectGeneration = retireCurrentConnection(
+                conn,
+                generation: generation,
+                cancel: true
+            )
             callbacks.onError?(error)
-            await self.scheduleReconnectIfNeeded()
+            if let reconnectGeneration {
+                await scheduleReconnectIfNeeded(expectedGeneration: reconnectGeneration)
+            }
         case .waiting(let error):
             callbacks.onError?(error)
         case .cancelled:
+            _ = retireCurrentConnection(conn, generation: generation, cancel: false)
             callbacks.onClose?(nil, nil)
         default:
             break
@@ -287,26 +388,55 @@ public actor NativeWebSocketClient {
     }
 
  /// 封装路径优化处理，统一通过 actor 访问回调
-    private func handleBetterPathUpdate() async {
+    private func handleBetterPathUpdate(from conn: NWConnection, generation: UInt64) {
+        guard isCurrentConnection(conn, generation: generation) else { return }
         let callbacks = self.callbacks
  // 这里不主动重建连接，Network 会在更佳路径可用时优化底层传输
  // 可根据需要在此做日志或 QoS 调整
         callbacks.onStateChange?(.preparing)
     }
 
-    private func continueReceiveIfNeeded() async {
-        guard isReceiving, let conn = connection else { return }
-        receiveNext(on: conn)
+    private func continueReceiveIfNeeded(on conn: NWConnection, generation: UInt64) {
+        guard isCurrentConnection(conn, generation: generation),
+              receivingGeneration == generation else { return }
+        receiveNext(on: conn, generation: generation)
     }
 
-    private func requestEstablishmentReport(for conn: NWConnection) {
-        conn.requestEstablishmentReport(queue: .global(qos: .utility)) { [weak self] report in
-            guard let report else { return }
-            Task { await self?.logEstablishmentReport(report) }
+    private func isCurrentConnection(_ conn: NWConnection, generation: UInt64) -> Bool {
+        connectionGeneration == generation && connection === conn
+    }
+
+    @discardableResult
+    private func retireCurrentConnection(
+        _ conn: NWConnection,
+        generation: UInt64,
+        cancel: Bool
+    ) -> UInt64? {
+        guard isCurrentConnection(conn, generation: generation) else { return nil }
+        connection = nil
+        receivingGeneration = nil
+        connectionGeneration &+= 1
+        conn.stateUpdateHandler = nil
+        conn.betterPathUpdateHandler = nil
+        if cancel {
+            conn.cancel()
+        }
+        return connectionGeneration
+    }
+
+    private func requestEstablishmentReport(for conn: NWConnection, generation: UInt64) {
+        conn.requestEstablishmentReport(queue: .global(qos: .utility)) { [weak self, weak conn] report in
+            guard let conn, let report else { return }
+            Task { await self?.logEstablishmentReport(report, from: conn, generation: generation) }
         }
     }
 
-    private func logEstablishmentReport(_ report: NWConnection.EstablishmentReport) {
+    private func logEstablishmentReport(
+        _ report: NWConnection.EstablishmentReport,
+        from conn: NWConnection,
+        generation: UInt64
+    ) {
+        guard isCurrentConnection(conn, generation: generation) else { return }
         let proxyEndpoint = report.proxyEndpoint.map { String(describing: $0) } ?? "direct"
         if preferNoProxies && report.usedProxy {
             logger.error(
@@ -320,12 +450,21 @@ public actor NativeWebSocketClient {
     }
 
  // MARK: 重连逻辑（指数退避）
-    private func scheduleReconnectIfNeeded() async {
+    private func scheduleReconnectIfNeeded(expectedGeneration: UInt64) async {
         guard let policy = reconnectPolicy else { return }
  // delay 未被修改，使用 let 提升语义与安全
         let delay = policy.initialDelay
+        guard delay.isFinite, delay >= 0 else {
+            logger.error("native websocket reconnect policy has an invalid initial delay")
+            return
+        }
  // 简单示例：尝试一次重连；根据需要可扩展为多次尝试
-        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        do {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        } catch {
+            return
+        }
+        guard connection == nil, connectionGeneration == expectedGeneration else { return }
         connect()
  // 若需要多次尝试，可将 delay = min(delay * factor, maxDelay) 并循环处理
     }
@@ -334,9 +473,11 @@ public actor NativeWebSocketClient {
     public enum NativeWebSocketError: Error {
  /// 尚未建立连接
         case notConnected
+        case connectionSuperseded
     }
 }
 
+#if DEBUG || SKYBRIDGE_TESTING
 extension NativeWebSocketClient {
     internal static func testOnlyBuildParameters(
         tls: Bool,
@@ -352,3 +493,4 @@ extension NativeWebSocketClient {
         )
     }
 }
+#endif

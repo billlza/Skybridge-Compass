@@ -95,9 +95,20 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
         let discovery = try loadSource(
             "SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
         )
-        XCTAssertTrue(discovery.contains("currentProtocolIdentitySnapshot()"))
+        XCTAssertTrue(discovery.contains("authority: ProtocolIdentitySnapshot"))
+        XCTAssertTrue(discovery.contains("validatedAuthority.deviceId"))
+        XCTAssertTrue(discovery.contains("advertisingAuthority = authority"))
         XCTAssertTrue(discovery.contains("record[\"protocolSigningAlgorithm\"]"))
         XCTAssertTrue(discovery.contains("record[\"identityFingerprint\"]"))
+
+        let p2pManager = try loadSource(
+            "SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        XCTAssertTrue(
+            p2pManager.contains("committedActiveProtocolIdentitySnapshot()"),
+            "The discovery boundary must receive only the committed active authority"
+        )
+        XCTAssertTrue(p2pManager.contains("authority: authority"))
 
         let transfer = try loadSource(
             "SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
@@ -283,6 +294,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
                 group.addTask {
                     try await authority.resolveSigningIdentity(
                         for: .ed25519,
+                        keyProtection: .softwareKeychain,
                         generate: {
                             generationCount.withLock { $0 += 1 }
                             return generated
@@ -320,6 +332,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
 
         let resolved = try await authority.resolveSigningIdentity(
             for: .ed25519,
+            keyProtection: .softwareKeychain,
             generate: { localCandidate },
             validate: Self.validateEd25519,
             decodeLegacy: Self.decodeLegacyEd25519
@@ -386,6 +399,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
         let cancelledWaiter = Task.detached { @Sendable in
             let resolved = try await authority.resolveSigningIdentity(
                 for: .ed25519,
+                keyProtection: .softwareKeychain,
                 generate: {
                     await gate.wait()
                     return material
@@ -410,6 +424,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
 
         let next = try await authority.resolveSigningIdentity(
             for: .ed25519,
+            keyProtection: .softwareKeychain,
             generate: { throw TestFailure.generatedUnexpectedly },
             validate: Self.validateEd25519,
             decodeLegacy: Self.decodeLegacyEd25519
@@ -427,12 +442,13 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
         let firstAuthority = ProtocolDeviceIdentityAuthority { store }
         _ = try await firstAuthority.resolveSigningIdentity(
             for: .ed25519,
+            keyProtection: .softwareKeychain,
             generate: { material },
             validate: Self.validateEd25519,
             decodeLegacy: Self.decodeLegacyEd25519
         )
 
-        var legacyEncoding = material.privateKey
+        var legacyEncoding = material.privateKeyRepresentation
         legacyEncoding.append(material.publicKey)
         store.installLegacySigningItems([
             ProtocolIdentityLegacyItem(
@@ -444,6 +460,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
         let retryAuthority = ProtocolDeviceIdentityAuthority { store }
         let retried = try await retryAuthority.resolveSigningIdentity(
             for: .ed25519,
+            keyProtection: .softwareKeychain,
             generate: { throw TestFailure.generatedUnexpectedly },
             validate: Self.validateEd25519,
             decodeLegacy: Self.decodeLegacyEd25519
@@ -463,7 +480,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
         let first = Self.ed25519Material()
         let second = Self.ed25519Material()
         func legacyEncoding(_ material: ProtocolSigningIdentityMaterial) -> Data {
-            var encoded = material.privateKey
+            var encoded = material.privateKeyRepresentation
             encoded.append(material.publicKey)
             return encoded
         }
@@ -482,6 +499,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
         do {
             _ = try await signingAuthority.resolveSigningIdentity(
                 for: .ed25519,
+                keyProtection: .softwareKeychain,
                 generate: { throw TestFailure.generatedUnexpectedly },
                 validate: Self.validateEd25519,
                 decodeLegacy: Self.decodeLegacyEd25519
@@ -510,6 +528,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
 
         let resolved = try await authority.resolveSigningIdentity(
             for: .ed25519,
+            keyProtection: .softwareKeychain,
             generate: { Self.ed25519Material() },
             validate: Self.validateEd25519,
             decodeLegacy: Self.decodeLegacyEd25519
@@ -540,7 +559,7 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
     ) async throws -> Void = { material in
         guard material.algorithm == .ed25519,
               let privateKey = try? Curve25519.Signing.PrivateKey(
-                  rawRepresentation: material.privateKey
+                  rawRepresentation: material.privateKeyRepresentation
               ),
               privateKey.publicKey.rawRepresentation == material.publicKey else {
             throw TestFailure.invalidKeyMaterial
@@ -593,12 +612,12 @@ private actor ProtocolIdentityTestGate {
 private struct ProtocolIdentityTestStore: ProtocolIdentityPersistence, Sendable {
     struct State: Sendable {
         var deviceAuthority: Data?
-        var signingKey: Data?
-        var signingAuthority: Data?
+        var signingKeysByAccount: [String: Data] = [:]
+        var signingAuthoritiesByAccount: [String: Data] = [:]
         var defaultsDeviceIds: [String]
         var legacyDeviceItems: [ProtocolIdentityLegacyItem]
         var legacySigningItems: [ProtocolIdentityLegacyItem]
-        var forcedSigningWinner: Data?
+        var forcedSigningWinnersByAccount: [String: Data] = [:]
         var publishedMirror: String?
         var deviceAuthorityInsertCount = 0
         var signingKeyInsertCount = 0
@@ -610,6 +629,14 @@ private struct ProtocolIdentityTestStore: ProtocolIdentityPersistence, Sendable 
             deviceAuthorityInsertCount + signingKeyInsertCount
                 + signingAuthorityInsertCount + cleanupCount + mirrorPublishCount
         }
+
+        var signingKey: Data? {
+            signingKeysByAccount.values.first
+        }
+
+        var signingAuthority: Data? {
+            signingAuthoritiesByAccount.values.first
+        }
     }
 
     private let state: OSAllocatedUnfairLock<State>
@@ -620,12 +647,15 @@ private struct ProtocolIdentityTestStore: ProtocolIdentityPersistence, Sendable 
         legacySigningItems: [ProtocolIdentityLegacyItem] = [],
         forcedSigningWinner: Data? = nil
     ) {
+        let forcedSigningWinnersByAccount = forcedSigningWinner.map {
+            [ProtocolSigningAlgorithm.ed25519.rawValue: $0]
+        } ?? [:]
         state = OSAllocatedUnfairLock(
             initialState: State(
                 defaultsDeviceIds: defaultsDeviceIds,
                 legacyDeviceItems: legacyDeviceItems,
                 legacySigningItems: legacySigningItems,
-                forcedSigningWinner: forcedSigningWinner
+                forcedSigningWinnersByAccount: forcedSigningWinnersByAccount
             )
         )
     }
@@ -649,42 +679,46 @@ private struct ProtocolIdentityTestStore: ProtocolIdentityPersistence, Sendable 
         }
     }
 
-    func loadSigningKey(for algorithm: ProtocolSigningAlgorithm) throws -> Data? {
-        _ = algorithm
-        return state.withLock { $0.signingKey }
+    func loadSigningKey(for slot: ProtocolSigningIdentitySlot) throws -> Data? {
+        state.withLock { $0.signingKeysByAccount[slot.persistenceAccount] }
     }
 
     func insertSigningKeyIfAbsent(
         _ data: Data,
-        for algorithm: ProtocolSigningAlgorithm
+        for slot: ProtocolSigningIdentitySlot
     ) throws -> IOSKeychainInsertResult {
-        _ = algorithm
         return state.withLock { value in
             value.signingKeyInsertCount += 1
-            guard value.signingKey == nil else { return .alreadyExists }
-            if let forced = value.forcedSigningWinner {
-                value.signingKey = forced
+            let account = slot.persistenceAccount
+            guard value.signingKeysByAccount[account] == nil else {
                 return .alreadyExists
             }
-            value.signingKey = data
+            if let forced = value.forcedSigningWinnersByAccount[account] {
+                value.signingKeysByAccount[account] = forced
+                return .alreadyExists
+            }
+            value.signingKeysByAccount[account] = data
             return .inserted
         }
     }
 
-    func loadSigningAuthority(for algorithm: ProtocolSigningAlgorithm) throws -> Data? {
-        _ = algorithm
-        return state.withLock { $0.signingAuthority }
+    func loadSigningAuthority(for slot: ProtocolSigningIdentitySlot) throws -> Data? {
+        state.withLock {
+            $0.signingAuthoritiesByAccount[slot.persistenceAccount]
+        }
     }
 
     func insertSigningAuthorityIfAbsent(
         _ data: Data,
-        for algorithm: ProtocolSigningAlgorithm
+        for slot: ProtocolSigningIdentitySlot
     ) throws -> IOSKeychainInsertResult {
-        _ = algorithm
         return state.withLock { value in
             value.signingAuthorityInsertCount += 1
-            guard value.signingAuthority == nil else { return .alreadyExists }
-            value.signingAuthority = data
+            let account = slot.persistenceAccount
+            guard value.signingAuthoritiesByAccount[account] == nil else {
+                return .alreadyExists
+            }
+            value.signingAuthoritiesByAccount[account] = data
             return .inserted
         }
     }

@@ -32,6 +32,21 @@ public enum SkyBridgeMetalShaderLibrary {
         "HazeParticleShaders"
     ]
 
+    /// Loads shader functions from the SkyBridgeCore resource bundle without exposing the
+    /// implementation-specific `Bundle.module` to application targets.
+    public static func loadCore(
+        device: MTLDevice,
+        sourceResourceNames: [String],
+        requiredFunctionNames: [String]
+    ) throws -> MTLLibrary {
+        try load(
+            device: device,
+            bundle: coreResourceBundle,
+            sourceResourceNames: sourceResourceNames,
+            requiredFunctionNames: requiredFunctionNames
+        )
+    }
+
     public static func loadIfAvailable(
         device: MTLDevice,
         bundle: Bundle,

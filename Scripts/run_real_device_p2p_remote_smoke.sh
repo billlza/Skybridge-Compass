@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
+source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
@@ -13,8 +15,14 @@ PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-publ
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
+IOS_RELEASE_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
+IOS_WIDGET_BUNDLE_ID="com.skybridge.compass.ios.widgets"
+IOS_TEAM_IDENTIFIER="YKUPL7Z869"
+IOS_APP_DISTRIBUTION_PROFILE_INPUT="${SKYBRIDGE_SMOKE_IOS_APP_DISTRIBUTION_PROFILE:-}"
+IOS_WIDGET_DISTRIBUTION_PROFILE_INPUT="${SKYBRIDGE_SMOKE_IOS_WIDGET_DISTRIBUTION_PROFILE:-}"
 IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
+IOS_BUILD_CONFIGURATION="${SKYBRIDGE_SMOKE_IOS_BUILD_CONFIGURATION:-Release}"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-240}"
 IOS_LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_LAUNCH_TIMEOUT_SECONDS:-$((SMOKE_TIMEOUT_SECONDS + 60))}"
 SMOKE_REMOTE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
@@ -26,9 +34,9 @@ SMOKE_VIDEO_HEIGHT="${SKYBRIDGE_SMOKE_VIDEO_HEIGHT:-1329}"
 SMOKE_EXPECT_RENDER_ORIENTATION="${SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION:-upright}"
 SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}"
 SMOKE_FORCE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$SMOKE_REQUIRE_SIGNED_KEM_REFRESH}"
-SMOKE_AUTO_APPROVE_PAIRING="${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-1}"
 RUN_MAC_ONLINE_IPAD_SMOKE="${SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD:-1}"
 RUN_ID="${SKYBRIDGE_SMOKE_P2P_REMOTE_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
+skybridge_smoke_require_safe_run_id "$RUN_ID" "SKYBRIDGE_SMOKE_P2P_REMOTE_RUN_ID"
 MAC_ONLINE_RUNTIME_DIR="${TMPDIR:-/tmp}/skybridge-mac-online-${RUN_ID}"
 PREFERRED_SUITE="${SB_PQC_PREFERRED_SUITE:-xwing}"
 HOST_PREFERRED_SUITE="${SB_PQC_HOST_PREFERRED_SUITE:-$PREFERRED_SUITE}"
@@ -36,16 +44,21 @@ IOS_PREFERRED_SUITE="${SB_PQC_IOS_PREFERRED_SUITE:-$PREFERRED_SUITE}"
 EXPECTED_TARGET_SUITE="${SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE:-X-Wing}"
 HOST_HANDSHAKE_PATTERN="(success .*suite=${EXPECTED_TARGET_SUITE} .*handshakeOnly=1|mac remote established .*suite=${EXPECTED_TARGET_SUITE})"
 PRESERVE_INSTALL="${SKYBRIDGE_SMOKE_PRESERVE_INSTALL:-1}"
-PQC_TRUST_MODE="${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-injected}"
-MAC_HOST_LAUNCH_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-direct}"
+PQC_TRUST_MODE="${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-actual}"
+KEYCHAIN_MODE="${SKYBRIDGE_SMOKE_KEYCHAIN_MODE:-system}"
+LAB_RUN="${SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN:-0}"
+MAC_HOST_LAUNCH_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-packaged}"
 SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}"
-SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-1}"
 SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-Mac Smoke Operator}"
 SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-mac-smoke-nebula}"
 SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-iPad Smoke Operator}"
 SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID="${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-ipad-smoke-nebula}"
 SWIFTPM_CACHE_DIR="${SKYBRIDGE_SWIFTPM_CACHE_DIR:-$ROOT_DIR/.swiftpm-cache}"
 SWIFT_MODULE_CACHE_DIR="${SKYBRIDGE_SWIFT_MODULE_CACHE_DIR:-$ROOT_DIR/.swiftpm-module-cache}"
+SMOKE_BUILD_DIR="${SKYBRIDGE_P2P_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-p2p-smoke}"
+if [[ "$SMOKE_BUILD_DIR" != /* ]]; then
+  SMOKE_BUILD_DIR="$ROOT_DIR/$SMOKE_BUILD_DIR"
+fi
 
 case "$PQC_TRUST_MODE" in
   user|actual|injected) ;;
@@ -55,10 +68,71 @@ case "$PQC_TRUST_MODE" in
     ;;
 esac
 
-case "$MAC_HOST_LAUNCH_MODE" in
-  direct|open) ;;
+case "$KEYCHAIN_MODE" in
+  system) KEYCHAIN_IN_MEMORY=0 ;;
+  in-memory) KEYCHAIN_IN_MEMORY=1 ;;
   *)
-    echo "Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=$MAC_HOST_LAUNCH_MODE (expected: direct, open)" >&2
+    echo "Unsupported SKYBRIDGE_SMOKE_KEYCHAIN_MODE=$KEYCHAIN_MODE (expected: system, in-memory)" >&2
+    exit 2
+    ;;
+esac
+
+case "$LAB_RUN" in
+  0|1) ;;
+  *)
+    echo "SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+case "$IOS_BUILD_CONFIGURATION" in
+  Release|Debug) ;;
+  *)
+    echo "SKYBRIDGE_SMOKE_IOS_BUILD_CONFIGURATION must be Release or Debug" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$IOS_BUILD_CONFIGURATION" == "Debug" && "$LAB_RUN" != "1" ]]; then
+  echo "The iOS Debug product is diagnostic-only and requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
+  exit 2
+fi
+
+if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  IOS_EXPECTED_ENTITLEMENTS="$IOS_RELEASE_ENTITLEMENTS"
+else
+  IOS_EXPECTED_ENTITLEMENTS="$IOS_DEBUG_ENTITLEMENTS"
+fi
+
+if [[ "$LAB_RUN" != "1" ]]; then
+  acceptance_violations=()
+  [[ "$PQC_TRUST_MODE" != "injected" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_PQC_TRUST_MODE=user|actual")
+  [[ "$KEYCHAIN_MODE" == "system" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_KEYCHAIN_MODE=system")
+  [[ "$RUN_MAC_ONLINE_IPAD_SMOKE" == "1" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD=1")
+  [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged")
+  [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_IOS_BUILD_CONFIGURATION=Release")
+  [[ "$SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE" == "1" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=1")
+  [[ "${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-0}" != "1" ]] \
+    || acceptance_violations+=("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=0")
+  [[ "${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" != "1" ]] \
+    || acceptance_violations+=("SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0")
+  if (( ${#acceptance_violations[@]} > 0 )); then
+    printf 'Real-device P2P acceptance profile is diagnostic-only; required: %s\n' "${acceptance_violations[*]}" >&2
+    echo "Set SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1 only for non-acceptance diagnostics." >&2
+    exit 2
+  fi
+fi
+
+case "$MAC_HOST_LAUNCH_MODE" in
+  packaged|direct) ;;
+  *)
+    echo "Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=$MAC_HOST_LAUNCH_MODE (expected: packaged, direct)" >&2
     exit 2
     ;;
 esac
@@ -76,7 +150,8 @@ case "$IOS_LAUNCH_TIMEOUT_SECONDS" in
     ;;
 esac
 
-mkdir -p "$ARTIFACT_DIR" "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR" "$MAC_ONLINE_RUNTIME_DIR"
+mkdir -p "$ARTIFACT_DIR" "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR"
+chmod 0700 "$ARTIFACT_DIR"
 
 pick_real_device_id() {
   python3 - <<'PY'
@@ -310,9 +385,12 @@ PY
 }
 validate_real_ipad_device_id
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
-HOST_STATUS="$ARTIFACT_DIR/mac.status.log"
-HOST_PQC_REPORT="$ARTIFACT_DIR/mac.pqc.json"
-HOST_STDOUT="$ARTIFACT_DIR/mac.stdout.log"
+HOST_STATUS_ARTIFACT="$ARTIFACT_DIR/mac.status.log"
+HOST_PQC_REPORT_ARTIFACT="$ARTIFACT_DIR/mac.pqc.json"
+HOST_STDOUT_ARTIFACT="$ARTIFACT_DIR/mac.stdout.log"
+HOST_STATUS="$MAC_ONLINE_RUNTIME_DIR/mac.status.log"
+HOST_PQC_REPORT="$MAC_ONLINE_RUNTIME_DIR/mac.pqc.json"
+HOST_STDOUT="$MAC_ONLINE_RUNTIME_DIR/mac.stdout.log"
 MAC_SOURCE_STDOUT="$ARTIFACT_DIR/mac-smoke-source.stdout.log"
 IOS_PQC_REPORT_NAME="ios.pqc.json"
 IOS_PQC_REPORT="$ARTIFACT_DIR/$IOS_PQC_REPORT_NAME"
@@ -328,18 +406,38 @@ MAC_ONLINE_APP_STDOUT="$ARTIFACT_DIR/mac-online-ipad.app.stdout.log"
 MAC_ONLINE_APP_STDERR="$ARTIFACT_DIR/mac-online-ipad.app.stderr.log"
 MAC_ONLINE_OPEN_STDERR="$ARTIFACT_DIR/mac-online-ipad-open.stderr.log"
 MAC_ONLINE_BUILD_LOG="$ARTIFACT_DIR/mac-online-ipad-build.log"
+MAC_TO_IOS_CRYPTO_HANDSHAKE_COMPLETE=0
 MAC_ONLINE_LAUNCH_STDOUT="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.app.stdout.log"
 MAC_ONLINE_LAUNCH_STDERR="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.app.stderr.log"
 MAC_ONLINE_LAUNCH_OPEN_STDERR="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad-open.stderr.log"
 MAC_ONLINE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-mac-online"
 MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
 MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
-MAC_ONLINE_SIGN_IDENTITY="${SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY:-}"
 MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS:-120}"
 MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS:-3}"
-MAC_APP_BUNDLE="$ARTIFACT_DIR/LocalLanInteropHost.app"
-MAC_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanInteropHost"
-MAC_SOURCE_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanSmokeSourceHost"
+MAC_HOST_PRODUCT_APP_BUNDLE="$ROOT_DIR/dist/SkyBridge Compass Pro.app"
+MAC_HOST_PRODUCT_BUNDLE_ID="com.skybridge.compass.pro"
+MAC_HOST_PRODUCT_PROFILE="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/embedded.provisionprofile"
+MAC_HOST_PRODUCT_WIDGET_BUNDLE="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID="com.skybridge.compass.pro.widgets"
+MAC_HOST_PRODUCT_WIDGET_PROFILE="$MAC_HOST_PRODUCT_WIDGET_BUNDLE/Contents/embedded.provisionprofile"
+MAC_HOST_SIGNING_DIR="$MAC_ONLINE_RUNTIME_DIR/mac-host-signing"
+MAC_HOST_PRODUCT_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/product-entitlements.plist"
+MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/product-widget-entitlements.plist"
+MAC_HOST_HELPER_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/helper-entitlements.plist"
+MAC_HOST_SIGNED_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/helper-signed-entitlements.plist"
+MAC_ONLINE_SIGNED_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/mac-online-signed-entitlements.plist"
+MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/mac-online-widget-signed-entitlements.plist"
+MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH=""
+MAC_HOST_PRODUCT_TEAM_IDENTIFIER=""
+MAC_HOST_PRODUCT_AUTHORITY=""
+MAC_HOST_HELPER_REGISTERED=0
+MAC_ONLINE_APP_REGISTERED=0
+MAC_ONLINE_APP_SOURCE="not-run"
+MAC_ONLINE_APP_SOURCE_CURRENT=0
+MAC_APP_BUNDLE="$MAC_ONLINE_RUNTIME_DIR/LocalLanInteropHost.app"
+MAC_DIRECT_BIN="$SMOKE_BUILD_DIR/debug/LocalLanInteropHost"
+MAC_SOURCE_DIRECT_BIN="$SMOKE_BUILD_DIR/debug/LocalLanSmokeSourceHost"
 MAC_APP_BIN=""
 MAC_ONLINE_APP_BUNDLE=""
 MAC_ONLINE_APP_BIN=""
@@ -349,6 +447,8 @@ IOS_STATUS_NAME="ios-p2p-remote-${RUN_ID}.status.log"
 IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
 IOS_STATUS_APP_CACHE_LOCAL="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.app-cache.status.log"
 IOS_STATUS_CONSOLE_SNAPSHOT="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.console.status.log"
+IOS_TRACE_NAME="${IOS_STATUS_NAME}.trace.log"
+IOS_TRACE_LOCAL="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.trace.log"
 IOS_LISTENER_STATUS_NAME="${IOS_STATUS_NAME%.status.log}.listener.status.log"
 IOS_LISTENER_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_LISTENER_STATUS_NAME"
 IOS_CONSOLE_STDERR="$ARTIFACT_DIR/ios-console.stderr.log"
@@ -356,6 +456,17 @@ IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_TIMEOUT_SECONDS:-15}"
 IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_HARD_TIMEOUT_SECONDS:-25}"
 IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-0}"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
+IOS_PRODUCT_PROOF="$ARTIFACT_DIR/ios-product-proof.json"
+P2P_APPROVAL_PROOF="$ARTIFACT_DIR/p2p-approval-proof.json"
+IOS_DISTRIBUTION_PREFLIGHT="$MAC_ONLINE_RUNTIME_DIR/ios-distribution-signing-preflight.json"
+IOS_SOURCE_REVISION=""
+IOS_SOURCE_CLEAN=0
+IOS_SOURCE_DIRTY_STATE="unknown"
+IOS_APP_DISTRIBUTION_PROFILE=""
+IOS_WIDGET_DISTRIBUTION_PROFILE=""
+IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=""
+IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=""
+IOS_DISTRIBUTION_IDENTITY_HASH=""
 LAUNCH_RESULT_JSON="$ARTIFACT_DIR/ios-launch.json"
 IOS_PROCESS_LIST_JSON="$ARTIFACT_DIR/ios-processes.json"
 IOS_PROCESS_LIST_LOG="$ARTIFACT_DIR/ios-processes.log"
@@ -369,6 +480,90 @@ IOS_APP_PID=""
 COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|remoteControlNoticeRejected .*missing_required_notice_metadata|render-main-path-failed|strict-media-failed|already_connected|rejectAlreadyConnected|对端拒绝连接：already_connected|Peer rejected handshake: already_connected'
 IOS_REMOTE_SMOKE_FAILURE_PATTERN="failed stage=|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|crossNetwork=1|audioRxPlaybackDrop=[1-9][0-9]*|audioRxJitterEvicted=[1-9][0-9]*|audioRxUnderflow=[1-9][0-9]*|audioRxRebuffer=[1-9][0-9]*|jitterEvicted=[1-9][0-9]*|playbackDrop=[1-9][0-9]*|datagrams=[1-9][0-9][0-9]+ .*probable=rx-decode-stalled|HEVC 连续失败|临时降级 H\\.264|codec=h264"
 HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
+REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(
+  "remoteControl.securityNotice.account"
+  "remoteControl.securityNotice.activeTitle"
+  "remoteControl.securityNotice.appName"
+  "remoteControl.securityNotice.approve"
+  "remoteControl.securityNotice.close"
+  "remoteControl.securityNotice.collapse"
+  "remoteControl.securityNotice.device"
+  "remoteControl.securityNotice.disconnect"
+  "remoteControl.securityNotice.expand"
+  "remoteControl.securityNotice.nebulaID"
+  "remoteControl.securityNotice.pendingTitle"
+  "remoteControl.securityNotice.pqc"
+  "remoteControl.securityNotice.reject"
+  "remoteControl.securityNotice.remoteIP"
+  "remoteControl.securityNotice.subtitle"
+  "remoteControl.securityNotice.transport"
+  "remoteControl.securityNotice.transport.p2p"
+  "remoteControl.securityNotice.transport.webrtc"
+  "remoteControl.securityNotice.valueUnavailable"
+  "remoteControl.securityNotice.windowTitle"
+)
+
+validate_remote_control_security_notice_localizations() {
+  local resource_root="$1"
+  local phase="$2"
+  local locale
+  local strings_path
+  local locales=("en" "ja" "zh-hans")
+
+  if [[ "${#REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS[@]}" -ne 20 ]]; then
+    echo "Remote-control security notice localization contract must contain exactly 20 keys." >&2
+    return 1
+  fi
+
+  for locale in "${locales[@]}"; do
+    strings_path="$resource_root/$locale.lproj/Localizable.strings"
+    if [[ ! -f "$strings_path" || -L "$strings_path" ]]; then
+      echo "Missing regular $locale remote-control localization during $phase validation: $strings_path" >&2
+      return 1
+    fi
+    if ! /usr/bin/plutil -lint "$strings_path" >/dev/null; then
+      echo "Malformed $locale Localizable.strings during $phase validation." >&2
+      return 1
+    fi
+    if ! python3 - "$strings_path" "$locale" "$phase" "${REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS[@]}" <<'PY'
+import json
+import subprocess
+import sys
+
+strings_path, locale, phase, *required_keys = sys.argv[1:]
+completed = subprocess.run(
+    ["/usr/bin/plutil", "-convert", "json", "-o", "-", strings_path],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if completed.returncode != 0:
+    print(f"Unable to decode {locale} localization during {phase} validation", file=sys.stderr)
+    raise SystemExit(1)
+payload = json.loads(completed.stdout)
+if not isinstance(payload, dict):
+    print(f"{locale} localization is not a dictionary during {phase} validation", file=sys.stderr)
+    raise SystemExit(1)
+missing_or_raw = [
+    key
+    for key in required_keys
+    if not isinstance(payload.get(key), str)
+    or not payload[key].strip()
+    or payload[key] == key
+]
+if missing_or_raw:
+    print(
+        f"{locale} localization is missing required non-raw keys during {phase} validation: "
+        + ",".join(missing_or_raw),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+    then
+      return 1
+    fi
+  done
+}
 
 fail_if_forbidden_fallback_evidence() {
   local path="$1"
@@ -414,7 +609,139 @@ sync_mac_online_launch_stdio() {
   fi
 }
 
+sync_macos_smoke_host_artifacts() {
+  local source_path
+  local destination_path
+  local pair
+
+  for pair in \
+    "$HOST_STATUS|$HOST_STATUS_ARTIFACT" \
+    "$HOST_PQC_REPORT|$HOST_PQC_REPORT_ARTIFACT" \
+    "$HOST_STDOUT|$HOST_STDOUT_ARTIFACT"
+  do
+    source_path="${pair%%|*}"
+    destination_path="${pair#*|}"
+    if [[ -f "$source_path" ]] && ! cp -f -- "$source_path" "$destination_path"; then
+      echo "Unable to persist macOS smoke host artifact: $destination_path" >&2
+      return 1
+    fi
+  done
+}
+
+capture_ios_release_source_provenance() {
+  local repository_root
+  local dirty_entries
+
+  if ! repository_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null)" || \
+     [[ "$repository_root" != "$ROOT_DIR" ]]; then
+    echo "The P2P smoke must run from the canonical Git repository root." >&2
+    return 1
+  fi
+  if ! IOS_SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null)" || \
+     [[ ! "$IOS_SOURCE_REVISION" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+    echo "Unable to resolve a concrete Git source revision for the iOS product build." >&2
+    return 1
+  fi
+  if ! dirty_entries="$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)"; then
+    echo "Unable to determine Git source provenance for the iOS product build." >&2
+    return 1
+  fi
+  if [[ -z "$dirty_entries" ]]; then
+    IOS_SOURCE_CLEAN=1
+    IOS_SOURCE_DIRTY_STATE="clean"
+  else
+    IOS_SOURCE_CLEAN=0
+    IOS_SOURCE_DIRTY_STATE="dirty"
+  fi
+  if [[ "$LAB_RUN" != "1" && "$IOS_SOURCE_CLEAN" != "1" ]]; then
+    echo "Formal P2P acceptance requires a clean Git worktree; current source provenance is dirty." >&2
+    return 1
+  fi
+}
+
+resolve_ios_distribution_signing_inputs() {
+  if [[ "$IOS_BUILD_CONFIGURATION" != "Release" ]]; then
+    return 0
+  fi
+
+  python3 "$ROOT_DIR/Scripts/resolve_ios_distribution_signing.py" \
+    "$IOS_DISTRIBUTION_PREFLIGHT" \
+    "$IOS_APP_DISTRIBUTION_PROFILE_INPUT" \
+    "$IOS_WIDGET_DISTRIBUTION_PROFILE_INPUT" \
+    "$IOS_TEAM_IDENTIFIER" \
+    "$IOS_BUNDLE_ID" \
+    "$IOS_WIDGET_BUNDLE_ID" \
+    "$IOS_DEVICE_ID"
+
+  IOS_APP_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_WIDGET_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_DISTRIBUTION_IDENTITY_HASH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["identityHash"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+
+  if [[ ! "$IOS_DISTRIBUTION_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ ]] || \
+     [[ -z "$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER" ]] || \
+     [[ -z "$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER" ]]; then
+    echo "Resolved iOS distribution signing inputs violate the strict preflight contract." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$IOS_APP_DISTRIBUTION_PROFILE" \
+    "$IOS_RELEASE_ENTITLEMENTS"; then
+    echo "The installed iOS app distribution profile does not cover Release entitlements." >&2
+    return 1
+  fi
+}
+
+write_ios_p2p_product_proof() {
+  if (( $# != 2 )); then
+    echo "write_ios_p2p_product_proof requires app and Widget embedded profiles" >&2
+    return 2
+  fi
+  skybridge_write_ios_distribution_product_proof \
+    "$IOS_APP_PATH" \
+    "$IOS_WIDGET_BUNDLE" \
+    "$1" \
+    "$2" \
+    "$IOS_EXPECTED_ENTITLEMENTS" \
+    "$IOS_PRODUCT_PROOF" \
+    "$MAC_ONLINE_RUNTIME_DIR/ios-signing-proof" \
+    "$IOS_BUNDLE_ID" \
+    "$IOS_WIDGET_BUNDLE_ID" \
+    "$IOS_TEAM_IDENTIFIER" \
+    "$IOS_BUILD_CONFIGURATION" \
+    "$LAB_RUN" \
+    "$IOS_SOURCE_REVISION" \
+    "$IOS_SOURCE_CLEAN" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_DISTRIBUTION_PROFILE" \
+    "$IOS_WIDGET_DISTRIBUTION_PROFILE" \
+    "$ROOT_DIR/Scripts/verify_ios_distribution_product.py"
+}
+
+finalize_release_acceptance_manifests_after_cleanup() {
+  local private_manifest="$ARTIFACT_DIR/release-acceptance.json"
+  local public_manifest="$PUBLIC_ARTIFACT_DIR/release-acceptance.json"
+
+  python3 "$ROOT_DIR/Scripts/finalize_release_acceptance_manifests.py" \
+    --private-manifest "$private_manifest" \
+    --public-manifest "$public_manifest"
+}
+
 cleanup() {
+  local original_status=$?
+  local cleanup_status=0
+  local launch_services_was_mutated=0
+  trap - EXIT
+
+  if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
+        "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" ]]; then
+    launch_services_was_mutated=1
+  fi
+
+  if [[ -n "${IOS_DEVICE_ID:-}" && ( -s "${IOS_STATUS_LOCAL:-}" || -n "${IOS_CONSOLE_PID:-}" ) ]]; then
+    copy_ios_trace || true
+  fi
   if [[ -n "$IOS_CONSOLE_PID" ]]; then
     kill "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
     wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
@@ -431,15 +758,57 @@ cleanup() {
     kill "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
     wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${MAC_ONLINE_APP_BIN:-}" ]]; then
-    terminate_stale_macos_online_ipad_clients >/dev/null 2>&1 || true
+  if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" ]]; then
+    if ! cleanup_macos_online_ipad_launch_services_registration; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=mac-online-launch-services reason=runtime-app-or-widget-registration-remains runtime=preserved-private" >&2
+    fi
+  elif [[ -n "${MAC_ONLINE_APP_BIN:-}" ]] && \
+       ! terminate_stale_macos_online_ipad_clients >/dev/null 2>&1; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=mac-online-process reason=exact-client-process-remains" >&2
+  fi
+  if ! cleanup_macos_smoke_host_launch_services_registration; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=helper-launch-services reason=helper-registration-cleanup-failed runtime=preserved-private" >&2
+  fi
+  if [[ "$launch_services_was_mutated" == "1" ]] && \
+     ! restore_canonical_macos_launch_services_registration_last; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=launch-services-restore reason=canonical-app-or-runtime-absence-proof-missing runtime=preserved-private" >&2
+  fi
+  if ! sync_macos_smoke_host_artifacts; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=artifact-sync reason=mac-host-runtime-artifact-copy-failed" >&2
   fi
   sync_mac_online_launch_stdio
   rm -f -- \
     "$MAC_ONLINE_LAUNCH_STDOUT" \
     "$MAC_ONLINE_LAUNCH_STDERR" \
     "$MAC_ONLINE_LAUNCH_OPEN_STDERR"
-  rm -rf -- "$MAC_ONLINE_RUNTIME_DIR"
+  if [[ "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" || \
+        "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
+        "$cleanup_status" != "0" ]]; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=runtime-remove reason=launch-services-cleanup-incomplete runtime=preserved-private" >&2
+  else
+    if ! rm -rf -- "$MAC_ONLINE_RUNTIME_DIR" || [[ -e "$MAC_ONLINE_RUNTIME_DIR" ]]; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=runtime-remove reason=private-runtime-remove-failed" >&2
+    fi
+  fi
+
+  if (( original_status == 0 && cleanup_status == 0 )); then
+    if ! finalize_release_acceptance_manifests_after_cleanup; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=release-acceptance reason=manifest-finalization-failed" >&2
+    fi
+  fi
+
+  if (( original_status == 0 && cleanup_status != 0 )); then
+    exit "$cleanup_status"
+  fi
+  exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -480,6 +849,9 @@ reset_smoke_artifacts() {
     "$HOST_STATUS" \
     "$HOST_PQC_REPORT" \
     "$HOST_STDOUT" \
+    "$HOST_STATUS_ARTIFACT" \
+    "$HOST_PQC_REPORT_ARTIFACT" \
+    "$HOST_STDOUT_ARTIFACT" \
     "$MAC_SOURCE_STDOUT" \
     "$ARTIFACT_DIR/mac-control-port-probe.stderr.log" \
     "$ARTIFACT_DIR/mac-remote-port-probe.stderr.log" \
@@ -487,6 +859,7 @@ reset_smoke_artifacts() {
     "$IOS_STATUS_LOCAL" \
     "$IOS_STATUS_APP_CACHE_LOCAL" \
     "$IOS_STATUS_CONSOLE_SNAPSHOT" \
+    "$IOS_TRACE_LOCAL" \
     "$IOS_LISTENER_STATUS_LOCAL" \
     "$IOS_CONSOLE_STDERR" \
     "$LAUNCH_RESULT_JSON" \
@@ -516,7 +889,7 @@ reset_smoke_artifacts() {
     "$ARTIFACT_DIR"/ios-copy-*.stderr.log
 
   rm -rf -- "$MAC_ONLINE_RUNTIME_DIR"
-  mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
+  /bin/mkdir -m 700 "$MAC_ONLINE_RUNTIME_DIR"
 }
 
 terminate_stale_smoke_scripts() {
@@ -581,13 +954,469 @@ terminate_stale_macos_smoke_hosts() {
   done <<<"$pids"
 }
 
+validate_macos_smoke_host_product_entitlements() {
+  local entitlements_path="$1"
+  local label="$2"
+
+  python3 - "$entitlements_path" "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" "$MAC_HOST_PRODUCT_BUNDLE_ID" "$label" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+team_identifier = sys.argv[2].strip()
+bundle_identifier = sys.argv[3].strip()
+label = sys.argv[4]
+
+try:
+    with path.open("rb") as handle:
+        entitlements = plistlib.load(handle)
+except Exception as error:
+    print(f"Unable to decode {label} entitlements: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+expected_application_identifier = f"{team_identifier}.{bundle_identifier}"
+actual_application_identifier = entitlements.get("com.apple.application-identifier")
+if actual_application_identifier != expected_application_identifier:
+    print(
+        f"{label} application identifier mismatch: "
+        f"expected={expected_application_identifier} actual={actual_application_identifier}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+keychain_groups = entitlements.get("keychain-access-groups")
+if not isinstance(keychain_groups, list):
+    print(f"{label} is missing keychain-access-groups", file=sys.stderr)
+    raise SystemExit(1)
+normalized_groups = {
+    str(value).strip()
+    for value in keychain_groups
+    if isinstance(value, str) and value.strip()
+}
+if expected_application_identifier not in normalized_groups:
+    print(
+        f"{label} keychain-access-groups does not include the product application identifier",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+if "com.apple.security.get-task-allow" in entitlements:
+    print(f"{label} unexpectedly contains get-task-allow", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+derive_macos_smoke_host_minimal_entitlements() {
+  python3 - \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS" \
+    "$MAC_HOST_HELPER_ENTITLEMENTS" \
+    "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" \
+    "$MAC_HOST_PRODUCT_BUNDLE_ID" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+team_identifier = sys.argv[3].strip()
+bundle_identifier = sys.argv[4].strip()
+expected_application_identifier = f"{team_identifier}.{bundle_identifier}"
+
+with source_path.open("rb") as source_file:
+    source = plistlib.load(source_file)
+
+if source.get("com.apple.application-identifier") != expected_application_identifier:
+    print("Product entitlements cannot provide the expected application identifier", file=sys.stderr)
+    raise SystemExit(1)
+
+source_groups = source.get("keychain-access-groups")
+if not isinstance(source_groups, list):
+    print("Product entitlements cannot provide keychain-access-groups", file=sys.stderr)
+    raise SystemExit(1)
+normalized_source_groups = [
+    value.strip()
+    for value in source_groups
+    if isinstance(value, str) and value.strip()
+]
+expected_shared_group = f"{team_identifier}.group.com.skybridge.compass"
+required_groups = {expected_application_identifier, expected_shared_group}
+if not required_groups.issubset(set(normalized_source_groups)):
+    print("Product entitlements do not contain both required product/shared Keychain groups", file=sys.stderr)
+    raise SystemExit(1)
+groups = [value for value in normalized_source_groups if value in required_groups]
+if len(groups) != 2 or set(groups) != required_groups:
+    print("Product entitlements contain duplicate required Keychain groups", file=sys.stderr)
+    raise SystemExit(1)
+
+for capability in (
+    "com.apple.security.network.client",
+    "com.apple.security.network.server",
+):
+    if source.get(capability) is not True:
+        print(f"Product entitlements do not enable required capability: {capability}", file=sys.stderr)
+        raise SystemExit(1)
+
+minimal = {
+    "com.apple.application-identifier": expected_application_identifier,
+    "keychain-access-groups": groups,
+    "com.apple.security.network.client": True,
+    "com.apple.security.network.server": True,
+}
+product_team = source.get("com.apple.developer.team-identifier")
+if product_team is not None:
+    if product_team != team_identifier:
+        print("Product team entitlement does not match the verified signing team", file=sys.stderr)
+        raise SystemExit(1)
+    minimal["com.apple.developer.team-identifier"] = product_team
+
+output_path.write_bytes(plistlib.dumps(minimal, fmt=plistlib.FMT_XML, sort_keys=False))
+PY
+}
+
+validate_macos_smoke_host_minimal_entitlements() {
+  local entitlements_path="$1"
+  local label="$2"
+
+  python3 - "$entitlements_path" "$label" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+label = sys.argv[2]
+with path.open("rb") as handle:
+    entitlements = plistlib.load(handle)
+
+allowed = {
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+    "com.apple.security.network.client",
+    "com.apple.security.network.server",
+}
+required = allowed - {"com.apple.developer.team-identifier"}
+keys = set(entitlements)
+unknown = keys - allowed
+missing = required - keys
+if unknown or missing:
+    print(
+        f"{label} entitlement allow-list mismatch: "
+        f"unknown={sorted(unknown)} missing={sorted(missing)}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+for capability in (
+    "com.apple.security.network.client",
+    "com.apple.security.network.server",
+):
+    if entitlements.get(capability) is not True:
+        print(f"{label} does not enable required capability: {capability}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+}
+
+validate_macos_product_widget_entitlements() {
+  local widget_entitlements_path="$1"
+  local label="$2"
+
+  python3 - \
+    "$widget_entitlements_path" \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS" \
+    "$label" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+widget_path = Path(sys.argv[1])
+app_path = Path(sys.argv[2])
+label = sys.argv[3]
+
+with widget_path.open("rb") as widget_file:
+    widget = plistlib.load(widget_file)
+with app_path.open("rb") as app_file:
+    app = plistlib.load(app_file)
+
+allowed_keys = {
+    "com.apple.security.app-sandbox",
+    "com.apple.security.application-groups",
+}
+if set(widget) != allowed_keys:
+    print(
+        f"{label} entitlement allow-list mismatch: "
+        f"actual={sorted(widget)} expected={sorted(allowed_keys)}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if widget.get("com.apple.security.app-sandbox") is not True:
+    print(f"{label} does not enable the App Sandbox", file=sys.stderr)
+    raise SystemExit(1)
+
+expected_groups = {"group.com.skybridge.compass"}
+widget_groups = {
+    value.strip()
+    for value in widget.get("com.apple.security.application-groups", [])
+    if isinstance(value, str) and value.strip()
+}
+app_groups = {
+    value.strip()
+    for value in app.get("com.apple.security.application-groups", [])
+    if isinstance(value, str) and value.strip()
+}
+if widget_groups != expected_groups or app_groups != expected_groups:
+    print(
+        f"{label} App Group does not exactly match the packaged product App Group",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+verify_macos_smoke_host_product_signing_context() {
+  local product_info_plist="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/Info.plist"
+  local product_widget_info_plist="$MAC_HOST_PRODUCT_WIDGET_BUNDLE/Contents/Info.plist"
+  local product_executable_name
+  local product_executable
+  local product_bundle_identifier
+  local product_metadata
+  local product_signed_identifier
+  local product_authority
+  local product_identity_hash
+  local product_widget_executable_name
+  local product_widget_executable
+  local product_widget_bundle_identifier
+  local product_widget_metadata
+  local product_widget_signed_identifier
+  local product_widget_team_identifier
+  local product_widget_authority
+  local product_widget_identity_hash
+
+  if [[ ! -d "$MAC_HOST_PRODUCT_APP_BUNDLE" ]]; then
+    echo "Packaged macOS product app is required for acceptance host signing: $MAC_HOST_PRODUCT_APP_BUNDLE" >&2
+    return 1
+  fi
+  if [[ -L "$MAC_HOST_PRODUCT_APP_BUNDLE" || \
+        "$MAC_HOST_PRODUCT_APP_BUNDLE" != "$ROOT_DIR/dist/SkyBridge Compass Pro.app" ]]; then
+    echo "Acceptance host signing requires the non-symlink canonical dist product app." >&2
+    return 1
+  fi
+  if [[ ! -f "$product_info_plist" ]]; then
+    echo "Packaged macOS product Info.plist is missing: $product_info_plist" >&2
+    return 1
+  fi
+  if [[ ! -f "$MAC_HOST_PRODUCT_PROFILE" ]]; then
+    echo "Packaged macOS product embedded provisioning profile is required: $MAC_HOST_PRODUCT_PROFILE" >&2
+    return 1
+  fi
+  if [[ ! -d "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" || -L "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" ]]; then
+    echo "Packaged macOS product Widget extension is missing or symlinked: $MAC_HOST_PRODUCT_WIDGET_BUNDLE" >&2
+    return 1
+  fi
+  if [[ ! -f "$product_widget_info_plist" || -L "$product_widget_info_plist" ]]; then
+    echo "Packaged macOS product Widget Info.plist is missing or symlinked: $product_widget_info_plist" >&2
+    return 1
+  fi
+  if [[ ! -f "$MAC_HOST_PRODUCT_WIDGET_PROFILE" || -L "$MAC_HOST_PRODUCT_WIDGET_PROFILE" ]]; then
+    echo "Packaged macOS product Widget provisioning profile is missing or symlinked: $MAC_HOST_PRODUCT_WIDGET_PROFILE" >&2
+    return 1
+  fi
+  if [[ ! -x /usr/libexec/PlistBuddy ]]; then
+    echo "PlistBuddy is unavailable; cannot verify the packaged macOS product identity." >&2
+    return 1
+  fi
+
+  product_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$product_info_plist" 2>/dev/null || true)"
+  if [[ "$product_bundle_identifier" != "$MAC_HOST_PRODUCT_BUNDLE_ID" ]]; then
+    echo "Packaged macOS product bundle identifier mismatch: expected=$MAC_HOST_PRODUCT_BUNDLE_ID actual=${product_bundle_identifier:-missing}" >&2
+    return 1
+  fi
+  product_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$product_info_plist" 2>/dev/null || true)"
+  product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/$product_executable_name"
+  if [[ -z "$product_executable_name" || ! -x "$product_executable" ]]; then
+    echo "Packaged macOS product executable is missing or not executable: $product_executable" >&2
+    return 1
+  fi
+  product_widget_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$product_widget_info_plist" 2>/dev/null || true)"
+  if [[ "$product_widget_bundle_identifier" != "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" ]]; then
+    echo "Packaged macOS product Widget bundle identifier mismatch: expected=$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID actual=${product_widget_bundle_identifier:-missing}" >&2
+    return 1
+  fi
+  product_widget_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$product_widget_info_plist" 2>/dev/null || true)"
+  product_widget_executable="$MAC_HOST_PRODUCT_WIDGET_BUNDLE/Contents/MacOS/$product_widget_executable_name"
+  if [[ -z "$product_widget_executable_name" || ! -x "$product_widget_executable" ]]; then
+    echo "Packaged macOS product Widget executable is missing or not executable: $product_widget_executable" >&2
+    return 1
+  fi
+
+  if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
+    echo "Packaged macOS product signature verification failed: $MAC_HOST_PRODUCT_APP_BUNDLE" >&2
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --strict --verbose=2 "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" >/dev/null; then
+    echo "Packaged macOS product Widget signature verification failed: $MAC_HOST_PRODUCT_WIDGET_BUNDLE" >&2
+    return 1
+  fi
+  if ! /usr/bin/xcrun stapler validate "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
+    echo "Packaged macOS product does not have a valid stapled notarization ticket." >&2
+    return 1
+  fi
+  if ! /usr/sbin/spctl --assess --type execute "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
+    echo "Packaged macOS product failed Gatekeeper assessment." >&2
+    return 1
+  fi
+  if ! product_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_HOST_PRODUCT_APP_BUNDLE" 2>&1)"; then
+    echo "Unable to read the packaged macOS product signature metadata." >&2
+    return 1
+  fi
+
+  product_signed_identifier="$(printf '%s\n' "$product_metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
+  MAC_HOST_PRODUCT_TEAM_IDENTIFIER="$(printf '%s\n' "$product_metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  product_authority="$(printf '%s\n' "$product_metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  if [[ "$product_signed_identifier" != "$MAC_HOST_PRODUCT_BUNDLE_ID" ]]; then
+    echo "Packaged macOS product signed identifier mismatch: expected=$MAC_HOST_PRODUCT_BUNDLE_ID actual=${product_signed_identifier:-missing}" >&2
+    return 1
+  fi
+  if [[ -z "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" || "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" == "not set" ]]; then
+    echo "Packaged macOS product signature does not contain a TeamIdentifier." >&2
+    return 1
+  fi
+  if [[ "$product_authority" != Developer\ ID\ Application:* ]]; then
+    echo "Packaged macOS product is not signed with a Developer ID Application identity." >&2
+    return 1
+  fi
+  if [[ "$product_authority" != *"($MAC_HOST_PRODUCT_TEAM_IDENTIFIER)"* ]]; then
+    echo "Packaged macOS product signing authority does not match its TeamIdentifier." >&2
+    return 1
+  fi
+  if ! product_widget_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" 2>&1)"; then
+    echo "Unable to read the packaged macOS product Widget signature metadata." >&2
+    return 1
+  fi
+  product_widget_signed_identifier="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
+  product_widget_team_identifier="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  product_widget_authority="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  if [[ "$product_widget_signed_identifier" != "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" ]]; then
+    echo "Packaged macOS product Widget signed identifier mismatch: expected=$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID actual=${product_widget_signed_identifier:-missing}" >&2
+    return 1
+  fi
+  if [[ "$product_widget_team_identifier" != "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" ]]; then
+    echo "Packaged macOS product Widget TeamIdentifier does not match the host app." >&2
+    return 1
+  fi
+  if [[ "$product_widget_authority" != "$product_authority" ]]; then
+    echo "Packaged macOS product Widget signing authority does not exactly match the host app authority." >&2
+    return 1
+  fi
+
+  mkdir -p "$MAC_HOST_SIGNING_DIR"
+  if ! skybridge_write_signed_entitlements "$MAC_HOST_PRODUCT_APP_BUNDLE" "$MAC_HOST_PRODUCT_ENTITLEMENTS"; then
+    echo "Unable to extract signed entitlements from the packaged macOS product app." >&2
+    return 1
+  fi
+  if ! validate_macos_smoke_host_product_entitlements "$MAC_HOST_PRODUCT_ENTITLEMENTS" "packaged product"; then
+    return 1
+  fi
+  if ! skybridge_write_signed_entitlements \
+    "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS"; then
+    echo "Unable to extract signed entitlements from the packaged macOS product Widget." >&2
+    return 1
+  fi
+  if ! validate_macos_product_widget_entitlements \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS" \
+    "packaged product Widget"; then
+    return 1
+  fi
+  if ! derive_macos_smoke_host_minimal_entitlements; then
+    echo "Unable to derive least-privilege smoke host entitlements from the packaged product signature." >&2
+    return 1
+  fi
+  if ! validate_macos_smoke_host_product_entitlements "$MAC_HOST_HELPER_ENTITLEMENTS" "derived smoke host"; then
+    return 1
+  fi
+  if ! validate_macos_smoke_host_minimal_entitlements "$MAC_HOST_HELPER_ENTITLEMENTS" "derived smoke host"; then
+    return 1
+  fi
+  if ! skybridge_validate_provisionprofile_app_identity \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_HOST_PRODUCT_BUNDLE_ID" \
+    "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER"; then
+    echo "Packaged macOS product profile does not match the signed bundle/team identity." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS"; then
+    echo "Packaged macOS product profile does not cover its signed profile-backed entitlements." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_HOST_HELPER_ENTITLEMENTS"; then
+    echo "Packaged macOS product profile does not cover the derived helper profile-backed entitlements." >&2
+    return 1
+  fi
+  if ! skybridge_validate_provisionprofile_app_identity \
+    "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+    "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" \
+    "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER"; then
+    echo "Packaged macOS product Widget profile does not match the signed bundle/team identity." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS"; then
+    echo "Packaged macOS product Widget profile does not cover its exact signed entitlements." >&2
+    return 1
+  fi
+
+  if ! product_identity_hash="$(
+    skybridge_resolve_profile_bound_codesign_identity_hash \
+      "$MAC_HOST_PRODUCT_PROFILE" \
+      "$product_authority"
+  )"; then
+    echo "Unable to resolve a unique profile-bound local identity for packaged-product signing." >&2
+    return 1
+  fi
+  if ! product_widget_identity_hash="$(
+    skybridge_resolve_profile_bound_codesign_identity_hash \
+      "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+      "$product_widget_authority"
+  )"; then
+    echo "Unable to resolve a unique profile-bound local identity for packaged-product Widget signing." >&2
+    return 1
+  fi
+  if [[ "$product_identity_hash" != "$product_widget_identity_hash" ]]; then
+    echo "Packaged app and Widget profiles do not bind to the same unique local Developer ID identity." >&2
+    return 1
+  fi
+  MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH="$product_identity_hash"
+  MAC_HOST_PRODUCT_AUTHORITY="$product_authority"
+
+  append_host_status "mac-host-product-signing-context source=packaged-product signature=developer-id bundleIdentifier=product team=matched appProfile=developer-id-current widgetProfile=developer-id-current certificate=profile-bound-shared entitlements=app-widget-exact keychainIdentity=unique"
+}
+
 prepare_macos_smoke_host_app_bundle() {
   local source_bin="$MAC_DIRECT_BIN"
-  local source_webrtc_framework="$ROOT_DIR/.build/debug/WebRTC.framework"
+  local source_webrtc_framework="$SMOKE_BUILD_DIR/debug/WebRTC.framework"
+  local source_core_resource_bundle="$SMOKE_BUILD_DIR/debug/SkyBridgeCompassApp_SkyBridgeCore.bundle"
   local contents_dir="$MAC_APP_BUNDLE/Contents"
   local macos_dir="$contents_dir/MacOS"
   local resources_dir="$contents_dir/Resources"
+  local embedded_core_resource_bundle="$resources_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle"
+  local embedded_core_resource_contents="$embedded_core_resource_bundle/Contents"
+  local embedded_core_resource_root="$embedded_core_resource_contents/Resources"
   local plist_path="$contents_dir/Info.plist"
+  local embedded_profile="$contents_dir/embedded.provisionprofile"
+  local scratch_root_dir
+  local scratch_debug_dir
+  local source_resource_dir
+  local source_resource_symlink
+  local embedded_resource_symlink
+  local helper_metadata
+  local helper_identifier
+  local helper_team_identifier
+  local helper_authority
 
   if [[ ! -x "$source_bin" ]]; then
     echo "macOS LAN host executable not found: $source_bin" >&2
@@ -597,21 +1426,94 @@ prepare_macos_smoke_host_app_bundle() {
     echo "WebRTC framework not found beside the SwiftPM build product: $source_webrtc_framework" >&2
     exit 1
   fi
+  if [[ ! -d "$SMOKE_BUILD_DIR" || ! -d "$SMOKE_BUILD_DIR/debug" ]]; then
+    echo "Dedicated SwiftPM smoke scratch directory is missing: $SMOKE_BUILD_DIR" >&2
+    exit 1
+  fi
+  if [[ ! -d "$source_core_resource_bundle" || -L "$source_core_resource_bundle" ]]; then
+    echo "SkyBridgeCore resource bundle is missing or symlinked in the dedicated smoke scratch: $source_core_resource_bundle" >&2
+    exit 1
+  fi
+  scratch_root_dir="$(cd "$SMOKE_BUILD_DIR" && pwd -P)"
+  scratch_debug_dir="$(cd "$SMOKE_BUILD_DIR/debug" && pwd -P)"
+  source_resource_dir="$(cd "$source_core_resource_bundle" && pwd -P)"
+  if [[ "$scratch_debug_dir" != "$scratch_root_dir/"* ]]; then
+    echo "SwiftPM debug product directory resolves outside the dedicated smoke scratch." >&2
+    exit 1
+  fi
+  if [[ "$source_resource_dir" != "$scratch_debug_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle" ]]; then
+    echo "SkyBridgeCore resource bundle did not resolve directly inside the dedicated smoke scratch." >&2
+    exit 1
+  fi
+  source_resource_symlink="$(/usr/bin/find -P "$source_core_resource_bundle" -type l -print -quit)"
+  if [[ -n "$source_resource_symlink" ]]; then
+    echo "SkyBridgeCore resource bundle contains a symlink and cannot be sealed into the smoke host: $source_resource_symlink" >&2
+    exit 1
+  fi
+  if [[ ! -f "$source_core_resource_bundle/en.lproj/Localizable.strings" ]] || \
+     ! /usr/bin/grep -Fq '"remoteControl.securityNotice.windowTitle"' \
+       "$source_core_resource_bundle/en.lproj/Localizable.strings"; then
+    echo "SkyBridgeCore smoke resource bundle does not contain the remote-control approval localization." >&2
+    exit 1
+  fi
   if [[ ! -x /usr/libexec/PlistBuddy ]]; then
     echo "PlistBuddy is unavailable; cannot build the temporary macOS smoke host app bundle." >&2
     exit 1
   fi
+  if [[ ! "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ || \
+        -z "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" || \
+        -z "$MAC_HOST_PRODUCT_AUTHORITY" ]]; then
+    echo "Packaged macOS product signing context was not verified before preparing the smoke host." >&2
+    exit 1
+  fi
+  if [[ ! -s "$MAC_HOST_HELPER_ENTITLEMENTS" || ! -f "$MAC_HOST_PRODUCT_PROFILE" ]]; then
+    echo "Verified packaged-product entitlements/profile are unavailable for smoke host signing." >&2
+    exit 1
+  fi
 
   rm -rf "$MAC_APP_BUNDLE"
-  mkdir -p "$macos_dir" "$resources_dir"
+  mkdir -p "$macos_dir" "$resources_dir" "$embedded_core_resource_root"
   cp "$source_bin" "$macos_dir/LocalLanInteropHost"
   cp -R "$source_webrtc_framework" "$macos_dir/WebRTC.framework"
+  /usr/bin/ditto --norsrc --noextattr --noqtn --noacl \
+    "$source_core_resource_bundle" \
+    "$embedded_core_resource_root"
+  if [[ ! -f "$embedded_core_resource_root/Info.plist" || \
+        -L "$embedded_core_resource_root/Info.plist" ]]; then
+    echo "Copied SkyBridgeCore resource bundle is missing its regular Info.plist." >&2
+    exit 1
+  fi
+  mv "$embedded_core_resource_root/Info.plist" "$embedded_core_resource_contents/Info.plist"
+  cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"
   chmod +x "$macos_dir/LocalLanInteropHost"
+
+  if [[ ! -d "$embedded_core_resource_bundle" || -L "$embedded_core_resource_bundle" ]]; then
+    echo "Embedded SkyBridgeCore resource bundle is missing or symlinked after the explicit copy." >&2
+    exit 1
+  fi
+  embedded_resource_symlink="$(/usr/bin/find -P "$embedded_core_resource_bundle" -type l -print -quit)"
+  if [[ -n "$embedded_resource_symlink" ]]; then
+    echo "Embedded SkyBridgeCore resource bundle contains an unexpected symlink: $embedded_resource_symlink" >&2
+    exit 1
+  fi
+  if ! cmp -s "$source_core_resource_bundle/Info.plist" "$embedded_core_resource_contents/Info.plist"; then
+    echo "Embedded SkyBridgeCore bundle Info.plist differs from the dedicated SwiftPM build output." >&2
+    exit 1
+  fi
+  if ! /usr/bin/diff -qr -x Info.plist "$source_core_resource_bundle" "$embedded_core_resource_root" >/dev/null; then
+    echo "Embedded SkyBridgeCore resource bundle differs from the dedicated SwiftPM smoke build output." >&2
+    exit 1
+  fi
+  if ! validate_remote_control_security_notice_localizations \
+    "$embedded_core_resource_root" \
+    "pre-sign"; then
+    exit 1
+  fi
 
   /usr/libexec/PlistBuddy \
     -c 'Clear dict' \
     -c 'Add :CFBundleExecutable string LocalLanInteropHost' \
-    -c "Add :CFBundleIdentifier string com.skybridge.compass.LocalLanInteropHostSmoke.${RUN_ID}" \
+    -c "Add :CFBundleIdentifier string $MAC_HOST_PRODUCT_BUNDLE_ID" \
     -c 'Add :CFBundleName string LocalLanInteropHostSmoke' \
     -c 'Add :CFBundlePackageType string APPL' \
     -c 'Add :CFBundleVersion string 1' \
@@ -624,27 +1526,319 @@ prepare_macos_smoke_host_app_bundle() {
     -c 'Add :NSBonjourServices:2 string _skybridge-transfer._tcp' \
     -c 'Add :NSBonjourServices:3 string _skybridge-remote._tcp' \
     "$plist_path" >/dev/null
-  /usr/bin/codesign --force --deep --sign - "$MAC_APP_BUNDLE" >/dev/null
-  xattr -dr com.apple.quarantine "$MAC_APP_BUNDLE" >/dev/null 2>&1 || true
-  register_macos_smoke_host_app_bundle
+  /usr/bin/codesign --force --timestamp=none --options runtime --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" "$macos_dir/WebRTC.framework" >/dev/null
+  /usr/bin/codesign \
+    --force \
+    --timestamp=none \
+    --options runtime \
+    --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" \
+    --entitlements "$MAC_HOST_HELPER_ENTITLEMENTS" \
+    "$MAC_APP_BUNDLE" >/dev/null
+  if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_APP_BUNDLE" >/dev/null; then
+    echo "Product-identity smoke host signature verification failed: $MAC_APP_BUNDLE" >&2
+    exit 1
+  fi
+  if ! validate_remote_control_security_notice_localizations \
+    "$embedded_core_resource_root" \
+    "post-sign"; then
+    exit 1
+  fi
+  if ! helper_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_APP_BUNDLE" 2>&1)"; then
+    echo "Unable to read the signed smoke host metadata." >&2
+    exit 1
+  fi
+  helper_identifier="$(printf '%s\n' "$helper_metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
+  helper_team_identifier="$(printf '%s\n' "$helper_metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  helper_authority="$(printf '%s\n' "$helper_metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  if [[ "$helper_identifier" != "$MAC_HOST_PRODUCT_BUNDLE_ID" || \
+        "$helper_team_identifier" != "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" || \
+        "$helper_authority" != "$MAC_HOST_PRODUCT_AUTHORITY" ]]; then
+    echo "Signed smoke host identity does not exactly match the verified packaged-product identity." >&2
+    exit 1
+  fi
+  if ! cmp -s "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"; then
+    echo "Signed smoke host embedded profile differs from the verified packaged-product profile." >&2
+    exit 1
+  fi
+  if ! skybridge_write_signed_entitlements "$MAC_APP_BUNDLE" "$MAC_HOST_SIGNED_ENTITLEMENTS"; then
+    echo "Unable to extract the signed smoke host entitlements." >&2
+    exit 1
+  fi
+  if ! validate_macos_smoke_host_product_entitlements "$MAC_HOST_SIGNED_ENTITLEMENTS" "signed smoke host"; then
+    exit 1
+  fi
+  if ! validate_macos_smoke_host_minimal_entitlements "$MAC_HOST_SIGNED_ENTITLEMENTS" "signed smoke host"; then
+    exit 1
+  fi
+  if ! python3 - "$MAC_HOST_HELPER_ENTITLEMENTS" "$MAC_HOST_SIGNED_ENTITLEMENTS" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
 
+with Path(sys.argv[1]).open("rb") as expected_file:
+    expected = plistlib.load(expected_file)
+with Path(sys.argv[2]).open("rb") as actual_file:
+    actual = plistlib.load(actual_file)
+if actual != expected:
+    print("Signed smoke host entitlements differ from the derived least-privilege entitlements", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    exit 1
+  fi
+  clear_runtime_bundle_quarantine_if_present "$MAC_APP_BUNDLE" "product-identity smoke host"
   MAC_APP_BIN="$macos_dir/LocalLanInteropHost"
+  register_macos_smoke_host_app_bundle
+  append_host_status "mac-host-signing source=packaged-product signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1"
 }
 
 register_launch_services_app_bundle() {
   local app_bundle="$1"
   local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-  if [[ -x "$lsregister" ]]; then
-    "$lsregister" -f "$app_bundle" >/dev/null 2>&1 || true
+  if [[ ! -x "$lsregister" ]]; then
+    echo "LaunchServices registration tool is unavailable: $lsregister" >&2
+    return 1
+  fi
+  if ! "$lsregister" -f "$app_bundle" >/dev/null 2>&1; then
+    echo "LaunchServices registration failed for app bundle: $app_bundle" >&2
+    return 1
+  fi
+}
+
+unregister_launch_services_app_bundle() {
+  local app_bundle="$1"
+  local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ ! -x "$lsregister" ]]; then
+    echo "LaunchServices registration tool is unavailable; cannot unregister helper bundle." >&2
+    return 1
+  fi
+  if ! "$lsregister" -u "$app_bundle" >/dev/null 2>&1; then
+    echo "LaunchServices unregistration failed for helper app bundle: $app_bundle" >&2
+    return 1
+  fi
+}
+
+verify_launch_services_paths_state() {
+  local expected_state="$1"
+  shift
+  local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  local dump_path="$MAC_HOST_SIGNING_DIR/launch-services.dump"
+
+  if [[ "$expected_state" != "present" && "$expected_state" != "absent" ]]; then
+    echo "Unsupported LaunchServices path state: $expected_state" >&2
+    return 2
+  fi
+  if (( $# == 0 )); then
+    echo "LaunchServices path-state verification requires at least one exact path." >&2
+    return 2
+  fi
+  if [[ ! -x "$lsregister" ]]; then
+    echo "LaunchServices registration tool is unavailable for registration-state verification." >&2
+    return 2
+  fi
+  mkdir -p "$MAC_HOST_SIGNING_DIR"
+  if ! "$lsregister" -dump >"$dump_path"; then
+    echo "LaunchServices registration database could not be read." >&2
+    return 2
+  fi
+  python3 - "$dump_path" "$expected_state" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+dump_path = Path(sys.argv[1])
+expected_state = sys.argv[2]
+targets = sys.argv[3:]
+content = dump_path.read_text(encoding="utf-8", errors="strict")
+for target in targets:
+    plain_record = f"path:                       {target} ("
+    quoted_record = f'Path = "{target}";'
+    is_present = plain_record in content or quoted_record in content
+    if (expected_state == "present") != is_present:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+verify_launch_services_runtime_paths_absent() {
+  local runtime_app="$1"
+  local runtime_widget="$runtime_app/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+
+  if ! verify_launch_services_paths_state absent "$runtime_app" "$runtime_widget"; then
+    echo "LaunchServices still contains a stale runtime app or Widget path after unregister." >&2
+    return 1
+  fi
+}
+
+cleanup_macos_smoke_host_launch_services_registration() {
+  local restore_status=0
+  local helper_terminated=1
+  local helper_unregistered=0
+
+  if [[ "${MAC_HOST_HELPER_REGISTERED:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${MAC_ONLINE_RUNTIME_DIR:-}" || \
+        "$MAC_APP_BUNDLE" != "$MAC_ONLINE_RUNTIME_DIR/"* || \
+        "$MAC_APP_BUNDLE" == "$MAC_ONLINE_RUNTIME_DIR" ]]; then
+    echo "Refusing unsafe helper cleanup path: ${MAC_APP_BUNDLE:-missing}" >&2
+    return 1
+  fi
+  if ! terminate_macos_smoke_host_bundle_processes; then
+    restore_status=1
+    helper_terminated=0
+  fi
+  if [[ "$helper_terminated" != "1" ]]; then
+    echo "Refusing to unregister or delete a product-identity helper while a process may still be alive." >&2
+  elif [[ ! -d "$MAC_APP_BUNDLE" ]]; then
+    echo "Registered product-identity helper disappeared before LaunchServices cleanup: $MAC_APP_BUNDLE" >&2
+    restore_status=1
+  else
+    if unregister_launch_services_app_bundle "$MAC_APP_BUNDLE" && \
+       verify_launch_services_runtime_paths_absent "$MAC_APP_BUNDLE"; then
+      helper_unregistered=1
+    else
+      restore_status=1
+    fi
+    if [[ "$helper_unregistered" == "1" ]]; then
+      rm -rf -- "$MAC_APP_BUNDLE"
+    fi
+  fi
+  if [[ "$helper_terminated" == "1" && "$helper_unregistered" == "1" && ! -d "$MAC_APP_BUNDLE" ]]; then
+    MAC_HOST_HELPER_REGISTERED=0
+  fi
+  return "$restore_status"
+}
+
+restore_canonical_macos_launch_services_registration_last() {
+  local canonical_widget="$MAC_HOST_PRODUCT_WIDGET_BUNDLE"
+  local runtime_online_widget="$MAC_ONLINE_RUNTIME_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+  local runtime_helper_widget="$MAC_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+
+  if [[ ! -d "$MAC_HOST_PRODUCT_APP_BUNDLE" || -L "$MAC_HOST_PRODUCT_APP_BUNDLE" ]]; then
+    echo "Canonical packaged macOS product app is unavailable for final LaunchServices restoration." >&2
+    return 1
+  fi
+  if [[ ! -d "$canonical_widget" || -L "$canonical_widget" ]]; then
+    echo "Canonical packaged macOS product Widget is unavailable for final LaunchServices restoration." >&2
+    return 1
+  fi
+  if ! register_launch_services_app_bundle "$MAC_HOST_PRODUCT_APP_BUNDLE"; then
+    echo "Failed to restore the canonical packaged macOS product as the final LaunchServices registration." >&2
+    return 1
+  fi
+  if ! verify_launch_services_paths_state \
+    present \
+    "$MAC_HOST_PRODUCT_APP_BUNDLE"; then
+    echo "Canonical packaged macOS product app path is absent after final LaunchServices registration." >&2
+    return 1
+  fi
+  if ! verify_launch_services_paths_state \
+    absent \
+    "$MAC_ONLINE_RUNTIME_APP_BUNDLE" \
+    "$runtime_online_widget" \
+    "$MAC_APP_BUNDLE" \
+    "$runtime_helper_widget"; then
+    echo "LaunchServices retains a runtime app or Widget path after canonical parent restoration." >&2
+    return 1
+  fi
+}
+
+macos_smoke_host_bundle_pids() {
+  [[ -n "${MAC_APP_BIN:-}" ]] || return 0
+  python3 - "$MAC_APP_BIN" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+executable = sys.argv[1]
+executable_candidates = {executable, str(Path(executable).resolve())}
+completed = subprocess.run(
+    ["/bin/ps", "-axo", "pid=,command="],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if completed.returncode != 0:
+    print("Unable to enumerate macOS smoke host processes", file=sys.stderr)
+    raise SystemExit(1)
+for raw_line in completed.stdout.splitlines():
+    stripped = raw_line.strip()
+    if not stripped:
+        continue
+    pid, separator, command = stripped.partition(" ")
+    command = command.lstrip()
+    if separator and pid.isdigit() and any(
+        command == candidate or command.startswith(candidate + " ")
+        for candidate in executable_candidates
+    ):
+        print(pid)
+PY
+}
+
+terminate_macos_smoke_host_bundle_processes() {
+  local pid
+  local attempt
+  local initial
+  local remaining
+
+  if ! initial="$(macos_smoke_host_bundle_pids)"; then
+    return 1
+  fi
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+  done <<<"$initial"
+
+  for attempt in {1..20}; do
+    if ! remaining="$(macos_smoke_host_bundle_pids)"; then
+      return 1
+    fi
+    [[ -z "$remaining" ]] && return 0
+    sleep 0.1
+  done
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  done <<<"$remaining"
+  sleep 0.1
+  if ! remaining="$(macos_smoke_host_bundle_pids)"; then
+    return 1
+  fi
+  if [[ -n "$remaining" ]]; then
+    echo "Unable to terminate all product-identity smoke host processes before helper cleanup." >&2
+    return 1
+  fi
+}
+
+clear_runtime_bundle_quarantine_if_present() {
+  local app_bundle="$1"
+  local label="$2"
+  local attributes
+
+  if [[ ! -d "$app_bundle" ]]; then
+    echo "Cannot inspect quarantine state for missing $label: $app_bundle" >&2
+    return 1
+  fi
+  if ! attributes="$(/usr/bin/xattr -r "$app_bundle" 2>&1)"; then
+    echo "Unable to inspect quarantine attributes for $label." >&2
+    return 1
+  fi
+  if printf '%s\n' "$attributes" | grep -Fq 'com.apple.quarantine'; then
+    if ! /usr/bin/xattr -dr com.apple.quarantine "$app_bundle"; then
+      echo "Unable to remove quarantine from runtime-only $label." >&2
+      return 1
+    fi
   fi
 }
 
 register_macos_smoke_host_app_bundle() {
-  register_launch_services_app_bundle "$MAC_APP_BUNDLE"
+  register_launch_services_app_bundle "$MAC_APP_BUNDLE" || return 1
+  MAC_HOST_HELPER_REGISTERED=1
 }
 
 find_macos_smoke_host_pid() {
-  pgrep -nf "$MAC_APP_BIN" || true
+  macos_smoke_host_bundle_pids | tail -n 1
 }
 
 open_macos_smoke_host_app_bundle() {
@@ -652,30 +1846,32 @@ open_macos_smoke_host_app_bundle() {
     -n \
     --stdout "$HOST_STDOUT" \
     --stderr "$HOST_STDOUT" \
-    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=1" \
+    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=$KEYCHAIN_IN_MEMORY" \
     --env "SB_PQC_PREFERRED_SUITE=$HOST_PREFERRED_SUITE" \
     --env "SKYBRIDGE_SMOKE_ROLE=mac-host" \
-    --env "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=$SMOKE_AUTO_APPROVE_PAIRING" \
     --env "SKYBRIDGE_SMOKE_STATUS_FILE=$HOST_STATUS" \
     --env "SKYBRIDGE_SMOKE_PQC_REPORT_FILE=$HOST_PQC_REPORT" \
     --env "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE=$EXPECTED_TARGET_SUITE" \
+    --env "SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES=1" \
     --env "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" \
-    --env "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" \
     --env "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME=${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-}" \
     --env "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID=${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
     "$MAC_APP_BUNDLE"
 }
 
 start_macos_smoke_host_directly() {
-  SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
+  if [[ "$LAB_RUN" != "1" ]]; then
+    append_host_status "failed stage=mac-host phase=launch reason=direct-mode-requires-lab-run"
+    echo "Direct SwiftPM host launch is diagnostic-only and requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
+    return 2
+  fi
+  SKYBRIDGE_KEYCHAIN_IN_MEMORY="$KEYCHAIN_IN_MEMORY" \
   SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
   SKYBRIDGE_SMOKE_ROLE=mac-host \
-  SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$SMOKE_AUTO_APPROVE_PAIRING" \
   SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
   SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$HOST_PQC_REPORT" \
   SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
   SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" \
-  SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" \
   SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-}" \
   SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
   "$MAC_DIRECT_BIN" >"$HOST_STDOUT" 2>&1 &
@@ -703,27 +1899,17 @@ start_macos_smoke_host() {
 
   if [[ "$MAC_HOST_LAUNCH_MODE" == "direct" ]]; then
     start_macos_smoke_host_directly
-    return 0
+    return $?
   fi
 
-  local open_attempt=1
-  local open_status=1
-  while (( open_attempt <= 3 )); do
-    if open_macos_smoke_host_app_bundle; then
-      open_status=0
-      break
-    fi
+  local open_status
+  if open_macos_smoke_host_app_bundle; then
+    open_status=0
+  else
     open_status=$?
-    append_host_status "launch method=open-app-bundle attempt=$open_attempt status=$open_status"
-    register_macos_smoke_host_app_bundle
-    sleep "$open_attempt"
-    open_attempt=$((open_attempt + 1))
-  done
-
-  if (( open_status != 0 )); then
-    append_host_status "launch method=open-app-bundle attempts=3 result=failed status=$open_status fallback=direct-app-binary"
-    start_macos_smoke_host_directly
-    return 0
+    append_host_status "failed stage=mac-host phase=launch reason=packaged-product-open-failed status=$open_status"
+    echo "LaunchServices failed to open the product-identity smoke host (status=$open_status)." >&2
+    return "$open_status"
   fi
 
   local started_at
@@ -731,17 +1917,12 @@ start_macos_smoke_host() {
   while true; do
     HOST_PID="$(find_macos_smoke_host_pid)"
     if [[ -n "$HOST_PID" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
-      append_host_status "launch method=open-app-bundle pid=$HOST_PID"
+      append_host_status "launch method=packaged-product-app-bundle pid=$HOST_PID identity=verified signature=developer-id profile=developer-id-current certificate=profile-bound entitlements=least-privilege keychainAccess=product"
       return 0
     fi
     if (( "$(date +%s)" - started_at >= 15 )); then
-      if (( open_status == 0 )); then
-        append_host_status "launch method=open-app-bundle result=pid-timeout fallback=direct-app-binary"
-        start_macos_smoke_host_directly
-        return 0
-      fi
-      append_host_status "failed stage=mac-host phase=launch reason=app-pid-not-found"
-      echo "Timed out waiting for LocalLanInteropHost app pid after LaunchServices start." >&2
+      append_host_status "failed stage=mac-host phase=launch reason=packaged-product-app-pid-not-found"
+      echo "Timed out waiting for the product-identity LocalLanInteropHost app pid after LaunchServices start." >&2
       print_smoke_tail_for_operator 80 "$HOST_STDOUT"
       return 1
     fi
@@ -777,52 +1958,19 @@ macos_online_ipad_rpaths() {
   '
 }
 
-select_macos_online_ipad_debug_signing_identity() {
-  if [[ -n "$MAC_ONLINE_SIGN_IDENTITY" ]]; then
-    printf '%s\n' "$MAC_ONLINE_SIGN_IDENTITY"
-    return 0
+remove_macos_online_ipad_debug_signature_before_binary_mutation() {
+  if ! /usr/bin/codesign --display "$MAC_ONLINE_APP_BIN" >/dev/null 2>&1; then
+    echo "The Xcode-built macOS online iPad executable is unexpectedly unsigned before rpath normalization." >&2
+    return 1
   fi
-
-  local identities
-  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-
-  local identity
-  identity="$(printf '%s\n' "$identities" | awk -F '"' '/"Apple Development:/ { print $2; exit }')"
-  if [[ -n "$identity" ]]; then
-    printf '%s\n' "$identity"
-    return 0
+  if ! /usr/bin/codesign --remove-signature "$MAC_ONLINE_APP_BIN" >/dev/null; then
+    echo "Unable to remove the transient Xcode signature before mutating macOS online iPad rpaths." >&2
+    return 1
   fi
-
-  identity="$(printf '%s\n' "$identities" | awk -F '"' '/"Developer ID Application:/ { print $2; exit }')"
-  if [[ -n "$identity" ]]; then
-    printf '%s\n' "$identity"
-    return 0
+  if /usr/bin/codesign --display "$MAC_ONLINE_APP_BIN" >/dev/null 2>&1; then
+    echo "The macOS online iPad executable remained signed after explicit pre-mutation signature removal." >&2
+    return 1
   fi
-
-  return 1
-}
-
-macos_online_ipad_debug_signing_identity_kind() {
-  local identity="$1"
-  case "$identity" in
-    Apple\ Development:*)
-      printf 'apple-development'
-      ;;
-    Developer\ ID\ Application:*)
-      printf 'developer-id'
-      ;;
-    *)
-      printf 'custom'
-      ;;
-  esac
-}
-
-macos_online_ipad_debug_entitlements_for() {
-  local bundle_name="$1"
-  find "$MAC_ONLINE_DERIVED_DATA/Build/Intermediates.noindex/SkyBridgeWidgets.build/Debug" \
-    -path "*/$bundle_name.xcent" \
-    -print \
-    -quit
 }
 
 normalize_macos_online_ipad_debug_rpaths() {
@@ -851,62 +1999,304 @@ normalize_macos_online_ipad_debug_frameworks() {
   done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type d -name '*.framework' -prune -print0)
 }
 
+validate_macos_online_ipad_debug_bundle_identity() {
+  local app_info_plist="$MAC_ONLINE_APP_BUNDLE/Contents/Info.plist"
+  local widget_bundle="$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+  local widget_info_plist="$widget_bundle/Contents/Info.plist"
+  local app_bundle_identifier
+  local widget_bundle_identifier
+  local nested_code_bundles
+
+  if [[ "$MAC_ONLINE_APP_BUNDLE" != "$MAC_ONLINE_RUNTIME_APP_BUNDLE" || \
+        ! -d "$MAC_ONLINE_APP_BUNDLE" || -L "$MAC_ONLINE_APP_BUNDLE" ]]; then
+    echo "The macOS online iPad Debug app must be the non-symlink private runtime bundle." >&2
+    return 1
+  fi
+  if [[ ! "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ || \
+        -z "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" || \
+        "$MAC_HOST_PRODUCT_AUTHORITY" != Developer\ ID\ Application:* ]]; then
+    echo "The verified canonical product Developer ID signing context is unavailable for the Debug app." >&2
+    return 1
+  fi
+  for required_file in \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS" \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS" \
+    "$app_info_plist" \
+    "$widget_info_plist"; do
+    if [[ ! -f "$required_file" || -L "$required_file" ]]; then
+      echo "Required canonical product signing input is missing or symlinked: $required_file" >&2
+      return 1
+    fi
+  done
+  if [[ ! -d "$widget_bundle" || -L "$widget_bundle" ]]; then
+    echo "The macOS online iPad Debug app is missing the regular product Widget extension." >&2
+    return 1
+  fi
+  nested_code_bundles="$(
+    find "$MAC_ONLINE_APP_BUNDLE/Contents" -type d \
+      \( -name '*.appex' -o -name '*.xpc' -o -name '*.app' \) \
+      -prune -print
+  )"
+  if [[ "$nested_code_bundles" != "$widget_bundle" ]]; then
+    echo "The macOS online iPad Debug app contains an unexpected nested code bundle." >&2
+    return 1
+  fi
+
+  app_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_info_plist" 2>/dev/null || true)"
+  widget_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$widget_info_plist" 2>/dev/null || true)"
+  if [[ "$app_bundle_identifier" != "$MAC_HOST_PRODUCT_BUNDLE_ID" || \
+        "$widget_bundle_identifier" != "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" ]]; then
+    echo "The Debug app/Widget bundle identifiers do not exactly match the canonical product identities." >&2
+    return 1
+  fi
+
+  cp "$MAC_HOST_PRODUCT_PROFILE" "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile"
+  cp "$MAC_HOST_PRODUCT_WIDGET_PROFILE" "$widget_bundle/Contents/embedded.provisionprofile"
+  if ! cmp -s \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile"; then
+    echo "The Debug app did not retain the exact canonical product profile bytes." >&2
+    return 1
+  fi
+  if ! cmp -s \
+    "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+    "$widget_bundle/Contents/embedded.provisionprofile"; then
+    echo "The Debug Widget did not retain the exact canonical product profile bytes." >&2
+    return 1
+  fi
+  if ! skybridge_validate_provisionprofile_app_identity \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile" \
+    "$MAC_HOST_PRODUCT_BUNDLE_ID" \
+    "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER"; then
+    echo "The embedded Debug app profile does not match the product bundle/team identity." >&2
+    return 1
+  fi
+  if ! skybridge_validate_provisionprofile_app_identity \
+    "$widget_bundle/Contents/embedded.provisionprofile" \
+    "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" \
+    "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER"; then
+    echo "The embedded Debug Widget profile does not match the product bundle/team identity." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile" \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS"; then
+    echo "The embedded Debug app profile does not cover the exact product entitlements." >&2
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$widget_bundle/Contents/embedded.provisionprofile" \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS"; then
+    echo "The embedded Debug Widget profile does not cover the exact product entitlements." >&2
+    return 1
+  fi
+}
+
+sign_macos_online_ipad_debug_frameworks() {
+  local framework_root
+  local binary
+  local framework
+
+  for framework_root in \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex/Contents/Frameworks"; do
+    [[ -d "$framework_root" ]] || continue
+    while IFS= read -r -d '' binary; do
+      if /usr/bin/file -b "$binary" | grep -Fq 'Mach-O'; then
+        /usr/bin/codesign \
+          --force \
+          --timestamp=none \
+          --options runtime \
+          --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" \
+          "$binary" >/dev/null
+      fi
+    done < <(find "$framework_root" -type f -print0)
+    while IFS= read -r -d '' framework; do
+      /usr/bin/codesign \
+        --force \
+        --timestamp=none \
+        --options runtime \
+        --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" \
+        "$framework" >/dev/null
+    done < <(find "$framework_root" -depth -type d -name '*.framework' -print0)
+  done
+}
+
+verify_macos_online_ipad_signed_identity() {
+  local target="$1"
+  local expected_identifier="$2"
+  local label="$3"
+  local metadata
+  local identifier
+  local team_identifier
+  local authority
+
+  if ! /usr/bin/codesign --verify --strict --verbose=2 "$target" >/dev/null; then
+    echo "$label strict signature verification failed: $target" >&2
+    return 1
+  fi
+  if ! metadata="$(/usr/bin/codesign --display --verbose=4 "$target" 2>&1)"; then
+    echo "Unable to read $label signature metadata." >&2
+    return 1
+  fi
+  identifier="$(printf '%s\n' "$metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
+  team_identifier="$(printf '%s\n' "$metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  authority="$(printf '%s\n' "$metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  if [[ "$identifier" != "$expected_identifier" || \
+        "$team_identifier" != "$MAC_HOST_PRODUCT_TEAM_IDENTIFIER" || \
+        "$authority" != "$MAC_HOST_PRODUCT_AUTHORITY" ]]; then
+    echo "$label signed identity does not exactly match the canonical product Developer ID identity." >&2
+    return 1
+  fi
+}
+
+compare_macos_online_ipad_entitlements_exact() {
+  local expected_path="$1"
+  local actual_path="$2"
+  local label="$3"
+
+  python3 - "$expected_path" "$actual_path" "$label" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+expected_path = Path(sys.argv[1])
+actual_path = Path(sys.argv[2])
+label = sys.argv[3]
+with expected_path.open("rb") as expected_file:
+    expected = plistlib.load(expected_file)
+with actual_path.open("rb") as actual_file:
+    actual = plistlib.load(actual_file)
+if actual != expected:
+    print(f"{label} signed entitlements differ from the canonical product entitlements", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+verify_macos_online_ipad_debug_product_signature() {
+  local widget_bundle="$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+  local framework_root
+  local framework
+  local framework_identifier
+
+  if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_ONLINE_APP_BUNDLE" >/dev/null; then
+    echo "The product-identity macOS online iPad Debug app failed strict nested signature verification." >&2
+    return 1
+  fi
+  if ! verify_macos_online_ipad_signed_identity \
+    "$MAC_ONLINE_APP_BUNDLE" \
+    "$MAC_HOST_PRODUCT_BUNDLE_ID" \
+    "macOS online iPad Debug app"; then
+    return 1
+  fi
+  if ! verify_macos_online_ipad_signed_identity \
+    "$widget_bundle" \
+    "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" \
+    "macOS online iPad Debug Widget"; then
+    return 1
+  fi
+  for framework_root in \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" \
+    "$widget_bundle/Contents/Frameworks"; do
+    [[ -d "$framework_root" ]] || continue
+    while IFS= read -r -d '' framework; do
+      framework_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$framework/Resources/Info.plist" 2>/dev/null || \
+        /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$framework/Versions/Current/Resources/Info.plist" 2>/dev/null || true)"
+      if [[ -z "$framework_identifier" ]]; then
+        echo "Embedded framework is missing a readable CFBundleIdentifier: $framework" >&2
+        return 1
+      fi
+      if ! verify_macos_online_ipad_signed_identity \
+        "$framework" \
+        "$framework_identifier" \
+        "macOS online iPad embedded framework"; then
+        return 1
+      fi
+    done < <(find "$framework_root" -depth -type d -name '*.framework' -print0)
+  done
+
+  if ! cmp -s \
+    "$MAC_HOST_PRODUCT_PROFILE" \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile" || \
+     ! cmp -s \
+    "$MAC_HOST_PRODUCT_WIDGET_PROFILE" \
+    "$widget_bundle/Contents/embedded.provisionprofile"; then
+    echo "The signed Debug app/Widget profiles drifted from the canonical product profiles." >&2
+    return 1
+  fi
+  if ! skybridge_write_signed_entitlements "$MAC_ONLINE_APP_BUNDLE" "$MAC_ONLINE_SIGNED_ENTITLEMENTS" || \
+     ! skybridge_write_signed_entitlements "$widget_bundle" "$MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS"; then
+    echo "Unable to re-extract signed Debug app/Widget entitlements." >&2
+    return 1
+  fi
+  if ! compare_macos_online_ipad_entitlements_exact \
+    "$MAC_HOST_PRODUCT_ENTITLEMENTS" \
+    "$MAC_ONLINE_SIGNED_ENTITLEMENTS" \
+    "macOS online iPad Debug app" || \
+     ! compare_macos_online_ipad_entitlements_exact \
+    "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS" \
+    "$MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS" \
+    "macOS online iPad Debug Widget"; then
+    return 1
+  fi
+  if ! validate_macos_smoke_host_product_entitlements \
+    "$MAC_ONLINE_SIGNED_ENTITLEMENTS" \
+    "signed macOS online iPad Debug app" || \
+     ! validate_macos_product_widget_entitlements \
+    "$MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS" \
+    "signed macOS online iPad Debug Widget"; then
+    return 1
+  fi
+  if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$MAC_ONLINE_APP_BUNDLE/Contents/embedded.provisionprofile" \
+    "$MAC_ONLINE_SIGNED_ENTITLEMENTS" || \
+     ! skybridge_profile_supports_requested_profile_backed_entitlements \
+    "$widget_bundle/Contents/embedded.provisionprofile" \
+    "$MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS"; then
+    echo "The signed Debug app/Widget entitlements are not covered by their exact embedded profiles." >&2
+    return 1
+  fi
+}
+
 sign_macos_online_ipad_debug_app() {
-  local identity
-  if ! identity="$(select_macos_online_ipad_debug_signing_identity)"; then
-    echo "No Apple Development or Developer ID Application signing identity is available for the macOS online iPad Debug app." >&2
-    echo "Install a valid signing identity or set SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY explicitly; ad-hoc signing is not accepted for the LaunchServices smoke." >&2
-    exit 1
-  fi
+  local widget_bundle="$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
 
-  local app_entitlements
-  app_entitlements="$(macos_online_ipad_debug_entitlements_for 'SkyBridge Compass Pro.app')"
-  if [[ ! -f "$app_entitlements" ]]; then
-    echo "macOS online iPad Debug app entitlements not found under DerivedData: $app_entitlements" >&2
-    exit 1
-  fi
-
+  validate_macos_online_ipad_debug_bundle_identity
+  remove_macos_online_ipad_debug_signature_before_binary_mutation
   normalize_macos_online_ipad_debug_rpaths
   normalize_macos_online_ipad_debug_frameworks
+  sign_macos_online_ipad_debug_frameworks
 
-  if [[ -d "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" ]]; then
-    while IFS= read -r -d '' binary; do
-      /usr/bin/codesign --force --timestamp=none --sign "$identity" "$binary" >/dev/null
-    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print0)
-
-    while IFS= read -r -d '' framework; do
-      /usr/bin/codesign --force --timestamp=none --sign "$identity" "$framework" >/dev/null
-    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type d -name '*.framework' -prune -print0)
-  fi
-
-  if [[ -d "$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns" ]]; then
-    while IFS= read -r -d '' appex; do
-      local appex_entitlements
-      appex_entitlements="$(macos_online_ipad_debug_entitlements_for "$(basename "$appex")")"
-      if [[ -f "$appex_entitlements" ]]; then
-        /usr/bin/codesign --force --timestamp=none --sign "$identity" --entitlements "$appex_entitlements" "$appex" >/dev/null
-      else
-        /usr/bin/codesign --force --timestamp=none --sign "$identity" "$appex" >/dev/null
-      fi
-    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns" -type d -name '*.appex' -prune -print0)
-  fi
-
-  /usr/bin/codesign --force --timestamp=none --sign "$identity" --entitlements "$app_entitlements" "$MAC_ONLINE_APP_BUNDLE" >/dev/null
-  /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  /usr/bin/codesign \
+    --force \
+    --timestamp=none \
+    --options runtime \
+    --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" \
+    --entitlements "$MAC_HOST_PRODUCT_WIDGET_ENTITLEMENTS" \
+    "$widget_bundle" >/dev/null
+  /usr/bin/codesign \
+    --force \
+    --timestamp=none \
+    --options runtime \
+    --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" \
+    --entitlements "$MAC_HOST_PRODUCT_ENTITLEMENTS" \
+    "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  verify_macos_online_ipad_debug_product_signature
 
   mkdir -p "$(dirname "$MAC_ONLINE_STATUS")"
-  printf '%s mac-online-app-signing source=debug identityKind=%s entitlements=app-xcent nested=verified\n' \
-    "$(timestamp_utc)" \
-    "$(macos_online_ipad_debug_signing_identity_kind "$identity")" \
-    >>"$MAC_ONLINE_STATUS"
+  printf '%s mac-online-app-signing source=debug identityKind=developer-id identitySource=canonical-dist appProfile=exact widgetProfile=exact entitlements=app-widget-exact nested=verified keychainAccess=product preMutationSignature=removed\n' \
+    "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
 }
 
 build_macos_online_ipad_app() {
   if [[ -d "$MAC_ONLINE_PACKAGED_APP_BUNDLE" ]]; then
     echo "==> Using packaged macOS online iPad UI client"
+    MAC_ONLINE_APP_SOURCE="packaged"
+    MAC_ONLINE_APP_SOURCE_CURRENT=0
     MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_PACKAGED_APP_BUNDLE"
     MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
-    xattr -dr com.apple.quarantine "$MAC_ONLINE_APP_BUNDLE" >/dev/null 2>&1 || true
     verify_macos_online_ipad_app_bundle "packaged"
     register_macos_online_ipad_app_bundle
     return 0
@@ -935,6 +2325,8 @@ build_macos_online_ipad_app() {
   fi
   rm -rf -- "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
   ditto "$debug_app_bundle" "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+  MAC_ONLINE_APP_SOURCE="debug"
+  MAC_ONLINE_APP_SOURCE_CURRENT=0
   MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_RUNTIME_APP_BUNDLE"
   MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
   if [[ ! -x "$MAC_ONLINE_APP_BIN" ]]; then
@@ -942,13 +2334,48 @@ build_macos_online_ipad_app() {
     exit 1
   fi
   sign_macos_online_ipad_debug_app
-  xattr -dr com.apple.quarantine "$MAC_ONLINE_APP_BUNDLE" >/dev/null 2>&1 || true
+  clear_runtime_bundle_quarantine_if_present "$MAC_ONLINE_APP_BUNDLE" "macOS online iPad Debug app"
   verify_macos_online_ipad_app_bundle "debug"
   register_macos_online_ipad_app_bundle
 }
 
 register_macos_online_ipad_app_bundle() {
-  register_launch_services_app_bundle "$MAC_ONLINE_APP_BUNDLE"
+  register_launch_services_app_bundle "$MAC_ONLINE_APP_BUNDLE" || return 1
+  if [[ "$MAC_ONLINE_APP_BUNDLE" == "$MAC_ONLINE_RUNTIME_APP_BUNDLE" ]]; then
+    MAC_ONLINE_APP_REGISTERED=1
+  fi
+}
+
+verify_macos_online_ipad_pib_v3_wire_freshness() {
+  local wire_source="$ROOT_DIR/Sources/SkyBridgeCore/P2P/AppMessage.swift"
+  local required_markers=(
+    "SkyBridge-PIB-1-V3-Confirm"
+    "SkyBridge-PIB-1-V3-SignedFinalAck"
+  )
+  local marker
+
+  if [[ ! -f "$wire_source" ]]; then
+    echo "PIB-1 wire source is missing: $wire_source" >&2
+    return 1
+  fi
+
+  for marker in "${required_markers[@]}"; do
+    if ! LC_ALL=C /usr/bin/grep -aFq -- "$marker" "$MAC_ONLINE_APP_BIN"; then
+      echo "macOS online iPad app is missing a required PIB-1 v3 wire marker: $marker" >&2
+      echo "Refusing a protocol-incompatible packaged client that iOS must reject fail closed." >&2
+      echo "Rebuild, sign, and notarize the macOS app from the current source before rerunning this smoke." >&2
+      return 1
+    fi
+  done
+
+  if [[ "$wire_source" -nt "$MAC_ONLINE_APP_BIN" ]]; then
+    echo "macOS online iPad app is older than the current PIB-1 wire source: $wire_source" >&2
+    echo "Rebuild, sign, and notarize the macOS app before claiming Mac-to-iOS handshake proof." >&2
+    return 1
+  fi
+
+  printf '%s mac-online-app-wire protocol=PIB-1-v3 transaction=present finalAck=present sourceFresh=1\n' \
+    "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
 }
 
 verify_macos_online_ipad_app_bundle() {
@@ -961,6 +2388,7 @@ verify_macos_online_ipad_app_bundle() {
     echo "macOS online iPad app executable not found: $MAC_ONLINE_APP_BIN" >&2
     exit 1
   fi
+  verify_macos_online_ipad_pib_v3_wire_freshness
   verify_macos_online_ipad_framework_resolution
   codesign --verify --deep --strict "$MAC_ONLINE_APP_BUNDLE" >/dev/null
   local trust_status="codesign=verified"
@@ -969,6 +2397,7 @@ verify_macos_online_ipad_app_bundle() {
     spctl --assess --type execute "$MAC_ONLINE_APP_BUNDLE" >/dev/null
     trust_status="$trust_status stapler=valid spctl=accepted"
   fi
+  MAC_ONLINE_APP_SOURCE_CURRENT=1
   printf '%s mac-online-app source=%s %s bundle=%s executable=%s\n' "$(timestamp_utc)" "$source_kind" "$trust_status" "$MAC_ONLINE_APP_BUNDLE" "$MAC_ONLINE_APP_BIN" >>"$MAC_ONLINE_STATUS"
 }
 
@@ -1006,7 +2435,34 @@ find_all_macos_online_ipad_client_pids() {
   local app_bin
   app_bin="$(canonical_macos_online_ipad_client_bin)" || return 0
   [[ -n "$app_bin" ]] || return 0
-  pgrep -f "$app_bin" || true
+  python3 - "$app_bin" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+executable = sys.argv[1]
+executable_candidates = {executable, str(Path(executable).resolve())}
+completed = subprocess.run(
+    ["/bin/ps", "-axo", "pid=,command="],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if completed.returncode != 0:
+    print("Unable to enumerate macOS online iPad client processes", file=sys.stderr)
+    raise SystemExit(1)
+for raw_line in completed.stdout.splitlines():
+    stripped = raw_line.strip()
+    if not stripped:
+        continue
+    pid, separator, command = stripped.partition(" ")
+    command = command.lstrip()
+    if separator and pid.isdigit() and any(
+        command == candidate or command.startswith(candidate + " ")
+        for candidate in executable_candidates
+    ):
+        print(pid)
+PY
 }
 
 find_macos_online_ipad_client_pid() {
@@ -1022,7 +2478,11 @@ canonical_macos_online_ipad_client_bin() {
 
 terminate_stale_macos_online_ipad_clients() {
   local pids
-  pids="$(find_all_macos_online_ipad_client_pids)"
+  local remaining
+  local attempt
+  if ! pids="$(find_all_macos_online_ipad_client_pids)"; then
+    return 1
+  fi
   [[ -n "$pids" ]] || return 0
 
   while IFS= read -r pid; do
@@ -1031,15 +2491,57 @@ terminate_stale_macos_online_ipad_clients() {
     kill "$pid" >/dev/null 2>&1 || true
   done <<<"$pids"
 
-  sleep 1
-
+  for attempt in {1..20}; do
+    if ! remaining="$(find_all_macos_online_ipad_client_pids)"; then
+      return 1
+    fi
+    [[ -z "$remaining" ]] && return 0
+    sleep 0.1
+  done
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      echo "==> Force terminating stale macOS online iPad UI client pid=$pid"
-      kill -KILL "$pid" >/dev/null 2>&1 || true
+    echo "==> Force terminating stale macOS online iPad UI client pid=$pid"
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  done <<<"$remaining"
+  for attempt in {1..20}; do
+    if ! remaining="$(find_all_macos_online_ipad_client_pids)"; then
+      return 1
     fi
-  done <<<"$pids"
+    [[ -z "$remaining" ]] && return 0
+    sleep 0.1
+  done
+  echo "The exact macOS online iPad runtime process remained alive after SIGKILL." >&2
+  return 1
+}
+
+cleanup_macos_online_ipad_launch_services_registration() {
+  local runtime_app="$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+
+  if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${MAC_ONLINE_RUNTIME_DIR:-}" || \
+        "$runtime_app" != "$MAC_ONLINE_RUNTIME_DIR/"* || \
+        "$runtime_app" == "$MAC_ONLINE_RUNTIME_DIR" || \
+        "$MAC_ONLINE_APP_BUNDLE" != "$runtime_app" ]]; then
+    echo "Refusing unsafe macOS online iPad runtime registration cleanup path." >&2
+    return 1
+  fi
+  if [[ ! -d "$runtime_app" || -L "$runtime_app" ]]; then
+    echo "Registered macOS online iPad runtime app disappeared before cleanup." >&2
+    return 1
+  fi
+  if ! terminate_stale_macos_online_ipad_clients; then
+    echo "Unable to terminate every process for the exact macOS online iPad runtime executable." >&2
+    return 1
+  fi
+  if ! unregister_launch_services_app_bundle "$runtime_app"; then
+    return 1
+  fi
+  if ! verify_launch_services_runtime_paths_absent "$runtime_app"; then
+    return 1
+  fi
+  MAC_ONLINE_APP_REGISTERED=0
 }
 
 open_macos_online_ipad_app_bundle() {
@@ -1051,9 +2553,8 @@ open_macos_online_ipad_app_bundle() {
     -n \
     --stdout "$MAC_ONLINE_LAUNCH_STDOUT" \
     --stderr "$MAC_ONLINE_LAUNCH_STDERR" \
-    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=1" \
+    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=$KEYCHAIN_IN_MEMORY" \
     --env "SKYBRIDGE_SMOKE_ROLE=mac-online-ipad-client" \
-    --env "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=$SMOKE_AUTO_APPROVE_PAIRING" \
     --env "SKYBRIDGE_SMOKE_AUTO_EXIT=1" \
     --env "SKYBRIDGE_SMOKE_STATUS_FILE=$MAC_ONLINE_STATUS" \
     --env "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS=$SMOKE_TIMEOUT_SECONDS" \
@@ -2165,6 +3666,13 @@ raise SystemExit(1)
 PY
 }
 
+authenticated_forward_ipad_control_host() {
+  python3 \
+    "$ROOT_DIR/Scripts/extract_authenticated_p2p_route.py" \
+    "$HOST_STATUS" \
+    "$IOS_PQC_DEVICE_ID"
+}
+
 bonjour_control_route_reachable() {
   local service_name_base64="$1"
   local probe_error="$2"
@@ -2196,6 +3704,7 @@ guard CommandLine.arguments.count == 2 else {
 let serviceName = CommandLine.arguments[1]
 let parameters = NWParameters.tcp
 parameters.includePeerToPeer = true
+parameters.requiredInterfaceType = .wifi
 let endpoint = NWEndpoint.service(
     name: serviceName,
     type: "_skybridge._tcp",
@@ -2243,7 +3752,7 @@ connection.stateUpdateHandler = { state in
 }
 connection.start(queue: DispatchQueue(label: "com.skybridge.smoke.bonjour-control-probe"))
 if completion.wait(timeout: .now() + 5) == .timedOut {
-    _ = probeState.finish(false, detail: "NWConnection timed out resolving Bonjour control route")
+    _ = probeState.finish(false, detail: "NWConnection timed out waiting for Bonjour control connection readiness")
 }
 connection.cancel()
 exit(probeState.result() ? 0 : 1)
@@ -2287,14 +3796,18 @@ PY
 
 verify_ipad_control_port_reachable_from_mac() {
   local started_at
-  local endpoint
-  local route_kind
-  local route_value
-  local host
-  local port
+  local endpoint=""
+  local route_kind=""
+  local route_value=""
+  local host=""
+  local port=""
   local probe_error="$ARTIFACT_DIR/ipad-control-port-probe.stderr.log"
-  local detail
-  local listener_ready
+  local authenticated_probe_error="$ARTIFACT_DIR/ipad-authenticated-forward-port-probe.stderr.log"
+  local authenticated_route_error="$ARTIFACT_DIR/ipad-authenticated-forward-route.stderr.log"
+  local detail=""
+  local listener_ready=0
+  local primary_reachable=0
+  local authenticated_host=""
   local tcp_reachable_without_listener=0
   started_at="$(date +%s)"
 
@@ -2312,19 +3825,52 @@ verify_ipad_control_port_reachable_from_mac() {
       else
         listener_ready=0
       fi
-      if { [[ "$route_kind" == "host" ]] && tcp_port_reachable "$route_value" "$port" "$probe_error"; } \
-        || { [[ "$route_kind" == "bonjour" ]] && bonjour_control_route_reachable "$route_value" "$probe_error"; }; then
+      primary_reachable=0
+      : >"$probe_error"
+      if [[ "$route_kind" == "host" ]]; then
+        if tcp_port_reachable "$route_value" "$port" "$probe_error"; then
+          primary_reachable=1
+        fi
+      elif [[ "$route_kind" == "bonjour" ]]; then
+        if bonjour_control_route_reachable "$route_value" "$probe_error"; then
+          primary_reachable=1
+        fi
+      fi
+
+      if [[ "$primary_reachable" == "1" ]]; then
         if [[ "$listener_ready" == "1" ]]; then
           printf '%s ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1 routeKind=%s\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$route_kind" >>"$MAC_ONLINE_STATUS"
           return 0
         fi
         tcp_reachable_without_listener=1
         detail="listener-not-ready"
-        printf '%s ipad-control-port reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=0 reason=listener-not-ready\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
-      fi
-      if [[ "$tcp_reachable_without_listener" != "1" || "$detail" != "listener-not-ready" ]]; then
+        printf '%s ipad-control-port reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=0 routeKind=%s reason=listener-not-ready\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$route_kind" >>"$MAC_ONLINE_STATUS"
+      else
         detail="$(redacted_last_log_line "$probe_error")"
-        printf '%s ipad-control-port reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=%s detail=%s\n' "$(timestamp_utc)" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" "${detail:-unknown}" >>"$MAC_ONLINE_STATUS"
+        printf '%s ipad-control-route-observation routeKind=%s reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe listenerReady=%s detail=%s\n' "$(timestamp_utc)" "$route_kind" "$host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" "${detail:-unknown}" >>"$MAC_ONLINE_STATUS"
+
+        : >"$authenticated_route_error"
+        authenticated_host="$(authenticated_forward_ipad_control_host 2>"$authenticated_route_error" || true)"
+        if [[ -z "$authenticated_host" ]]; then
+          detail="$(redacted_last_log_line "$authenticated_route_error")"
+          printf '%s ipad-control-route-observation routeKind=authenticated-forward-peer reachable=0 host=unavailable port=%s identityKey=%s targetDeviceId=%s source=operator-approved-xwing-forward-session listenerReady=%s bonjourReachable=0 detail=%s\n' "$(timestamp_utc)" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" "${detail:-target_bound_route_unavailable}" >>"$MAC_ONLINE_STATUS"
+        elif [[ "$route_kind" == "host" && "$authenticated_host" == "$route_value" ]]; then
+          printf '%s ipad-control-route-observation routeKind=authenticated-forward-peer reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=operator-approved-xwing-forward-session listenerReady=%s detail=same_unreachable_route_as_online_row\n' "$(timestamp_utc)" "$authenticated_host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" >>"$MAC_ONLINE_STATUS"
+        else
+          : >"$authenticated_probe_error"
+          if tcp_port_reachable "$authenticated_host" "$port" "$authenticated_probe_error"; then
+            printf '%s ipad-control-route-observation routeKind=authenticated-forward-peer reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=operator-approved-xwing-forward-session listenerReady=%s bonjourReachable=0\n' "$(timestamp_utc)" "$authenticated_host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" >>"$MAC_ONLINE_STATUS"
+            if [[ "$listener_ready" == "1" ]]; then
+              printf '%s ipad-control-port reachable=1 host=%s port=%s identityKey=%s targetDeviceId=%s source=pre-mac-online-probe probe=tcp-only listenerReady=1 routeKind=authenticated-forward-peer bonjourReachable=0 routeEvidence=operator-approved-xwing-forward-session\n' "$(timestamp_utc)" "$authenticated_host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+              return 0
+            fi
+            tcp_reachable_without_listener=1
+            detail="listener-not-ready"
+          else
+            detail="$(redacted_last_log_line "$authenticated_probe_error")"
+            printf '%s ipad-control-route-observation routeKind=authenticated-forward-peer reachable=0 host=%s port=%s identityKey=%s targetDeviceId=%s source=operator-approved-xwing-forward-session listenerReady=%s bonjourReachable=0 detail=%s\n' "$(timestamp_utc)" "$authenticated_host" "$port" "$IOS_PQC_DEVICE_ID" "$IOS_PQC_DEVICE_ID" "$listener_ready" "${detail:-unknown}" >>"$MAC_ONLINE_STATUS"
+          fi
+        fi
       fi
     fi
 
@@ -2340,6 +3886,68 @@ verify_ipad_control_port_reachable_from_mac() {
     fi
     sleep 1
   done
+}
+
+validate_mac_online_product_p2p_path() {
+  python3 - "$MAC_ONLINE_STATUS" "$IOS_PQC_DEVICE_ID" <<'PY'
+import re
+import sys
+
+status_path, target_device_id = sys.argv[1:]
+
+def field(line, key):
+    match = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", line)
+    return match.group(1) if match else None
+
+def canonical_device_id(raw):
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value.startswith("id:"):
+        value = value[3:]
+    return value or None
+
+with open(status_path, "r", encoding="utf-8", errors="strict") as handle:
+    lines = handle.read().splitlines()
+
+connect_start_indexes = [
+    index
+    for index, line in enumerate(lines)
+    if "mac-online-connect-start" in line
+    and "targetFamily=ipad" in line
+    and "evidenceSource=external-ax" in line
+]
+if not connect_start_indexes:
+    raise SystemExit("missing target-bound Mac online connect-start evidence")
+connect_start_index = connect_start_indexes[-1]
+target = canonical_device_id(target_device_id)
+
+for line in reversed(lines[connect_start_index + 1 :]):
+    if "p2p-connection-ready-path" not in line:
+        continue
+    if canonical_device_id(field(line, "deviceId")) != target:
+        continue
+    path_status = field(line, "pathStatus")
+    route_class = field(line, "routeClass")
+    attached = field(line, "attached")
+    link_local = field(line, "linkLocal")
+    interface_types = set((field(line, "usedInterfaceTypes") or "").lower().split(","))
+    if path_status != "satisfied":
+        raise SystemExit("target product P2P path is not satisfied")
+    if route_class not in {"wifi", "awdl"}:
+        raise SystemExit(f"target product P2P path is not Wi-Fi/AWDL: {route_class}")
+    if attached != "0" or "wiredethernet" in interface_types:
+        raise SystemExit("target product P2P path used an attached or wired interface")
+    if link_local != "0":
+        raise SystemExit("target product P2P path used a link-local address")
+    print(
+        "Mac online product P2P path passed: "
+        f"routeClass={route_class} interfaceTypes={','.join(sorted(interface_types))}"
+    )
+    raise SystemExit(0)
+
+raise SystemExit("missing target-bound product P2P currentPath evidence")
+PY
 }
 
 run_mac_online_ipad_button_smoke() {
@@ -2377,6 +3985,12 @@ run_mac_online_ipad_button_smoke() {
 
   wait_for_mac_online_pattern 'mac-online-connect action=button .*source=OnlineDeviceCard .*clickSource=accessibility .*targetRowBound=1 .*axMatch=(target-identifier|target-row-title)' 30 "macOS online iPad real button click evidence"
   wait_for_mac_online_pattern 'mac-online-connect-start .*targetFamily=ipad .*source=OnlineDeviceCard .*evidenceSource=external-ax' 30 "macOS online iPad connect start from clicked row"
+  wait_for_mac_online_pattern 'p2p-connection-ready-path .*pathStatus=satisfied .*routeClass=(wifi|awdl) .*attached=0 .*linkLocal=0' "$SMOKE_TIMEOUT_SECONDS" "macOS-to-iOS product Wi-Fi/AWDL P2P path"
+  validate_mac_online_product_p2p_path
+  wait_for_mac_online_pattern 'mac remote established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "macOS-to-iOS authenticated X-Wing remote-control handshake"
+  wait_for_ios_status_pattern 'p2p-inbound handshake-established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "iOS inbound X-Wing P2P handshake"
+  wait_for_ios_status_pattern 'lan-remote handshake-established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "iOS inbound X-Wing remote-control handshake"
+  MAC_TO_IOS_CRYPTO_HANDSHAKE_COMPLETE=1
   wait_for_mac_online_connected_row "$SMOKE_TIMEOUT_SECONDS"
   sync_mac_online_launch_stdio
   if ! grep -qE 'mac-online-connect-result .*targetFamily=ipad .*result=success' "$MAC_ONLINE_STATUS_ARTIFACT"; then
@@ -2676,6 +4290,10 @@ copy_ios_app_cache_file() {
 
   rm -f "$tmp_path"
   return 1
+}
+
+copy_ios_trace() {
+  copy_ios_app_cache_file "$IOS_TRACE_NAME" "$IOS_TRACE_LOCAL" "trace"
 }
 
 copy_ios_status() {
@@ -4274,14 +5892,107 @@ terminate_ios_remote_smoke_app_for_notice_disconnect() {
   copy_ios_status
 }
 
+write_p2p_remote_control_approval_proof() {
+  python3 - "$HOST_STATUS" "$P2P_APPROVAL_PROOF" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from collections import defaultdict
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+metadata = status_path.lstat()
+if not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit("P2P approval status input must be a regular file")
+status = status_path.read_text(encoding="utf-8", errors="strict")
+
+event_pattern = re.compile(
+    r"\bremoteControlNotice(?P<event>Shown|PanelPresented|HumanApproved|Approved|Active)\s+"
+    r"session=(?P<session>[^\s]+)\s+transport=p2p\b(?P<tail>[^\n]*)"
+)
+events_by_session: dict[str, list[tuple[str, int]]] = defaultdict(list)
+active_sessions: set[str] = set()
+panel_contract_by_session: dict[str, bool] = {}
+for match in event_pattern.finditer(status):
+    event = match.group("event")
+    session = match.group("session")
+    tail = match.group("tail")
+    if event == "PanelPresented":
+        if re.search(r"\bphase=awaitingApproval\b", tail) is None:
+            continue
+        buttons_match = re.search(r"\bbuttons=([^\s]+)", tail)
+        buttons = set(buttons_match.group(1).split(",")) if buttons_match else set()
+        panel_contract_by_session[session] = {"approve", "reject"}.issubset(buttons)
+    if event == "Active":
+        active_sessions.add(session)
+    events_by_session[session].append((event, match.start()))
+
+expected_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]
+valid_sessions = []
+for session, events in events_by_session.items():
+    lifecycle = [event for event, _ in events]
+    if lifecycle == expected_lifecycle and panel_contract_by_session.get(session) is True:
+        valid_sessions.append(session)
+
+if len(valid_sessions) != 1:
+    raise SystemExit("P2P approval proof requires exactly one strict same-session human lifecycle")
+session = valid_sessions[0]
+if active_sessions != {session}:
+    raise SystemExit("P2P approval proof contains an active notice outside the strict human-approved session")
+
+escaped_session = re.escape(session)
+auto_patterns = (
+    rf"\bremoteControlNoticeAutoApproved\s+session={escaped_session}\s+transport=p2p\b",
+    rf"\bremoteControlNoticeApproved\s+session={escaped_session}\s+transport=p2p\b[^\n]*\bapprovalSource=(?:auto|runtime)\b",
+    rf"(?m)^(?=[^\n]*\bsession={escaped_session}\b)(?=[^\n]*\b(?:runtimeAutoApproval|autoApprove)=true\b)[^\n]*$",
+)
+runtime_auto_approval = any(re.search(pattern, status, re.IGNORECASE) for pattern in auto_patterns)
+human_approval = "HumanApproved" in [event for event, _ in events_by_session[session]]
+if not human_approval or runtime_auto_approval:
+    raise SystemExit("P2P approval proof did not establish exclusive human approval")
+
+proof = {
+    "schemaVersion": 1,
+    "sessionRef": hashlib.sha256(session.encode("utf-8")).hexdigest()[:24],
+    "humanApproval": human_approval,
+    "runtimeAutoApproval": runtime_auto_approval,
+    "lifecycle": expected_lifecycle,
+    "panelActionsVerified": panel_contract_by_session[session],
+}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+temporary_path = Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+        json.dump(proof, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, output_path)
+finally:
+    if temporary_path.exists():
+        temporary_path.unlink()
+PY
+}
+
 wait_for_remote_control_notice_lifecycle() {
   if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
     return 0
   fi
 
-  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeShown .*transport=p2p' 20 "macOS remote-control notice shown"
-  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeApproved .*transport=p2p' 20 "macOS remote-control notice approved"
-  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeActive .*transport=p2p' 20 "macOS remote-control notice active"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeShown .*transport=p2p' "$SMOKE_TIMEOUT_SECONDS" "macOS remote-control notice shown"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticePanelPresented .*transport=p2p .*phase=awaitingApproval .*buttons=[^[:space:]]*(approve[^[:space:]]*reject|reject[^[:space:]]*approve)' "$SMOKE_TIMEOUT_SECONDS" "macOS P2P remote-control approval panel with approve/reject actions"
+  echo "==> Waiting for the operator to approve the visible macOS P2P remote-control notice"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeHumanApproved .*transport=p2p' "$SMOKE_TIMEOUT_SECONDS" "human-approved macOS P2P remote-control notice"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeApproved .*transport=p2p' "$SMOKE_TIMEOUT_SECONDS" "operator-approved macOS P2P remote-control notice"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeActive .*transport=p2p' "$SMOKE_TIMEOUT_SECONDS" "active macOS P2P remote-control notice"
+  write_p2p_remote_control_approval_proof
 }
 
 wait_for_remote_control_notice_disconnected() {
@@ -4370,6 +6081,19 @@ require_remote_control_notice_identity_env
 echo "==> Checking macOS visible desktop preflight"
 detect_macos_loginwindow_occlusion
 
+echo "==> Verifying iOS source provenance"
+capture_ios_release_source_provenance
+
+if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  echo "==> Resolving installed iOS app and Widget distribution profiles"
+  resolve_ios_distribution_signing_inputs
+fi
+
+if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
+  echo "==> Verifying packaged-product signing context for the macOS LAN host"
+  verify_macos_smoke_host_product_signing_context
+fi
+
 echo "==> Checking Apple PQC SDK gate for macOS host"
 skybridge_configure_optional_apple_pqc_sdk_compile_gate macosx
 if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]]; then
@@ -4389,11 +6113,11 @@ echo "==> Building macOS LAN host"
   SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  swift build --product LocalLanInteropHost
+  swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost
   SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  swift build --product LocalLanSmokeSourceHost
+  swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
 ) >"$ARTIFACT_DIR/macos-build.log"
 
 if [[ ! -x "$MAC_DIRECT_BIN" ]]; then
@@ -4405,13 +6129,20 @@ if [[ ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
   exit 1
 fi
 
-if [[ "$MAC_HOST_LAUNCH_MODE" == "open" ]]; then
+if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
   prepare_macos_smoke_host_app_bundle
 fi
 
 echo "==> Starting macOS LAN host"
 start_macos_smoke_host
 
+if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
+  wait_for_file_pattern \
+    "$HOST_STATUS" \
+    'remote-control-localization requiredKeys=20 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
+    30 \
+    "embedded signed SkyBridgeCore localization contract"
+fi
 wait_for_file_pattern "$HOST_STATUS" 'ready discovery=_skybridge._tcp' 60 "macOS host ready"
 MAC_REMOTE_PORT="$(python3 - "$HOST_STATUS" <<'PY'
 import re
@@ -4500,29 +6231,52 @@ if ! skybridge_apple_pqc_sdk_probe_succeeded; then
   exit 1
 fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+IOS_XCODE_SIGNING_SETTINGS=()
+if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  IOS_XCODE_SIGNING_SETTINGS=(
+    "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
+    "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
+    "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
+  )
+fi
 SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
-  -configuration Debug \
+  -configuration "$IOS_BUILD_CONFIGURATION" \
   -destination "$IOS_BUILD_DESTINATION" \
   -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
+  "INFOPLIST_KEY_SkyBridgePackagingBuildConfiguration=$IOS_BUILD_CONFIGURATION" \
+  "INFOPLIST_KEY_SkyBridgePackagingGitDirtyState=$IOS_SOURCE_DIRTY_STATE" \
+  "INFOPLIST_KEY_SkyBridgePackagingGitCommit=$IOS_SOURCE_REVISION" \
+  "INFOPLIST_KEY_SkyBridgePackagingSourceRepository=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}" \
+  "INFOPLIST_KEY_SkyBridgePackagingProductSurface=testing" \
+  "INFOPLIST_KEY_SkyBridgePackagingSwiftActiveCompilationConditions=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING" \
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
+  "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING" \
+  "${IOS_XCODE_SIGNING_SETTINGS[@]}" \
   build >"$IOS_BUILD_LOG"
 
-IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
+IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
   exit 1
 fi
 
 IOS_EMBEDDED_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
+IOS_WIDGET_BUNDLE="$IOS_APP_PATH/PlugIns/SkyBridgeCompass-Widgets.appex"
+IOS_WIDGET_EMBEDDED_PROFILE="$IOS_WIDGET_BUNDLE/embedded.mobileprovision"
+if [[ ! -d "$IOS_WIDGET_BUNDLE" ]]; then
+  echo "iOS Widget bundle not found at the exact product path: $IOS_WIDGET_BUNDLE" >&2
+  exit 1
+fi
 if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
-  "$IOS_DEBUG_ENTITLEMENTS"; then
-  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide a signing mismatch." >&2
+  "$IOS_EXPECTED_ENTITLEMENTS"; then
+  echo "iOS app provisioning profile does not cover the requested configuration entitlements; refusing a smoke run that would hide a signing mismatch." >&2
   echo "profile=<redacted-profile-path> entitlements=<redacted-entitlements-path>" >&2
   exit 1
 fi
+write_ios_p2p_product_proof "$IOS_EMBEDDED_PROFILE" "$IOS_WIDGET_EMBEDDED_PROFILE"
 
 echo "==> Installing iOS app on real device"
 if [[ "$PRESERVE_INSTALL" != "1" ]]; then
@@ -4548,6 +6302,7 @@ else
 fi
 IOS_SMOKE_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-$IOS_DEVICE_ID}"
 IOS_ENV_JSON="$(
+  SKYBRIDGE_KEYCHAIN_IN_MEMORY="$KEYCHAIN_IN_MEMORY" \
   SKYBRIDGE_DEVICE_ID="$IOS_SMOKE_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_NAME="$MAC_TARGET_NAME" \
@@ -4567,7 +6322,6 @@ IOS_ENV_JSON="$(
   SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION="$SMOKE_EXPECT_RENDER_ORIENTATION" \
   SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH="$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" \
   SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH="$SMOKE_FORCE_SIGNED_KEM_REFRESH" \
-  SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$SMOKE_AUTO_APPROVE_PAIRING" \
   SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
   SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}" \
   SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}" \
@@ -4600,7 +6354,6 @@ keys = [
     "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION",
     "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH",
     "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH",
-    "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING",
     "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE",
     "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME",
     "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID",
@@ -4611,9 +6364,8 @@ keys = [
     "SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64",
 ]
 env = {
-    "SKYBRIDGE_KEYCHAIN_IN_MEMORY": "1",
+    "SKYBRIDGE_KEYCHAIN_IN_MEMORY": os.environ["SKYBRIDGE_KEYCHAIN_IN_MEMORY"],
     "SKYBRIDGE_SMOKE_ROLE": "ios-p2p-client",
-    "SKYBRIDGE_SMOKE_ALLOW_IDENTITY_OVERRIDE": "1",
     "SKYBRIDGE_SMOKE_EXPECT_REMOTE_DESKTOP": "1",
     "SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB": "1",
     "SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW": "1",
@@ -4664,6 +6416,7 @@ wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 
+sync_macos_smoke_host_artifacts
 echo "==> Running Rust CLI P2P remote performance artifact gate"
 skybridge_smoke_check_performance_gate "$ROOT_DIR" p2p-remote "$ARTIFACT_DIR" \
   --min-fps "$SMOKE_MIN_FPS" \
@@ -4673,12 +6426,178 @@ skybridge_smoke_check_performance_gate "$ROOT_DIR" p2p-remote "$ARTIFACT_DIR" \
   --min-pass-window-seconds "$SMOKE_SOAK_SECONDS" \
   --require-audio true \
   --strict-fps-floor true
+python3 - \
+  "$ARTIFACT_DIR/release-acceptance.json" \
+  "$LAB_RUN" \
+  "$PQC_TRUST_MODE" \
+  "$KEYCHAIN_MODE" \
+  "$RUN_MAC_ONLINE_IPAD_SMOKE" \
+  "$MAC_TO_IOS_CRYPTO_HANDSHAKE_COMPLETE" \
+  "$MAC_ONLINE_APP_SOURCE" \
+  "$MAC_ONLINE_APP_SOURCE_CURRENT" \
+  "$P2P_APPROVAL_PROOF" \
+  "$IOS_PRODUCT_PROOF" <<'PY'
+import json
+import pathlib
+import stat
+import sys
+
+(
+    output_path,
+    lab_run,
+    trust_mode,
+    keychain_mode,
+    reverse_run,
+    reverse_crypto,
+    mac_online_source,
+    mac_online_source_current,
+    approval_proof_path,
+    ios_product_proof_path,
+) = sys.argv[1:]
+
+
+def load_measured_proof(path_value: str, label: str) -> dict:
+    path = pathlib.Path(path_value)
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0 or metadata.st_size > 1024 * 1024:
+        raise SystemExit(f"{label} is not a bounded regular file")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{label} is not a JSON object")
+    return payload
+
+
+approval_proof = load_measured_proof(approval_proof_path, "P2P approval proof")
+ios_product_proof = load_measured_proof(ios_product_proof_path, "iOS product proof")
+human_approval = approval_proof.get("humanApproval") is True
+runtime_auto_approval = approval_proof.get("runtimeAutoApproval") is True
+approval_lifecycle = approval_proof.get("lifecycle")
+approval_session_ref = approval_proof.get("sessionRef")
+expected_approval_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]
+if (
+    approval_proof.get("schemaVersion") != 1
+    or approval_lifecycle != expected_approval_lifecycle
+    or approval_proof.get("panelActionsVerified") is not True
+    or not isinstance(approval_session_ref, str)
+    or len(approval_session_ref) != 24
+):
+    raise SystemExit("P2P approval proof contract is invalid")
+
+required_ios_true_fields = (
+    "releaseConfiguration",
+    "sourceClean",
+    "productBundle",
+    "signatureVerified",
+    "profileVerified",
+    "teamMatch",
+    "certificateMatch",
+    "certificateNotExpired",
+    "profileNotExpired",
+    "profileDeviceBound",
+    "distributionSigning",
+    "expectedEntitlementsMatch",
+    "keychainGroupsVerified",
+    "nestedWidgetVerified",
+    "productionProduct",
+)
+ios_product_ready = (
+    ios_product_proof.get("schemaVersion") == 1
+    and ios_product_proof.get("configuration") == "Release"
+    and all(ios_product_proof.get(key) is True for key in required_ios_true_fields)
+    and ios_product_proof.get("getTaskAllow") is False
+)
+ios_source_revision_ref = ios_product_proof.get("sourceRevisionRef")
+if not isinstance(ios_source_revision_ref, str) or len(ios_source_revision_ref) != 24:
+    raise SystemExit("iOS product proof source revision reference is invalid")
+
+is_lab = lab_run == "1"
+ios_production_identity_lifecycle_verified = False
+has_reverse_run = reverse_run == "1"
+has_reverse_crypto = reverse_crypto == "1"
+has_current_packaged_mac_online = (
+    mac_online_source == "packaged" and mac_online_source_current == "1"
+)
+pre_cleanup_candidate = (
+    not is_lab
+    and trust_mode != "injected"
+    and keychain_mode == "system"
+    and has_reverse_run
+    and has_reverse_crypto
+    and has_current_packaged_mac_online
+    and human_approval
+    and not runtime_auto_approval
+    and ios_product_ready
+    and ios_production_identity_lifecycle_verified
+)
+payload = {
+    "schemaVersion": 1,
+    "transport": "p2p",
+    "realDevice": True,
+    "acceptanceEligible": False,
+    "diagnosticOnly": True,
+    "cleanupComplete": False,
+    "preCleanupCandidate": pre_cleanup_candidate,
+    "labRun": is_lab,
+    "trustMode": trust_mode,
+    "keychainMode": keychain_mode,
+    "injectedTrust": trust_mode == "injected",
+    "inMemoryKeychain": keychain_mode == "in-memory",
+    "humanApproval": human_approval,
+    "runtimeAutoApproval": runtime_auto_approval,
+    "approvalSessionRef": approval_session_ref,
+    "approvalLifecycle": approval_lifecycle,
+    "iosToMacRemoteControl": True,
+    "macToIOSConnection": has_reverse_run and has_reverse_crypto,
+    "reverseCryptoHandshakeComplete": has_reverse_crypto,
+    "bidirectionalHandshake": has_reverse_crypto,
+    "macOnlineSource": mac_online_source,
+    "macOnlineSourceCurrent": mac_online_source_current == "1",
+    "iosBuildConfiguration": ios_product_proof.get("configuration"),
+    "iosReleaseConfiguration": ios_product_proof.get("releaseConfiguration") is True,
+    "iosSourceClean": ios_product_proof.get("sourceClean") is True,
+    "sourceRepository": ios_product_proof.get("sourceRepository"),
+    "sourceCommit": ios_product_proof.get("sourceCommit"),
+    "iosSourceRevisionRef": ios_source_revision_ref,
+    "iosProductSurface": ios_product_proof.get("productSurface"),
+    "iosSwiftActiveCompilationConditions": ios_product_proof.get("swiftActiveCompilationConditions"),
+    "iosTestingCompilationCondition": ios_product_proof.get("testingCompilationCondition") is True,
+    "iosBinaryTestSurfaceDetected": ios_product_proof.get("binaryTestSurfaceDetected") is True,
+    "iosProductionProduct": ios_product_proof.get("productionProduct") is True,
+    "iosProductionIdentityAlgorithm": "unproven",
+    "iosProductionIdentityProtection": "unproven",
+    "iosProductionIdentityLifecycleVerified": ios_production_identity_lifecycle_verified,
+    "iosProductionIdentityProof": False,
+    "iosProductBundle": ios_product_proof.get("productBundle") is True,
+    "iosSignatureVerified": ios_product_proof.get("signatureVerified") is True,
+    "iosProfileVerified": ios_product_proof.get("profileVerified") is True,
+    "iosTeamMatch": ios_product_proof.get("teamMatch") is True,
+    "iosCertificateMatch": ios_product_proof.get("certificateMatch") is True,
+    "iosCertificateNotExpired": ios_product_proof.get("certificateNotExpired") is True,
+    "iosProfileNotExpired": ios_product_proof.get("profileNotExpired") is True,
+    "iosProfileDeviceBound": ios_product_proof.get("profileDeviceBound") is True,
+    "iosDistributionSigning": ios_product_proof.get("distributionSigning") is True,
+    "iosExpectedEntitlementsMatch": ios_product_proof.get("expectedEntitlementsMatch") is True,
+    "iosKeychainGroupsVerified": ios_product_proof.get("keychainGroupsVerified") is True,
+    "iosNestedWidgetVerified": ios_product_proof.get("nestedWidgetVerified") is True,
+    "iosGetTaskAllow": ios_product_proof.get("getTaskAllow") is True,
+    "iosProductProof": ios_product_ready,
+}
+pathlib.Path(output_path).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
 echo "==> Materializing redacted public P2P remote smoke artifacts"
 skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
 echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 
+if [[ "$LAB_RUN" == "1" ]]; then
+  echo "Lab run completed, but this is not an acceptance pass because SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
+  exit 2
+fi
+
 echo "==> Real-device P2P remote desktop smoke succeeded"
-echo "    mac status: $HOST_STATUS"
+echo "    mac status: $HOST_STATUS_ARTIFACT"
 echo "    ios status: $IOS_STATUS_LOCAL"
-echo "    host stdout: $HOST_STDOUT"
+echo "    host stdout: $HOST_STDOUT_ARTIFACT"

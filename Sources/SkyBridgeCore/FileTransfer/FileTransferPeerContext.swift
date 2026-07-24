@@ -46,4 +46,36 @@ enum ClassicTransferCapability {
             capability.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == classicResume
         }
     }
+
+    static func normalizedRemoteCapabilities(
+        _ advertisedCapabilities: [String]?,
+        fileTransferPort: UInt16?,
+        remoteControlPort: UInt16?
+    ) -> [String] {
+        var capabilities = advertisedCapabilities ?? []
+
+        func containsAssignment(for normalizedKey: String) -> Bool {
+            capabilities.contains { capability in
+                let key = capability.split(separator: "=", maxSplits: 1).first.map(String.init) ?? capability
+                let normalized = key
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                    .filter { $0.isLetter || $0.isNumber }
+                return normalized == normalizedKey
+            }
+        }
+
+        if let fileTransferPort, fileTransferPort > 0,
+           !containsAssignment(for: "filetransferport") {
+            capabilities.append("fileTransferPort=\(fileTransferPort)")
+        }
+        if let remoteControlPort, remoteControlPort > 0,
+           !containsAssignment(for: "remotecontrolport") {
+            capabilities.append("remoteControlPort=\(remoteControlPort)")
+        }
+
+        // Remote feature support is authoritative. In particular, never
+        // synthesize classic_resume for a peer that did not advertise it.
+        return capabilities
+    }
 }

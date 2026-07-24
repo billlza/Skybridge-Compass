@@ -1,11 +1,283 @@
 import XCTest
 import Network
 import CryptoKit
+import SkyBridgeProtocolCore
 @testable import SkyBridgeCore
 
 @MainActor
 final class FileTransferManagerSecurityTests: XCTestCase {
-    func testResumeTransferOnlyUnpausesActiveTransfer() async {
+    func testCleanupCancelsQueuedSlotWaitersWithoutCorruptingInFlightAccounting() async throws {
+        let manager = FileTransferManager()
+        manager.updateSettings(maxConcurrentTransfers: 1)
+        let originalGeneration = try await manager.testingAcquireTransferSlot()
+        XCTAssertEqual(manager.testingTransferSlotCounts.inFlight, 1)
+
+        let waiter = Task { @MainActor () -> Error? in
+            do {
+                _ = try await manager.testingAcquireTransferSlot()
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while manager.testingTransferSlotCounts.pending == 0,
+              ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        XCTAssertEqual(manager.testingTransferSlotCounts.pending, 1)
+
+        manager.cleanup()
+
+        guard let waiterError = await waiter.value as? FileTransferError,
+              case .transferCancelled = waiterError else {
+            return XCTFail("Queued waiter must finish with typed cancellation")
+        }
+        XCTAssertEqual(manager.testingTransferSlotCounts.inFlight, 1)
+        XCTAssertEqual(manager.testingTransferSlotCounts.pending, 0)
+        XCTAssertThrowsError(try manager.testingEnsureCurrentLifecycle(originalGeneration))
+
+        manager.testingReleaseTransferSlot()
+        XCTAssertEqual(manager.testingTransferSlotCounts.inFlight, 0)
+
+        try await manager.start()
+        let restartedGeneration = manager.testingLifecycleGeneration
+        _ = try await manager.testingAcquireTransferSlot()
+        manager.testingReleaseTransferSlot()
+
+        try await manager.start()
+        XCTAssertEqual(manager.testingLifecycleGeneration, restartedGeneration)
+    }
+
+    func testNetworkServiceDisconnectsOnlyTheExactOwnedConnection() throws {
+        let service = FileTransferNetworkService()
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: 9))
+        let first = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        let second = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        service.activeConnections = ["first": first, "second": second]
+
+        service.disconnect(first)
+
+        XCTAssertEqual(service.activeConnections.count, 1)
+        XCTAssertTrue(service.activeConnections["second"] === second)
+        second.cancel()
+    }
+
+    func testStopWaitsForRegisteredClassicOperationsToFinish() async {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        let completion = FileTransferStopCompletionProbe()
+        let stopTask = Task { @MainActor in
+            await manager.stop()
+            await completion.markCompleted()
+        }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while manager.testingAcceptsNewTransfers,
+              ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+        XCTAssertEqual(manager.testingActiveClassicOperationCount, 1)
+        let completedBeforeDrain = await completion.isCompleted
+        XCTAssertFalse(completedBeforeDrain)
+
+        manager.testingEndClassicOperation(operationID)
+        await stopTask.value
+
+        let completedAfterDrain = await completion.isCompleted
+        XCTAssertTrue(completedAfterDrain)
+        XCTAssertEqual(manager.testingActiveClassicOperationCount, 0)
+    }
+
+    func testStartAfterCleanupWaitsForPreviousLifecycleOperationsToDrain() async throws {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        manager.cleanup()
+        let completion = FileTransferStopCompletionProbe()
+        let startTask = Task { @MainActor in
+            try await manager.start()
+            await completion.markCompleted()
+        }
+
+        await Task.yield()
+        let completedBeforeDrain = await completion.isCompleted
+        XCTAssertFalse(completedBeforeDrain)
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+
+        manager.testingEndClassicOperation(operationID)
+        try await startTask.value
+
+        let completedAfterDrain = await completion.isCompleted
+        XCTAssertTrue(completedAfterDrain)
+        XCTAssertTrue(manager.testingAcceptsNewTransfers)
+    }
+
+    func testConcurrentStartsPerformOnlyOneLifecycleGenerationTransition() async throws {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        manager.cleanup()
+
+        let firstStart = Task { @MainActor in try await manager.start() }
+        let secondStart = Task { @MainActor in try await manager.start() }
+        await Task.yield()
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+
+        manager.testingEndClassicOperation(operationID)
+        try await firstStart.value
+        let generationAfterFirstCompletion = manager.testingLifecycleGeneration
+        try await secondStart.value
+
+        XCTAssertTrue(manager.testingAcceptsNewTransfers)
+        XCTAssertEqual(manager.testingLifecycleGeneration, generationAfterFirstCompletion)
+    }
+
+    func testConcurrentStopThenStartIsSerializedAndEndsRunning() async throws {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        let stopTask = Task { @MainActor in await manager.stop() }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while manager.testingAcceptsNewTransfers,
+              ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+
+        let startTask = Task { @MainActor in try await manager.start() }
+        manager.testingEndClassicOperation(operationID)
+        await stopTask.value
+        try await startTask.value
+
+        XCTAssertTrue(manager.testingAcceptsNewTransfers)
+    }
+
+    func testCleanupAfterQueuedStartWinsLifecycleOrdering() async {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        let stopTask = Task { @MainActor in await manager.stop() }
+        while manager.testingAcceptsNewTransfers {
+            await Task.yield()
+        }
+
+        let startTask = Task { @MainActor in try await manager.start() }
+        while manager.testingLifecycleTransitionWaiterCount == 0 {
+            await Task.yield()
+        }
+        manager.cleanup()
+        manager.testingEndClassicOperation(operationID)
+
+        await stopTask.value
+        switch await startTask.result {
+        case .success:
+            XCTFail("A start ordered before cleanup must not restart the manager")
+        case .failure(let error):
+            guard let transferError = error as? FileTransferError,
+                  case .transferCancelled = transferError else {
+                return XCTFail("Expected typed lifecycle cancellation, got \(error)")
+            }
+        }
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+        XCTAssertFalse(manager.isTransferring)
+    }
+
+    func testCancelledQueuedStartCannotRestartManager() async {
+        let manager = FileTransferManager()
+        let operationID = manager.testingBeginClassicOperation()
+        let stopTask = Task { @MainActor in await manager.stop() }
+        while manager.testingAcceptsNewTransfers {
+            await Task.yield()
+        }
+
+        let startTask = Task { @MainActor in try await manager.start() }
+        while manager.testingLifecycleTransitionWaiterCount == 0 {
+            await Task.yield()
+        }
+        startTask.cancel()
+        manager.testingEndClassicOperation(operationID)
+
+        await stopTask.value
+        switch await startTask.result {
+        case .success:
+            XCTFail("A cancelled queued start must not restart the manager")
+        case .failure(let error):
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertFalse(manager.testingAcceptsNewTransfers)
+    }
+
+    func testRemoteCapabilityNormalizationNeverInventsClassicResumeSupport() {
+        let capabilities = ClassicTransferCapability.normalizedRemoteCapabilities(
+            ["file_transfer"],
+            fileTransferPort: 8080,
+            remoteControlPort: nil
+        )
+
+        XCTAssertFalse(ClassicTransferCapability.supportsClassicResume(in: capabilities))
+        XCTAssertEqual(capabilities, ["file_transfer", "fileTransferPort=8080"])
+    }
+
+    func testControlIntentNormalizationPreservesSecurityFailuresAndTypesCancellation() {
+        let cancelledNetworkError = ClassicTransferControlIntentPolicy.normalized(
+            NWError.posix(.ECONNRESET),
+            status: .cancelled,
+            controlFailure: FileTransferError.transferCancelled
+        )
+        guard let cancellation = cancelledNetworkError as? FileTransferError,
+              case .transferCancelled = cancellation else {
+            return XCTFail("Explicit cancellation must win over a transport reset")
+        }
+
+        let integrityError = ClassicTransferControlIntentPolicy.normalized(
+            FileTransferError.integrityCheckFailed,
+            status: .cancelled,
+            controlFailure: FileTransferError.transferCancelled
+        )
+        guard let integrity = integrityError as? FileTransferError,
+              case .integrityCheckFailed = integrity else {
+            return XCTFail("Cancellation must not hide an integrity failure")
+        }
+
+        let persistenceError = ClassicTransferControlIntentPolicy.normalized(
+            NWError.posix(.ECONNRESET),
+            status: .failed,
+            controlFailure: FileTransferError.resumeStatePersistenceFailed
+        )
+        guard let persistence = persistenceError as? FileTransferError,
+              case .resumeStatePersistenceFailed = persistence else {
+            return XCTFail("A typed control failure must survive transport teardown")
+        }
+
+        let integrityDuringPersistenceFailure = ClassicTransferControlIntentPolicy.normalized(
+            FileTransferError.integrityCheckFailed,
+            status: .failed,
+            controlFailure: FileTransferError.resumeStatePersistenceFailed
+        )
+        guard let concurrentIntegrity = integrityDuringPersistenceFailure as? FileTransferError,
+              case .integrityCheckFailed = concurrentIntegrity else {
+            return XCTFail("A control failure must not hide a non-transport integrity failure")
+        }
+    }
+
+    func testRemoteCapabilityNormalizationPreservesExplicitResumeAndPortAliases() {
+        let capabilities = ClassicTransferCapability.normalizedRemoteCapabilities(
+            [
+                " CLASSIC_RESUME ",
+                "file_transfer_port=9443",
+                "remote-control-port=9444"
+            ],
+            fileTransferPort: 8080,
+            remoteControlPort: 8081
+        )
+
+        XCTAssertTrue(ClassicTransferCapability.supportsClassicResume(in: capabilities))
+        XCTAssertEqual(capabilities.count, 3)
+        XCTAssertFalse(capabilities.contains(where: { $0.hasPrefix("fileTransferPort=") }))
+        XCTAssertFalse(capabilities.contains(where: { $0.hasPrefix("remoteControlPort=") }))
+    }
+
+    func testResumeTransferRejectsPausedStateWithoutPersistedPauseRequest() async throws {
         let manager = FileTransferManager()
         let transfer = FileTransfer(
             id: UUID().uuidString,
@@ -17,9 +289,237 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
         manager.activeTransfers[transfer.id] = transfer
 
-        await manager.resumeTransfer(UUID(uuidString: transfer.id)!)
+        await manager.resumeTransfer(try XCTUnwrap(UUID(uuidString: transfer.id)))
 
-        XCTAssertEqual(manager.activeTransfers[transfer.id]?.status, .transferring)
+        XCTAssertEqual(manager.activeTransfers[transfer.id]?.status, .paused)
+    }
+
+    func testClassicTransferLoopControlPolicyFailsClosedForTerminalStates() {
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .transferring),
+            .proceed
+        )
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .paused),
+            .waitForResume
+        )
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .cancelled),
+            .cancel
+        )
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .failed),
+            .failControlState
+        )
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .completed),
+            .failInvalidState
+        )
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: .preparing),
+            .failInvalidState
+        )
+    }
+
+    func testPausePersistenceFailureMarksTypedTerminalControlFailure() async throws {
+        let fileManager = FileManager.default
+        let invalidResumeBase = fileManager.temporaryDirectory
+            .appendingPathComponent("resume-base-file-\(UUID().uuidString)")
+        try Data("not-a-directory".utf8).write(to: invalidResumeBase, options: .atomic)
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: invalidResumeBase)) }
+
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(
+                path: "FileTransferPauseTests/\(UUID().uuidString).json"
+            ),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(
+            historyStore: historyStore,
+            resumeStore: ClassicTransferResumeStore(baseDirectory: invalidResumeBase)
+        )
+        await manager.awaitHistoryPersistence()
+        let transfer = Self.makeManualPauseTransfer()
+        manager.activeTransfers[transfer.id] = transfer
+        let testPort = try XCTUnwrap(NWEndpoint.Port(rawValue: 9))
+        let connection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: testPort,
+            using: .tcp
+        )
+        manager.bindClassicConnection(connection, to: transfer.id)
+        defer {
+            manager.unbindClassicConnection(connection, from: transfer.id)
+            connection.cancel()
+        }
+
+        let transferID = try XCTUnwrap(UUID(uuidString: transfer.id))
+        let pauseTask = Task { @MainActor in
+            await manager.pauseTransfer(transferID)
+        }
+        let didAcknowledgePause = try await Self.awaitPauseBoundaryAcknowledgment(
+            manager: manager,
+            transfer: transfer
+        )
+        XCTAssertTrue(didAcknowledgePause)
+        await pauseTask.value
+
+        XCTAssertEqual(transfer.status, .failed)
+        guard case .resumeStatePersistenceFailed = transfer.classicControlFailure else {
+            return XCTFail("Pause persistence failure must remain typed")
+        }
+        XCTAssertEqual(
+            ClassicTransferLoopControlPolicy.decision(for: transfer.status),
+            .failControlState
+        )
+        XCTAssertNil(transfer.resumeDataPath)
+    }
+
+    func testManualPauseResumeStateIsRemovedOnSuccessfulCompletionCleanup() async throws {
+        let fileManager = FileManager.default
+        let resumeBase = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: resumeBase)) }
+        let resumeStore = ClassicTransferResumeStore(baseDirectory: resumeBase)
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(
+                path: "FileTransferPauseTests/\(UUID().uuidString).json"
+            ),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(
+            historyStore: historyStore,
+            resumeStore: resumeStore
+        )
+        await manager.awaitHistoryPersistence()
+        let transfer = Self.makeManualPauseTransfer()
+        manager.activeTransfers[transfer.id] = transfer
+        let transferID = try XCTUnwrap(UUID(uuidString: transfer.id))
+        let testPort = try XCTUnwrap(NWEndpoint.Port(rawValue: 9))
+        let connection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: testPort,
+            using: .tcp
+        )
+        manager.bindClassicConnection(connection, to: transfer.id)
+        defer {
+            manager.unbindClassicConnection(connection, from: transfer.id)
+            connection.cancel()
+        }
+
+        let pauseTask = Task { @MainActor in
+            await manager.pauseTransfer(transferID)
+        }
+        let didAcknowledgePause = try await Self.awaitPauseBoundaryAcknowledgment(
+            manager: manager,
+            transfer: transfer
+        )
+        XCTAssertTrue(didAcknowledgePause)
+        XCTAssertEqual(transfer.status, .paused)
+
+        await manager.resumeTransfer(transferID)
+        XCTAssertEqual(
+            transfer.status,
+            .paused,
+            "Resume must wait until the quiesced offset is durably persisted"
+        )
+
+        await pauseTask.value
+        let recordURL = try XCTUnwrap(transfer.resumeDataPath)
+        XCTAssertTrue(fileManager.fileExists(atPath: recordURL.path))
+
+        await manager.resumeTransfer(transferID)
+        XCTAssertEqual(transfer.status, .transferring)
+        try await manager.cleanupResumeStateIfPresent(for: transfer)
+
+        XCTAssertNil(transfer.resumeDataPath)
+        XCTAssertFalse(fileManager.fileExists(atPath: recordURL.path))
+        let persistedRecord = try await resumeStore.load(transferID: transfer.id)
+        XCTAssertNil(persistedRecord)
+    }
+
+    func testCancellingPausedTransferWithoutConnectionWaitsForResumeRecordCleanup() async throws {
+        let fileManager = FileManager.default
+        let resumeBase = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: resumeBase)) }
+        let resumeStore = ClassicTransferResumeStore(baseDirectory: resumeBase)
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(
+                path: "FileTransferCancellationTests/\(UUID().uuidString).json"
+            ),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(historyStore: historyStore, resumeStore: resumeStore)
+        await manager.awaitHistoryPersistence()
+        let transfer = Self.makeManualPauseTransfer()
+        manager.activeTransfers[transfer.id] = transfer
+
+        let testPort = try XCTUnwrap(NWEndpoint.Port(rawValue: 9))
+        let connection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: testPort,
+            using: .tcp
+        )
+        manager.bindClassicConnection(connection, to: transfer.id)
+        let transferID = try XCTUnwrap(UUID(uuidString: transfer.id))
+        let pauseTask = Task { @MainActor in
+            await manager.pauseTransfer(transferID)
+        }
+        let didAcknowledgePause = try await Self.awaitPauseBoundaryAcknowledgment(
+            manager: manager,
+            transfer: transfer
+        )
+        XCTAssertTrue(didAcknowledgePause)
+        await pauseTask.value
+        let recordURL = try XCTUnwrap(transfer.resumeDataPath)
+        XCTAssertTrue(fileManager.fileExists(atPath: recordURL.path))
+
+        manager.unbindClassicConnection(connection, from: transfer.id)
+        connection.cancel()
+        manager.cancelTransfer(transfer.id)
+        await manager.testingAwaitTerminalCleanupTasks()
+
+        XCTAssertNil(manager.activeTransfers[transfer.id])
+        let persistedRecord = try await resumeStore.load(transferID: transfer.id)
+        XCTAssertNil(persistedRecord)
+        XCTAssertFalse(fileManager.fileExists(atPath: recordURL.path))
+        XCTAssertEqual(manager.transferHistory.last(where: { $0.id == transfer.id })?.status, .cancelled)
+    }
+
+    func testCancellationSurfacesResumeRecordCleanupFailure() async throws {
+        let fileManager = FileManager.default
+        let invalidResumeBase = fileManager.temporaryDirectory
+            .appendingPathComponent("resume-cleanup-base-file-\(UUID().uuidString)")
+        try Data("not-a-directory".utf8).write(to: invalidResumeBase, options: .atomic)
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: invalidResumeBase)) }
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(
+                path: "FileTransferCancellationTests/\(UUID().uuidString).json"
+            ),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(
+            historyStore: historyStore,
+            resumeStore: ClassicTransferResumeStore(baseDirectory: invalidResumeBase)
+        )
+        await manager.awaitHistoryPersistence()
+        let transfer = Self.makeManualPauseTransfer()
+        transfer.resumeDataPath = invalidResumeBase.appendingPathComponent("owned.resume")
+        manager.activeTransfers[transfer.id] = transfer
+
+        manager.cancelTransfer(transfer.id)
+        await manager.testingAwaitTerminalCleanupTasks()
+
+        let historicalTransfer = try XCTUnwrap(
+            manager.transferHistory.last(where: { $0.id == transfer.id })
+        )
+        XCTAssertEqual(historicalTransfer.status, .failed)
+        guard case .resumeStateCleanupFailed = historicalTransfer.classicControlFailure else {
+            return XCTFail("Cleanup failure must remain typed")
+        }
     }
 
     func testClassicTransferPeerResolutionPrefersDeclaredSenderDeviceId() {
@@ -54,6 +554,57 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertEqual(resolved?.matchDeviceId, "id:trusted-peer")
         XCTAssertEqual(resolved?.matchedBy, .declaredSenderDeviceId)
         XCTAssertTrue(resolved?.supportsClassicResume == true)
+    }
+
+    func testClassicTransferExactIdentityWinsAliasAndAmbiguousAliasFailsClosed() {
+        let directPeer = ClassicTransferAuthenticatedPeerCandidate(
+            matchDeviceId: "id:canonical",
+            resolvedPeerDeviceId: "id:canonical",
+            aliases: ["id:canonical"],
+            endpointHostOrIP: nil,
+            capabilities: []
+        )
+        let aliasOnlyPeer = ClassicTransferAuthenticatedPeerCandidate(
+            matchDeviceId: "id:other",
+            resolvedPeerDeviceId: "id:other",
+            aliases: ["id:canonical", "shared-alias"],
+            endpointHostOrIP: nil,
+            capabilities: []
+        )
+        let exactContext = FileTransferPeerContext(
+            declaredSenderDeviceId: "id:canonical",
+            endpointHostOrIP: nil,
+            peerLabel: nil,
+            transferId: "exact-precedence"
+        )
+        for peers in [[aliasOnlyPeer, directPeer], [directPeer, aliasOnlyPeer]] {
+            XCTAssertEqual(
+                ClassicTransferPeerResolutionPolicy.resolvePeer(
+                    peerContext: exactContext,
+                    authenticatedPeers: peers
+                )?.resolvedPeerDeviceId,
+                "id:canonical"
+            )
+        }
+
+        let secondAliasPeer = ClassicTransferAuthenticatedPeerCandidate(
+            matchDeviceId: "id:second",
+            resolvedPeerDeviceId: "id:second",
+            aliases: ["shared-alias"],
+            endpointHostOrIP: nil,
+            capabilities: []
+        )
+        XCTAssertNil(
+            ClassicTransferPeerResolutionPolicy.resolvePeer(
+                peerContext: .init(
+                    declaredSenderDeviceId: "shared-alias",
+                    endpointHostOrIP: nil,
+                    peerLabel: nil,
+                    transferId: "ambiguous-alias"
+                ),
+                authenticatedPeers: [aliasOnlyPeer, secondAliasPeer]
+            )
+        )
     }
 
     func testClassicTransferPeerResolutionFallsBackToEndpointHostOrIP() {
@@ -271,8 +822,8 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             transferId: transferId
         )
         let now = Date()
-        let staleKey = SymmetricKey(data: Data(repeating: 0x41, count: 32))
-        let freshKey = SymmetricKey(data: Data(repeating: 0x7A, count: 32))
+        let staleSourceIdentifier = UUID()
+        let freshSourceIdentifier = UUID()
         let aliases = [
             "id:ios-peer",
             "ios-peer",
@@ -280,6 +831,7 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             "fe80::bc:dca9:7759:5a45%en0"
         ]
         let staleSnapshot = ClassicTransferAuthenticatedSessionSource(
+            sourceIdentifier: staleSourceIdentifier,
             candidate: .init(
                 matchDeviceId: "id:ios-peer",
                 resolvedPeerDeviceId: "id:ios-peer",
@@ -287,11 +839,11 @@ final class FileTransferManagerSecurityTests: XCTestCase {
                 endpointHostOrIP: "fe80::bc:dca9:7759:5a45%en0",
                 capabilities: ["fileTransferPort=8080"]
             ),
-            transferKey: staleKey,
             lastSeenAt: now.addingTimeInterval(-30),
             sourceKind: .sessionSnapshot
         )
         let freshLiveConnection = ClassicTransferAuthenticatedSessionSource(
+            sourceIdentifier: freshSourceIdentifier,
             candidate: .init(
                 matchDeviceId: "id:ios-peer",
                 resolvedPeerDeviceId: "id:ios-peer",
@@ -299,7 +851,6 @@ final class FileTransferManagerSecurityTests: XCTestCase {
                 endpointHostOrIP: "fe80::bc:dca9:7759:5a45%en0",
                 capabilities: ["fileTransferPort=8080"]
             ),
-            transferKey: freshKey,
             lastSeenAt: now,
             sourceKind: .liveConnection
         )
@@ -309,11 +860,8 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             authenticatedSources: [staleSnapshot, freshLiveConnection]
         )
 
-        let probe = Data("receipt-probe".utf8)
-        let selectedTag = resolved.map { Data(HMAC<SHA256>.authenticationCode(for: probe, using: $0.source.transferKey)) }
-        let freshTag = Data(HMAC<SHA256>.authenticationCode(for: probe, using: freshKey))
         XCTAssertEqual(resolved?.source.sourceKind, .liveConnection)
-        XCTAssertEqual(selectedTag, freshTag)
+        XCTAssertEqual(resolved?.source.sourceIdentifier, freshSourceIdentifier)
         XCTAssertEqual(resolved?.resolution.matchedBy, .declaredSenderDeviceId)
     }
 
@@ -359,25 +907,40 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertTrue(candidate.capabilities.contains("fileTransferPort=8080"))
     }
 
-    func testResolvedReceiveDirectoryFallsBackWhenPreferredDirectoryIsNotWritable() throws {
-        let manager = FileTransferManager()
+    func testResolvedReceiveDirectoryFallsBackWhenPreferredDirectoryIsNotWritable() async throws {
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString,
             isDirectory: true
         )
         let readOnly = parent.appendingPathComponent("read-only", isDirectory: true)
+        let fallback = parent.appendingPathComponent("fallback", isDirectory: true)
 
         try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnly.path)
         defer {
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnly.path)
-            try? FileManager.default.removeItem(at: parent)
+            XCTAssertNoThrow(
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: readOnly.path
+                )
+            )
+            XCTAssertNoThrow(try FileManager.default.removeItem(at: parent))
         }
 
-        let resolved = manager.resolvedReceiveDirectoryForTesting(from: readOnly)
-
-        XCTAssertNotEqual(resolved.standardizedFileURL.path, readOnly.standardizedFileURL.path)
-        XCTAssertTrue(FileManager.default.isWritableFile(atPath: resolved.path))
+        let resolution = await FileTransferSettingsBridge.resolveReceiveDirectory(
+            preferredPath: readOnly.path,
+            fallbackURL: fallback
+        )
+        guard case .success(
+            let resolved,
+            let usedFallback,
+            let preferredFailure
+        ) = resolution else {
+            return XCTFail("Expected descriptor-validated fallback, got \(resolution)")
+        }
+        XCTAssertTrue(usedFallback)
+        XCTAssertNotNil(preferredFailure)
+        XCTAssertEqual(resolved.standardizedFileURL, fallback.standardizedFileURL)
     }
 
     func testClassicTransferSecurityContextCountsDiscoveryAuthenticatedConnections() async {
@@ -422,6 +985,60 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertFalse(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(FileTransferError.secureSessionRequired))
     }
 
+    func testInboundPartialRetentionOnlyAcceptsExplicitRecoverableDisconnects() {
+        let recoverablePOSIXCodes: [POSIXErrorCode] = [
+            .ECONNABORTED, .ECONNRESET, .EHOSTUNREACH, .ENETDOWN,
+            .ENETRESET, .ENETUNREACH, .ENOTCONN, .EPIPE, .ETIMEDOUT
+        ]
+        for code in recoverablePOSIXCodes {
+            XCTAssertTrue(
+                ClassicTransferRecoverableDisconnectPolicy.shouldPreserveInboundPartial(
+                    receivedBytes: 1,
+                    after: NWError.posix(code)
+                ),
+                "Expected recoverable POSIX disconnect: \(code)"
+            )
+        }
+        XCTAssertTrue(
+            ClassicTransferRecoverableDisconnectPolicy.shouldPreserveInboundPartial(
+                receivedBytes: 1,
+                after: FileTransferError.connectionClosed
+            )
+        )
+        XCTAssertTrue(
+            ClassicTransferRecoverableDisconnectPolicy.shouldPreserveInboundPartial(
+                receivedBytes: 1,
+                after: FileTransferError.timeout
+            )
+        )
+
+        let nonRecoverableErrors: [Error] = [
+            CancellationError(),
+            NWError.posix(.ECANCELED),
+            NWError.posix(.EACCES),
+            FileTransferError.transferCancelled,
+            FileTransferError.invalidHeader,
+            FileTransferError.integrityCheckFailed,
+            FileTransferError.secureSessionRequired,
+            FileTransferError.receiverRejected
+        ]
+        for error in nonRecoverableErrors {
+            XCTAssertFalse(
+                ClassicTransferRecoverableDisconnectPolicy.shouldPreserveInboundPartial(
+                    receivedBytes: 1,
+                    after: error
+                ),
+                "Must not preserve an inbound partial for \(error)"
+            )
+        }
+        XCTAssertFalse(
+            ClassicTransferRecoverableDisconnectPolicy.shouldPreserveInboundPartial(
+                receivedBytes: 0,
+                after: FileTransferError.connectionClosed
+            )
+        )
+    }
+
     func testInboundPreMetadataRejectsAreNonFatalSmokeDiagnostics() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -438,7 +1055,7 @@ final class FileTransferManagerSecurityTests: XCTestCase {
 
         XCTAssertTrue(managerSource.contains("zeroByteDisconnectError: .inboundConnectionClosedBeforeMetadata"))
         XCTAssertTrue(managerSource.contains("throw FileTransferError.inboundInvalidInitialHeader"))
-        XCTAssertTrue(managerSource.contains("accumulator.count() == 0"))
+        XCTAssertTrue(managerSource.contains("operation.receivedByteCount == 0"))
         XCTAssertTrue(managerSource.contains("return zeroByteDisconnectError"))
         XCTAssertFalse(
             managerSource.contains(
@@ -454,6 +1071,10 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertTrue(listenerSource.contains("fatal=0 phase=initial_header reason=invalid_header"))
         XCTAssertTrue(listenerSource.contains("failed stage=file-transfer phase=\\(phase)"))
         XCTAssertTrue(listenerSource.contains("mac_receive_file_connection_closed"))
+        XCTAssertTrue(listenerSource.contains("inboundAdmission.reserve(connectionID: connectionId)"))
+        XCTAssertTrue(listenerSource.contains("inboundAdmission.release(connectionID: connectionId)"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferInboundPolicy.initialHeaderTimeoutSeconds"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferInboundPolicy.metadataPayloadTimeoutSeconds"))
         let benignCatch = try XCTUnwrap(
             listenerSource.range(of: "catch FileTransferError.inboundConnectionClosedBeforeMetadata")
         )
@@ -508,11 +1129,712 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertFalse(iosModelsSource.contains("DispatchQueue.main.sync"))
         XCTAssertFalse(localPresentationSource.contains("DispatchQueue.main.sync"))
         XCTAssertFalse(managerSource.contains("(try? compressData(chunkData)) ?? chunkData"))
+        XCTAssertFalse(managerSource.contains(".decompressed(using: .zlib)"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferZlibCompressionWorker.shared.compress"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferZlibDecompressionWorker.shared.decompress"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferChunkContract.decompressedOutputLimit"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferChunkContract.validateDecodedChunkSize"))
+        XCTAssertTrue(managerSource.contains("ClassicTransferChunkContract.validateCompletion"))
         XCTAssertTrue(engineSource.contains("compressDataIfBeneficial"))
         XCTAssertTrue(engineSource.contains("isEncrypted: isEncrypted"))
         XCTAssertFalse(remoteDesktopManagerSource.contains("CMSampleBufferGetImageBuffer(frame.sampleBuffer)!"))
         XCTAssertTrue(remoteControlManagerSource.contains("failStrictMediaCapture"))
         XCTAssertTrue(remoteControlManagerSource.contains("strict-media-failed"))
+    }
+
+    func testClassicManagersAdoptSharedTerminalContractsAndPublishAfterRelease() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let macSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let iosSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let listenerSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift"
+            ),
+            encoding: .utf8
+        )
+
+        for source in [macSource, iosSource] {
+            XCTAssertTrue(source.contains("ClassicTransferSendOperation()"))
+            XCTAssertTrue(source.contains("withTaskCancellationHandler"))
+            XCTAssertTrue(source.contains("defer { timeoutTask.cancel() }"))
+            XCTAssertTrue(source.contains("timeoutTask?.cancel()"))
+            XCTAssertTrue(source.contains("ClassicTransferAuthenticationContract.isValidHMACSHA256"))
+            XCTAssertTrue(source.contains("ClassicTransferReceiptContract.validateSuccessfulFileHash"))
+        }
+        XCTAssertTrue(macSource.contains("ClassicTransferResumeAcknowledgmentContract.validate"))
+        XCTAssertTrue(macSource.contains("ClassicTransferPeerResolutionPolicy.resolveSessionSource"))
+        XCTAssertTrue(macSource.contains("classicConnectionsByTransferID[transferId]"))
+        XCTAssertTrue(macSource.contains("connection?.cancel()"))
+        XCTAssertTrue(macSource.contains("guard activeTransfers[transfer.id] === transfer else { return }"))
+        XCTAssertTrue(macSource.contains("negotiatedChunkSize: negotiatedChunkSize"))
+        XCTAssertTrue(macSource.contains("negotiatedCompression: negotiatedCompression"))
+        XCTAssertTrue(iosSource.contains("compression: state.metadata!.compression"))
+        XCTAssertTrue(iosSource.contains("sendSuccessfulReceiptAfterCommit("))
+        XCTAssertTrue(iosSource.contains("if let committedURL"))
+        XCTAssertFalse(iosSource.contains("catch path rolls the committed file back"))
+
+        // The committed URL and receipt outcome are retained before releasing the
+        // actor handle so a release failure does not erase durable-file evidence.
+        // User-visible terminal success must still be published only after release.
+        let macReceipt = try XCTUnwrap(
+            macSource.range(of: "sendSuccessfulTransferReceiptAfterCommit(")
+        )
+        let macRelease = try XCTUnwrap(
+            macSource.range(
+                of: "releaseCommittedFile(using: ioHandle)",
+                range: macReceipt.upperBound..<macSource.endIndex
+            )
+        )
+        let macPublication = try XCTUnwrap(
+            macSource.range(
+                of: "transfer.status = .completed",
+                range: macRelease.upperBound..<macSource.endIndex
+            )
+        )
+        XCTAssertLessThan(macRelease.lowerBound, macPublication.lowerBound)
+
+        let iosReceipt = try XCTUnwrap(
+            iosSource.range(of: "sendSuccessfulReceiptAfterCommit(")
+        )
+        let iosRelease = try XCTUnwrap(
+            iosSource.range(
+                of: "releaseCommittedFile(using: ioHandle)",
+                range: iosReceipt.upperBound..<iosSource.endIndex
+            )
+        )
+        let iosPublication = try XCTUnwrap(
+            iosSource.range(
+                of: "await completeTransfer(transfer.id, success: true)",
+                range: iosRelease.upperBound..<iosSource.endIndex
+            )
+        )
+        XCTAssertLessThan(iosRelease.lowerBound, iosPublication.lowerBound)
+
+        XCTAssertTrue(listenerSource.contains("Self.cancelListener(listener)"))
+        XCTAssertTrue(listenerSource.contains("connection.viabilityUpdateHandler = nil"))
+        XCTAssertTrue(listenerSource.contains("connection.betterPathUpdateHandler = nil"))
+        XCTAssertTrue(listenerSource.contains("inboundTasks.removeAll()"))
+    }
+
+    func testClassicInboundAdmissionReleasesCapacityDeterministically() {
+        var admission = ClassicTransferInboundAdmission(limit: 2)
+
+        XCTAssertTrue(admission.reserve(connectionID: "connection-a"))
+        XCTAssertTrue(admission.reserve(connectionID: "connection-b"))
+        XCTAssertFalse(admission.reserve(connectionID: "connection-c"))
+        XCTAssertFalse(admission.reserve(connectionID: "connection-a"))
+        XCTAssertEqual(admission.count, 2)
+
+        admission.release(connectionID: "connection-a")
+
+        XCTAssertTrue(admission.reserve(connectionID: "connection-c"))
+        XCTAssertEqual(admission.count, 2)
+    }
+
+    func testClassicChunkContractRejectsOversizedRemainingChunkAndInexactCompletion() throws {
+        XCTAssertEqual(
+            try ClassicTransferChunkContract.decompressedOutputLimit(
+                declaredChunkSize: 4,
+                receivedBytes: 6,
+                declaredFileSize: 10,
+                negotiatedChunkSize: 8,
+                maximumChunkSize: 8
+            ),
+            4
+        )
+        XCTAssertThrowsError(
+            try ClassicTransferChunkContract.decompressedOutputLimit(
+                declaredChunkSize: 5,
+                receivedBytes: 6,
+                declaredFileSize: 10,
+                negotiatedChunkSize: 8,
+                maximumChunkSize: 8
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ClassicTransferChunkContractError,
+                .chunkExceedsRemainingFileSize
+            )
+        }
+        XCTAssertThrowsError(
+            try ClassicTransferChunkContract.validateDecodedChunkSize(3, declaredChunkSize: 4)
+        ) { error in
+            XCTAssertEqual(
+                error as? ClassicTransferChunkContractError,
+                .decodedChunkSizeMismatch
+            )
+        }
+        XCTAssertThrowsError(
+            try ClassicTransferChunkContract.validateCompletion(
+                receivedBytes: 9,
+                declaredFileSize: 10
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ClassicTransferChunkContractError,
+                .completedFileSizeMismatch
+            )
+        }
+    }
+
+    func testClassicZlibWorkersEnforceInputAndOutputBounds() async throws {
+        let original = Data(repeating: 0x41, count: 4_096)
+        let compressed = try await ClassicTransferZlibCompressionWorker.shared.compress(
+            original,
+            maximumInputSize: original.count
+        )
+        let decoded = try await ClassicTransferZlibDecompressionWorker.shared.decompress(
+            compressed,
+            maximumOutputSize: original.count
+        )
+        XCTAssertEqual(decoded, original)
+
+        do {
+            _ = try await ClassicTransferZlibCompressionWorker.shared.compress(
+                original,
+                maximumInputSize: original.count - 1
+            )
+            XCTFail("Compression must reject inputs above the negotiated chunk bound")
+        } catch let error as ClassicTransferZlibCompressionError {
+            XCTAssertEqual(error, .inputLimitExceeded)
+        }
+
+        do {
+            _ = try await ClassicTransferZlibDecompressionWorker.shared.decompress(
+                compressed,
+                maximumOutputSize: original.count - 1
+            )
+            XCTFail("Decompression must reject output above the declared chunk size")
+        } catch let error as ClassicTransferZlibDecompressionError {
+            XCTAssertEqual(error, .outputLimitExceeded)
+        }
+    }
+
+    func testClassicResumeStoreRoundTripsPrivateRegularRecord() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: false)
+        defer {
+            XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory))
+        }
+
+        let record = Self.makeResumeRecord(transferID: "resume-roundtrip")
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let fileURL = try await store.save(record)
+        let loaded = try await store.load(transferID: record.transferID)
+        let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+        let directoryAttributes = try fileManager.attributesOfItem(
+            atPath: fileURL.deletingLastPathComponent().path
+        )
+        let fileMode = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+        let directoryMode = try XCTUnwrap(
+            directoryAttributes[.posixPermissions] as? NSNumber
+        ).intValue
+
+        XCTAssertEqual(loaded?.transferID, record.transferID)
+        XCTAssertEqual(loaded?.fileHash, record.fileHash)
+        XCTAssertEqual(fileMode & 0o077, 0)
+        XCTAssertEqual(directoryMode & 0o077, 0)
+    }
+
+    func testTerminalResumeRecordRemovalStillRunsFromCancelledTask() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let record = Self.makeResumeRecord(transferID: "cancelled-cleanup")
+        let recordURL = try await store.save(record)
+
+        let cleanupTask = Task {
+            await Task.yield()
+            try await store.remove(matching: record)
+        }
+        cleanupTask.cancel()
+        try await cleanupTask.value
+
+        XCTAssertFalse(fileManager.fileExists(atPath: recordURL.path))
+        let persistedRecord = try await store.load(transferID: record.transferID)
+        XCTAssertNil(persistedRecord)
+    }
+
+    func testResumeRecordCompareAndDeleteRejectsStaleSameIdentifierCleanup() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let transferID = "same-id-new-record"
+        let timestamp = Date()
+        let staleRecord = Self.makeResumeRecord(
+            transferID: transferID,
+            timestamp: timestamp
+        )
+        let currentRecord = Self.makeResumeRecord(
+            transferID: transferID,
+            timestamp: timestamp.addingTimeInterval(0.001)
+        )
+
+        _ = try await store.save(staleRecord)
+        let currentURL = try await store.save(currentRecord)
+
+        do {
+            try await store.remove(matching: staleRecord)
+            XCTFail("Stale cleanup must not delete a newer same-ID resume record")
+        } catch let error as FileTransferError {
+            guard case .resumeStatePersistenceFailed = error else {
+                return XCTFail("Unexpected compare-and-delete error: \(error)")
+            }
+        }
+
+        XCTAssertTrue(fileManager.fileExists(atPath: currentURL.path))
+        let persistedRecord = try await store.load(transferID: transferID)
+        XCTAssertEqual(persistedRecord, currentRecord)
+    }
+
+    func testResumeStoreSerializesSameIdentifierSaveAgainstStaleRemovalAcrossInstances() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let firstStore = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let secondStore = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+
+        for iteration in 0..<24 {
+            let transferID = "cross-instance-same-id"
+            let baseTimestamp = Date().addingTimeInterval(Double(iteration))
+            let staleRecord = Self.makeResumeRecord(
+                transferID: transferID,
+                timestamp: baseTimestamp
+            )
+            let currentRecord = Self.makeResumeRecord(
+                transferID: transferID,
+                timestamp: baseTimestamp.addingTimeInterval(0.001)
+            )
+            _ = try await firstStore.save(staleRecord)
+
+            let removal = Task {
+                try await firstStore.remove(matching: staleRecord)
+            }
+            _ = try await secondStore.save(currentRecord)
+            do {
+                try await removal.value
+            } catch let error as FileTransferError {
+                guard case .resumeStatePersistenceFailed = error else {
+                    return XCTFail("Unexpected stale removal error: \(error)")
+                }
+            }
+
+            let loadedRecord = try await firstStore.load(transferID: transferID)
+            XCTAssertEqual(
+                loadedRecord,
+                currentRecord,
+                "A cooperating second store must never let stale cleanup delete the replacement"
+            )
+        }
+    }
+
+    func testClassicResumeStorePrunesExpiredRecordAndItsOwnedPartial() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        let partialURL = try Self.createOwnedInboundPartial(
+            baseDirectory: baseDirectory,
+            byteCount: 64 * 1_024
+        )
+        let policy = ClassicTransferResumeStore.RetentionPolicy(
+            recordTTL: 60,
+            maximumRecordCount: 8,
+            maximumTotalInboundPartialBytes: 512 * 1_024
+        )
+        let initialStore = ClassicTransferResumeStore(
+            baseDirectory: baseDirectory,
+            retentionPolicy: policy,
+            now: { timestamp }
+        )
+        let record = Self.makeResumeRecord(
+            transferID: "resume-expired",
+            direction: .incoming,
+            localPath: partialURL.path,
+            timestamp: timestamp
+        )
+        let recordURL = try await initialStore.save(record)
+
+        let pruningStore = ClassicTransferResumeStore(
+            baseDirectory: baseDirectory,
+            retentionPolicy: policy,
+            now: { timestamp.addingTimeInterval(61) }
+        )
+        let report = try await pruningStore.prune()
+
+        XCTAssertEqual(report.removedRecordCount, 1)
+        XCTAssertEqual(report.removedInboundPartialCount, 1)
+        XCTAssertEqual(report.removedInboundPartialBytes, 64 * 1_024)
+        XCTAssertFalse(fileManager.fileExists(atPath: recordURL.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: partialURL.path))
+    }
+
+    func testClassicResumeStoreEnforcesMaximumRecordCountOldestFirst() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let timestamp = Date(timeIntervalSince1970: 1_800_100_000)
+        let policy = ClassicTransferResumeStore.RetentionPolicy(
+            recordTTL: 600,
+            maximumRecordCount: 2,
+            maximumTotalInboundPartialBytes: 512 * 1_024
+        )
+        let store = ClassicTransferResumeStore(
+            baseDirectory: baseDirectory,
+            retentionPolicy: policy,
+            now: { timestamp.addingTimeInterval(10) }
+        )
+        var partialURLs: [URL] = []
+        for index in 0..<3 {
+            let partialURL = try Self.createOwnedInboundPartial(
+                baseDirectory: baseDirectory,
+                byteCount: 64 * 1_024
+            )
+            partialURLs.append(partialURL)
+            _ = try await store.save(Self.makeResumeRecord(
+                transferID: "resume-count-\(index)",
+                direction: .incoming,
+                localPath: partialURL.path,
+                timestamp: timestamp.addingTimeInterval(Double(index))
+            ))
+        }
+
+        let evictedRecord = try await store.load(transferID: "resume-count-0")
+        let retainedRecord1 = try await store.load(transferID: "resume-count-1")
+        let retainedRecord2 = try await store.load(transferID: "resume-count-2")
+        XCTAssertNil(evictedRecord)
+        XCTAssertNotNil(retainedRecord1)
+        XCTAssertNotNil(retainedRecord2)
+        XCTAssertFalse(fileManager.fileExists(atPath: partialURLs[0].path))
+        XCTAssertTrue(fileManager.fileExists(atPath: partialURLs[1].path))
+        XCTAssertTrue(fileManager.fileExists(atPath: partialURLs[2].path))
+    }
+
+    func testClassicResumeStoreEnforcesTotalInboundPartialByteQuota() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let timestamp = Date(timeIntervalSince1970: 1_800_200_000)
+        let policy = ClassicTransferResumeStore.RetentionPolicy(
+            recordTTL: 600,
+            maximumRecordCount: 8,
+            maximumTotalInboundPartialBytes: 96 * 1_024
+        )
+        let store = ClassicTransferResumeStore(
+            baseDirectory: baseDirectory,
+            retentionPolicy: policy,
+            now: { timestamp.addingTimeInterval(10) }
+        )
+        let oldestPartial = try Self.createOwnedInboundPartial(
+            baseDirectory: baseDirectory,
+            byteCount: 64 * 1_024
+        )
+        _ = try await store.save(Self.makeResumeRecord(
+            transferID: "resume-byte-oldest",
+            direction: .incoming,
+            localPath: oldestPartial.path,
+            timestamp: timestamp
+        ))
+        let newestPartial = try Self.createOwnedInboundPartial(
+            baseDirectory: baseDirectory,
+            byteCount: 64 * 1_024
+        )
+        _ = try await store.save(Self.makeResumeRecord(
+            transferID: "resume-byte-newest",
+            direction: .incoming,
+            localPath: newestPartial.path,
+            timestamp: timestamp.addingTimeInterval(1)
+        ))
+
+        let evictedRecord = try await store.load(transferID: "resume-byte-oldest")
+        let retainedRecord = try await store.load(transferID: "resume-byte-newest")
+        XCTAssertNil(evictedRecord)
+        XCTAssertNotNil(retainedRecord)
+        XCTAssertFalse(fileManager.fileExists(atPath: oldestPartial.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: newestPartial.path))
+    }
+
+    func testClassicResumeStoreRejectsMaliciousPartialPathWithoutDeletingForeignFile() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = try Self.makeResumeStoreBaseDirectory()
+        let externalDirectory = fileManager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: externalDirectory, withIntermediateDirectories: false)
+        defer {
+            XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory))
+            XCTAssertNoThrow(try fileManager.removeItem(at: externalDirectory))
+        }
+        let externalFile = externalDirectory.appendingPathComponent("foreign.partial")
+        let externalData = Data(repeating: 0x5A, count: 64 * 1_024)
+        try externalData.write(to: externalFile, options: [.withoutOverwriting])
+        let timestamp = Date(timeIntervalSince1970: 1_800_300_000)
+        let store = ClassicTransferResumeStore(
+            baseDirectory: baseDirectory,
+            retentionPolicy: .init(
+                recordTTL: 600,
+                maximumRecordCount: 8,
+                maximumTotalInboundPartialBytes: 512 * 1_024
+            ),
+            now: { timestamp }
+        )
+        let recordURL = try await store.save(Self.makeResumeRecord(
+            transferID: "resume-malicious-path",
+            direction: .outgoing,
+            localPath: externalFile.path,
+            timestamp: timestamp
+        ))
+        let maliciousRecord = Self.makeResumeRecord(
+            transferID: "resume-malicious-path",
+            direction: .incoming,
+            localPath: externalFile.path,
+            timestamp: timestamp
+        )
+        try JSONEncoder().encode(maliciousRecord).write(to: recordURL)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recordURL.path)
+
+        await XCTAssertThrowsErrorAsync(try await store.prune())
+
+        XCTAssertEqual(try Data(contentsOf: externalFile), externalData)
+        XCTAssertFalse(fileManager.fileExists(atPath: recordURL.path))
+    }
+
+    func testClassicResumeStoreRejectsSymlinkedDirectoryComponent() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let externalDirectory = fileManager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: false)
+        try fileManager.createDirectory(at: externalDirectory, withIntermediateDirectories: false)
+        defer {
+            XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory))
+            XCTAssertNoThrow(try fileManager.removeItem(at: externalDirectory))
+        }
+        try fileManager.createSymbolicLink(
+            at: baseDirectory.appendingPathComponent("SkyBridge", isDirectory: true),
+            withDestinationURL: externalDirectory
+        )
+
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        do {
+            _ = try await store.save(Self.makeResumeRecord(transferID: "directory-symlink"))
+            XCTFail("A symlinked resume directory component must fail closed")
+        } catch let error as FileTransferError {
+            guard case .resumeStatePersistenceFailed = error else {
+                return XCTFail("Unexpected resume store error: \(error)")
+            }
+        }
+        XCTAssertFalse(
+            fileManager.fileExists(
+                atPath: externalDirectory.appendingPathComponent("ResumeData").path
+            )
+        )
+    }
+
+    func testClassicResumeStoreRejectsFinalRecordSymlinkWithoutTouchingTarget() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let resumeDirectory = baseDirectory
+            .appendingPathComponent("SkyBridge", isDirectory: true)
+            .appendingPathComponent("ResumeData", isDirectory: true)
+        try fileManager.createDirectory(at: resumeDirectory, withIntermediateDirectories: true)
+        let externalFile = baseDirectory.appendingPathComponent("outside.txt", isDirectory: false)
+        let originalExternalData = Data("must-not-change".utf8)
+        try originalExternalData.write(to: externalFile, options: [.withoutOverwriting])
+        let transferID = "record-symlink"
+        let recordName = Self.resumeRecordFileName(transferID: transferID)
+        try fileManager.createSymbolicLink(
+            at: resumeDirectory.appendingPathComponent(recordName, isDirectory: false),
+            withDestinationURL: externalFile
+        )
+        defer {
+            XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory))
+        }
+
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let expectedRecord = Self.makeResumeRecord(transferID: transferID)
+        do {
+            _ = try await store.save(expectedRecord)
+            XCTFail("A symlinked resume record must fail closed")
+        } catch let error as FileTransferError {
+            guard case .resumeStatePersistenceFailed = error else {
+                return XCTFail("Unexpected resume store error: \(error)")
+            }
+        }
+        do {
+            _ = try await store.load(transferID: transferID)
+            XCTFail("Loading a symlinked resume record must fail closed")
+        } catch let error as FileTransferError {
+            guard case .resumeStatePersistenceFailed = error else {
+                return XCTFail("Unexpected resume store error: \(error)")
+            }
+        }
+        do {
+            try await store.remove(matching: expectedRecord)
+            XCTFail("Removing a symlinked resume record must fail closed")
+        } catch let error as FileTransferError {
+            guard case .resumeStatePersistenceFailed = error else {
+                return XCTFail("Unexpected resume store error: \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: externalFile), originalExternalData)
+    }
+
+    func testClassicResumeStoreRejectsUnsafeModeOversizeCorruptionAndMismatchedRecord() async throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: false)
+        defer { XCTAssertNoThrow(try fileManager.removeItem(at: baseDirectory)) }
+        let transferID = "resume-invalid-record"
+        let store = ClassicTransferResumeStore(baseDirectory: baseDirectory)
+        let recordURL = try await store.save(Self.makeResumeRecord(transferID: transferID))
+
+        try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: recordURL.path)
+        await XCTAssertThrowsErrorAsync(try await store.load(transferID: transferID))
+
+        try Data(repeating: 0x41, count: 64 * 1_024 + 1).write(to: recordURL)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recordURL.path)
+        await XCTAssertThrowsErrorAsync(try await store.load(transferID: transferID))
+
+        try Data("not-json".utf8).write(to: recordURL)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recordURL.path)
+        await XCTAssertThrowsErrorAsync(try await store.load(transferID: transferID))
+
+        let mismatchedRecord = Self.makeResumeRecord(transferID: "different-transfer")
+        try JSONEncoder().encode(mismatchedRecord).write(to: recordURL)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recordURL.path)
+        await XCTAssertThrowsErrorAsync(try await store.load(transferID: transferID))
+    }
+
+    private static func makeResumeStoreBaseDirectory() throws -> URL {
+        let baseDirectory = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: baseDirectory,
+            withIntermediateDirectories: false
+        )
+        return baseDirectory
+    }
+
+    private static func createOwnedInboundPartial(
+        baseDirectory: URL,
+        byteCount: Int
+    ) throws -> URL {
+        let partialDirectory = baseDirectory
+            .appendingPathComponent("SkyBridge", isDirectory: true)
+            .appendingPathComponent("ClassicInboundPartials", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: partialDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: partialDirectory.path
+        )
+        let partialURL = partialDirectory.appendingPathComponent(
+            ".skybridge-classic-\(UUID().uuidString).partial",
+            isDirectory: false
+        )
+        try Data(repeating: 0x41, count: byteCount).write(
+            to: partialURL,
+            options: [.withoutOverwriting]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: partialURL.path
+        )
+        return partialURL
+    }
+
+    private static func makeResumeRecord(
+        transferID: String,
+        direction: TransferDirection = .outgoing,
+        localPath: String = "/private/tmp/archive.bin",
+        timestamp: Date = Date()
+    ) -> ClassicTransferResumeRecord {
+        ClassicTransferResumeRecord(
+            transferID: transferID,
+            fileName: "archive.bin",
+            fileSize: 131_072,
+            transferredBytes: 65_536,
+            resumeOffset: 65_536,
+            deviceID: "peer-device",
+            deviceIPAddress: "192.0.2.10",
+            devicePort: 8080,
+            deviceName: "Peer",
+            direction: direction.rawValue,
+            localPath: localPath,
+            fileHash: String(repeating: "a", count: 64),
+            compression: "zlib",
+            declaredChunkSize: 64 * 1_024,
+            timestamp: timestamp
+        )
+    }
+
+    private static func makeManualPauseTransfer() -> FileTransfer {
+        let transfer = FileTransfer(
+            id: UUID().uuidString,
+            fileName: "archive.bin",
+            fileSize: 131_072,
+            deviceId: "peer-device",
+            direction: .outgoing,
+            status: .transferring
+        )
+        transfer.localPath = URL(fileURLWithPath: "/private/tmp/archive.bin")
+        transfer.fileHash = String(repeating: "a", count: 64)
+        transfer.negotiatedClassicChunkSize = 64 * 1_024
+        transfer.deviceIPAddress = "192.0.2.10"
+        transfer.devicePort = 8_080
+        transfer.deviceName = "Peer"
+        transfer.updateProgress(transferredBytes: 64 * 1_024)
+        return transfer
+    }
+
+    private static func awaitPauseBoundaryAcknowledgment(
+        manager: FileTransferManager,
+        transfer: FileTransfer
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            await Task.yield()
+            if manager.acknowledgeClassicPauseRequestIfNeeded(for: transfer) {
+                return true
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        } while Date() < deadline
+        return false
+    }
+
+    private static func resumeRecordFileName(transferID: String) -> String {
+        let digest = SHA256.hash(data: Data(transferID.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(digest).resume"
     }
 
     private static func mockSessionKeys(sessionId: String) -> SessionKeys {
@@ -525,5 +1847,27 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             sessionId: sessionId,
             createdAt: Date()
         )
+    }
+}
+
+private actor FileTransferStopCompletionProbe {
+    private(set) var isCompleted = false
+
+    func markCompleted() {
+        isCompleted = true
+    }
+}
+
+@MainActor
+private func XCTAssertThrowsErrorAsync<T>(
+    _ expression: @autoclosure () async throws -> T,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected expression to throw", file: file, line: line)
+    } catch {
+        // Expected.
     }
 }

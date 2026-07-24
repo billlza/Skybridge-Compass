@@ -90,6 +90,16 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         XCTAssertTrue(sshSession.contains("boundedReconnectBackoffInitialMilliseconds"))
         XCTAssertTrue(sshSession.contains("boundedReconnectBackoffMaxMilliseconds"))
         XCTAssertTrue(sshSession.contains("boundedReconnectBackoffMultiplier"))
+        XCTAssertTrue(sshSession.contains("private var reconnectTask: Task<Void, Never>?"))
+        XCTAssertTrue(sshSession.contains("guard !reconnecting, !isDisconnecting else { return }"))
+        XCTAssertTrue(
+            sshSession.contains(
+                "await shutdownEventLoopGroup(staleGroup, context: \"reconnect-replacement\")"
+            )
+        )
+        XCTAssertTrue(sshSession.contains("try await eventLoopGroup.shutdownGracefully()"))
+        XCTAssertFalse(sshSession.contains("syncShutdownGracefully"))
+        XCTAssertFalse(sshSession.contains("try? await Task.sleep"))
         XCTAssertTrue(vncClient.contains("VNCConnectionContinuationGate"))
         XCTAssertTrue(vncClient.contains("configuration.connectionTimeout"))
         XCTAssertTrue(vncClient.contains("VNCClientError.timeout"))
@@ -255,26 +265,64 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
     func testFileTransferSettingsAreNotCoupledToUnrelatedSwitches() throws {
         let source = try readSource("Sources/SkyBridgeCore/FileTransfer/FileTransferSettingsBridge.swift")
         let engine = try readSource("Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift")
+        let manager = try readSource("Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift")
+        let settingsManager = try readSource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
         let settingsView = try readSource("Sources/SkyBridgeCore/Views/SettingsView.swift")
+        let modernSettingsView = try readSource("Sources/SkyBridgeUI/FileTransfer/ModernTransferSettingsView.swift")
         let crypto = try readSource("Sources/SkyBridgeCore/QuantumSecure/EnhancedPostQuantumCrypto.swift")
 
         XCTAssertFalse(source.contains("enableCompression: settings.enableConnectionEncryption"))
-        XCTAssertTrue(source.contains("enableEncryption: settings.enableConnectionEncryption"))
-        XCTAssertTrue(source.contains("ResumableTransferManager.shared.applyRuntimeSettings"))
-        XCTAssertTrue(source.contains("autoRetryFailedTransfers: settings.autoRetryFailedTransfers"))
+        XCTAssertFalse(source.contains("enableEncryption: settings.enableConnectionEncryption"))
+        XCTAssertFalse(manager.contains("private var encryptionEnabled"))
+        XCTAssertTrue(manager.contains("ClassicTransferChunkCryptoWorker.shared.sealAndHash"))
+        XCTAssertTrue(manager.contains("ClassicTransferChunkCryptoWorker.shared.open"))
+        XCTAssertTrue(source.contains("automaticResumeEnabled: settings.autoRetryFailedTransfers"))
+        XCTAssertFalse(source.contains("ResumableTransferManager"))
+        XCTAssertFalse(source.contains("FileTransferEngine"))
         XCTAssertTrue(source.contains("keepTransferHistory: settings.keepTransferHistory"))
         XCTAssertTrue(source.contains("keepSystemAwakeDuringTransfer: settings.keepSystemAwakeDuringTransfer"))
-        XCTAssertTrue(source.contains("encryptionAlgorithm: settings.encryptionAlgorithm"))
-        XCTAssertTrue(source.contains("settings.retryCount"))
-        XCTAssertTrue(engine.contains("automaticRetryEnabled"))
-        XCTAssertTrue(engine.contains("guard keepTransferHistory else { return }"))
-        XCTAssertTrue(engine.contains("FileTransferPowerAssertionController"))
+        XCTAssertFalse(source.contains("settings.retryCount"))
+        XCTAssertFalse(source.contains("settings.encryptionAlgorithm"))
+        XCTAssertTrue(source.contains("speedLimitMBps.isFinite"))
+        XCTAssertTrue(source.contains("speedLimitMBps * 1_024 * 1_024"))
+        XCTAssertTrue(source.contains("await task?.value"))
+        XCTAssertTrue(source.contains("InboundFileTransferIOActor.shared"))
+        XCTAssertTrue(source.contains("settings.maxConcurrentFileTransfers"))
+        XCTAssertFalse(source.contains("try?"))
+        XCTAssertTrue(source.contains("FileTransferReceivePathFailure"))
+        XCTAssertTrue(manager.contains("ClassicTransferAutomaticResumePolicy.shouldAttempt"))
+        XCTAssertTrue(manager.contains("private var automaticResumeEnabled = true"))
+        XCTAssertTrue(modernSettingsView.contains("settings.autoRetryFailedTransfers = autoRetryFailedTransfers"))
+        XCTAssertTrue(modernSettingsView.contains("settings.transferBufferSize = chunkSize"))
+        XCTAssertTrue(modernSettingsView.contains("FileTransferSettingsBridge.shared.apply()"))
+        XCTAssertFalse(modernSettingsView.contains("enableCompression"))
+        XCTAssertTrue(settingsManager.contains("maxConcurrentFileTransfers"))
+        XCTAssertFalse(modernSettingsView.contains("enableConnectionEncryption"))
+        XCTAssertFalse(modernSettingsView.contains("private func exportSettings"))
+        XCTAssertFalse(modernSettingsView.contains("private func importSettings"))
+
+        let fileTransferSettingsStart = try XCTUnwrap(
+            settingsView.range(of: "private var fileTransferSettings: some View")
+        )
+        let videoSettingsStart = try XCTUnwrap(
+            settingsView.range(
+                of: "private var videoTransferConfigurationSection: some View",
+                range: fileTransferSettingsStart.upperBound..<settingsView.endIndex
+            )
+        )
+        let fileTransferSettingsSource = String(
+            settingsView[fileTransferSettingsStart.lowerBound..<videoSettingsStart.lowerBound]
+        )
+        XCTAssertFalse(fileTransferSettingsSource.contains("settings.common.retryCount"))
+        XCTAssertFalse(fileTransferSettingsSource.contains("enableConnectionEncryption"))
+        XCTAssertTrue(fileTransferSettingsSource.contains("requiredFileTransferEncryptionNotice"))
+        XCTAssertTrue(settingsView.contains("settings.fileTransfer.security.encryption.alwaysOn"))
         XCTAssertTrue(settingsView.contains("settingsManager.encryptionAlgorithm.displayName"))
         XCTAssertFalse(settingsView.contains(#"Text("ChaCha20").tag("ChaCha20")"#))
         XCTAssertFalse(settingsView.contains(#"Text("AES-128").tag("AES-128")"#))
         XCTAssertTrue(engine.contains("pqCrypto.signPQCRequired"))
         XCTAssertTrue(engine.contains("verifyPQCRequired"))
-        XCTAssertTrue(engine.contains("missing_strict_pqc_signature"))
+        XCTAssertTrue(engine.contains("try LegacyFileTransferWireContract.validate(metadata)"))
         XCTAssertFalse(engine.contains(#"signatureAlgorithm: enablePQCFlag ? pqcAlgo : "P256""#))
         XCTAssertTrue(crypto.contains("public func signPQCRequired"))
         XCTAssertTrue(crypto.contains("public func verifyPQCRequired"))
@@ -348,26 +396,6 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         XCTAssertFalse(twoAttempt.contains("UserDefaults.standard.bool(forKey: \"Settings.PreferXWingHybrid\")"))
     }
 
-    func testQPeriaptSettingsStayDormantUntilSignedPolicyRuntimeIsProvisioned() throws {
-        let settings = try readSource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
-        let settingsView = try readSource("Sources/SkyBridgeCore/Views/SettingsView.swift")
-        let preferencesView = try readSource("Sources/SkyBridgeCompassApp/PreferencesView.swift")
-        let capabilities = try readSource("Sources/SkyBridgeProtocolCore/P2P/CryptoCapabilities.swift")
-
-        XCTAssertTrue(settings.contains("preferQPeriaptBeta && !QPeriaptPlatformPolicy.isLocalRuntimeSupported"))
-        XCTAssertTrue(settings.contains("guard !value || QPeriaptPlatformPolicy.isLocalRuntimeSupported"))
-
-        for source in [settingsView, preferencesView] {
-            XCTAssertTrue(source.contains("Q-Periapt ABI2 PolicyBound 混合套件（beta）"))
-            XCTAssertTrue(source.contains(".disabled(!QPeriaptPlatformPolicy.isLocalRuntimeSupported)"))
-            XCTAssertTrue(source.contains("尚未安装并验证 Q-Periapt 签名策略与信任根"))
-            XCTAssertFalse(source.contains("Q-Periapt ContextBound 混合套件"))
-        }
-
-        XCTAssertTrue(capabilities.contains("Q-Periapt-ABI2-PolicyBound"))
-        XCTAssertTrue(capabilities.contains("Q-Periapt ABI2 PolicyBound (Beta)"))
-    }
-
     func testStrictPQCSecuritySourcesDoNotExposeFakeSuccessFallbacks() throws {
         let pake = try readSource("Sources/SkyBridgeCore/P2P/PAKEService.swift")
         let providers = try readSource("Sources/SkyBridgeCore/P2P/CryptoProviders.swift")
@@ -411,35 +439,50 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         let discovery = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift")
         let protocolIdentity = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/ProtocolDeviceIdentity.swift")
 
-        XCTAssertTrue(discovery.contains("private func createTXTRecord(port: UInt16) async throws -> NWTXTRecord"))
-        XCTAssertTrue(discovery.contains("try await createTXTRecord(port: port)"))
-        XCTAssertTrue(discovery.contains("currentProtocolIdentitySnapshot()"))
-        XCTAssertTrue(discovery.contains("record[\"deviceId\"] = protocolIdentity.deviceId"))
-        XCTAssertTrue(discovery.contains("record[\"uniqueId\"] = protocolIdentity.deviceId"))
-        XCTAssertTrue(discovery.contains("record[\"pubKeyFP\"] = protocolIdentity.signingPublicKeyFingerprint"))
-        XCTAssertTrue(discovery.contains("record[\"protocolSigningAlgorithm\"] = protocolIdentity.signingAlgorithm.rawValue"))
-        XCTAssertFalse(discovery.contains("ProtocolDeviceIdentity.stableDeviceId()"))
-        XCTAssertFalse(discovery.contains("localProtocolIdentityFingerprintForAdvertisement()"))
-        XCTAssertFalse(discovery.contains("let advertisedDeviceId = protocolDeviceId.isEmpty"))
-        XCTAssertFalse(discovery.contains("mobileSnapshot.stableDeviceId"))
+        XCTAssertTrue(discovery.contains("private func createTXTRecord(\n        port: UInt16,\n        authority: ProtocolIdentitySnapshot"))
+        XCTAssertTrue(discovery.contains("let txtRecord = try await createTXTRecord(\n            port: port,\n            authority: authority"))
+        XCTAssertTrue(discovery.contains("let validatedAuthority = try ProtocolIdentityBindingCompat("))
+        XCTAssertTrue(discovery.contains("validatedAuthority.protocolPublicKeyFingerprint\n                == authority.signingPublicKeyFingerprint"))
+        XCTAssertTrue(discovery.contains("record[\"deviceId\"] = validatedAuthority.deviceId"))
+        XCTAssertTrue(discovery.contains("record[\"uuid\"] = validatedAuthority.deviceId"))
+        XCTAssertTrue(discovery.contains("record[\"uniqueId\"] = validatedAuthority.deviceId"))
+        XCTAssertTrue(discovery.contains("record[\"pubKeyFP\"] = validatedAuthority.protocolPublicKeyFingerprint"))
+        XCTAssertTrue(discovery.contains("record[\"protocolIdentityFingerprint\"] =\n            validatedAuthority.protocolPublicKeyFingerprint"))
+        XCTAssertTrue(discovery.contains("record[\"protocolSigningAlgorithm\"] =\n            validatedAuthority.protocolSigningAlgorithm.rawValue"))
+        XCTAssertTrue(discovery.contains("record[\"vendorDeviceId\"] = vendorDeviceId"))
+        XCTAssertFalse(discovery.contains("record[\"deviceId\"] = snapshot.stableDeviceId"))
+        XCTAssertFalse(discovery.contains("record[\"deviceId\"] = mobileSnapshot.stableDeviceId"))
+        XCTAssertFalse(discovery.contains("record[\"deviceId\"] = mobileStableId"))
 
-        XCTAssertTrue(protocolIdentity.contains("actor ProtocolDeviceIdentityAuthority"))
-        XCTAssertTrue(protocolIdentity.contains("insertDeviceAuthorityIfAbsent"))
-        XCTAssertTrue(protocolIdentity.contains("insertSigningAuthorityIfAbsent"))
-        XCTAssertTrue(protocolIdentity.contains("configureExplicitSmokeOverrideIfPresent"))
-        XCTAssertFalse(protocolIdentity.contains("static func stableDeviceId()"))
+        XCTAssertTrue(protocolIdentity.contains("SkyBridge.P2P.DeviceIdentity.DeviceID"))
+        XCTAssertTrue(protocolIdentity.contains("SkyBridge.DeviceId"))
+        XCTAssertTrue(protocolIdentity.contains("func legacyDefaultsDeviceIds() -> [String]"))
+        XCTAssertTrue(protocolIdentity.contains("func publishDeviceIdMirrors(_ deviceId: String)"))
+        XCTAssertTrue(protocolIdentity.contains("persistence.publishDeviceIdMirrors(winner)"))
 
         let p2pModels = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PModels.swift")
-        XCTAssertTrue(p2pModels.contains("public static func current() async throws -> P2PDeviceInfo"))
-        XCTAssertTrue(p2pModels.contains("currentProtocolIdentitySnapshot()"))
-        XCTAssertFalse(p2pModels.contains("private static func getOrCreateDeviceId()"))
+        let currentDeviceBody = try extract(
+            source: p2pModels,
+            from: "public static func current() async throws -> P2PDeviceInfo",
+            to: "private static func getDeviceName() -> String"
+        )
+        XCTAssertTrue(currentDeviceBody.contains(".currentProtocolIdentitySnapshot()"))
+        XCTAssertTrue(currentDeviceBody.contains("id: authority.deviceId"))
+        XCTAssertTrue(currentDeviceBody.contains("publicKeyFingerprint: authority.signingPublicKeyFingerprint"))
+        XCTAssertFalse(
+            currentDeviceBody.contains("UUID().uuidString"),
+            "Legacy iOS P2PDeviceInfo must mirror the protocol identity instead of generating a second device id that splits Bonjour/Cloud/P2P identity."
+        )
 
         let macP2PModels = try readSource("Sources/SkyBridgeCore/P2P/P2PDeviceModels.swift")
-        XCTAssertTrue(macP2PModels.contains("public static func current() async throws -> P2PDeviceInfo"))
-        XCTAssertTrue(macP2PModels.contains("snapshotEnsuringProtocolDeviceId(allowCreate: true)"))
-        XCTAssertTrue(macP2PModels.contains("publicKeyFingerprint: identity.pubKeyFP"))
-        XCTAssertFalse(macP2PModels.contains("private static func getOrCreateDeviceId()"))
-        XCTAssertFalse(macP2PModels.contains("UUID().uuidString"))
+        let macGetDeviceIdBody = try extract(
+            source: macP2PModels,
+            from: "private static func getOrCreateDeviceId() -> String",
+            to: "private static func getDeviceName()"
+        )
+        XCTAssertTrue(macP2PModels.contains("SkyBridge.P2P.DeviceIdentity.DeviceID"))
+        XCTAssertTrue(macP2PModels.contains("SkyBridge.DeviceId"))
+        XCTAssertTrue(macGetDeviceIdBody.contains("mirrorDeviceIdToLegacyDefaultsIfNeeded"))
     }
 
     private func readSource(_ relativePath: String) throws -> String {

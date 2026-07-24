@@ -83,6 +83,19 @@ public struct PairingTrustApprovalSheet: View {
                     Section("识别信息") {
                         LabeledContent("Device ID", value: request.declaredDeviceId)
                         LabeledContent("Endpoint", value: request.peerEndpoint)
+                        if let algorithm = request.protocolIdentityAlgorithm, !algorithm.isEmpty {
+                            LabeledContent("协议签名算法", value: algorithm)
+                        }
+                        if let fingerprint = request.protocolIdentityFingerprint, !fingerprint.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("协议身份指纹")
+                                    .foregroundStyle(.secondary)
+                                Text(fingerprint)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                         LabeledContent("KEM Keys", value: "\(request.kemKeyCount)")
                     }
                 }
@@ -110,6 +123,17 @@ public struct PairingTrustApprovalSheet: View {
                         Text(promptText)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+
+                        if service.isPendingResolutionInFlight {
+                            ProgressView("正在安全写入协议身份信任…")
+                                .controlSize(.small)
+                        }
+
+                        if let notice = service.pendingResolutionNotice {
+                            Label(notice, systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                        }
                         
                         HStack(spacing: 10) {
                             Button(role: .destructive) {
@@ -118,7 +142,7 @@ public struct PairingTrustApprovalSheet: View {
                                 Text("拒绝")
                                     .frame(minWidth: 76)
                             }
-                            .disabled(service.pendingDecision != nil)
+                            .disabled(decisionControlsDisabled)
                             
                             Spacer(minLength: 0)
                             
@@ -129,7 +153,7 @@ public struct PairingTrustApprovalSheet: View {
                                     .frame(minWidth: 90)
                             }
                             .buttonStyle(.bordered)
-                            .disabled(service.pendingDecision != nil)
+                            .disabled(decisionControlsDisabled)
                             
                             Button {
                                 resolve(.alwaysAllow)
@@ -139,7 +163,7 @@ public struct PairingTrustApprovalSheet: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.green)
-                            .disabled(service.pendingDecision != nil)
+                            .disabled(decisionControlsDisabled)
                         }
                     }
                 }
@@ -156,10 +180,12 @@ public struct PairingTrustApprovalSheet: View {
                         Text("关闭")
                     }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(service.isPendingResolutionInFlight)
                 }
             }
         }
         .frame(minWidth: 560, minHeight: 480)
+        .interactiveDismissDisabled(service.isPendingResolutionInFlight)
     }
     
     private var shouldShowVerificationStage: Bool {
@@ -192,6 +218,12 @@ public struct PairingTrustApprovalSheet: View {
     }
 
     private var completionText: String {
+        if service.pendingResolutionNotice != nil {
+            return "协议身份已为本次连接完成确认；永久允许策略未保存，下次仍需再次核对。"
+        }
+        if service.pendingVerificationSuite == "PIB-1-v3-candidate" {
+            return "候选身份尚未获得授权。请在另一端显示同一验证码并批准；收到签名确认后，本机还会要求你显式批准，之后才会写入信任。"
+        }
         if isProtocolIdentityBindingPrompt {
             return "协议身份确认已处理。另一端现在可以继续 SKR-1 signed KEM refresh。"
         }
@@ -199,10 +231,13 @@ public struct PairingTrustApprovalSheet: View {
     }
 
     private func resolve(_ decision: PairingTrustApprovalService.Decision) {
-        guard service.pendingDecision == nil else { return }
+        guard !decisionControlsDisabled else { return }
         onDecision(decision)
         // Sheet dismissal is driven by `pendingRequest`. For allow decisions we keep the sheet open
         // to surface the transcript-bound SAS verification code.
     }
-}
 
+    private var decisionControlsDisabled: Bool {
+        service.pendingDecision != nil || service.isPendingResolutionInFlight
+    }
+}

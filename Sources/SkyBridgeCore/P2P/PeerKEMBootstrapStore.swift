@@ -417,10 +417,12 @@ public actor PeerKEMBootstrapStore {
         }
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     func clearForTesting() {
         entries.removeAll()
         defaults.removeObject(forKey: Self.defaultsKey)
     }
+#endif
 
     private func lookupCandidates(forAny identifiers: [String]) -> [String] {
         var seen = Set<String>()

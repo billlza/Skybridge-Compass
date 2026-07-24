@@ -240,12 +240,12 @@ struct RemoteDesktopView: View {
 
     private var trustedActiveSessionsPanel: some View {
         remoteSurfacePanel(
-            title: "Trusted Active Sessions",
+            title: "Active Sessions",
             trailing: filteredActiveSessions.isEmpty ? "No active session" : "\(filteredActiveSessions.count) active"
         ) {
             if filteredActiveSessions.isEmpty {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Trusted peers will appear here once a verified remote session is established.")
+                    Text("Remote desktops and validated local camera stream endpoints will appear here after connection.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
 
@@ -326,8 +326,18 @@ struct RemoteDesktopView: View {
 
 // 控制按钮
             HStack(spacing: 8) {
-// 双通道模式徽章
-                connectionModeBadge
+// 摄像头不得复用用户上次选择的桌面通道徽章；显示真实只读传输语义。
+                if session.kind == .readOnlyCamera {
+                    Label(session.protocolDescription, systemImage: "video.fill")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundColor(.orange)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                } else {
+                    connectionModeBadge
+                }
 
                 Divider()
                     .frame(height: 20)
@@ -339,33 +349,36 @@ struct RemoteDesktopView: View {
                 }
                 .help(LocalizationManager.shared.localizedString("remote.performance.monitor"))
 
-// 质量设置
-                Menu {
-                    ForEach(VideoQuality.allCases, id: \.self) { quality in
-                        Button {
- // 写入真实设置并下发到活跃会话；此前只设置一个从不被读取的 selectedQuality（=假阳性）。
-                            RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality = quality
-                            RemoteDesktopSettingsManager.shared.saveSettings()
-                            remoteDesktopManager.reapplyCurrentSettingsToActiveSessions()
-                        } label: {
-                            Label(
-                                quality.displayName,
-                                systemImage: RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality == quality ? "checkmark" : ""
-                            )
+// 质量设置只属于可交互桌面；摄像头画质由其 RTSP profile 决定。
+                if session.kind.supportsRemoteInput {
+                    Menu {
+                        ForEach(VideoQuality.allCases, id: \.self) { quality in
+                            Button {
+                                RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality = quality
+                                RemoteDesktopSettingsManager.shared.saveSettings()
+                                remoteDesktopManager.reapplyCurrentSettingsToActiveSessions()
+                            } label: {
+                                Label(
+                                    quality.displayName,
+                                    systemImage: RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality == quality ? "checkmark" : ""
+                                )
+                            }
                         }
+                    } label: {
+                        Image(systemName: "tv")
+                            .foregroundColor(.primary)
                     }
-                } label: {
-                    Image(systemName: "tv")
-                        .foregroundColor(.primary)
+                    .menuStyle(.borderlessButton)
                 }
-                .menuStyle(.borderlessButton)
 
-// 设置按钮
-                Button(action: { showingSettingsSheet = true }) {
-                    Image(systemName: "gearshape")
-                        .foregroundColor(.primary)
+// RDP 交互/音频设置不适用于只读摄像头。
+                if session.kind.supportsRemoteInput {
+                    Button(action: { showingSettingsSheet = true }) {
+                        Image(systemName: "gearshape")
+                            .foregroundColor(.primary)
+                    }
+                    .help(LocalizationManager.shared.localizedString("remote.settings.help"))
                 }
-                .help(LocalizationManager.shared.localizedString("remote.settings.help"))
 
 // 全屏切换
                 Button(action: toggleRemoteDesktopFullScreen) {
@@ -452,19 +465,20 @@ struct RemoteDesktopView: View {
     }
 
     private func remoteDisplayArea(for session: RemoteSessionSummary) -> some View {
-        GeometryReader { geometry in
-            RemoteDisplayView(
-                textureFeed: remoteDesktopManager.textureFeed,
-                onMouseEvent: { location, eventType, buttonNumber in
-                    handleMouseEvent(location: location, eventType: eventType, buttonNumber: buttonNumber, for: session)
-                },
-                onKeyboardEvent: { keyCode, isPressed in
-                    handleKeyboardEvent(keyCode: keyCode, isPressed: isPressed, for: session)
-                },
-                onScrollEvent: { deltaX, deltaY in
-                    handleScrollEvent(deltaX: deltaX, deltaY: deltaY, for: session)
-                }
-            )
+        GeometryReader { _ in
+            if let sessionFeed = remoteDesktopManager.textureFeed(for: session.id) {
+                RemoteDisplayView(
+                    textureFeed: sessionFeed,
+                    onMouseEvent: session.kind.supportsRemoteInput ? { location, eventType, buttonNumber in
+                        handleMouseEvent(location: location, eventType: eventType, buttonNumber: buttonNumber, for: session)
+                    } : nil,
+                    onKeyboardEvent: session.kind.supportsRemoteInput ? { keyCode, isPressed in
+                        handleKeyboardEvent(keyCode: keyCode, isPressed: isPressed, for: session)
+                    } : nil,
+                    onScrollEvent: session.kind.supportsRemoteInput ? { deltaX, deltaY in
+                        handleScrollEvent(deltaX: deltaX, deltaY: deltaY, for: session)
+                    } : nil
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
                 .overlay(
@@ -477,6 +491,17 @@ struct RemoteDesktopView: View {
                     performanceOverlay(for: session),
                     alignment: .topTrailing
                 )
+            } else {
+                ContentUnavailableView(
+                    LocalizationManager.shared.localizedString("remote.camera.feedUnavailable.title"),
+                    systemImage: "video.slash",
+                    description: Text(
+                        session.status == .failed
+                            ? LocalizationManager.shared.localizedString("remote.camera.feedUnavailable.failed")
+                            : LocalizationManager.shared.localizedString("remote.camera.feedUnavailable.released")
+                    )
+                )
+            }
         }
     }
 
@@ -718,8 +743,10 @@ struct RemoteDesktopView: View {
  // MARK: - 上下文菜单
     private func sessionContextMenu(for session: RemoteSessionSummary) -> some View {
         Group {
-            Button(LocalizationManager.shared.localizedString("remote.context.focusWindow")) {
-                remoteDesktopManager.focus(on: session.id)
+            if session.kind.supportsRemoteInput {
+                Button(LocalizationManager.shared.localizedString("remote.context.focusWindow")) {
+                    remoteDesktopManager.focus(on: session.id)
+                }
             }
 
             Button(LocalizationManager.shared.localizedString("remote.context.disconnect")) {
@@ -971,8 +998,12 @@ struct NewConnectionSheet: View {
     @State private var port = "3389"
     @State private var username = ""
     @State private var password = ""
+    @State private var cameraDisplayName = ""
+    @State private var acknowledgesPlaintextRTSP = false
     @State private var selectedProtocol: RemoteProtocol = .rdp
     @State private var showAdvanced: Bool
+    @State private var cameraConnectionTask: Task<Void, Never>?
+    @State private var isCancellingCameraConnection = false
  // 连接错误提示
     @State private var connectError: String?
     @Environment(\.openWindow) private var openWindow
@@ -996,6 +1027,11 @@ struct NewConnectionSheet: View {
                         NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
                         isPresented = false
                     }
+
+                    Button(LocalizationManager.shared.localizedString("remote.camera.connect")) {
+                        selectedProtocol = .camera
+                        showAdvanced = true
+                    }
                 }
 
                 Section {
@@ -1010,8 +1046,31 @@ struct NewConnectionSheet: View {
                                 }
                             }
 
-                            TextField(LocalizationManager.shared.localizedString("remote.form.hostname"), text: $hostname)
-                            TextField(LocalizationManager.shared.localizedString("remote.form.port"), text: $port)
+                            if selectedProtocol == .camera {
+                                TextField(LocalizationManager.shared.localizedString("remote.camera.name"), text: $cameraDisplayName)
+                                TextField(LocalizationManager.shared.localizedString("remote.camera.endpoint"), text: $hostname)
+                                    .textContentType(.URL)
+
+                                Text(LocalizationManager.shared.localizedString("remote.camera.contract"))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                if usesPlaintextRTSP {
+                                    Toggle(
+                                        LocalizationManager.shared.localizedString("remote.camera.plaintextAcknowledgement"),
+                                        isOn: $acknowledgesPlaintextRTSP
+                                    )
+                                    .toggleStyle(.checkbox)
+                                } else if usesSecureRTSP {
+                                    Text(LocalizationManager.shared.localizedString("remote.camera.tlsNotice"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                TextField(LocalizationManager.shared.localizedString("remote.form.hostname"), text: $hostname)
+                                TextField(LocalizationManager.shared.localizedString("remote.form.port"), text: $port)
+                            }
 
                             Divider()
 
@@ -1027,15 +1086,16 @@ struct NewConnectionSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(LocalizationManager.shared.localizedString("action.cancel")) {
-                        isPresented = false
+                        cancelConnectionAndDismiss()
                     }
+                    .disabled(isCancellingCameraConnection)
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button(LocalizationManager.shared.localizedString("remote.form.connect")) {
                         connectToRemote()
                     }
-                    .disabled(!showAdvanced || hostname.isEmpty || username.isEmpty)
+                    .disabled(!isConnectionFormValid)
                 }
             }
         }
@@ -1049,6 +1109,7 @@ struct NewConnectionSheet: View {
         } message: {
             Text(connectError ?? "")
         }
+        .interactiveDismissDisabled(cameraConnectionTask != nil)
         .onChange(of: selectedProtocol) { _, newValue in
             switch newValue {
             case .rdp:
@@ -1063,12 +1124,55 @@ struct NewConnectionSheet: View {
                 if port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || port == "3389" || port == "22" {
                     port = "5900"
                 }
+            case .camera:
+                port = ""
+                acknowledgesPlaintextRTSP = false
             }
+        }
+        .onDisappear {
+            cameraConnectionTask?.cancel()
+            password = ""
         }
     }
 
     private func connectToRemote() {
  // 实现远程连接逻辑（按协议类型分发）
+        if selectedProtocol == .camera {
+            guard cameraConnectionTask == nil else { return }
+            isCancellingCameraConnection = false
+            let task = Task { @MainActor in
+                var connectedSessionID: UUID?
+                do {
+                    connectedSessionID = try await RemoteDesktopManager.shared.connectCamera(
+                        endpoint: hostname,
+                        username: username.isEmpty ? nil : username,
+                        password: password.isEmpty ? nil : password,
+                        displayName: cameraDisplayName.isEmpty ? nil : cameraDisplayName,
+                        acknowledgesPlaintextRTSP: acknowledgesPlaintextRTSP
+                    )
+                    try Task.checkCancellation()
+                    password = ""
+                    cameraConnectionTask = nil
+                    isPresented = false
+                } catch {
+                    if Task.isCancelled {
+                        if let connectedSessionID {
+                            RemoteDesktopManager.shared.terminate(sessionID: connectedSessionID)
+                        }
+                        password = ""
+                        cameraConnectionTask = nil
+                        isCancellingCameraConnection = false
+                        isPresented = false
+                    } else {
+                        cameraConnectionTask = nil
+                        connectError = error.localizedDescription
+                    }
+                }
+            }
+            cameraConnectionTask = task
+            return
+        }
+
         guard let portValue = Int(port) else {
             connectError = "端口格式不正确"
             return
@@ -1100,16 +1204,63 @@ struct NewConnectionSheet: View {
                 openWindow(id: "vnc-viewer")
             }
         case .ssh:
- // 该分支同样无抛错点，去除无效 do-catch，直接进行UI状态更新与窗口打开。
             Task { @MainActor in
-                SSHLaunchContext.shared.host = hostname
-                SSHLaunchContext.shared.port = Int(portValue)
-                SSHLaunchContext.shared.username = username
-                SSHLaunchContext.shared.password = password
-                isPresented = false
-                openWindow(id: "ssh-terminal")
+                do {
+                    let requestID = try SSHLaunchContext.shared.configure(
+                        host: hostname,
+                        port: portValue,
+                        username: username,
+                        password: password
+                    )
+                    password = ""
+                    isPresented = false
+                    openWindow(id: "ssh-terminal", value: requestID)
+                } catch {
+                    connectError = error.localizedDescription
+                }
             }
+        case .camera:
+            break
         }
+    }
+
+    private var normalizedEndpoint: String {
+        hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var usesPlaintextRTSP: Bool {
+        normalizedEndpoint.hasPrefix("rtsp://")
+    }
+
+    private var usesSecureRTSP: Bool {
+        normalizedEndpoint.hasPrefix("rtsps://")
+    }
+
+    private var credentialsArePaired: Bool {
+        username.isEmpty == password.isEmpty
+    }
+
+    private var isConnectionFormValid: Bool {
+        guard cameraConnectionTask == nil else { return false }
+        guard showAdvanced, !hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if selectedProtocol == .camera {
+            return credentialsArePaired
+                && (usesSecureRTSP || (usesPlaintextRTSP && acknowledgesPlaintextRTSP))
+        }
+        return !username.isEmpty && Int(port) != nil
+    }
+
+    private func cancelConnectionAndDismiss() {
+        guard let cameraConnectionTask else {
+            password = ""
+            isPresented = false
+            return
+        }
+        guard !isCancellingCameraConnection else { return }
+        isCancellingCameraConnection = true
+        cameraConnectionTask.cancel()
     }
 }
 
@@ -1642,13 +1793,15 @@ enum SettingsTab: String, CaseIterable {
 // 不再保留本文件内同名的本地副本（此前是无人使用的死代码）。
 
 enum RemoteProtocol: CaseIterable {
-    case rdp, vnc, ssh
+    case rdp, vnc, ssh, camera
 
+    @MainActor
     var displayName: String {
         switch self {
         case .rdp: return "RDP"
         case .vnc: return "VNC"
         case .ssh: return "SSH"
+        case .camera: return LocalizationManager.shared.localizedString("remote.camera.protocol")
         }
     }
 }
@@ -1698,4 +1851,3 @@ enum ConnectionMode: String, CaseIterable {
         }
     }
 }
-

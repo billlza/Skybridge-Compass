@@ -1,5 +1,5 @@
 import SwiftUI
-import Metal
+@preconcurrency import Metal
 import MetalKit
 import Combine
 import os.log
@@ -13,6 +13,7 @@ class InteractiveRemoteView: MTKView {
     var onScrollEvent: ((CGFloat, CGFloat) -> Void)?
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "RemoteInput")
+    private var renderingErrorLabel: NSTextField?
     
     override var acceptsFirstResponder: Bool { true }
     override var canBecomeKeyView: Bool { true }
@@ -36,6 +37,32 @@ class InteractiveRemoteView: MTKView {
         addTrackingArea(trackingArea)
         
         logger.info("🖱️ 远程显示视图输入跟踪已启用")
+    }
+
+    @MainActor
+    func showRenderingError() {
+        guard renderingErrorLabel == nil else { return }
+        let label = NSTextField(
+            labelWithString: LocalizationManager.shared.localizedString("remote.camera.rendererUnavailable")
+        )
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
+        label.maximumNumberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+        ])
+        renderingErrorLabel = label
+    }
+
+    @MainActor
+    func clearRenderingError() {
+        renderingErrorLabel?.removeFromSuperview()
+        renderingErrorLabel = nil
     }
     
  // MARK: - 鼠标事件处理
@@ -148,6 +175,7 @@ struct RemoteDisplayView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: InteractiveRemoteView, context: Context) {
+        context.coordinator.attach(view: nsView, feed: textureFeed)
  // 更新回调
         nsView.onMouseEvent = onMouseEvent
         nsView.onKeyboardEvent = onKeyboardEvent
@@ -166,52 +194,56 @@ struct RemoteDisplayView: NSViewRepresentable {
  /// 渲染协调器：构建管线并在收到新纹理时编码一次全屏绘制。
     @MainActor
     final class RendererCoordinator: NSObject, MTKViewDelegate {
-        private var device: MTLDevice!
-        private var commandQueue: MTLCommandQueue!
-        private var pipelineState: MTLRenderPipelineState!
-        private var vertexBuffer: MTLBuffer!
+        private final class DeviceBox: @unchecked Sendable {
+            let device: MTLDevice
+
+            init(_ device: MTLDevice) {
+                self.device = device
+            }
+        }
+
+        private struct PipelineArtifacts: @unchecked Sendable {
+            let commandQueue: MTLCommandQueue
+            let pipelineState: MTLRenderPipelineState
+        }
+
+        private enum PipelineError: Error {
+            case missingCommandQueue
+            case missingShaderFunction
+        }
+
+        private var commandQueue: MTLCommandQueue?
+        private var pipelineState: MTLRenderPipelineState?
         private weak var view: MTKView?
+        private weak var presentationFeed: RemoteTextureFeed?
         private var cancellable: AnyCancellable?
-        private var latestTexture: MTLTexture?
+        private var pipelineBuildTask: Task<Void, Never>?
+        private var attachedFeedID: ObjectIdentifier?
+        private var latestFrame: RemoteTextureFrame?
         private var displayRequestPending = false
 
  /// 绑定 MTKView 与纹理发布者。
         func attach(view: MTKView, feed: RemoteTextureFeed) {
             self.view = view
-            guard let device = view.device else { return }
-            self.device = device
-            self.commandQueue = device.makeCommandQueue()
-
- // 运行时编译着色器库。若迁移到 Xcode App 目标，可改为 makeDefaultLibrary() 加载 .metal 文件。
-            let shaderSource = Self.basicShaderSource
-            let library = try? device.makeLibrary(source: shaderSource, options: nil)
-            let vertexFunc = library?.makeFunction(name: "passthroughVertex")
-            let fragmentFunc = library?.makeFunction(name: "blitFragment")
-
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = vertexFunc
-            descriptor.fragmentFunction = fragmentFunc
-            descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
-            pipelineState = try? device.makeRenderPipelineState(descriptor: descriptor)
-
- // 全屏矩形（两三角），NDC 坐标与纹理坐标。
-            struct Vertex { var pos: SIMD2<Float>; var uv: SIMD2<Float> }
-            let quad: [Vertex] = [
-                Vertex(pos: [-1, -1], uv: [0, 1]),
-                Vertex(pos: [ 1, -1], uv: [1, 1]),
-                Vertex(pos: [-1,  1], uv: [0, 0]),
-                Vertex(pos: [-1,  1], uv: [0, 0]),
-                Vertex(pos: [ 1, -1], uv: [1, 1]),
-                Vertex(pos: [ 1,  1], uv: [1, 0])
-            ]
-            vertexBuffer = device.makeBuffer(bytes: quad, length: MemoryLayout<Vertex>.stride * quad.count, options: .storageModeShared)
+            self.presentationFeed = feed
+            let feedID = ObjectIdentifier(feed)
+            guard attachedFeedID != feedID else { return }
+            attachedFeedID = feedID
+            cancellable?.cancel()
+            latestFrame = nil
+            displayRequestPending = false
+            guard let device = view.device else {
+                (view as? InteractiveRemoteView)?.showRenderingError()
+                return
+            }
+            buildPipelineIfNeeded(device: device, pixelFormat: view.colorPixelFormat)
 
  // 订阅纹理更新：收到新纹理时触发一次显式绘制。
-            cancellable = feed.$texture
+            cancellable = feed.$frame
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] (tex: MTLTexture?) in
+                .sink { [weak self] frame in
                     guard let self = self else { return }
-                    self.latestTexture = tex
+                    self.latestFrame = frame
                     guard let view = self.view, view.window != nil else { return }
                     if !self.displayRequestPending {
                         self.displayRequestPending = true
@@ -224,8 +256,12 @@ struct RemoteDisplayView: NSViewRepresentable {
  // 手动清理订阅
             cancellable?.cancel()
             cancellable = nil
-            latestTexture = nil
+            attachedFeedID = nil
+            latestFrame = nil
+            presentationFeed = nil
             displayRequestPending = false
+            pipelineBuildTask?.cancel()
+            pipelineBuildTask = nil
             view?.delegate = nil
         }
 
@@ -237,41 +273,78 @@ struct RemoteDisplayView: NSViewRepresentable {
             displayRequestPending = false
             guard let commandQueue, let pipelineState else { return }
             guard let descriptor = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else { return }
+            guard let frame = latestFrame else { return }
 
-            let commandBuffer = commandQueue.makeCommandBuffer()
-            let encoder = commandBuffer?.makeRenderCommandEncoder(descriptor: descriptor)
-            encoder?.setRenderPipelineState(pipelineState)
-            encoder?.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            if let texture = latestTexture {
-                encoder?.setFragmentTexture(texture, index: 0)
+            guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+                (view as? InteractiveRemoteView)?.showRenderingError()
+                return
             }
-            encoder?.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            encoder?.endEncoding()
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setFragmentTexture(frame.texture, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
 
- // 注册呈现并提交命令缓冲，遵循 MTKView 文档的推荐流程。
-            commandBuffer?.present(drawable)
-            commandBuffer?.commit()
+            // `present()`/`commit()` only submit work. The drawable callback is
+            // the first boundary that proves this exact texture became visible.
+            let presentationFeed = presentationFeed
+            drawable.addPresentedHandler { [weak presentationFeed, frame] _ in
+                Task { @MainActor [weak presentationFeed, frame] in
+                    presentationFeed?.reportPresentedFrame(frame)
+                }
+            }
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
         }
 
- /// 基本着色器：直通顶点 + 采样片段，将远端纹理贴到屏幕。
-        private static let basicShaderSource = """
-        #include <metal_stdlib>
-        using namespace metal;
-
-        struct VertexIn { float2 pos [[attribute(0)]]; float2 uv [[attribute(1)]]; };
-        struct VSOut { float4 position [[position]]; float2 uv; };
-
-        vertex VSOut passthroughVertex(uint vid [[vertex_id]], const device VertexIn* vertices [[buffer(0)]]) {
-            VSOut out;
-            out.position = float4(vertices[vid].pos, 0.0, 1.0);
-            out.uv = vertices[vid].uv;
-            return out;
+        private func buildPipelineIfNeeded(device: MTLDevice, pixelFormat: MTLPixelFormat) {
+            guard pipelineState == nil, pipelineBuildTask == nil else { return }
+            let deviceBox = DeviceBox(device)
+            pipelineBuildTask = Task { @MainActor [weak self] in
+                do {
+                    let artifacts = try await Task.detached(priority: .userInitiated) {
+                        let device = deviceBox.device
+                        let library = try SkyBridgeMetalShaderLibrary.loadCore(
+                            device: device,
+                            sourceResourceNames: ["RemoteDesktopPassthrough"],
+                            requiredFunctionNames: [
+                                "fluidPassthroughVertex",
+                                "fluidPassthroughFragment",
+                            ]
+                        )
+                        guard let vertexFunction = library.makeFunction(name: "fluidPassthroughVertex"),
+                              let fragmentFunction = library.makeFunction(name: "fluidPassthroughFragment") else {
+                            throw PipelineError.missingShaderFunction
+                        }
+                        guard let commandQueue = device.makeCommandQueue() else {
+                            throw PipelineError.missingCommandQueue
+                        }
+                        let descriptor = MTLRenderPipelineDescriptor()
+                        descriptor.vertexFunction = vertexFunction
+                        descriptor.fragmentFunction = fragmentFunction
+                        descriptor.colorAttachments[0].pixelFormat = pixelFormat
+                        let pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+                        return PipelineArtifacts(
+                            commandQueue: commandQueue,
+                            pipelineState: pipelineState
+                        )
+                    }.value
+                    guard !Task.isCancelled, let self else { return }
+                    self.commandQueue = artifacts.commandQueue
+                    self.pipelineState = artifacts.pipelineState
+                    self.pipelineBuildTask = nil
+                    (self.view as? InteractiveRemoteView)?.clearRenderingError()
+                    if self.latestFrame != nil {
+                        self.view?.needsDisplay = true
+                    }
+                } catch is CancellationError {
+                    self?.pipelineBuildTask = nil
+                } catch {
+                    guard let self else { return }
+                    self.pipelineBuildTask = nil
+                    (self.view as? InteractiveRemoteView)?.showRenderingError()
+                }
+            }
         }
-
-        fragment float4 blitFragment(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
-            constexpr sampler s(address::clamp_to_edge, filter::linear);
-            return tex.sample(s, in.uv);
-        }
-        """
     }
 }

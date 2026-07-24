@@ -58,22 +58,27 @@ public final class InboundFileTransferApprovalService: ObservableObject {
     @Published public private(set) var pendingRequest: Request?
 
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "InboundFileTransferApproval")
-    private var continuationByRequestId: [UUID: [CheckedContinuation<Decision, Never>]] = [:]
+    private struct Waiter {
+        let continuation: CheckedContinuation<Decision, Never>
+        let timeoutTask: Task<Void, Never>
+    }
+    private static let maximumCoalescedWaiters = 8
+    private let decisionTimeout: Duration = .seconds(60)
+    private var waitersByRequestId: [UUID: [UUID: Waiter]] = [:]
+    private var earlyDecisionByRequestId: [UUID: Decision] = [:]
 
     private init() {}
 
     public func decide(for request: Request) async -> Decision {
-        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_APPROVE_INBOUND_FILE_TRANSFER"] == "1" {
-            logger.info("Smoke auto-approving inbound file transfer transferId=\(request.transferId, privacy: .private)")
-            return .allowOnce
-        }
-
         if let pendingRequest {
             if isSameTransferRequest(pendingRequest, request) {
-                logger.info("Inbound file transfer approval coalesced transferId=\(request.transferId, privacy: .private)")
-                return await withCheckedContinuation { continuation in
-                    continuationByRequestId[pendingRequest.id, default: []].append(continuation)
+                guard (waitersByRequestId[pendingRequest.id]?.count ?? 0)
+                        < Self.maximumCoalescedWaiters else {
+                    logger.warning("Inbound file transfer approval waiter limit reached")
+                    return .reject
                 }
+                logger.info("Inbound file transfer approval coalesced transferId=\(request.transferId, privacy: .private)")
+                return await waitForDecision(requestId: pendingRequest.id)
             }
             logger.warning("Inbound file transfer rejected because another approval prompt is pending transferId=\(request.transferId, privacy: .private)")
             return .reject
@@ -84,19 +89,24 @@ public final class InboundFileTransferApprovalService: ObservableObject {
             "Inbound file transfer approval required transferId=\(request.transferId, privacy: .private) fileName=\(request.fileName, privacy: .private) sender=\(request.senderDeviceId, privacy: .private)"
         )
 
-        return await withCheckedContinuation { continuation in
-            continuationByRequestId[request.id, default: []].append(continuation)
-        }
+        return await waitForDecision(requestId: request.id)
     }
 
     public func resolve(_ request: Request, decision: Decision) {
         guard pendingRequest?.id == request.id else { return }
-        let continuations = continuationByRequestId.removeValue(forKey: request.id) ?? []
+        let waiters = waitersByRequestId
+            .removeValue(forKey: request.id)
+            .map { Array($0.values) }
+            ?? []
+        if waiters.isEmpty {
+            earlyDecisionByRequestId = [request.id: decision]
+        }
         pendingRequest = nil
 
         logger.info("Inbound file transfer decision=\(decision.rawValue, privacy: .public) transferId=\(request.transferId, privacy: .private)")
-        for continuation in continuations {
-            continuation.resume(returning: decision)
+        for waiter in waiters {
+            waiter.timeoutTask.cancel()
+            waiter.continuation.resume(returning: decision)
         }
     }
 
@@ -109,5 +119,61 @@ public final class InboundFileTransferApprovalService: ObservableObject {
         lhs.transferId == rhs.transferId
             && lhs.senderDeviceId == rhs.senderDeviceId
             && lhs.proposedSavePath == rhs.proposedSavePath
+    }
+
+    private func waitForDecision(requestId: UUID) async -> Decision {
+        let waiterId = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if let earlyDecision = earlyDecisionByRequestId.removeValue(forKey: requestId) {
+                    continuation.resume(returning: earlyDecision)
+                    return
+                }
+                let timeoutTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await Task.sleep(for: self.decisionTimeout)
+                    } catch {
+                        return
+                    }
+                    self.finishWaiter(
+                        requestId: requestId,
+                        waiterId: waiterId,
+                        decision: .reject
+                    )
+                }
+                waitersByRequestId[requestId, default: [:]][waiterId] = Waiter(
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.finishWaiter(
+                    requestId: requestId,
+                    waiterId: waiterId,
+                    decision: .reject
+                )
+            }
+        }
+    }
+
+    private func finishWaiter(
+        requestId: UUID,
+        waiterId: UUID,
+        decision: Decision
+    ) {
+        guard var waiters = waitersByRequestId[requestId],
+              let waiter = waiters.removeValue(forKey: waiterId) else { return }
+        waiter.timeoutTask.cancel()
+        if waiters.isEmpty {
+            waitersByRequestId.removeValue(forKey: requestId)
+            if pendingRequest?.id == requestId {
+                pendingRequest = nil
+            }
+        } else {
+            waitersByRequestId[requestId] = waiters
+        }
+        waiter.continuation.resume(returning: decision)
     }
 }

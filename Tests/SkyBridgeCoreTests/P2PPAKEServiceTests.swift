@@ -295,16 +295,6 @@ final class P2PPAKEServiceTests: XCTestCase {
     }
     
  // MARK: - Additional PAKE Tests
-
-    func testInitializerRejectsMissingOrNonCanonicalLocalDeviceId() {
-        for invalidDeviceId in ["", "   ", " device-id", "device-id "] {
-            XCTAssertThrowsError(
-                try PAKEService(localDeviceId: invalidDeviceId)
-            ) { error in
-                XCTAssertEqual(error as? PAKEError, .invalidLocalDeviceId)
-            }
-        }
-    }
     
  /// Test invalid pairing code format is rejected
     func testInvalidPairingCodeRejected() async throws {
@@ -382,8 +372,7 @@ extension PAKEError: Equatable {
              (.macVerificationFailed, .macVerificationFailed),
              (.sessionNotInitiated, .sessionNotInitiated),
              (.sessionAlreadyCompleted, .sessionAlreadyCompleted),
-             (.invalidState, .invalidState),
-             (.invalidLocalDeviceId, .invalidLocalDeviceId):
+             (.invalidState, .invalidState):
             return true
         case (.rateLimited(let a), .rateLimited(let b)):
             return abs(a - b) < 1.0

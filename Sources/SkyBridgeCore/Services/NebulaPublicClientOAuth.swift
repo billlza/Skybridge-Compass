@@ -143,7 +143,9 @@ public final class NebulaPublicClientOAuth: BaseManager {
 
     private let urlSession: URLSession
     private var cachedDiscovery: DiscoveryDocument?
+#if DEBUG || SKYBRIDGE_TESTING
     private var configurationOverride: NebulaConfigurationResolver.ResolvedConfiguration?
+#endif
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -158,6 +160,7 @@ public final class NebulaPublicClientOAuth: BaseManager {
         logger.info("NebulaPublicClientOAuth initialized")
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     public func overrideConfiguration(baseURL: String, clientId: String, clientSecret: String? = nil) {
         configurationOverride = NebulaConfigurationResolver.ResolvedConfiguration(
             baseURL: baseURL,
@@ -170,6 +173,7 @@ public final class NebulaPublicClientOAuth: BaseManager {
     public func clearConfigurationOverride() {
         configurationOverride = nil
     }
+#endif
 
     public func fetchDiscoveryDocument(forceRefresh: Bool = false) async throws -> DiscoveryDocument {
         if let cachedDiscovery, !forceRefresh {
@@ -351,9 +355,11 @@ public final class NebulaPublicClientOAuth: BaseManager {
     }
 
     private func requireConfiguration() throws -> NebulaConfigurationResolver.ResolvedConfiguration {
+#if DEBUG || SKYBRIDGE_TESTING
         if let configurationOverride {
             return configurationOverride
         }
+#endif
         guard let resolved = NebulaConfigurationResolver.resolve() else {
             throw OAuthError.configurationMissing
         }

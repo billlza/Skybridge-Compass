@@ -1426,7 +1426,11 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteDesktop/WebRTCMediaDiagnostics.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(diagnosticsSource.contains("webrtc-media-\\(safeSessionRef).jsonl"))
+        XCTAssertTrue(
+            diagnosticsSource.contains(
+                "let filename = \"webrtc-media-\\(safeSessionReference).jsonl\""
+            )
+        )
         XCTAssertTrue(diagnosticsSource.contains("payload.removeValue(forKey: \"session_id\")"))
         XCTAssertTrue(diagnosticsSource.contains("payload[\"session_ref\"] = safeSessionReference(event.sessionId)"))
         XCTAssertTrue(diagnosticsSource.contains("case videoFPS = \"video_fps\""))
@@ -1937,7 +1941,8 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(viewSource.contains("private var renderCoalescedFrames = 0"))
         XCTAssertFalse(viewSource.contains("pendingDisplayedCallbackCount"))
         XCTAssertFalse(viewSource.contains("lastDisplayedCallbackFlushAt"))
-        XCTAssertTrue(viewSource.contains("onFramesDisplayed: @escaping @Sendable (CMTime, Int, Date, Int?) -> Void"))
+        XCTAssertTrue(viewSource.contains("onFramesDisplayed: @escaping @Sendable ("))
+        XCTAssertTrue(viewSource.contains("CameraFramePresentationContext?"))
         XCTAssertTrue(viewSource.contains("displayedCallbackCompletedAt"))
         XCTAssertTrue(viewSource.contains("let uprightTransform = CGAffineTransform("))
         XCTAssertTrue(viewSource.contains("let visibleRect = CGRect("))
@@ -1951,7 +1956,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertFalse(viewSource.contains("d: -scaleY"))
         XCTAssertFalse(viewSource.contains("a: -scaleX"))
         XCTAssertTrue(viewSource.contains("Metal render telemetry"))
-        XCTAssertTrue(viewSource.contains("SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)"))
+        XCTAssertTrue(viewSource.contains("SkyBridgeDiagnosticTrace.appendStatus(telemetryLine)"))
         XCTAssertTrue(viewSource.contains("inputFPS="))
         XCTAssertTrue(viewSource.contains("frameAgeMs="))
         XCTAssertTrue(viewSource.contains("source="))
@@ -1988,10 +1993,12 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             return
         }
         let decodeLoopBody = managerSource[decodeLoopStart.lowerBound..<finishDecodeStart.lowerBound]
-        XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .high)"))
+        XCTAssertTrue(decodeLoopBody.contains("let task = Task.detached("))
+        XCTAssertTrue(decodeLoopBody.contains("guard await self?.isDecodeGenerationCurrent(decodeGeneration) == true"))
         XCTAssertTrue(decodeLoopBody.contains("try await decoder.submit(screenData: screenData)"))
         XCTAssertTrue(decodeLoopBody.contains("try await handle.wait()"))
         XCTAssertTrue(decodeLoopBody.contains("await previousSubmission?.value"))
+        XCTAssertTrue(decodeLoopBody.contains("decodeSubmissionChain = task"))
         XCTAssertFalse(decodeLoopBody.contains("Task { @MainActor"))
         XCTAssertTrue(managerSource.contains("metal-feed-awaiting-renderer-consumer"))
         XCTAssertTrue(managerSource.contains("metal-feed-renderer-rejected"))

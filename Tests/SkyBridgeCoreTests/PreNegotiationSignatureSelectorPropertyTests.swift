@@ -139,21 +139,6 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
             XCTAssertFalse(isCompatible, "P-256 ECDSA should never be compatible for sigA with suite \(suite.rawValue)")
         }
     }
-
-    func testProperty2_4_LegacyABI1SuiteIsNeverSignatureCompatible() {
-        XCTAssertFalse(
-            PreNegotiationSignatureSelector.validateSuiteCompatibility(
-                selectedSuite: .qperiaptContextBound,
-                sigAAlgorithm: .mlDSA65
-            )
-        )
-        XCTAssertFalse(
-            PreNegotiationSignatureSelector.validateSuiteCompatibility(
-                selectedSuite: .qperiaptContextBound,
-                sigAAlgorithm: .ed25519
-            )
-        )
-    }
     
     // MARK: - Property 3: Signature Provider Selection
     

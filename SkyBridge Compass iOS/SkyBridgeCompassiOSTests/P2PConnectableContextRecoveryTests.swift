@@ -5,15 +5,15 @@ import XCTest
 final class P2PConnectableContextRecoveryTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
-        TrustedDeviceStore.shared.clearAll()
+        try TrustedDeviceStore.shared.replaceTrustedDevicesForTesting([])
     }
 
     override func tearDown() async throws {
-        TrustedDeviceStore.shared.clearAll()
+        try TrustedDeviceStore.shared.replaceTrustedDevicesForTesting([])
         try await super.tearDown()
     }
 
-    func testTrustedDeviceStoreRestoresPersistedBonjourContextForCanonicalAlias() {
+    func testTrustedDeviceStoreRestoresPersistedBonjourContextForCanonicalAlias() throws {
         let liveAlias = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",
             name: "Lza的MacBook Pro",
@@ -27,7 +27,7 @@ final class P2PConnectableContextRecoveryTests: XCTestCase {
             services: ["_skybridge._tcp"],
             portMap: ["_skybridge._tcp": 9527]
         )
-        TrustedDeviceStore.shared.trustResolvedPeer(
+        try TrustedDeviceStore.shared.trustResolvedPeer(
             liveAlias,
             declaredDeviceId: "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
         )
@@ -50,7 +50,7 @@ final class P2PConnectableContextRecoveryTests: XCTestCase {
         XCTAssertEqual(resolved?.services, ["_skybridge._tcp"])
     }
 
-    func testP2PConnectionManagerUsesTrustedBonjourContextWhenLiveSnapshotLostEndpoint() {
+    func testP2PConnectionManagerUsesTrustedBonjourContextWhenLiveSnapshotLostEndpoint() throws {
         let liveAlias = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",
             name: "Lza的MacBook Pro",
@@ -64,7 +64,7 @@ final class P2PConnectableContextRecoveryTests: XCTestCase {
             services: ["_skybridge._tcp"],
             portMap: ["_skybridge._tcp": 9527]
         )
-        TrustedDeviceStore.shared.trustResolvedPeer(
+        try TrustedDeviceStore.shared.trustResolvedPeer(
             liveAlias,
             declaredDeviceId: "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
         )
@@ -87,8 +87,8 @@ final class P2PConnectableContextRecoveryTests: XCTestCase {
         XCTAssertTrue(endpointDescriptions.contains { $0.contains("_skybridge._tcp") })
     }
 
-    func testP2PConnectionManagerPrefersUniqueLiveCandidateOverPollutedTrustedAlias() {
-        TrustedDeviceStore.shared.mergeFromCloud([
+    func testP2PConnectionManagerPrefersUniqueLiveCandidateOverPollutedTrustedAlias() throws {
+        try TrustedDeviceStore.shared.mergeFromCloud([
             TrustedDeviceStore.TrustedDevice(
                 id: "id:lza的macbook pro",
                 name: "Lza的MacBook Pro",

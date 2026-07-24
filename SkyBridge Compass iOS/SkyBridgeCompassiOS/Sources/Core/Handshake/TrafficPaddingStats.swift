@@ -22,7 +22,7 @@ public actor TrafficPaddingStats {
     }
 
     private var labels: [String: LabelStats] = [:]
-    private var lastFlushAt: Date = .distantPast
+    private var lastFlushAttemptAt: Date = .distantPast
     private var pendingEvents: Int = 0
     private var didPrintPathHint: Bool = false
 
@@ -99,8 +99,18 @@ public actor TrafficPaddingStats {
     private func maybeFlush(cfg: Config) async {
         guard cfg.autoFlushEnabled else { return }
         guard pendingEvents >= cfg.flushEveryNEvents else { return }
-        guard Date().timeIntervalSince(lastFlushAt) >= cfg.flushMinIntervalSeconds else { return }
-        do { try await flushToCSV() } catch { }
+        let now = Date()
+        guard now.timeIntervalSince(lastFlushAttemptAt) >= cfg.flushMinIntervalSeconds else { return }
+        lastFlushAttemptAt = now
+        do {
+            try await flushToCSV()
+        } catch {
+            // Keep pendingEvents intact; lastFlushAttemptAt bounds retries and error-log volume.
+            let diagnostic = error as NSError
+            SkyBridgeLogger.shared.error(
+                "Traffic padding statistics flush failed: domain=\(diagnostic.domain) code=\(diagnostic.code)"
+            )
+        }
     }
 
     public func flushToCSV() async throws {
@@ -140,7 +150,7 @@ public actor TrafficPaddingStats {
         let data = (lines.joined(separator: "\n") + "\n").data(using: .utf8) ?? Data()
         try data.write(to: url, options: [.atomic])
 
-        lastFlushAt = Date()
+        lastFlushAttemptAt = Date()
         pendingEvents = 0
     }
 
@@ -157,5 +167,3 @@ public actor TrafficPaddingStats {
         return s
     }
 }
-
-

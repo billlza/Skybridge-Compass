@@ -8,7 +8,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
     case android = "Android"
     case windows = "Windows"
     case linux = "Linux"
-    
+
  /// 设备类型显示名称
     public var displayName: String {
         switch self {
@@ -20,7 +20,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
         case .linux: return "Linux"
         }
     }
-    
+
  /// 设备图标名称
     public var iconName: String {
         switch self {
@@ -36,6 +36,9 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
 
 // MARK: - 设备信息
 public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
+    private static let protocolIdentityMirrorDefaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
+    private static let legacyDeviceDefaultsKey = "SkyBridge.DeviceId"
+
     public let id: String
     public let name: String
     public let type: P2PDeviceType
@@ -46,21 +49,50 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
     public let publicKeyFingerprint: String
     
  /// 获取当前设备信息
-    public static func current() async throws -> P2PDeviceInfo {
-        let identity = try await SelfIdentityProvider.shared
-            .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+    public static func current() -> P2PDeviceInfo {
         return P2PDeviceInfo(
-            id: identity.deviceId,
+            id: getOrCreateDeviceId(),
             name: getDeviceName(),
             type: getCurrentDeviceType(),
             address: "0.0.0.0", // 将在网络发现时更新
             port: 8080,
             osVersion: getOSVersion(),
             capabilities: getSupportedCapabilities(),
-            publicKeyFingerprint: identity.pubKeyFP
+            publicKeyFingerprint: "" // 将在安全管理器初始化时设置
         )
     }
     
+ /// 获取或创建设备ID
+    private static func getOrCreateDeviceId() -> String {
+        if let protocolIdentity = UserDefaults.standard.string(forKey: protocolIdentityMirrorDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !protocolIdentity.isEmpty {
+            mirrorDeviceIdToLegacyDefaultsIfNeeded(protocolIdentity)
+            return protocolIdentity
+        }
+
+        if let legacyIdentity = UserDefaults.standard.string(forKey: legacyDeviceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !legacyIdentity.isEmpty {
+            UserDefaults.standard.set(legacyIdentity, forKey: protocolIdentityMirrorDefaultsKey)
+            return legacyIdentity
+        }
+
+        let newId = UUID().uuidString
+        UserDefaults.standard.set(newId, forKey: protocolIdentityMirrorDefaultsKey)
+        mirrorDeviceIdToLegacyDefaultsIfNeeded(newId)
+        return newId
+    }
+
+    private static func mirrorDeviceIdToLegacyDefaultsIfNeeded(_ raw: String) {
+        let deviceId = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !deviceId.isEmpty else { return }
+        if UserDefaults.standard.string(forKey: legacyDeviceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) != deviceId {
+            UserDefaults.standard.set(deviceId, forKey: legacyDeviceDefaultsKey)
+        }
+    }
+
     private static func getDeviceName() -> String {
         let snapshot = LocalDevicePresentation.current()
         return snapshot.deviceName ?? snapshot.modelName ?? "Unknown Device"

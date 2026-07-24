@@ -1092,7 +1092,7 @@ final class ApplePQCCompatibilityTests: XCTestCase {
     
  // MARK: - Runtime truth
     
-    func testMLDSARuntimeDoesNotExposeUnimplementedSecureEnclaveSetting() async throws {
+    func testLegacyProviderSettingsDoNotExposeObsoleteSecureEnclaveBooleans() async throws {
         let appleProvider = ApplePQCProvider(scopeSource: keychain.scopeSource)
         let testMessage = "software-backed-ML-DSA-test".utf8Data
         let testPeerId = "software-mldsa-\(UUID().uuidString)"
@@ -1186,11 +1186,6 @@ final class ApplePQCCompatibilityTests: XCTestCase {
             "HAS_APPLE_PQC_SDK on macOS 26+ must select the Apple PQC provider"
         )
         
-        await MainActor.run {
-            SettingsManager.shared.enablePQC = true
-            SettingsManager.shared.pqcSignatureAlgorithm = "ML-DSA-65"
-        }
-        
         let identityNamespace = "apple-hybrid-identity-\(UUID().uuidString)"
         let identityAccessGroup = "group.com.skybridge.tests.device-identity.\(identityNamespace)"
         let identityScope = KeychainGenericPasswordScope(
@@ -1209,7 +1204,15 @@ final class ApplePQCCompatibilityTests: XCTestCase {
             keychainScope: identityScope
         )
         let crypto = EnhancedPostQuantumCrypto(
-            deviceIdentityKeyManager: identityManager
+            deviceIdentityKeyManager: identityManager,
+            committedLocalIdentityLoader: {
+                try await CommittedLocalProtocolIdentitySnapshot.load(
+                    algorithm: .mlDSA65,
+                    protection: .softwareKeychain,
+                    keyManager: identityManager
+                )
+            },
+            pqcEnabledLoader: { true }
         )
         let testMessage = "混合签名测试".utf8Data
         let testPeerId = "hybrid-test-\(UUID().uuidString)"
@@ -1586,14 +1589,14 @@ final class ApplePQCCompatibilityTests: XCTestCase {
         )
     }
 
-    func testAppleRekeyStagingRejectsNonProductionMLDSA87() async throws {
+    func testMLDSA65OnlyAppleRekeyStagingRejectsMLDSA87() async throws {
         do {
             try await PQCAppleRekeyStaging.stageAppleRekey(
                 peerId: "apple-rekey-unsupported-\(UUID().uuidString)",
                 algorithm: "ML-DSA-87",
                 scopeSource: keychain.scopeSource
             )
-            XCTFail("ML-DSA-87 is not a production migration algorithm")
+            XCTFail("The dormant ML-DSA-65 rekey staging path must not relabel material as ML-DSA-87")
         } catch let error as PQCAppleRekeyStaging.StagingError {
             guard case .unsupportedAlgorithm(let algorithm) = error else {
                 return XCTFail("Expected unsupportedAlgorithm, got \(error)")

@@ -12,12 +12,13 @@ settings:
     SWIFT_VERSION: "6.0"
 
 packages:
-  WebRTCLocal:
-    path: LocalPackages/WebRTCLocal
-  OQSRAIILocal:
-    path: LocalPackages/OQSRAIILocal
-  SkyBridgeMediaLocal:
-    path: LocalPackages/SkyBridgeMediaLocal
+  SkyBridgeRoot:
+    path: ..
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    from: 148.0.0
+  SkyBridgeCameraKitLocal:
+    path: ../Packages/SkyBridgeCameraKit
 
 targets:
   SkyBridgeCompass-iOS:
@@ -46,6 +47,7 @@ targets:
           - _sftp-ssh._tcp
           - _smb._tcp
           - _http._tcp
+          - _rtsp._tcp
           - _rdlink._tcp
           - _androidshare._tcp
         NSAppTransportSecurity:
@@ -70,18 +72,28 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     sources:
       - path: SkyBridgeCompassiOS/Sources
+      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/ClassicTransferSafety.swift
+        group: SkyBridgeCompassiOS/Sources/Core/FileTransfer
+      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/STUNMessageCodec.swift
+        group: SkyBridgeCompassiOS/Sources/Core/Network
+      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/InboundFileTransferIOActor.swift
+        group: SkyBridgeCompassiOS/Sources/Core/FileTransfer
       - path: "SkyBridgeCompassiOS/Supporting Files/LaunchScreen.storyboard"
         buildPhase: resources
       - path: SkyBridgeCompassiOS/Resources
         buildPhase: resources
     dependencies:
       - sdk: AppIntents.framework
-      - package: WebRTCLocal
+      - package: WebRTC
         product: WebRTC
-      - package: OQSRAIILocal
+      - package: SkyBridgeRoot
+        product: SkyBridgeQPeriaptRuntime
+      - package: SkyBridgeRoot
         product: OQSRAII
-      - package: SkyBridgeMediaLocal
+      - package: SkyBridgeRoot
         product: SkyBridgeRealtimeMedia
+      - package: SkyBridgeCameraKitLocal
+        product: SkyBridgeCameraKit
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:
@@ -107,6 +119,10 @@ targets:
           "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
         Release:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSRelease.entitlements
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER)"
 
   SkyBridgeCompass-Widgets:
     type: app-extension
@@ -136,6 +152,12 @@ targets:
           "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
           "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
           "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
+        Release:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-WidgetsRelease.entitlements
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER)"
 
   SkyBridgeCompassiOSTests:
     type: bundle.unit-test
@@ -143,6 +165,9 @@ targets:
     hostApplication: SkyBridgeCompass-iOS
     sources:
       - path: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/signed-policy-vectors.json
+        group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
+        buildPhase: resources
     dependencies:
       - target: SkyBridgeCompass-iOS
       - sdk: AppIntents.framework

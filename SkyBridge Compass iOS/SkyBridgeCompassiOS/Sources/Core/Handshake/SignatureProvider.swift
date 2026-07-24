@@ -127,72 +127,223 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
     }
 }
 
-// MARK: - PQCSignatureProvider (ML-DSA-65)
+// MARK: - PQCSignatureProvider (ML-DSA-65 / ML-DSA-87)
 
-/// PQC 签名 Provider (ML-DSA-65)
+public enum PQCSignatureBackend: Sendable {
+    case applePQC
+    case oqs
+    case auto
+}
+
+/// 精确绑定 ML-DSA-65 或 ML-DSA-87 的协议签名 Provider。
+///
+/// Apple CryptoKit 软件密钥支持 65/87。当前 iOS OQS raw-key adapter
+/// 只接收 ML-DSA-65；ML-DSA-87 OQS 请求显式失败，不猜测或换后端。
 public struct PQCSignatureProvider: ProtocolSignatureProvider {
-    public let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    private struct AlgorithmContract: Sendable {
+        let name: String
+        let publicKeyLength: Int
+        let signatureLength: Int
+        let applePrivateKeyLength: Int
+        let oqsPrivateKeyLength: Int
+        let supportsOQSRawKeySigning: Bool
+        let supportsOQSRawKeyVerification: Bool
+    }
+
+    public let signatureAlgorithm: ProtocolSigningAlgorithm
+    private let backend: PQCSignatureBackend
     private static let hasLiboqsBackend = OQSPQCCryptoProvider.quickRuntimeProbe()
-    private static let applePrivateKeyRepresentationLength = 64
-    private static let liboqsPrivateKeyRepresentationLength = 4032
-    private static let mldsa65PublicKeyLength = 1952
-    private static let mldsa65SignatureLength = 3309
+    private static let mldsa65Contract = AlgorithmContract(
+        name: "ML-DSA-65",
+        publicKeyLength: 1_952,
+        signatureLength: 3_309,
+        applePrivateKeyLength: 64,
+        oqsPrivateKeyLength: 4_032,
+        supportsOQSRawKeySigning: true,
+        supportsOQSRawKeyVerification: true
+    )
+    private static let mldsa87Contract = AlgorithmContract(
+        name: "ML-DSA-87",
+        publicKeyLength: 2_592,
+        signatureLength: 4_627,
+        applePrivateKeyLength: 64,
+        oqsPrivateKeyLength: 4_896,
+        supportsOQSRawKeySigning: false,
+        supportsOQSRawKeyVerification: false
+    )
     
-    public init() {}
+    public init(
+        algorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        backend: PQCSignatureBackend = .auto
+    ) {
+        self.signatureAlgorithm = algorithm
+        self.backend = backend
+    }
     
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            if Self.shouldUseLiboqsForSigningBeforeApple(key: key) {
-                do {
-                    return try await OQSPQCCryptoProvider().sign(data: data, using: key)
-                } catch let oqsError {
-                    throw SignatureProviderError.signatureFailed(
-                        "liboqs failed for liboqs-format ML-DSA-65 private key (\(oqsError.localizedDescription)); Apple PQC was not attempted because the key is not an Apple integrityCheckedRepresentation"
-                    )
-                }
-            }
-            do {
-                return try await signWithApplePQC(data, key: key)
-            } catch let appleError {
-                if Self.shouldRetrySignWithLiboqs(key: key) {
-                    do {
-                        return try await OQSPQCCryptoProvider().sign(data: data, using: key)
-                    } catch let oqsError {
-                        throw SignatureProviderError.signatureFailed(
-                            "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
-                        )
-                    }
-                }
-                throw appleError
-            }
-        }
-        #endif
+        let contract = try Self.contract(for: signatureAlgorithm)
 
-        if Self.hasLiboqsBackend {
-            return try await OQSPQCCryptoProvider().sign(data: data, using: key)
+        switch key {
+        case .callback(let signingCallback):
+            // Callback 失败时必须原样失败，不得转用软件密钥或另一后端。
+            let signature = try await signingCallback.sign(data: data)
+            try Self.validateSignatureLength(signature, contract: contract)
+            return signature
+        #if canImport(Security)
+        case .secureEnclaveRef:
+            throw SignatureProviderError.unsupportedKeyHandle(
+                "\(contract.name) CryptoKit Secure Enclave keys must use a typed SigningCallback, not SecKey"
+            )
+        #endif
+        case .softwareKey:
+            break
         }
-        
-        throw SignatureProviderError.pqcBackendUnavailable(
-            "ML-DSA-65 requires iOS 26+ or liboqs integration"
-        )
+
+        let signature: Data
+        switch backend {
+        case .applePQC:
+            signature = try await signWithApplePQC(data, key: key, contract: contract)
+        case .oqs:
+            signature = try await signWithOQS(data, key: key, contract: contract)
+        case .auto:
+            signature = try await signAutomatically(data, key: key, contract: contract)
+        }
+
+        try Self.validateSignatureLength(signature, contract: contract)
+        return signature
     }
     
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        let contract = try Self.contract(for: signatureAlgorithm)
+        try Self.validatePublicKeyLength(publicKey, contract: contract)
+        try Self.validateSignatureLength(signature, contract: contract)
+
+        switch backend {
+        case .applePQC:
+            return try await verifyWithApplePQC(
+                data,
+                signature: signature,
+                publicKey: publicKey,
+                contract: contract
+            )
+        case .oqs:
+            return try await verifyWithOQS(
+                data,
+                signature: signature,
+                publicKey: publicKey,
+                contract: contract
+            )
+        case .auto:
+            return try await verifyAutomatically(
+                data,
+                signature: signature,
+                publicKey: publicKey,
+                contract: contract
+            )
+        }
+    }
+
+    private static func contract(
+        for algorithm: ProtocolSigningAlgorithm
+    ) throws -> AlgorithmContract {
+        switch algorithm {
+        case .mlDSA65:
+            return mldsa65Contract
+        case .mlDSA87:
+            return mldsa87Contract
+        case .ed25519:
+            throw SignatureProviderError.internalInvariantViolated(
+                "PQCSignatureProvider cannot be constructed for Ed25519"
+            )
+        }
+    }
+
+    private static func validatePublicKeyLength(
+        _ publicKey: Data,
+        contract: AlgorithmContract
+    ) throws {
+        guard publicKey.count == contract.publicKeyLength else {
+            throw SignatureProviderError.invalidPublicKeyFormat(
+                "\(contract.name) public key must be \(contract.publicKeyLength) bytes, got \(publicKey.count)"
+            )
+        }
+    }
+
+    private static func validateSignatureLength(
+        _ signature: Data,
+        contract: AlgorithmContract
+    ) throws {
+        guard signature.count == contract.signatureLength else {
+            throw SignatureProviderError.invalidSignatureFormat(
+                "\(contract.name) signature must be \(contract.signatureLength) bytes, got \(signature.count)"
+            )
+        }
+    }
+
+    private func signAutomatically(
+        _ data: Data,
+        key: SigningKeyHandle,
+        contract: AlgorithmContract
+    ) async throws -> Data {
+        guard case .softwareKey(let privateKeyData) = key else {
+            throw SignatureProviderError.internalInvariantViolated(
+                "non-software ML-DSA key bypassed the signing-handle boundary"
+            )
+        }
+
+        if privateKeyData.count == contract.oqsPrivateKeyLength {
+            guard contract.supportsOQSRawKeySigning else {
+                throw SignatureProviderError.pqcBackendUnavailable(
+                    "\(contract.name) liboqs raw-key signing is not connected to the protocol provider"
+                )
+            }
+            return try await signWithOQS(data, key: key, contract: contract)
+        }
+
+        guard privateKeyData.count == contract.applePrivateKeyLength else {
+            throw SignatureProviderError.invalidKeyType(
+                expected: "\(contract.name) Apple private key (\(contract.applePrivateKeyLength) bytes)"
+                    + (contract.supportsOQSRawKeySigning
+                        ? " or liboqs private key (\(contract.oqsPrivateKeyLength) bytes)"
+                        : ""),
+                actual: "\(privateKeyData.count) bytes"
+            )
+        }
+
+        return try await signWithApplePQC(data, key: key, contract: contract)
+    }
+
+    private func verifyAutomatically(
+        _ data: Data,
+        signature: Data,
+        publicKey: Data,
+        contract: AlgorithmContract
+    ) async throws -> Bool {
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
             do {
-                // Apple 返回 false 是确定性的密码学拒绝，必须直接作为最终结果返回；
-                // 不得再用 liboqs 重验，否则验签接受面会变成两个实现的并集
-                //（任一实现的验签缺陷都会成为可利用面，且两实现的行为分歧被静默掩盖）。
-                return try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
+                // Apple 返回 false 是确定性密码学拒绝，不得换实现重验。
+                return try await verifyWithApplePQC(
+                    data,
+                    signature: signature,
+                    publicKey: publicKey,
+                    contract: contract
+                )
             } catch let appleError {
-                // 仅运行性失败（如 CryptoKit 不接受该公钥编码）才回退 liboqs 互操作路径。
-                guard Self.shouldRetryVerifyWithLiboqs(signature: signature, publicKey: publicKey) else {
+                guard Self.shouldRetryVerifyWithLiboqs(
+                    algorithm: signatureAlgorithm,
+                    signature: signature,
+                    publicKey: publicKey
+                ) else {
                     throw appleError
                 }
                 do {
-                    return try await OQSPQCCryptoProvider().verify(data: data, signature: signature, publicKey: publicKey)
+                    return try await verifyWithOQS(
+                        data,
+                        signature: signature,
+                        publicKey: publicKey,
+                        contract: contract
+                    )
                 } catch let oqsError {
                     throw SignatureProviderError.verificationFailed(
                         "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
@@ -202,28 +353,40 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         }
         #endif
 
-        if Self.hasLiboqsBackend {
-            return try await OQSPQCCryptoProvider().verify(data: data, signature: signature, publicKey: publicKey)
+        guard contract.supportsOQSRawKeyVerification else {
+            throw SignatureProviderError.pqcBackendUnavailable(
+                "\(contract.name) verification requires Apple CryptoKit on iOS 26+; liboqs raw-key verification is not connected to this provider"
+            )
         }
-        
-        throw SignatureProviderError.pqcBackendUnavailable(
-            "ML-DSA-65 verification requires iOS 26+ or liboqs integration"
+        return try await verifyWithOQS(
+            data,
+            signature: signature,
+            publicKey: publicKey,
+            contract: contract
         )
     }
-    
+
     #if HAS_APPLE_PQC_SDK
     // internal 以便测试锁定回退决策语义（防止条件被无意放宽，扩大验签/签名回退面）。
-    static func shouldUseLiboqsForSigningBeforeApple(key: SigningKeyHandle) -> Bool {
-        shouldRetrySignWithLiboqs(key: key)
+    static func shouldUseLiboqsForSigningBeforeApple(
+        algorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        key: SigningKeyHandle
+    ) -> Bool {
+        shouldRetrySignWithLiboqs(algorithm: algorithm, key: key)
     }
 
-    static func shouldRetrySignWithLiboqs(key: SigningKeyHandle) -> Bool {
-        guard hasLiboqsBackend else { return false }
+    static func shouldRetrySignWithLiboqs(
+        algorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        key: SigningKeyHandle
+    ) -> Bool {
+        guard hasLiboqsBackend,
+              let contract = try? contract(for: algorithm),
+              contract.supportsOQSRawKeySigning else {
+            return false
+        }
         switch key {
         case .softwareKey(let privateKeyData):
-            // 仅标准 liboqs 私钥（4032 字节）才回退；其余长度属于密钥格式非法，
-            // 应直接抛出 Apple 的 invalidKeyType，避免错误被包装成"双后端失败"而掩盖真实原因。
-            return privateKeyData.count == liboqsPrivateKeyRepresentationLength
+            return privateKeyData.count == contract.oqsPrivateKeyLength
         case .callback:
             return false
         #if canImport(Security)
@@ -233,44 +396,150 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         }
     }
 
-    static func shouldRetryVerifyWithLiboqs(signature: Data, publicKey: Data) -> Bool {
-        hasLiboqsBackend
-            && publicKey.count == mldsa65PublicKeyLength
-            && signature.count == mldsa65SignatureLength
-    }
-
-    @available(iOS 26.0, macOS 26.0, *)
-    private func signWithApplePQC(_ data: Data, key: SigningKeyHandle) async throws -> Data {
-        switch key {
-        case .softwareKey(let privateKeyData):
-            // CryptoKit (iOS 26/macOS 26) 约定：MLDSA65.PrivateKey.integrityCheckedRepresentation 为 64 bytes（紧凑格式）
-            guard privateKeyData.count == Self.applePrivateKeyRepresentationLength else {
-                throw SignatureProviderError.invalidKeyType(
-                    expected: "ML-DSA-65 private key (64 bytes integrityCheckedRepresentation)",
-                    actual: "\(privateKeyData.count) bytes"
-                )
-            }
-            let privateKey = try MLDSA65.PrivateKey(integrityCheckedRepresentation: privateKeyData)
-            return try privateKey.signature(for: data)
-            
-        case .callback(let signingCallback):
-            return try await signingCallback.sign(data: data)
-            
-        #if canImport(Security)
-        case .secureEnclaveRef:
-            throw SignatureProviderError.unsupportedKeyHandle(
-                "Secure Enclave does not support ML-DSA-65"
-            )
-        #endif
+    static func shouldRetryVerifyWithLiboqs(
+        algorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        signature: Data,
+        publicKey: Data
+    ) -> Bool {
+        guard hasLiboqsBackend,
+              let contract = try? contract(for: algorithm),
+              contract.supportsOQSRawKeyVerification else {
+            return false
         }
-    }
-    
-    @available(iOS 26.0, macOS 26.0, *)
-    private func verifyWithApplePQC(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
-        let publicKeyObj = try MLDSA65.PublicKey(rawRepresentation: publicKey)
-        return publicKeyObj.isValidSignature(signature, for: data)
+        return publicKey.count == contract.publicKeyLength
+            && signature.count == contract.signatureLength
     }
     #endif
+
+    private func signWithApplePQC(
+        _ data: Data,
+        key: SigningKeyHandle,
+        contract: AlgorithmContract
+    ) async throws -> Data {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            switch key {
+            case .softwareKey(let privateKeyData):
+                guard privateKeyData.count == contract.applePrivateKeyLength else {
+                    throw SignatureProviderError.invalidKeyType(
+                        expected: "\(contract.name) private key (\(contract.applePrivateKeyLength) bytes integrityCheckedRepresentation)",
+                        actual: "\(privateKeyData.count) bytes"
+                    )
+                }
+                switch signatureAlgorithm {
+                case .mlDSA65:
+                    let privateKey = try MLDSA65.PrivateKey(
+                        integrityCheckedRepresentation: privateKeyData
+                    )
+                    return try privateKey.signature(for: data)
+                case .mlDSA87:
+                    let privateKey = try MLDSA87.PrivateKey(
+                        integrityCheckedRepresentation: privateKeyData
+                    )
+                    return try privateKey.signature(for: data)
+                case .ed25519:
+                    throw SignatureProviderError.internalInvariantViolated(
+                        "PQCSignatureProvider cannot sign Ed25519"
+                    )
+                }
+
+            case .callback(let signingCallback):
+                let signature = try await signingCallback.sign(data: data)
+                try Self.validateSignatureLength(signature, contract: contract)
+                return signature
+
+            #if canImport(Security)
+            case .secureEnclaveRef:
+                throw SignatureProviderError.unsupportedKeyHandle(
+                    "\(contract.name) CryptoKit Secure Enclave keys must use a typed SigningCallback"
+                )
+            #endif
+            }
+        }
+        #endif
+        throw SignatureProviderError.pqcBackendUnavailable(
+            "\(contract.name) Apple CryptoKit requires iOS 26+ with the PQC SDK"
+        )
+    }
+    
+    private func verifyWithApplePQC(
+        _ data: Data,
+        signature: Data,
+        publicKey: Data,
+        contract: AlgorithmContract
+    ) async throws -> Bool {
+        try Self.validatePublicKeyLength(publicKey, contract: contract)
+        try Self.validateSignatureLength(signature, contract: contract)
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            switch signatureAlgorithm {
+            case .mlDSA65:
+                let key = try MLDSA65.PublicKey(rawRepresentation: publicKey)
+                return key.isValidSignature(signature, for: data)
+            case .mlDSA87:
+                let key = try MLDSA87.PublicKey(rawRepresentation: publicKey)
+                return key.isValidSignature(signature, for: data)
+            case .ed25519:
+                throw SignatureProviderError.internalInvariantViolated(
+                    "PQCSignatureProvider cannot verify Ed25519"
+                )
+            }
+        }
+        #endif
+        throw SignatureProviderError.pqcBackendUnavailable(
+            "\(contract.name) Apple CryptoKit requires iOS 26+ with the PQC SDK"
+        )
+    }
+
+    private func signWithOQS(
+        _ data: Data,
+        key: SigningKeyHandle,
+        contract: AlgorithmContract
+    ) async throws -> Data {
+        guard contract.supportsOQSRawKeySigning else {
+            throw SignatureProviderError.pqcBackendUnavailable(
+                "\(contract.name) liboqs raw-key signing is not connected to the protocol provider"
+            )
+        }
+        guard Self.hasLiboqsBackend else {
+            throw SignatureProviderError.pqcBackendUnavailable("liboqs backend is unavailable")
+        }
+        guard case .softwareKey(let privateKeyData) = key else {
+            throw SignatureProviderError.internalInvariantViolated(
+                "non-software ML-DSA key bypassed the signing-handle boundary"
+            )
+        }
+        guard privateKeyData.count == contract.oqsPrivateKeyLength else {
+            throw SignatureProviderError.invalidKeyType(
+                expected: "\(contract.name) liboqs private key (\(contract.oqsPrivateKeyLength) bytes)",
+                actual: "\(privateKeyData.count) bytes"
+            )
+        }
+        return try await OQSPQCCryptoProvider().sign(data: data, using: key)
+    }
+
+    private func verifyWithOQS(
+        _ data: Data,
+        signature: Data,
+        publicKey: Data,
+        contract: AlgorithmContract
+    ) async throws -> Bool {
+        guard contract.supportsOQSRawKeyVerification else {
+            throw SignatureProviderError.pqcBackendUnavailable(
+                "\(contract.name) liboqs raw-key verification is not connected to the protocol provider"
+            )
+        }
+        guard Self.hasLiboqsBackend else {
+            throw SignatureProviderError.pqcBackendUnavailable("liboqs backend is unavailable")
+        }
+        try Self.validatePublicKeyLength(publicKey, contract: contract)
+        try Self.validateSignatureLength(signature, contract: contract)
+        return try await OQSPQCCryptoProvider().verify(
+            data: data,
+            signature: signature,
+            publicKey: publicKey
+        )
+    }
 }
 
 // MARK: - P256SePoPProvider
@@ -334,14 +603,20 @@ public struct ProtocolSignatureProviderSelector {
         case .ed25519:
             return ClassicSignatureProvider()
         case .mlDSA65:
-            return PQCSignatureProvider()
+            return PQCSignatureProvider(algorithm: .mlDSA65, backend: .auto)
+        case .mlDSA87:
+            return PQCSignatureProvider(algorithm: .mlDSA87, backend: .auto)
         }
     }
     
     public static func select(for tier: CryptoTier) -> any ProtocolSignatureProvider {
         switch tier {
-        case .nativePQC, .liboqsPQC:
-            return PQCSignatureProvider()
+        case .qperiaptPQC:
+            return PQCSignatureProvider(algorithm: .mlDSA65, backend: .oqs)
+        case .nativePQC:
+            return PQCSignatureProvider(algorithm: .mlDSA65, backend: .applePQC)
+        case .liboqsPQC:
+            return PQCSignatureProvider(algorithm: .mlDSA65, backend: .oqs)
         case .classic:
             return ClassicSignatureProvider()
         }

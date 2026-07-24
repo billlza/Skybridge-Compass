@@ -22,7 +22,7 @@ enum StrictPQCAdmissionGate {
         localPQCSuitesAvailable: Bool
     ) -> StrictPQCAdmissionRejection? {
         guard policy.requirePQC else { return nil }
-        guard peerSupportedSuites.contains(where: { $0.isPQCGroup && $0.isNegotiable }) else {
+        guard peerSupportedSuites.contains(where: { $0.isPQCGroup }) else {
             return .peerOfferedClassicOnly
         }
         guard localPQCSuitesAvailable else {

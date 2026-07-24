@@ -18,10 +18,6 @@ public struct FileTransferView: View {
     @State private var qrCodeString = ""
     @State private var previewingFile: PreviewedFile?
     @State private var transferErrorMessage: String?
- // 调试面板：记录最近一次整文件HMAC与签名校验结果
-    @State private var lastHmacTagHex: String = ""
-    @State private var lastSignatureOk: Bool = false
-    @State private var lastSigTransferId: String = ""
 
  // 威胁警报状态 - Requirements: 4.3
     @State private var showingThreatAlert = false
@@ -41,18 +37,6 @@ public struct FileTransferView: View {
  // 主内容区域
             mainContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileHmacTagReported"))) { note in
-            if let info = note.userInfo, let hex = info["hmacTagHex"] as? String, let tid = info["transferId"] as? String {
-                lastHmacTagHex = hex
-                lastSigTransferId = tid
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileSignatureVerified"))) { note in
-            if let info = note.userInfo, let ok = info["ok"] as? Bool, let tid = info["transferId"] as? String {
-                lastSignatureOk = ok
-                lastSigTransferId = tid
-            }
         }
  // 顶部不再显示“二维码/齿轮”按钮，设置入口保留在“设置”标签
         .sheet(item: $previewingFile) { previewFile in
@@ -462,42 +446,6 @@ public struct FileTransferView: View {
                         ForEach(fileTransferManager.transferHistory) { transfer in
                             EnhancedHistoryRowView(transfer: transfer)
                         }
- // 调试面板：整文件 HMAC 与签名校验并排显示
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(LocalizationManager.shared.localizedString("fileTransfer.debug.title"))
-                                .font(.headline)
-                                .fontWeight(.semibold)
-                            HStack(alignment: .top, spacing: 16) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(LocalizationManager.shared.localizedString("fileTransfer.debug.hmacTagHex"))
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text(lastHmacTagHex.isEmpty ? LocalizationManager.shared.localizedString("common.none") : lastHmacTagHex)
-                                        .font(.system(.footnote, design: .monospaced))
-                                        .lineLimit(3)
-                                }
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(LocalizationManager.shared.localizedString("fileTransfer.debug.signatureResult"))
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    HStack(spacing: 6) {
-                                        Image(systemName: lastSignatureOk ? "checkmark.seal.fill" : "xmark.seal")
-                                            .foregroundColor(lastSignatureOk ? .green : .red)
-                                        Text(lastSigTransferId.isEmpty ? LocalizationManager.shared.localizedString("common.none") : lastSigTransferId)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                Spacer()
-                            }
-                            .padding()
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                            )
-                        }
-                        .padding(.horizontal)
                     }
                     .padding(.horizontal)
                 }
@@ -616,6 +564,7 @@ public struct FileTransferView: View {
             let filesToSend = selectedFiles
             var failedFiles: [URL] = []
             var failureMessages: [String] = []
+            var requiresExplicitTargetSelection = false
 
             for fileURL in filesToSend {
                 do {
@@ -634,6 +583,10 @@ public struct FileTransferView: View {
                     selectedFiles.removeAll { $0 == fileURL }
                     continue
                 } catch {
+                    if let transferError = error as? FileTransferError,
+                       case .ambiguousTarget = transferError {
+                        requiresExplicitTargetSelection = true
+                    }
                     failedFiles.append(fileURL)
                     failureMessages.append("\(fileURL.lastPathComponent): \(error.localizedDescription)")
                     SkyBridgeLogger.ui.error("传输失败: \(error.localizedDescription, privacy: .private)")
@@ -646,7 +599,10 @@ public struct FileTransferView: View {
             if !failureMessages.isEmpty {
                 let details = failureMessages.prefix(3).joined(separator: "\n")
                 let suffix = failureMessages.count > 3 ? "\n..." : ""
-                transferErrorMessage = "设备离线或没有可用的已认证传输会话。待发送文件已保留，请重新连接后重试。\n\n\(details)\(suffix)"
+                let guidance = requiresExplicitTargetSelection
+                    ? "检测到多个已认证设备。为避免误发，请从目标设备的详情页发起传输。"
+                    : "设备离线或没有可用的已认证传输会话。待发送文件已保留，请重新连接后重试。"
+                transferErrorMessage = "\(guidance)\n\n\(details)\(suffix)"
             }
         }
     }
@@ -901,10 +857,18 @@ private struct ModernTransferRowView: View {
 private struct CompactTransferRowView: View {
     let transfer: FileTransfer
 
+    private var hasOperationalWarning: Bool {
+        transfer.status == .completed && transfer.error != nil
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(transfer.status == .completed ? .green : .red)
+            Image(systemName: transfer.receiptDeliveryStatus == .unknown || hasOperationalWarning
+                ? "exclamationmark.triangle.fill"
+                : (transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                .foregroundColor(transfer.receiptDeliveryStatus == .unknown || hasOperationalWarning
+                    ? .orange
+                    : (transfer.status == .completed ? .green : .red))
                 .font(.caption)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -917,6 +881,20 @@ private struct CompactTransferRowView: View {
                     Text(formatDate(completedAt))
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+
+                if transfer.receiptDeliveryStatus == .unknown {
+                    Text(LocalizationManager.shared.localizedString("fileTransfer.receiptDeliveryUnknown"))
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
+                }
+
+                if hasOperationalWarning, let warning = transfer.error {
+                    Text(warning)
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
                 }
             }
 
@@ -937,11 +915,19 @@ private struct EnhancedHistoryRowView: View {
     let transfer: FileTransfer
     @State private var showingScanDetails = false
 
+    private var hasOperationalWarning: Bool {
+        transfer.status == .completed && transfer.error != nil
+    }
+
     var body: some View {
         HStack(spacing: 12) {
  // 状态图标
-            Image(systemName: transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(transfer.status == .completed ? .green : .red)
+            Image(systemName: transfer.receiptDeliveryStatus == .unknown || hasOperationalWarning
+                ? "exclamationmark.triangle.fill"
+                : (transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                .foregroundColor(transfer.receiptDeliveryStatus == .unknown || hasOperationalWarning
+                    ? .orange
+                    : (transfer.status == .completed ? .green : .red))
                 .font(.title2)
 
  // 文件信息
@@ -976,6 +962,21 @@ private struct EnhancedHistoryRowView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                }
+
+                if transfer.receiptDeliveryStatus == .unknown {
+                    Text(LocalizationManager.shared.localizedString("fileTransfer.receiptDeliveryUnknown"))
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
+                }
+
+
+                if hasOperationalWarning, let warning = transfer.error {
+                    Text(warning)
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
                 }
             }
 

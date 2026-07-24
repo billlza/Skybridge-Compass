@@ -72,10 +72,12 @@ actor SignedKEMRefreshRequestAdmissionGate {
         return .allowed
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     func clearForTesting() {
         seenRequestHashes.removeAll()
         requesterWindows.removeAll()
     }
+#endif
 
     private func prune(now: TimeInterval) {
         let replayCutoff = now - ttl

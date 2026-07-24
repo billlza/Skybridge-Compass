@@ -19,7 +19,7 @@ final class RemoteVideoTrackHeartbeatRenderer: NSObject, RTCVideoRenderer {
         guard size.width > 0, size.height > 0 else { return }
         if !loggedFirstSize {
             loggedFirstSize = true
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-track-renderer-size session=\(sessionId) trackId=\(trackId) size=\(Int(size.width))x\(Int(size.height)) source=heartbeat-renderer"
             )
         }
@@ -35,7 +35,7 @@ final class RemoteVideoTrackHeartbeatRenderer: NSObject, RTCVideoRenderer {
         guard measuredSize.width > 0, measuredSize.height > 0 else { return }
         if !loggedFirstFrame {
             loggedFirstFrame = true
-            SkyBridgeSmokeTraceWriter.appendStatus(
+            SkyBridgeDiagnosticTrace.appendStatus(
                 "native-track-renderer-frame session=\(sessionId) trackId=\(trackId) size=\(Int(measuredSize.width))x\(Int(measuredSize.height)) source=heartbeat-renderer"
             )
         }

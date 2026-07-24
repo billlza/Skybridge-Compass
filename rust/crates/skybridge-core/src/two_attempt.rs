@@ -39,17 +39,17 @@ use crate::policy::{
 };
 use crate::{CryptoSuite, ProtocolSigningAlgorithm};
 
-/// The local ML-DSA-65 identity used to sign an authorized [`crate::DowngradeEvent`].
+/// The local ML-DSA identity used to sign an authorized [`crate::DowngradeEvent`].
 ///
 /// This is the same key material the PQC handshake signs MessageA with; the driver
 /// borrows it only to produce the detached audit signature.
 #[derive(Clone)]
 pub struct DowngradeSigningIdentity {
-    /// Always [`ProtocolSigningAlgorithm::MlDsa65`] for a real signer.
+    /// Exact ML-DSA algorithm for the active protocol identity.
     pub algorithm: ProtocolSigningAlgorithm,
-    /// ML-DSA-65 public key (carried into the signed event for verification).
+    /// Algorithm-matched ML-DSA public key (carried for verification).
     pub public_key: Vec<u8>,
-    /// ML-DSA-65 secret key (used to produce the detached signature; never emitted).
+    /// Algorithm-matched ML-DSA secret key (never emitted).
     pub secret_key: Vec<u8>,
 }
 
@@ -237,7 +237,7 @@ impl<'gate, 'id> TwoAttemptHandshakeDriver<'gate, 'id> {
             }
         };
 
-        // Sign the authorized event with the local ML-DSA-65 identity and hand the
+        // Sign the authorized event with the local ML-DSA identity and hand the
         // tamper-evident record to the sink *before* sending any Classic MessageA.
         let signed = SignedDowngradeEvent::sign(
             event,

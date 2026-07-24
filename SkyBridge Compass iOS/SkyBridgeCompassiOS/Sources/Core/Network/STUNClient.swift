@@ -8,36 +8,7 @@
 
 import Foundation
 import Network
-
-// MARK: - STUN Message Type
-
-/// STUN 消息类型
-public struct STUNMessageType {
-    public static let bindingRequest: UInt16 = 0x0001
-    public static let bindingResponse: UInt16 = 0x0101
-    public static let bindingErrorResponse: UInt16 = 0x0111
-}
-
-// MARK: - STUN Attribute Type
-
-/// STUN 属性类型
-public struct STUNAttributeType {
-    public static let mappedAddress: UInt16 = 0x0001
-    public static let responseAddress: UInt16 = 0x0002
-    public static let changeRequest: UInt16 = 0x0003
-    public static let sourceAddress: UInt16 = 0x0004
-    public static let changedAddress: UInt16 = 0x0005
-    public static let username: UInt16 = 0x0006
-    public static let password: UInt16 = 0x0007
-    public static let messageIntegrity: UInt16 = 0x0008
-    public static let errorCode: UInt16 = 0x0009
-    public static let unknownAttributes: UInt16 = 0x000A
-    public static let reflectedFrom: UInt16 = 0x000B
-    public static let xorMappedAddress: UInt16 = 0x0020
-    public static let software: UInt16 = 0x8022
-    public static let alternateServer: UInt16 = 0x8023
-    public static let fingerprint: UInt16 = 0x8028
-}
+import os
 
 // MARK: - STUN Result
 
@@ -67,12 +38,13 @@ public struct STUNResult: Sendable {
 // MARK: - STUN Error
 
 /// STUN 错误
-public enum STUNError: Error, LocalizedError, Sendable {
+public enum STUNError: Error, LocalizedError, Sendable, Equatable {
     case connectionFailed
     case timeout
     case invalidResponse
     case noMappedAddress
     case serverUnreachable
+    case invalidConfiguration
     
     public var errorDescription: String? {
         switch self {
@@ -81,6 +53,277 @@ public enum STUNError: Error, LocalizedError, Sendable {
         case .invalidResponse: return "无效的 STUN 响应"
         case .noMappedAddress: return "未能获取映射地址"
         case .serverUnreachable: return "STUN 服务器不可达"
+        case .invalidConfiguration: return "STUN 超时配置无效"
+        }
+    }
+}
+
+protocol IOSSTUNDatagramConnection: AnyObject, Sendable {
+    func setStateUpdateHandler(
+        _ handler: @escaping @Sendable (NWConnection.State) -> Void
+    )
+    func clearStateUpdateHandler()
+    func start()
+    func send(
+        _ data: Data,
+        completion: @escaping @Sendable (Error?) -> Void
+    )
+    func receiveMessage(
+        completion: @escaping @Sendable (Data?, Bool, Error?) -> Void
+    )
+    func cancel()
+}
+
+private final class NWIOSSTUNDatagramConnection: IOSSTUNDatagramConnection, @unchecked Sendable {
+    private let connection: NWConnection
+    private let queue = DispatchQueue(label: "com.skybridge.stun", qos: .utility)
+
+    init(endpoint: NWEndpoint) {
+        let parameters = NWParameters.udp
+        parameters.includePeerToPeer = true
+        connection = NWConnection(to: endpoint, using: parameters)
+    }
+
+    func setStateUpdateHandler(
+        _ handler: @escaping @Sendable (NWConnection.State) -> Void
+    ) {
+        connection.stateUpdateHandler = handler
+    }
+
+    func clearStateUpdateHandler() {
+        connection.stateUpdateHandler = nil
+    }
+
+    func start() {
+        connection.start(queue: queue)
+    }
+
+    func send(
+        _ data: Data,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        connection.send(content: data, completion: .contentProcessed(completion))
+    }
+
+    func receiveMessage(
+        completion: @escaping @Sendable (Data?, Bool, Error?) -> Void
+    ) {
+        connection.receiveMessage { data, _, isComplete, error in
+            completion(data, isComplete, error)
+        }
+    }
+
+    func cancel() {
+        connection.cancel()
+    }
+}
+
+private final class IOSSTUNQueryCompletion: @unchecked Sendable {
+    private enum Stage {
+        case waitingForReady
+        case sending
+        case receiving
+        case completed
+    }
+
+    private struct State {
+        var stage = Stage.waitingForReady
+        var timeoutTask: Task<Void, Never>?
+        var connection: (any IOSSTUNDatagramConnection)?
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+    private let continuation: CheckedContinuation<STUNMappedAddress, Error>
+
+    init(
+        continuation: CheckedContinuation<STUNMappedAddress, Error>,
+        connection: any IOSSTUNDatagramConnection
+    ) {
+        self.continuation = continuation
+        state = OSAllocatedUnfairLock(
+            initialState: State(connection: connection)
+        )
+    }
+
+    func beginSending() -> Bool {
+        state.withLock { state in
+            guard state.stage == .waitingForReady else { return false }
+            state.stage = .sending
+            return true
+        }
+    }
+
+    func beginReceiving() -> Bool {
+        state.withLock { state in
+            guard state.stage == .sending else { return false }
+            state.stage = .receiving
+            return true
+        }
+    }
+
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        let shouldCancel = state.withLock { state -> Bool in
+            guard state.stage != .completed else { return true }
+            state.timeoutTask = task
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func finish(_ result: Result<STUNMappedAddress, Error>) {
+        let completion = state.withLock { state -> (
+            shouldResume: Bool,
+            timeoutTask: Task<Void, Never>?,
+            connection: (any IOSSTUNDatagramConnection)?
+        ) in
+            guard state.stage != .completed else { return (false, nil, nil) }
+            state.stage = .completed
+            defer {
+                state.timeoutTask = nil
+                state.connection = nil
+            }
+            return (true, state.timeoutTask, state.connection)
+        }
+        guard completion.shouldResume else { return }
+
+        // Cleanup is deliberately outside the lock: NWConnection.cancel() may
+        // synchronously re-enter its state handler.
+        completion.timeoutTask?.cancel()
+        completion.connection?.clearStateUpdateHandler()
+        completion.connection?.cancel()
+        continuation.resume(with: result)
+    }
+}
+
+private final class WeakIOSSTUNDatagramConnection: @unchecked Sendable {
+    weak var value: (any IOSSTUNDatagramConnection)?
+
+    init(_ value: any IOSSTUNDatagramConnection) {
+        self.value = value
+    }
+}
+
+private final class IOSSTUNQueryCancellationRelay: @unchecked Sendable {
+    private struct State {
+        var isCancelled = false
+        var completion: IOSSTUNQueryCompletion?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Registers the completion boundary. Returning `false` means cancellation
+    /// arrived before registration and the caller must finish immediately.
+    func register(_ completion: IOSSTUNQueryCompletion) -> Bool {
+        state.withLock { state in
+            guard !state.isCancelled else { return false }
+            state.completion = completion
+            return true
+        }
+    }
+
+    func cancel() {
+        let completion = state.withLock { state -> IOSSTUNQueryCompletion? in
+            state.isCancelled = true
+            return state.completion
+        }
+        completion?.finish(.failure(CancellationError()))
+    }
+}
+
+enum IOSSTUNQueryPipeline {
+    static func query(
+        connection: any IOSSTUNDatagramConnection,
+        timeout: Duration
+    ) async throws -> STUNMappedAddress {
+        let cancellationRelay = IOSSTUNQueryCancellationRelay()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let completion = IOSSTUNQueryCompletion(
+                    continuation: continuation,
+                    connection: connection
+                )
+                let weakConnection = WeakIOSSTUNDatagramConnection(connection)
+                let request = STUNMessageCodec.makeBindingRequest()
+
+                // Install the handler before publishing the completion to the
+                // cancellation relay. If cancellation won the race, finish()
+                // can now remove every callback installed by this operation.
+                connection.setStateUpdateHandler { state in
+                    switch state {
+                    case .ready:
+                        guard completion.beginSending() else { return }
+                        guard let activeConnection = weakConnection.value else {
+                            completion.finish(.failure(STUNError.connectionFailed))
+                            return
+                        }
+                        activeConnection.send(request.payload) { sendError in
+                            guard sendError == nil else {
+                                completion.finish(.failure(STUNError.connectionFailed))
+                                return
+                            }
+                            guard completion.beginReceiving() else { return }
+                            guard let activeConnection = weakConnection.value else {
+                                completion.finish(.failure(STUNError.connectionFailed))
+                                return
+                            }
+                            activeConnection.receiveMessage { data, isComplete, receiveError in
+                                guard receiveError == nil else {
+                                    completion.finish(.failure(STUNError.connectionFailed))
+                                    return
+                                }
+                                guard isComplete, let data else {
+                                    completion.finish(.failure(STUNError.invalidResponse))
+                                    return
+                                }
+                                do {
+                                    let mappedAddress = try STUNMessageCodec.parseBindingResponse(
+                                        data,
+                                        expectedTransactionID: request.transactionID
+                                    )
+                                    completion.finish(.success(mappedAddress))
+                                } catch STUNMessageCodecError.missingMappedAddress {
+                                    completion.finish(.failure(STUNError.noMappedAddress))
+                                } catch {
+                                    completion.finish(.failure(STUNError.invalidResponse))
+                                }
+                            }
+                        }
+                    case .failed, .cancelled:
+                        completion.finish(.failure(STUNError.connectionFailed))
+                    default:
+                        break
+                    }
+                }
+
+                guard cancellationRelay.register(completion) else {
+                    completion.finish(.failure(CancellationError()))
+                    return
+                }
+
+                let timeoutTask = Task { @Sendable in
+                    do {
+                        try await Task.sleep(for: timeout)
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        completion.finish(.failure(STUNError.connectionFailed))
+                        return
+                    }
+                    completion.finish(.failure(STUNError.timeout))
+                }
+                completion.installTimeoutTask(timeoutTask)
+
+                guard !Task.isCancelled else {
+                    cancellationRelay.cancel()
+                    return
+                }
+                connection.start()
+            }
+        } onCancel: {
+            cancellationRelay.cancel()
         }
     }
 }
@@ -90,36 +333,52 @@ public enum STUNError: Error, LocalizedError, Sendable {
 /// STUN 客户端
 @available(iOS 17.0, *)
 public actor STUNClient {
+    typealias ServerQuery = @Sendable (STUNServer, Duration) async throws -> STUNMappedAddress
     
     // MARK: - Properties
     
     private let servers: [STUNServer]
     private let timeout: TimeInterval
-    private let queue = DispatchQueue(label: "com.skybridge.stun", qos: .utility)
-    
-    /// Magic Cookie (RFC 5389)
-    private let magicCookie: UInt32 = 0x2112A442
+    private let serverQuery: ServerQuery
     
     // MARK: - Initialization
     
     public init(servers: [STUNServer] = STUNServer.defaultServers, timeout: TimeInterval = 5.0) {
         self.servers = servers
         self.timeout = timeout
+        serverQuery = Self.liveServerQuery
+    }
+
+    init(
+        servers: [STUNServer],
+        timeout: TimeInterval,
+        serverQuery: @escaping ServerQuery
+    ) {
+        self.servers = servers
+        self.timeout = timeout
+        self.serverQuery = serverQuery
     }
     
     // MARK: - Public Methods
     
     /// 发现公网地址
     public func discoverPublicAddress() async throws -> STUNResult {
-        // 尝试所有 STUN 服务器
+        _ = try validatedTimeout()
         for server in servers {
             do {
                 let result = try await queryServer(server)
                 SkyBridgeLogger.shared.info("✅ STUN 发现公网地址: \(result.publicAddress):\(result.publicPort)")
                 return result
-            } catch {
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as STUNError {
+                guard error != .invalidConfiguration else { throw error }
                 SkyBridgeLogger.shared.warning("⚠️ STUN 服务器 \(server.host) 失败: \(error.localizedDescription)")
                 continue
+            } catch {
+                // Preserve unexpected programmer/runtime failures instead of
+                // disguising them as an unreachable STUN server.
+                throw error
             }
         }
         
@@ -128,186 +387,51 @@ public actor STUNClient {
     
     /// 检测 NAT 类型
     public func detectNATType() async throws -> NATType {
-        // 简化的 NAT 类型检测
-        // 完整实现需要多次查询不同的 STUN 服务器
-        
-        guard let firstResult = try? await discoverPublicAddress() else {
-            return .unknown
+        _ = try validatedTimeout()
+        // Two distinct destinations can provide evidence of endpoint-dependent
+        // mapping, but equal mappings alone cannot prove full-cone behavior.
+        // RFC 5780 filtering tests are required before returning a cone type.
+        guard servers.count >= 2 else { return .unknown }
+        let firstResult = try await queryServer(servers[0])
+        let secondResult = try await queryServer(servers[1])
+        if firstResult.publicAddress != secondResult.publicAddress ||
+            firstResult.publicPort != secondResult.publicPort {
+            return .symmetric
         }
-        
-        // 如果公网地址与本地地址相同，则没有 NAT
-        if firstResult.publicAddress == firstResult.localAddress {
-            return .noNAT
-        }
-        
-        // 尝试第二个服务器
-        if servers.count > 1 {
-            let secondServer = servers[1]
-            if let secondResult = try? await queryServer(secondServer) {
-                // 如果两个服务器返回相同的映射地址，可能是锥形 NAT
-                if firstResult.publicAddress == secondResult.publicAddress &&
-                   firstResult.publicPort == secondResult.publicPort {
-                    return .fullCone
-                } else {
-                    return .symmetric
-                }
-            }
-        }
-        
         return .unknown
     }
     
     // MARK: - Private Methods
     
     private func queryServer(_ server: STUNServer) async throws -> STUNResult {
+        let queryTimeout = try validatedTimeout()
+        let mappedAddress = try await serverQuery(server, queryTimeout)
+        return STUNResult(
+            publicAddress: mappedAddress.address,
+            publicPort: mappedAddress.port
+        )
+    }
+
+    private func validatedTimeout() throws -> Duration {
+        guard timeout.isFinite, timeout > 0, timeout <= 300 else {
+            throw STUNError.invalidConfiguration
+        }
+        return .seconds(timeout)
+    }
+
+    private static func liveServerQuery(
+        _ server: STUNServer,
+        _ timeout: Duration
+    ) async throws -> STUNMappedAddress {
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(server.host),
             port: NWEndpoint.Port(integerLiteral: server.port)
         )
-        
-        let parameters = NWParameters.udp
-        parameters.includePeerToPeer = true
-        
-        let connection = NWConnection(to: endpoint, using: parameters)
-        
-        // 等待连接就绪
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    continuation.resume()
-                case .failed(let error):
-                    continuation.resume(throwing: error)
-                case .cancelled:
-                    continuation.resume(throwing: STUNError.connectionFailed)
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-        }
-        
-        defer { connection.cancel() }
-        
-        // 构建并发送 STUN 绑定请求
-        let request = buildBindingRequest()
-        
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: request, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
-        }
-        
-        // 接收响应
-        let response = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 20, maximumLength: 1024) { data, _, _, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let data = data {
-                    continuation.resume(returning: data)
-                } else {
-                    continuation.resume(throwing: STUNError.invalidResponse)
-                }
-            }
-        }
-        
-        // 解析响应
-        return try parseBindingResponse(response)
-    }
-    
-    /// 构建 STUN 绑定请求
-    private func buildBindingRequest() -> Data {
-        var data = Data()
-        
-        // 消息类型 (Binding Request)
-        data.append(contentsOf: withUnsafeBytes(of: STUNMessageType.bindingRequest.bigEndian) { Array($0) })
-        
-        // 消息长度 (0 for simple binding request)
-        data.append(contentsOf: [0x00, 0x00])
-        
-        // Magic Cookie
-        data.append(contentsOf: withUnsafeBytes(of: magicCookie.bigEndian) { Array($0) })
-        
-        // Transaction ID (12 bytes random)
-        var transactionId = [UInt8](repeating: 0, count: 12)
-        for i in 0..<12 {
-            transactionId[i] = UInt8.random(in: 0...255)
-        }
-        data.append(contentsOf: transactionId)
-        
-        return data
-    }
-    
-    /// 解析 STUN 绑定响应
-    private func parseBindingResponse(_ data: Data) throws -> STUNResult {
-        guard data.count >= 20 else {
-            throw STUNError.invalidResponse
-        }
-        
-        // 检查消息类型
-        let messageType = UInt16(data[0]) << 8 | UInt16(data[1])
-        guard messageType == STUNMessageType.bindingResponse else {
-            throw STUNError.invalidResponse
-        }
-        
-        // 消息长度
-        let messageLength = Int(UInt16(data[2]) << 8 | UInt16(data[3]))
-        
-        // 跳过头部 (20 bytes)，解析属性
-        var offset = 20
-        var publicAddress: String?
-        var publicPort: UInt16?
-        
-        while offset + 4 <= 20 + messageLength && offset + 4 <= data.count {
-            let attrType = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
-            let attrLength = Int(UInt16(data[offset + 2]) << 8 | UInt16(data[offset + 3]))
-            
-            offset += 4
-            
-            guard offset + attrLength <= data.count else { break }
-            
-            if attrType == STUNAttributeType.xorMappedAddress {
-                // XOR-MAPPED-ADDRESS
-                if attrLength >= 8 {
-                    let family = data[offset + 1]
-                    let xorPort = UInt16(data[offset + 2]) << 8 | UInt16(data[offset + 3])
-                    publicPort = xorPort ^ UInt16(magicCookie >> 16)
-                    
-                    if family == 0x01 { // IPv4
-                        let xorIP = UInt32(data[offset + 4]) << 24 |
-                                    UInt32(data[offset + 5]) << 16 |
-                                    UInt32(data[offset + 6]) << 8 |
-                                    UInt32(data[offset + 7])
-                        let ip = xorIP ^ magicCookie
-                        publicAddress = "\((ip >> 24) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 8) & 0xFF).\(ip & 0xFF)"
-                    }
-                }
-            } else if attrType == STUNAttributeType.mappedAddress && publicAddress == nil {
-                // MAPPED-ADDRESS (fallback)
-                if attrLength >= 8 {
-                    let family = data[offset + 1]
-                    publicPort = UInt16(data[offset + 2]) << 8 | UInt16(data[offset + 3])
-                    
-                    if family == 0x01 { // IPv4
-                        publicAddress = "\(data[offset + 4]).\(data[offset + 5]).\(data[offset + 6]).\(data[offset + 7])"
-                    }
-                }
-            }
-            
-            // 对齐到 4 字节边界
-            let padding = (4 - (attrLength % 4)) % 4
-            offset += attrLength + padding
-        }
-        
-        guard let address = publicAddress, let port = publicPort else {
-            throw STUNError.noMappedAddress
-        }
-        
-        return STUNResult(publicAddress: address, publicPort: port)
+        let connection = NWIOSSTUNDatagramConnection(endpoint: endpoint)
+        return try await IOSSTUNQueryPipeline.query(
+            connection: connection,
+            timeout: timeout
+        )
     }
 }
 
@@ -356,15 +480,13 @@ public actor NATTraversalHelper {
     }
     
     /// 判断是否可以进行 P2P 直连
-    public func canEstablishDirectConnection(with peerNATType: NATType) async -> Bool {
+    public func canEstablishDirectConnection(with peerNATType: NATType) async throws -> Bool {
         // 获取本地 NAT 类型
         let localNATType: NATType
         if let cached = cachedNATType {
             localNATType = cached
-        } else if let detected = try? await getNATType() {
-            localNATType = detected
         } else {
-            return false
+            localNATType = try await getNATType()
         }
         
         // NAT 兼容性矩阵
@@ -391,4 +513,3 @@ public actor NATTraversalHelper {
         }
     }
 }
-

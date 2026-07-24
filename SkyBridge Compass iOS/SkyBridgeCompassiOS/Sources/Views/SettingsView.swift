@@ -10,6 +10,8 @@ struct SettingsView: View {
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var showLogoutConfirmation = false
+    @State private var showLogoutError = false
+    @State private var logoutErrorMessage = ""
 
     private func t(_ key: String) -> String {
         localizationManager.localized(key)
@@ -52,6 +54,11 @@ struct SettingsView: View {
                     logout()
                 }
                 Button(t("common.cancel"), role: .cancel) {}
+            }
+            .alert("退出登录失败", isPresented: $showLogoutError) {
+                Button(t("common.ok"), role: .cancel) {}
+            } message: {
+                Text(logoutErrorMessage)
             }
         }
     }
@@ -290,7 +297,12 @@ struct SettingsView: View {
     
     private func logout() {
         Task {
-            await authManager.signOut()
+            do {
+                try await authManager.signOut()
+            } catch {
+                logoutErrorMessage = error.localizedDescription
+                showLogoutError = true
+            }
         }
     }
 
@@ -322,7 +334,6 @@ struct SettingsView: View {
         }
 
         guard currentTier == .nativePQC || currentTier == .liboqsPQC,
-              currentSuite.isNegotiable,
               currentSuite.isPQCGroup
         else {
             return PQCPolicyStatusPresentation(
@@ -365,8 +376,22 @@ struct SettingsView: View {
 
 @available(iOS 17.0, *)
 struct PQCSecuritySettingsView: View {
+    @EnvironmentObject private var authManager: AuthenticationManager
     @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var errorMessage: String?
+    @State private var requestedProtocolSigningAlgorithm =
+        ProtocolSigningIdentityPolicy.requestedPQCAlgorithm()
+    @State private var requestedSecureEnclave =
+        ProtocolSigningIdentityPolicy.requestedProtection() == .secureEnclaveRequired
+    @State private var activeProtocolSigningAlgorithm =
+        ProtocolSigningIdentityPolicy.requestedPQCAlgorithm()
+    @State private var activeProtocolSigningProtection =
+        ProtocolSigningIdentityPolicy.requestedProtection()
+    @State private var protocolIdentityRuntimeIsActive = false
+    @State private var protocolIdentityRequiresExplicitConfirmation =
+        ProtocolSigningIdentityPolicy.configurationResolution()
+            .needsExplicitConfirmation
+    @State private var isApplyingProtocolIdentity = false
     
     var body: some View {
         List {
@@ -387,6 +412,96 @@ struct PQCSecuritySettingsView: View {
                 LabeledContent("当前套件", value: pqcManager.currentSuite.rawValue)
                 LabeledContent("Provider", value: pqcManager.providerInfo)
                 LabeledContent("安全层级", value: pqcManager.currentTier.rawValue)
+            }
+
+            Section("主协议身份签名") {
+                Picker("ML-DSA 参数集", selection: $requestedProtocolSigningAlgorithm) {
+                    Text("65 · Category 3").tag(ProtocolSigningAlgorithm.mlDSA65)
+                    if Self.mlDSA87SoftwareAvailable {
+                        Text("87 · Category 5").tag(ProtocolSigningAlgorithm.mlDSA87)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if !Self.mlDSA87SoftwareAvailable {
+                    Text("ML-DSA-87 需要 iOS 26+ 与包含 Apple PQC 的正式构建。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+
+                Toggle(
+                    "使用 Secure Enclave 保护 ML-DSA 私钥",
+                    isOn: $requestedSecureEnclave
+                )
+                .disabled(!IOSSecureEnclaveMLDSAIdentityFactory.isAvailable)
+
+                if !IOSSecureEnclaveMLDSAIdentityFactory.isAvailable {
+                    Text(
+                        IOSSecureEnclaveMLDSAIdentityFactory.unavailabilityReason
+                            ?? "此设备当前不能创建 Secure Enclave ML-DSA 密钥。"
+                    )
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+
+                Button {
+                    applyProtocolIdentityConfiguration()
+                } label: {
+                    if isApplyingProtocolIdentity {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在生成并自检…")
+                        }
+                    } else {
+                        Text("应用身份签名配置")
+                    }
+                }
+                .disabled(
+                    isApplyingProtocolIdentity
+                        || (requestedProtocolSigningAlgorithm == .mlDSA87
+                            && !Self.mlDSA87SoftwareAvailable)
+                        || (requestedSecureEnclave
+                            && !IOSSecureEnclaveMLDSAIdentityFactory.isAvailable)
+                )
+
+                LabeledContent(
+                    protocolIdentityRuntimeIsActive ? "已激活算法" : "已配置意图",
+                    value: activeProtocolSigningAlgorithm.rawValue
+                )
+                LabeledContent(
+                    protocolIdentityRuntimeIsActive ? "本机私钥" : "计划私钥",
+                    value: activeProtocolSigningProtection == .secureEnclaveRequired
+                        ? "Secure Enclave"
+                        : "Keychain 软件密钥"
+                )
+
+                if protocolIdentityRequiresExplicitConfirmation {
+                    Text("身份配置记录不完整、损坏或无法证明对应密钥槽。连接已停用；请重新选择并点击“应用身份签名配置”进行显式确认。")
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                } else if !protocolIdentityRuntimeIsActive {
+                    Text("这是已配置意图；运行时恢复密钥并完成签名自检后才会标记为已激活。")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                }
+
+                if activeProtocolSigningAlgorithm == .mlDSA87 {
+                    if protocolIdentityRuntimeIsActive {
+                        Text("本机 ML-DSA-87 主身份已恢复并通过签名自检。")
+                            .font(.footnote)
+                            .foregroundColor(.orange)
+                    } else {
+                        Text("已配置 ML-DSA-87 主身份；运行时恢复密钥并完成签名自检后才会激活。")
+                            .font(.footnote)
+                            .foregroundColor(.orange)
+                    }
+                    Text("跨网络会话要求对端精确绑定原始 87 公钥；尚未重新批准的连接会明确拒绝。其他路径若使用独立的 65 兼容身份，也不会冒充 87。")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                }
+                Text("Secure Enclave 仅约束所选主身份的本机私钥驻留；不宣称对端硬件证明，该精确密钥槽失败时不会回退到软件密钥。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
             }
             
             Section("密钥状态") {
@@ -461,6 +576,9 @@ struct PQCSecuritySettingsView: View {
         .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("后量子加密")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            refreshProtocolIdentityPresentation()
+        }
         .alert(
             "PQC 操作失败",
             isPresented: Binding(
@@ -511,6 +629,115 @@ struct PQCSecuritySettingsView: View {
                 SkyBridgeLogger.shared.error("❌ PQC Provider 重新初始化失败: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func applyProtocolIdentityConfiguration() {
+        let algorithm = requestedProtocolSigningAlgorithm
+        let protection: ProtocolSigningKeyProtection = requestedSecureEnclave
+            ? .secureEnclaveRequired
+            : .softwareKeychain
+        isApplyingProtocolIdentity = true
+        Task { @MainActor in
+            defer { isApplyingProtocolIdentity = false }
+            do {
+                guard let authenticationPrincipal = authManager
+                    .currentPathAuthenticationPrincipal else {
+                    throw IOSCurrentPathDeviceActivationError
+                        .authenticationStateChanged
+                }
+                try await IOSCurrentPathDeviceActivationCoordinator.shared
+                    .activateCurrentIdentityIfNeeded(
+                        authenticationPrincipal: authenticationPrincipal
+                    )
+                let expectedScope = SignalServerClientCompat
+                    .IdentityRotationAuthenticationScope(
+                        tenantID: authenticationPrincipal.tenantID,
+                        userID: authenticationPrincipal.userID
+                    )
+                try await IOSCurrentPathDeviceIdentityRotationCoordinator.shared.rotate(
+                    algorithm: algorithm,
+                    protection: protection,
+                    expectedScope: expectedScope
+                )
+                let committed = try await SkyBridgeiOSCore.shared
+                    .committedActiveProtocolIdentitySnapshot()
+                guard committed.algorithm == algorithm,
+                      committed.protection == protection else {
+                    throw IOSCurrentPathDeviceIdentityRotationError
+                        .localConfigurationChanged
+                }
+                activeProtocolSigningAlgorithm = committed.algorithm
+                activeProtocolSigningProtection = committed.protection
+                protocolIdentityRuntimeIsActive = true
+                do {
+                    try await P2PConnectionManager.instance
+                        .refreshAdvertisingAuthorityIfActive(committed.snapshot)
+                    protocolIdentityRequiresExplicitConfirmation = false
+                } catch {
+                    protocolIdentityRequiresExplicitConfirmation = true
+                    errorMessage = "协议身份已切换，但局域网广播已安全停用：\(error.localizedDescription)"
+                }
+            } catch IOSCurrentPathDeviceIdentityRotationError
+                .localAuthorityCommittedRecoveryRequired(let reason) {
+                var publicationFailure: String?
+                if let committed = try? await SkyBridgeiOSCore.shared
+                    .committedActiveProtocolIdentitySnapshot() {
+                    activeProtocolSigningAlgorithm = committed.algorithm
+                    activeProtocolSigningProtection = committed.protection
+                    protocolIdentityRuntimeIsActive = true
+                    do {
+                        try await P2PConnectionManager.instance
+                            .refreshAdvertisingAuthorityIfActive(committed.snapshot)
+                    } catch {
+                        publicationFailure = error.localizedDescription
+                    }
+                }
+                protocolIdentityRequiresExplicitConfirmation = true
+                if let publicationFailure {
+                    errorMessage = "协议身份已切换；恢复记录待清理，局域网广播已安全停用：\(reason)；\(publicationFailure)"
+                } else {
+                    errorMessage = "协议身份已切换，但恢复记录仍待清理：\(reason)"
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                SkyBridgeLogger.shared.error(
+                    "Protocol signing identity configuration failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private static var mlDSA87SoftwareAvailable: Bool {
+#if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, *) {
+            return true
+        }
+#endif
+        return false
+    }
+
+    @MainActor
+    private func refreshProtocolIdentityPresentation() {
+        let configurationResolution = ProtocolSigningIdentityPolicy
+            .configurationResolution()
+        let persistedAlgorithm = ProtocolSigningIdentityPolicy.requestedPQCAlgorithm()
+        let persistedProtection = ProtocolSigningIdentityPolicy.requestedProtection()
+        requestedProtocolSigningAlgorithm = persistedAlgorithm
+        requestedSecureEnclave = persistedProtection == .secureEnclaveRequired
+        if SkyBridgeiOSCore.shared.isInitialized,
+           let runtimeAlgorithm = SkyBridgeiOSCore.shared.signatureProvider?.signatureAlgorithm,
+           runtimeAlgorithm != .ed25519 {
+            activeProtocolSigningAlgorithm = runtimeAlgorithm
+            activeProtocolSigningProtection =
+                SkyBridgeiOSCore.shared.activeProtocolSigningKeyProtection
+            protocolIdentityRuntimeIsActive = true
+        } else {
+            activeProtocolSigningAlgorithm = persistedAlgorithm
+            activeProtocolSigningProtection = persistedProtection
+            protocolIdentityRuntimeIsActive = false
+        }
+        protocolIdentityRequiresExplicitConfirmation = configurationResolution
+            .needsExplicitConfirmation
     }
 }
 
@@ -647,6 +874,7 @@ struct TrustedDevicesView: View {
     @StateObject private var store = TrustedDeviceStore.shared
     @State private var pairingDeviceIds: Set<String> = []
     @State private var pairingError: String?
+    @State private var trustMutationError: String?
 
     private var activeTrustedDevices: [TrustedDeviceStore.TrustedDevice] {
         store.trustedDevices.filter { lifecycleState(for: $0) == .active }
@@ -758,12 +986,12 @@ struct TrustedDevicesView: View {
             if !store.trustedDevices.isEmpty {
                 Section {
                     Button(role: .destructive) {
-                        let aliases = store.trustedDevices.flatMap { store.untrust(deviceId: $0.id) }
-                        store.clearAll()
                         Task {
-                            await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(
-                                deviceIds: aliases
-                            )
+                            do {
+                                try await P2PConnectionManager.instance.forgetAllTrustedDevices()
+                            } catch {
+                                trustMutationError = error.localizedDescription
+                            }
                         }
                     } label: {
                         Text("清空受信任设备")
@@ -774,12 +1002,26 @@ struct TrustedDevicesView: View {
             .scrollContentBackground(.hidden)
             .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("受信任的设备")
+            .alert(
+                "无法更新受信任设备",
+                isPresented: Binding(
+                    get: { trustMutationError != nil },
+                    set: { if !$0 { trustMutationError = nil } }
+                )
+            ) {
+                Button("确定", role: .cancel) {}
+            } message: {
+                Text(trustMutationError ?? "未知错误")
+            }
     }
 
     private func forgetTrustedDevice(_ device: TrustedDeviceStore.TrustedDevice) {
-        let aliases = store.untrust(deviceId: device.id)
         Task {
-            await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: aliases)
+            do {
+                try await P2PConnectionManager.instance.forgetTrustedDevice(deviceId: device.id)
+            } catch {
+                trustMutationError = error.localizedDescription
+            }
         }
     }
 
@@ -1182,6 +1424,7 @@ struct ClipboardSettingsView: View {
 
 struct CloudSyncSettingsView: View {
     @StateObject private var settings = SettingsManager.instance
+    @StateObject private var cloudKitSync = CloudKitSyncManager.instance
 
     var body: some View {
         Form {
@@ -1190,10 +1433,59 @@ struct CloudSyncSettingsView: View {
             } footer: {
                 Text("未在 Xcode Signing 中开启 iCloud/CloudKit 能力时，建议保持关闭。")
             }
+
+            if settings.enableCloudKitSync {
+                Section("同步状态") {
+                    if cloudKitSync.isSyncing {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("正在同步受信任设备…")
+                        }
+                    } else if let errorMessage = cloudKitSync.lastSyncErrorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    } else if let lastSyncDate = cloudKitSync.lastSyncDate {
+                        Label(
+                            "上次成功：\(lastSyncDate.formatted(date: .abbreviated, time: .standard))",
+                            systemImage: "checkmark.icloud.fill"
+                        )
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    } else {
+                        Text("尚未完成同步")
+                            .foregroundColor(.secondary)
+                    }
+
+                    Button("立即同步") {
+                        startManualCloudKitSync()
+                    }
+                    .disabled(cloudKitSync.isSyncing)
+                }
+            }
         }
         .scrollContentBackground(.hidden)
         .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("iCloud 同步")
+        .onChange(of: settings.enableCloudKitSync) { _, enabled in
+            if enabled {
+                startManualCloudKitSync()
+            }
+        }
+    }
+
+    private func startManualCloudKitSync() {
+        Task { @MainActor in
+            do {
+                try await cloudKitSync.refreshTrustedDevices(trigger: .manual)
+            } catch {
+                // The manager publishes the durable error state shown above;
+                // this boundary records context without pretending success.
+                SkyBridgeLogger.shared.error(
+                    "⛔️ 手动 CloudKit 信任同步失败：\(CloudKitSyncManager.safeErrorSummary(error))"
+                )
+            }
+        }
     }
 }
 
@@ -1233,7 +1525,7 @@ struct SupabaseSettingsView: View {
 
             Section {
                 Button("保存并生效") {
-                    save()
+                    Task { await save() }
                 }
                 .disabled(supabaseURL.isEmpty || anonKey.isEmpty)
 
@@ -1254,7 +1546,7 @@ struct SupabaseSettingsView: View {
         .scrollContentBackground(.hidden)
         .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("Supabase 配置")
-        .task { load() }
+        .task { await load() }
         .alert("提示", isPresented: $showAlert) {
             Button("确定", role: .cancel) {}
         } message: {
@@ -1262,14 +1554,20 @@ struct SupabaseSettingsView: View {
         }
     }
 
-    private func load() {
-        if let cfg = try? KeychainManager.shared.retrieveSupabaseConfig() {
+    private func load() async {
+        do {
+            let cfg = try await KeychainManager.shared.retrieveSupabaseConfig()
             supabaseURL = cfg.url
             anonKey = cfg.anonKey
+        } catch KeychainError.itemNotFound {
+            return
+        } catch {
+            alertMessage = "读取失败：\(error.localizedDescription)"
+            showAlert = true
         }
     }
 
-    private func save() {
+    private func save() async {
         do {
             let urlString = supabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             let keyString = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1285,7 +1583,7 @@ struct SupabaseSettingsView: View {
                 return
             }
             
-            try KeychainManager.shared.storeSupabaseConfig(url: urlString, anonKey: keyString)
+            try await KeychainManager.shared.storeSupabaseConfig(url: urlString, anonKey: keyString)
             SupabaseService.shared.updateConfiguration(
                 .init(url: url, anonKey: keyString)
             )

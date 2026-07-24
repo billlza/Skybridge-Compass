@@ -74,6 +74,7 @@ let package = Package(
         .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
         .library(name: "SkyBridgeOpus", targets: ["SkyBridgeOpus"]),
         .library(name: "SkyBridgeRealtimeMedia", targets: ["SkyBridgeRealtimeMedia"]),
+        .library(name: "SkyBridgeQPeriaptRuntime", targets: ["SkyBridgeQPeriaptRuntime"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
         .library(name: "SkyBridgeVisualParity", targets: ["SkyBridgeVisualParity"]),
@@ -90,7 +91,8 @@ let package = Package(
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
         // 注意：上游 149.0.0 发布损坏（资产 SHA256 与其 manifest 声明不符，SwiftPM 必然拉取失败），
         // 故停留在 148.x；上游修复后再升级。
-        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0")
+        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0"),
+        .package(path: "Packages/SkyBridgeCameraKit")
     ],
     targets: [
         .binaryTarget(
@@ -149,6 +151,14 @@ let package = Package(
             publicHeadersPath: "include"
         ),
         .target(
+            name: "SkyBridgeQPeriaptRuntime",
+            dependencies: ["CQPeriapt"],
+            path: "Sources/SkyBridgeQPeriaptRuntime",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
             name: "FreeRDPBridge",
             dependencies: ["WinPR", "FreeRDP", "FreeRDPClient"],
             path: "Sources/FreeRDPBridge",
@@ -192,7 +202,8 @@ let package = Package(
             name: "LocalLanInteropHost",
             dependencies: [
                 "SkyBridgeCore",
-                "SkyBridgeSmokeSupport"
+                "SkyBridgeSmokeSupport",
+                "SkyBridgeUI"
             ],
             path: "Sources/LocalLanInteropHost",
             swiftSettings: [
@@ -308,15 +319,16 @@ let package = Package(
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
                 "SkyBridgeSmokeSupport",
-                "FreeRDPBridge",
+                .target(name: "FreeRDPBridge", condition: .when(platforms: [.macOS])),
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),
                 .product(name: "WebRTC", package: "WebRTC"),
+                .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit"),
                 "liboqs",
                 "OQSRAII",
-                "CQPeriapt",
+                "SkyBridgeQPeriaptRuntime",
                 "SkyBridgeWidgetShared"
             ],
             path: "Sources/SkyBridgeCore",
@@ -362,10 +374,10 @@ let package = Package(
                 .linkedFramework("Accelerate"), // 向量化计算优化
                 .linkedFramework("MetalPerformanceShaders"), // GPU加速计算
                 // macOS 系统框架
-                .linkedFramework("AppKit"),
-                .linkedFramework("IOKit"),
-                .linkedFramework("CoreWLAN"),
-                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("AppKit", .when(platforms: [.macOS])),
+                .linkedFramework("IOKit", .when(platforms: [.macOS])),
+                .linkedFramework("CoreWLAN", .when(platforms: [.macOS])),
+                .linkedFramework("ScreenCaptureKit", .when(platforms: [.macOS])),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("AVFoundation"),
@@ -406,9 +418,11 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "SkyBridgeProtocolCore",
+                "SkyBridgeQPeriaptRuntime",
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
+                "CQPeriapt",
                 "OQSRAII",
                 "SkyBridgeBenchmarkSupport",
                 "PrivateSensorBridge"
@@ -427,6 +441,11 @@ let package = Package(
                 .define("HAS_APPLE_PQC_SDK")
             ] : [])),
             linkerSettings: webRTCTestLinkerSettings()
+        ),
+        .testTarget(
+            name: "SkyBridgeQPeriaptRuntimeTests",
+            dependencies: ["SkyBridgeQPeriaptRuntime"],
+            path: "Tests/SkyBridgeQPeriaptRuntimeTests"
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",

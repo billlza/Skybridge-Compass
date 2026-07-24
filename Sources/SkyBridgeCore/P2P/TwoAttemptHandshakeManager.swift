@@ -161,11 +161,15 @@ public struct TwoAttemptHandshakeManager: Sendable {
     public static func prepareAttempt(
         strategy: HandshakeAttemptStrategy,
         cryptoProvider: any CryptoProvider,
-        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable
+        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
     ) throws -> AttemptPreparation {
 // 1. 先 build suites
         let buildResult: HandshakeOfferedSuites.BuildResult
-        let negotiationSuites = availableSuitesForNegotiation(using: cryptoProvider)
+        let negotiationSuites = availableSuitesForNegotiation(
+            using: cryptoProvider,
+            pqcSignatureAlgorithm: pqcSignatureAlgorithm
+        )
         switch strategy {
         case .pqcOnly:
             buildResult = HandshakeOfferedSuites.build(
@@ -197,7 +201,10 @@ public struct TwoAttemptHandshakeManager: Sendable {
         }
 
  // 3. 选算法
-        let selectionResult = PreNegotiationSignatureSelector.selectForMessageAResult(offeredSuites: offeredSuites)
+        let selectionResult = PreNegotiationSignatureSelector.selectForMessageAResult(
+            offeredSuites: offeredSuites,
+            pqcAlgorithm: pqcSignatureAlgorithm
+        )
         let sigAAlgorithm: ProtocolSigningAlgorithm
         switch selectionResult {
         case .success(let algorithm, _):
@@ -254,8 +261,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
         securityEventEmitter: SecurityEventEmitter = .shared,
         executor: PreparedHandshakeExecutor,
         enforceFallbackRateLimit: Bool = true,
-        enablePQCBridgeRetry: Bool = true
+        enablePQCBridgeRetry: Bool = true,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
     ) async throws -> SessionKeys {
+        let qPeriaptFailClosed = isQPeriaptBoundProvider(cryptoProvider)
+        if qPeriaptFailClosed, !preferPQC {
+            throw HandshakeError.failed(.pqcProviderUnavailable)
+        }
+        if pqcSignatureAlgorithm == .mlDSA87, !preferPQC {
+            throw HandshakeError.failed(.pqcProviderUnavailable)
+        }
         if policy.requirePQC, !preferPQC {
             throw HandshakeError.failed(.pqcProviderUnavailable)
         }
@@ -266,13 +281,15 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 let preparation = try prepareAttempt(
                     strategy: .pqcOnly,
                     cryptoProvider: cryptoProvider,
-                    pqcOfferMode: enablePQCBridgeRetry ? .preferredSingle : .allAvailable
+                    pqcOfferMode: enablePQCBridgeRetry ? .preferredSingle : .allAvailable,
+                    pqcSignatureAlgorithm: pqcSignatureAlgorithm
                 )
                 return try await executor(preparation)
             } catch let error as AttemptPreparationError {
 // PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
                     if enablePQCBridgeRetry,
+                       !qPeriaptFailClosed,
                        !policy.requirePQC,
                        let bridged = try await attemptPQCBridgeRetry(
                             deviceId: deviceId,
@@ -280,9 +297,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
                             policy: policy,
                             cryptoProvider: cryptoProvider,
                             securityEventEmitter: securityEventEmitter,
-                            executor: executor
-                       ) {
+                            executor: executor,
+                            pqcSignatureAlgorithm: pqcSignatureAlgorithm
+                    ) {
                         return bridged
+                    }
+                    guard pqcSignatureAlgorithm != .mlDSA87 else {
+                        throw error
+                    }
+                    guard !qPeriaptFailClosed else {
+                        throw error
                     }
                     guard policy.allowClassicFallback else {
                         throw error
@@ -301,7 +325,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
             } catch let error as HandshakeError {
 // 检查是否允许 fallback
                 if case .failed(let reason) = error {
-                    if enablePQCBridgeRetry, !policy.requirePQC {
+                    if enablePQCBridgeRetry,
+                       !qPeriaptFailClosed,
+                       !policy.requirePQC {
                         do {
                             if let bridged = try await attemptPQCBridgeRetry(
                                 deviceId: deviceId,
@@ -309,7 +335,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                                 policy: policy,
                                 cryptoProvider: cryptoProvider,
                                 securityEventEmitter: securityEventEmitter,
-                                executor: executor
+                                executor: executor,
+                                pqcSignatureAlgorithm: pqcSignatureAlgorithm
                             ) {
                                 return bridged
                             }
@@ -332,6 +359,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 }
                 if case .failed(let reason) = error,
                    shouldAllowFallback(reason) {
+                    guard pqcSignatureAlgorithm != .mlDSA87 else {
+                        throw error
+                    }
+                    guard !qPeriaptFailClosed else {
+                        throw error
+                    }
                     guard policy.allowClassicFallback else {
                         throw error
                     }
@@ -348,6 +381,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 throw error
             }
         } else {
+            guard !qPeriaptFailClosed else {
+                throw HandshakeError.failed(.pqcProviderUnavailable)
+            }
  // 直接使用 Classic
             let preparation = try prepareAttempt(strategy: .classicOnly, cryptoProvider: cryptoProvider)
             return try await executor(preparation)
@@ -371,9 +407,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
         policy: HandshakePolicy,
         cryptoProvider: any CryptoProvider,
         securityEventEmitter: SecurityEventEmitter,
-        executor: PreparedHandshakeExecutor
+        executor: PreparedHandshakeExecutor,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm
     ) async throws -> SessionKeys? {
         guard shouldAttemptPQCBridgeRetry(reason) else {
+            return nil
+        }
+        guard !isQPeriaptBoundProvider(cryptoProvider) else {
             return nil
         }
 
@@ -382,7 +422,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             bridgePreparation = try prepareAttempt(
                 strategy: .pqcOnly,
                 cryptoProvider: cryptoProvider,
-                pqcOfferMode: .compatRetry
+                pqcOfferMode: .compatRetry,
+                pqcSignatureAlgorithm: pqcSignatureAlgorithm
             )
         } catch {
             return nil
@@ -419,6 +460,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
         enforceFallbackRateLimit: Bool
     ) async throws -> SessionKeys {
         guard policy.allowClassicFallback else {
+            throw HandshakeError.failed(reason)
+        }
+        guard !isQPeriaptBoundProvider(cryptoProvider) else {
             throw HandshakeError.failed(reason)
         }
  // 9.3: 检查限流
@@ -524,10 +568,29 @@ public struct TwoAttemptHandshakeManager: Sendable {
         }
     }
 
+    private static func isQPeriaptBoundProvider(
+        _ cryptoProvider: any CryptoProvider
+    ) -> Bool {
+        cryptoProvider.tier == .qperiaptPQC
+            || cryptoProvider is any QPeriaptSessionBoundCryptoProvider
+            || cryptoProvider.supportedSuites.contains {
+                $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+            }
+    }
+
     private static func availableSuitesForNegotiation(
-        using cryptoProvider: any CryptoProvider
+        using cryptoProvider: any CryptoProvider,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm
     ) -> [CryptoSuite] {
         var suites = cryptoProvider.supportedSuites
+        if pqcSignatureAlgorithm == .mlDSA87 {
+            // Q-Periapt ABI2 binds its authenticated profile to ML-DSA-65.
+            // Keep KEM selection orthogonal for other suites, but never widen Q
+            // into the ML-DSA-87 identity path.
+            suites.removeAll {
+                $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+            }
+        }
         let explicitXWingPreference = explicitlyPrefersXWingHybridSuite()
         guard cryptoProvider.tier == .nativePQC else {
             if explicitXWingPreference {
@@ -613,9 +676,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
     public static func getSuites(
         for strategy: HandshakeAttemptStrategy,
         cryptoProvider: any CryptoProvider,
-        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable
+        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable,
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
     ) -> HandshakeOfferedSuites.BuildResult {
-        let negotiationSuites = availableSuitesForNegotiation(using: cryptoProvider)
+        let negotiationSuites = availableSuitesForNegotiation(
+            using: cryptoProvider,
+            pqcSignatureAlgorithm: pqcSignatureAlgorithm
+        )
         switch strategy {
         case .pqcOnly:
             return HandshakeOfferedSuites.build(

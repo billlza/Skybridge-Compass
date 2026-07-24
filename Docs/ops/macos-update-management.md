@@ -1,6 +1,6 @@
 # macOS Update Management
 
-Last verified: 2026-05-26
+Last verified: 2026-07-19
 
 This document defines how SkyBridge Compass Pro discovers and publishes macOS
 updates outside the Mac App Store.
@@ -35,14 +35,15 @@ Use these fields consistently:
 
 ```text
 CFBundleShortVersionString  user-visible version, for example 1.0.0
-CFBundleVersion             app build string, currently may be dotted
+CFBundleVersion             positive integer build identifier
 manifest.sequence           positive Int64 anti-rollback sequence
 ```
 
 `manifest.sequence` must only increase. `Scripts/publish_macos_update_release.sh`
-uses `CFBundleVersion` when it is a positive integer. If the build is dotted
-such as `1.0.0`, it uses the current UTC timestamp in `yyyyMMddHHmmss` form.
-For deterministic release trains, pass `--sequence <int64>` explicitly.
+requires a positive integer `CFBundleVersion` and requires `manifest.sequence`
+to equal that exact build for an official immutable release. It does not invent
+a timestamp fallback. This keeps the app bundle, signed manifest, tag, and
+anti-rollback order on one deterministic release identity.
 
 ## Key Management
 
@@ -65,7 +66,10 @@ SKYBRIDGE_UPDATE_MANIFEST_KEY_ID
 SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64
 ```
 
-The workflow only publishes update assets when `publish_update_release=true`.
+The workflow only publishes update assets when `publish_update_release=true`
+and the operator also supplies the exact `publish_release_tag`. The producer
+workflow path, event, and seven accepted evidence artifact names are fixed in
+the workflow; callers cannot substitute a weaker producer or evidence set.
 
 ## Publish Flow
 
@@ -91,21 +95,73 @@ spctl --assess --type execute --verbose=4 "dist/SkyBridge Compass Pro.app"
 spctl --assess --type open --verbose=4 "dist/SkyBridgeCompassPro-1.0.0.dmg"
 ```
 
-Publish the stable update assets:
+Create and push the unique annotated release tag before invoking the publisher.
+The tag must exactly match the packaged version and numeric build and must point
+to the source commit being released:
+
+```bash
+source_sha="$(git rev-parse HEAD)"
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
+build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
+tag="macos-v${version}-build-${build}"
+git tag -a "$tag" "$source_sha" -m "SkyBridge Compass Pro ${version} (${build})"
+git push origin "refs/tags/${tag}"
+```
+
+Then publish the immutable update release from a clean checkout, using the
+public-redacted evidence archive produced by the release-readiness workflow:
 
 ```bash
 bash Scripts/publish_macos_update_release.sh \
   --repository billlza/Skybridge-Compass \
-  --tag stable \
+  --tag "$tag" \
+  --expected-source-sha "$source_sha" \
   --app-path "dist/SkyBridge Compass Pro.app" \
   --dmg-path "dist/SkyBridgeCompassPro-1.0.0.dmg" \
+  --evidence-provenance-path "Artifacts/release-gate/release-artifact-run-provenance.json" \
+  --evidence-asset "dist/macos-release-evidence.tar.gz" \
   --key-id skybridge-release-ed25519-2026-05-local \
   --private-key-file "$HOME/.config/skybridge/update-manifest-ed25519-2026-05.seed"
 ```
 
-The publisher verifies stapling before manifest generation, uploads both assets
-with `gh release upload --clobber`, downloads them back, and checks that the
-downloaded DMG hash matches the manifest `sha256`.
+The publisher rejects `stable`, an absent or mismatched tag, an existing draft
+or published Release, a dirty checkout, a source-SHA mismatch, duplicate or
+linked asset files, and any version/build/tag disagreement. It validates the
+DMG, notarization, signed manifest, and evidence files locally. The producer-run
+provenance must bind the same repository and source SHA, the fixed producer
+workflow/event, and the exact seven unexpired artifact names with GitHub SHA-256
+digests. The publisher stages immutable copies and records every release asset
+SHA-256 before making a remote mutation.
+Before creating the draft, it also calls GitHub's immutable-releases repository
+endpoint using API version `2026-03-10` and requires `enabled=true`; a repository
+with immutability disabled is not allowed to enter the publication transaction.
+
+It then creates one draft with every asset attached. While the release is still
+a draft, it verifies the exact asset-name set, downloads every asset, rechecks
+every SHA-256, and reruns manifest validation against the downloaded DMG. Only a
+complete verified draft is published and marked Latest. After publication, it
+requires `isImmutable=true`, repeats the complete read-back, runs
+`gh release verify`, and runs `gh release verify-asset` for every staged file.
+There is no asset replacement path and no `--clobber` operation. A failure
+before publication leaves an unpublished draft for audit; that draft must be
+deleted after investigation and must never be resumed or reused.
+The workflow retains the resulting `macos-stable.publish-proof.json` as a
+separate 90-day Actions artifact; it records the source SHA, exact asset names
+and hashes, immutable state, and attestation results without changing the
+already-published Release.
+
+The historical `stable` Release is a legacy discovery pointer and is not
+modified by this publisher. New clients should discover the manifest through:
+
+```text
+https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json
+```
+
+Clients already shipped with the `/releases/download/stable/` URL cannot learn
+the new endpoint from a uniquely tagged release. Before the legacy manifest
+expires, they need either one explicitly approved bridge update on the old
+channel or a documented manual upgrade. Do not silently mutate the old channel
+as part of a new immutable release.
 
 ## App Behavior
 

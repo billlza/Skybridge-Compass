@@ -17,6 +17,123 @@ public protocol DiscoveryTransport: Sendable {
     func send(to peer: PeerIdentifier, data: Data) async throws
 }
 
+private enum IOSResponderCapabilityPayloadError: Error {
+    case payloadTooLarge
+    case collectionTooLarge
+    case stringTooLarge
+    case truncated
+    case invalidUTF8
+    case invalidBoolean
+    case invalidProviderType
+    case trailingBytes
+    case nonCanonicalEncoding
+}
+
+/// Bounded decoder for authenticated MessageB capability data. It validates
+/// attacker-controlled collection counts before allocating storage.
+private struct IOSResponderCapabilityPayloadDecoder {
+    private static let maximumPayloadLength = 4_096
+    private static let maximumCollectionCount = 32
+    private static let maximumStringLength = 512
+
+    private let data: Data
+    private var offset = 0
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    mutating func decode() throws -> CryptoCapabilities {
+        guard data.count <= Self.maximumPayloadLength else {
+            throw IOSResponderCapabilityPayloadError.payloadTooLarge
+        }
+
+        let supportedKEM = try decodeStringArray()
+        let supportedSignature = try decodeStringArray()
+        let supportedAuthProfiles = try decodeStringArray()
+        let supportedAEAD = try decodeStringArray()
+        let pqcAvailable = try decodeBool()
+        let platformVersion = try decodeString()
+        let providerTypeRaw = try decodeString()
+
+        guard let providerType = CryptoProviderType(rawValue: providerTypeRaw) else {
+            throw IOSResponderCapabilityPayloadError.invalidProviderType
+        }
+        guard offset == data.count else {
+            throw IOSResponderCapabilityPayloadError.trailingBytes
+        }
+
+        return CryptoCapabilities(
+            supportedKEM: supportedKEM,
+            supportedSignature: supportedSignature,
+            supportedAuthProfiles: supportedAuthProfiles,
+            supportedAEAD: supportedAEAD,
+            pqcAvailable: pqcAvailable,
+            platformVersion: platformVersion,
+            providerType: providerType
+        )
+    }
+
+    private mutating func decodeStringArray() throws -> [String] {
+        let count = Int(try decodeUInt32())
+        guard count <= Self.maximumCollectionCount else {
+            throw IOSResponderCapabilityPayloadError.collectionTooLarge
+        }
+        var values: [String] = []
+        values.reserveCapacity(count)
+        for _ in 0..<count {
+            values.append(try decodeString())
+        }
+        return values
+    }
+
+    private mutating func decodeString() throws -> String {
+        let length = Int(try decodeUInt32())
+        guard length <= Self.maximumStringLength else {
+            throw IOSResponderCapabilityPayloadError.stringTooLarge
+        }
+        guard offset <= data.count, length <= data.count - offset else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let startIndex = data.index(data.startIndex, offsetBy: offset)
+        let endIndex = data.index(startIndex, offsetBy: length)
+        let bytes = data[startIndex..<endIndex]
+        offset += length
+        guard let value = String(data: bytes, encoding: .utf8) else {
+            throw IOSResponderCapabilityPayloadError.invalidUTF8
+        }
+        return value
+    }
+
+    private mutating func decodeBool() throws -> Bool {
+        guard offset < data.count else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let index = data.index(data.startIndex, offsetBy: offset)
+        let byte = data[index]
+        offset += 1
+        switch byte {
+        case 0: return false
+        case 1: return true
+        default: throw IOSResponderCapabilityPayloadError.invalidBoolean
+        }
+    }
+
+    private mutating func decodeUInt32() throws -> UInt32 {
+        let width = MemoryLayout<UInt32>.size
+        guard offset <= data.count, width <= data.count - offset else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let startIndex = data.index(data.startIndex, offsetBy: offset)
+        let value = UInt32(data[startIndex])
+            | (UInt32(data[data.index(startIndex, offsetBy: 1)]) << 8)
+            | (UInt32(data[data.index(startIndex, offsetBy: 2)]) << 16)
+            | (UInt32(data[data.index(startIndex, offsetBy: 3)]) << 24)
+        offset += width
+        return value
+    }
+}
+
 // MARK: - HandshakeTrustProvider
 
 /// Identity pinning provider for handshake trust checks
@@ -29,6 +146,12 @@ public protocol HandshakeTrustProvider: Sendable {
     /// over the protocol signing algorithm tag plus the raw protocol public key
     /// bytes. Do not return a raw SHA-256 of the wire blob or bare public key.
     func trustedFingerprint(for deviceId: String) async -> String?
+    /// Returns the exact raw protocol key authorized for an algorithm. This is
+    /// mandatory for ML-DSA-87; fingerprint unions alone cannot authorize it.
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data?
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?
     func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool
@@ -63,16 +186,35 @@ public extension HandshakeTrustProvider {
         }
         return [fingerprint]
     }
+
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data? {
+        _ = deviceId
+        _ = algorithm
+        return nil
+    }
 }
 
 @available(iOS 17.0, *)
 public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
     public let protocolSigningAlgorithm: String
     public let protocolPublicKeyFingerprint: String
+    /// Exact wire public key whose authenticated handshake signature produced
+    /// `protocolPublicKeyFingerprint`. Callers must persist this together with
+    /// the algorithm and fingerprint; a fingerprint-only record cannot later
+    /// prove which key bytes were actually authenticated.
+    public let protocolPublicKeyBytes: Data?
 
-    public init(protocolSigningAlgorithm: String, protocolPublicKeyFingerprint: String) {
+    public init(
+        protocolSigningAlgorithm: String,
+        protocolPublicKeyFingerprint: String,
+        protocolPublicKeyBytes: Data? = nil
+    ) {
         self.protocolSigningAlgorithm = protocolSigningAlgorithm
         self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+        self.protocolPublicKeyBytes = protocolPublicKeyBytes
     }
 }
 
@@ -313,6 +455,10 @@ public actor HandshakeDriver {
     
     /// 加密 Provider
     private let cryptoProvider: any CryptoProvider
+
+    /// Driver-creation-time Q-Periapt admission. The retained provider is
+    /// bound to this decision and cannot be enabled by later global changes.
+    private let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
     
     /// 协议签名 Provider
     private let protocolSignatureProvider: any ProtocolSignatureProvider
@@ -403,6 +549,7 @@ public actor HandshakeDriver {
         protocolSignatureProvider: any ProtocolSignatureProvider,
         identityKeyHandle: SigningKeyHandle?,
         sigAAlgorithm: ProtocolSigningAlgorithm,
+        protocolSigningKeyProtection: ProtocolSigningKeyProtection,
         identityPublicKey: Data,
         policy: HandshakePolicy = .default,
         cryptoPolicy: CryptoPolicy = .default,
@@ -416,8 +563,21 @@ public actor HandshakeDriver {
         authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
         soaSessionScope: PeerSessionArbiter.SessionScope = .p2p
     ) {
+        let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
+        if sigAAlgorithm == protocolSignatureProvider.signatureAlgorithm {
+            qPeriaptAdmissionSnapshot = .capture(
+                provider: cryptoProvider,
+                protocolIdentityConfiguration: ProtocolIdentityConfigurationRecord(
+                    algorithm: sigAAlgorithm,
+                    keyProtection: protocolSigningKeyProtection
+                )
+            )
+        } else {
+            qPeriaptAdmissionSnapshot = .unavailable
+        }
         self.transport = transport
-        self.cryptoProvider = cryptoProvider
+        self.qPeriaptAdmissionSnapshot = qPeriaptAdmissionSnapshot
+        self.cryptoProvider = qPeriaptAdmissionSnapshot.bind(provider: cryptoProvider)
         self.protocolSignatureProvider = protocolSignatureProvider
         self.identityKeyHandle = identityKeyHandle
         self.sigAAlgorithm = sigAAlgorithm
@@ -584,8 +744,13 @@ public actor HandshakeDriver {
                             clock: clock
                         )
                         await self.handleTimeout()
+                    } catch is CancellationError {
+                        return
                     } catch {
-                        // 取消/中断时忽略
+                        SkyBridgeLogger.shared.error(
+                            "Handshake MessageB timeout task failed unexpectedly: \(error.localizedDescription)"
+                        )
+                        await self.handleTimeout()
                     }
                 }
             }
@@ -759,6 +924,7 @@ public actor HandshakeDriver {
                 await handleHandshakeError(error, context: ctx)
                 return
             }
+            defer { sharedSecret.zeroize() }
             
             // 发送 MessageB
             do {
@@ -807,8 +973,13 @@ public actor HandshakeDriver {
                 do {
                     try await Task.sleep(until: clock.now + self.timeout, tolerance: HandshakeConstants.timeoutTolerance, clock: clock)
                     await self.handleTimeout()
+                } catch is CancellationError {
+                    return
                 } catch {
-                    // 取消/中断时忽略
+                    SkyBridgeLogger.shared.error(
+                        "Handshake responder timeout task failed unexpectedly: \(error.localizedDescription)"
+                    )
+                    await self.handleTimeout()
                 }
             }
 
@@ -865,8 +1036,13 @@ public actor HandshakeDriver {
                 do {
                     try await Task.sleep(until: clock.now + self.timeout, tolerance: HandshakeConstants.timeoutTolerance, clock: clock)
                     await self.handleTimeout()
+                } catch is CancellationError {
+                    return
                 } catch {
-                    // 取消/中断时忽略
+                    SkyBridgeLogger.shared.error(
+                        "Handshake initiator timeout task failed unexpectedly: \(error.localizedDescription)"
+                    )
+                    await self.handleTimeout()
                 }
             }
 
@@ -911,6 +1087,20 @@ public actor HandshakeDriver {
     }
 
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
+        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(
+            from: identityPublicKey
+        )
+        if identityKeys.protocolAlgorithm == .mlDSA87 {
+            let exactPublicKey = await trustProvider.trustedProtocolIdentityPublicKey(
+                for: deviceId,
+                algorithm: .mlDSA87
+            )
+            try Self.validateExactMLDSA87Authority(
+                messageAlgorithm: .mlDSA87,
+                messagePublicKey: identityKeys.protocolPublicKey,
+                trustedPublicKey: exactPublicKey
+            )
+        }
         let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
@@ -923,7 +1113,7 @@ public actor HandshakeDriver {
             }
             return
         }
-        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey).lowercased()
+        let actualFingerprint = try identityKeys.authoritativeProtocolFingerprint().lowercased()
         guard trustedFingerprints.contains(actualFingerprint) else {
             throw HandshakeError.failed(.identityMismatch(
                 expected: trustedFingerprints.sorted().joined(separator: ","),
@@ -932,9 +1122,18 @@ public actor HandshakeDriver {
         }
     }
 
-    private func authoritativeFingerprint(for identityPublicKey: Data) throws -> String {
-        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
-        return try identityKeys.authoritativeProtocolFingerprint()
+    nonisolated static func validateExactMLDSA87Authority(
+        messageAlgorithm: ProtocolSigningAlgorithm,
+        messagePublicKey: Data,
+        trustedPublicKey: Data?
+    ) throws {
+        guard messageAlgorithm == .mlDSA87 else { return }
+        guard trustedPublicKey == messagePublicKey else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: "exact authenticated ML-DSA-87 protocol key",
+                actual: "missing or non-matching ML-DSA-87 protocol key"
+            ))
+        }
     }
 
     private nonisolated func isFinishedMessage(_ data: Data) -> Bool {
@@ -1049,11 +1248,17 @@ public actor HandshakeDriver {
     }
     
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        let contextToZeroize = context
+        context = nil
+        pendingFinished = nil
+        clearAuthenticatedRemoteAuthority()
+        state = .failed(reason: reason)
+        if let contextToZeroize {
+            await contextToZeroize.zeroize()
+        }
         if let pairKey = soaPairKey {
             await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
         }
-        clearAuthenticatedRemoteAuthority()
-        state = .failed(reason: reason)
         finishOnce(with: .failure(HandshakeError.failed(reason)))
     }
     
@@ -1263,6 +1468,7 @@ public actor HandshakeContext {
     
     public let role: HandshakeRole
     private let cryptoProvider: any CryptoProvider
+    private let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
     private let pqcProvider: (any CryptoProvider)?
     private let hybridProvider: (any CryptoProvider)?
     private let protocolSignatureProvider: any ProtocolSignatureProvider
@@ -1311,6 +1517,15 @@ public actor HandshakeContext {
 
     /// 最近一次成功验签得到的远端协议身份 authority
     private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// Guards suspended actor work from committing after cancellation or
+    /// zeroization and rejects overlapping public handshake operations.
+    private var lifecycleGeneration: UInt64 = 0
+    private var isProcessingHandshakeMessage = false
+
+    /// Authenticated peer capabilities. MessageA sets this for responders;
+    /// MessageB sets it only after payload decoding and suite binding succeeds.
+    public private(set) var peerCapabilities: CryptoCapabilities?
     
     // MARK: - Initialization
     
@@ -1327,6 +1542,14 @@ public actor HandshakeContext {
     ) {
         self.role = role
         self.cryptoProvider = cryptoProvider
+        if let provider = cryptoProvider as? any QPeriaptHandshakeBoundCryptoProvider {
+            self.qPeriaptAdmissionSnapshot = .freeze(
+                provider: provider,
+                protocolIdentityConfiguration: provider.qPeriaptProtocolIdentityConfiguration
+            )
+        } else {
+            self.qPeriaptAdmissionSnapshot = .unavailable
+        }
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *), cryptoProvider.tier == .nativePQC {
             self.pqcProvider = ApplePQCCryptoProvider()
@@ -1354,7 +1577,12 @@ public actor HandshakeContext {
 
     private func provider(for suite: CryptoSuite) -> (any CryptoProvider)? {
         guard suite.isNegotiable else { return nil }
-
+        if suite == .qperiaptABI2PolicyBound {
+            guard qPeriaptAdmissionSnapshot.admits(provider: cryptoProvider) else {
+                return nil
+            }
+            return cryptoProvider
+        }
         if let hybridProvider, hybridProvider.supportsSuite(suite) {
             return hybridProvider
         }
@@ -1365,6 +1593,191 @@ public actor HandshakeContext {
             return cryptoProvider
         }
         return nil
+    }
+
+    private static func decodeResponderCapabilities(from payload: Data) throws -> CryptoCapabilities {
+        do {
+            var decoder = IOSResponderCapabilityPayloadDecoder(data: payload)
+            let capabilities = try decoder.decode()
+            guard try capabilities.deterministicEncode() == payload else {
+                throw IOSResponderCapabilityPayloadError.nonCanonicalEncoding
+            }
+            return capabilities
+        } catch {
+            throw HandshakeError.failed(
+                .invalidMessageFormat("Responder capabilities payload is invalid or non-canonical")
+            )
+        }
+    }
+
+    private func ensureActive(generation: UInt64) throws {
+        guard !isZeroized, lifecycleGeneration == generation else {
+            throw HandshakeError.contextZeroized
+        }
+    }
+
+    private static func validatedMessageAKeyShares(
+        _ messageA: HandshakeMessageA
+    ) throws -> [CryptoSuite: Data] {
+        guard messageA.version == HandshakeConstants.protocolVersion else {
+            throw HandshakeError.failed(.versionMismatch(
+                local: HandshakeConstants.protocolVersion,
+                remote: messageA.version
+            ))
+        }
+        guard messageA.clientNonce.count == HandshakeConstants.nonceSize else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA nonce length"))
+        }
+        guard !messageA.supportedSuites.isEmpty,
+              messageA.supportedSuites.count <= Int(HandshakeConstants.maxSupportedSuites),
+              messageA.supportedSuites.allSatisfy(\.isNegotiable),
+              Set(messageA.supportedSuites.map(\.wireId)).count == messageA.supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid or duplicate supported suite"))
+        }
+        guard messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
+              messageA.keyShares.count <= messageA.supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA keyShare count"))
+        }
+
+        let supportedIndexes = Dictionary(
+            uniqueKeysWithValues: messageA.supportedSuites.enumerated().map { ($0.element.wireId, $0.offset) }
+        )
+        var previousIndex = -1
+        var result: [CryptoSuite: Data] = [:]
+        result.reserveCapacity(messageA.keyShares.count)
+        for keyShare in messageA.keyShares {
+            guard keyShare.suite.isNegotiable,
+                  let index = supportedIndexes[keyShare.suite.wireId],
+                  index >= previousIndex else {
+                throw HandshakeError.failed(
+                    .invalidMessageFormat("MessageA keyShares are unsupported or out of order")
+                )
+            }
+            guard result.updateValue(keyShare.shareBytes, forKey: keyShare.suite) == nil else {
+                throw HandshakeError.failed(.invalidMessageFormat("Duplicate keyShare suite"))
+            }
+            previousIndex = index
+        }
+        return result
+    }
+
+    private func validateResponderCapabilities(
+        _ capabilities: CryptoCapabilities,
+        selectedSuite: CryptoSuite
+    ) throws {
+        guard selectedSuite.isNegotiable,
+              Self.suiteMeetsHandshakePolicy(selectedSuite, policy: policy) else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite violates the local handshake policy"
+            )
+        }
+
+        guard Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedKEM),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedSignature),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedAuthProfiles),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedAEAD) else {
+            throw Self.responderCapabilityBindingFailure(
+                "capability sets contain empty or duplicate values"
+            )
+        }
+
+        let requiredKEM: String
+        switch selectedSuite.wireId {
+        case CryptoSuite.xwing.wireId:
+            requiredKEM = "X-Wing"
+        case CryptoSuite.qperiaptABI2PolicyBound.wireId:
+            requiredKEM = CryptoSuite.qperiaptABI2PolicyBound.rawValue
+        case CryptoSuite.mlkem768.wireId,
+             CryptoSuite.mlkem768fs.wireId:
+            requiredKEM = "ML-KEM-768"
+        case CryptoSuite.x25519Ed25519.wireId:
+            requiredKEM = "X25519"
+        case CryptoSuite.p256.wireId:
+            requiredKEM = "P-256"
+        default:
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite has no admitted iOS capability mapping"
+            )
+        }
+
+        let advertisesRequiredKEM: Bool
+        let advertisesRequiredAEAD: Bool
+        if selectedSuite == .qperiaptABI2PolicyBound {
+            advertisesRequiredKEM = capabilities.supportedKEM.contains(requiredKEM)
+            advertisesRequiredAEAD = capabilities.supportedAEAD.contains("AES-256-GCM")
+        } else {
+            advertisesRequiredKEM = Self.containsCanonicalCapability(
+                requiredKEM,
+                in: capabilities.supportedKEM
+            )
+            advertisesRequiredAEAD = Self.containsCanonicalCapability(
+                "AES-256-GCM",
+                in: capabilities.supportedAEAD
+            )
+        }
+        guard advertisesRequiredKEM, advertisesRequiredAEAD else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite or payload AEAD was not advertised"
+            )
+        }
+
+        if selectedSuite == .qperiaptABI2PolicyBound {
+            guard qPeriaptAdmissionSnapshot.isPeerEligible(capabilities) else {
+                throw Self.responderCapabilityBindingFailure(
+                    "Q-Periapt signed-policy capability binding is invalid"
+                )
+            }
+            return
+        }
+
+        let requiredAuthProfile: String
+        if selectedSuite.isHybrid {
+            requiredAuthProfile = "Hybrid"
+        } else if selectedSuite.isPQC {
+            requiredAuthProfile = "PQC"
+        } else {
+            requiredAuthProfile = "Classic"
+        }
+        guard Self.containsCanonicalCapability(
+            requiredAuthProfile,
+            in: capabilities.supportedAuthProfiles
+        ) else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite authentication profile was not advertised"
+            )
+        }
+
+        if selectedSuite.isPQC {
+            guard capabilities.pqcAvailable,
+                  capabilities.providerType == .cryptoKitPQC
+                    || capabilities.providerType == .liboqs else {
+                throw Self.responderCapabilityBindingFailure(
+                    "selected PQC suite contradicts the responder provider capability"
+                )
+            }
+        }
+    }
+
+    private static func containsCanonicalCapability(_ required: String, in values: [String]) -> Bool {
+        let canonicalRequired = canonicalCapabilityToken(required)
+        return values.contains { canonicalCapabilityToken($0) == canonicalRequired }
+    }
+
+    private static func capabilityValuesAreCanonicalAndUnique(_ values: [String]) -> Bool {
+        let canonicalValues = values.map(canonicalCapabilityToken)
+        return canonicalValues.allSatisfy { !$0.isEmpty }
+            && Set(canonicalValues).count == canonicalValues.count
+    }
+
+    private static func canonicalCapabilityToken(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func responderCapabilityBindingFailure(_ reason: String) -> HandshakeError {
+        .failed(.invalidMessageFormat("Responder capabilities do not match MessageB: \(reason)"))
     }
 
     nonisolated static func suiteMeetsHandshakePolicy(
@@ -1421,7 +1834,8 @@ public actor HandshakeContext {
     ) throws -> AuthenticatedRemoteAuthority {
         AuthenticatedRemoteAuthority(
             protocolSigningAlgorithm: identityKeys.protocolAlgorithm.rawValue,
-            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased(),
+            protocolPublicKeyBytes: identityKeys.protocolPublicKey
         )
     }
 
@@ -1459,15 +1873,11 @@ public actor HandshakeContext {
     private func selectInitiatorSuite() throws -> CryptoSuite {
         let candidates = (offeredSuites?.isEmpty == false ? offeredSuites : nil) ?? [cryptoProvider.activeSuite]
 
-        if let unknown = candidates.first(where: { !$0.isKnown }) {
-            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "buildMessageA.activeSuite")
-            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
-        }
-        guard candidates.allSatisfy(\.isNegotiable) else {
-            throw HandshakeError.failed(.suiteNotSupported)
-        }
-
         for suite in candidates {
+            guard suite.isKnown else {
+                emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
+                throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
+            }
             guard provider(for: suite) != nil else { continue }
             guard suiteIsLocallyNegotiable(
                 suite,
@@ -1489,6 +1899,7 @@ public actor HandshakeContext {
     internal func selectResponderSuite(for messageA: HandshakeMessageA) throws -> CryptoSuite {
         let advertisedKeyShareSuites = Set(messageA.keyShares.map(\.suite))
         for suite in messageA.supportedSuites {
+            guard isFrozenLocalSuiteOffered(suite) else { continue }
             guard provider(for: suite) != nil else { continue }
             guard suiteIsLocallyNegotiable(
                 suite,
@@ -1496,6 +1907,10 @@ public actor HandshakeContext {
                 peerPolicy: messageA.policy
             ) else { continue }
             guard advertisedKeyShareSuites.contains(suite) else { continue }
+            if suite == .qperiaptABI2PolicyBound,
+               !qPeriaptAdmissionSnapshot.isPeerEligible(messageA.capabilities) {
+                continue
+            }
             if suite.requiresV2EphemeralContribution,
                messageA.initiatorContribution == nil {
                 continue
@@ -1504,6 +1919,11 @@ public actor HandshakeContext {
         }
 
         throw HandshakeError.failed(.suiteNegotiationFailed)
+    }
+
+    private func isFrozenLocalSuiteOffered(_ suite: CryptoSuite) -> Bool {
+        guard let offeredSuites else { return true }
+        return offeredSuites.contains { $0.wireId == suite.wireId }
     }
 
     private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
@@ -1528,6 +1948,23 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
+
+        if cryptoProvider.activeSuite == .qperiaptABI2PolicyBound,
+           !qPeriaptAdmissionSnapshot.admits(provider: cryptoProvider) {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
         
         // 生成 nonce
         var nonceBytes = [UInt8](repeating: 0, count: HandshakeConstants.nonceSize)
@@ -1540,7 +1977,16 @@ public actor HandshakeContext {
         // iOS 本地栈必须使用调用方为本次尝试准备好的 suite，而不是无条件回退到 activeSuite。
         let suite = try selectInitiatorSuite()
         let supportedSuites = [suite]
-        negotiatedSuite = suite
+        guard let suiteProvider = provider(for: suite) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        // Capabilities are committed by the canonical Q-Periapt MessageA
+        // application context, so they must be finalized before KEM execution.
+        let capabilities = CryptoCapabilities.fromProvider(
+            suiteProvider,
+            protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+        )
         
         // 创建 KeyShare（与 supportedSuites 绑定）
         let keyShares: [HandshakeKeyShare]
@@ -1548,17 +1994,42 @@ public actor HandshakeContext {
             guard let peerKEM = peerKEMPublicKey(for: suite) else {
                 throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: suite.rawValue))
             }
-            guard let kemProvider = provider(for: suite) else {
-                throw HandshakeError.failed(.suiteNegotiationFailed)
+            let encaps: (encapsulatedKey: Data, sharedSecret: SecureBytes)
+            if suite == .qperiaptABI2PolicyBound {
+                guard let contextBoundProvider = suiteProvider as? any ApplicationContextBoundCryptoProvider else {
+                    throw HandshakeError.failed(
+                        .cryptoError("Q-Periapt provider lacks its application-context contract")
+                    )
+                }
+                let applicationContext = try QPeriaptHandshakeApplicationContext.messageA(
+                    version: HandshakeConstants.protocolVersion,
+                    suite: suite,
+                    clientNonce: nonce,
+                    recipientPublicKey: peerKEM,
+                    policy: policy,
+                    offeredSuites: supportedSuites,
+                    capabilities: capabilities,
+                    identityPublicKey: identityPublicKey,
+                    extensionsRaw: extensionsRaw
+                )
+                encaps = try await contextBoundProvider.kemEncapsulate(
+                    recipientPublicKey: peerKEM,
+                    applicationContext: applicationContext
+                )
+            } else {
+                encaps = try await suiteProvider.kemEncapsulate(recipientPublicKey: peerKEM)
             }
-            let encaps = try await kemProvider.kemEncapsulate(recipientPublicKey: peerKEM)
+            do {
+                try ensureActive(generation: generation)
+            } catch {
+                encaps.sharedSecret.zeroize()
+                throw error
+            }
             kemSharedSecrets[suite] = encaps.sharedSecret
             keyShares = [HandshakeKeyShare(suite: suite, shareBytes: encaps.encapsulatedKey)]
         } else {
-            guard let suiteProvider = provider(for: suite) else {
-                throw HandshakeError.failed(.suiteNegotiationFailed)
-            }
             let keyPair = try await suiteProvider.generateKeyPair(for: .ephemeral)
+            try ensureActive(generation: generation)
             ephemeralPrivateKey = SecureBytes(data: keyPair.privateKey.bytes)
             ephemeralPublicKey = keyPair.publicKey.bytes
             keyShares = [HandshakeKeyShare(suite: suite, shareBytes: keyPair.publicKey.bytes)]
@@ -1575,9 +2046,6 @@ public actor HandshakeContext {
 
         self.sentSupportedSuites = supportedSuites
         self.sentKeyShares = Dictionary(uniqueKeysWithValues: keyShares.map { ($0.suite, $0.shareBytes) })
-        
-        // 创建能力声明
-        let capabilities = CryptoCapabilities.fromProvider(cryptoProvider)
         
         // 创建身份公钥结构
         let identityKeys = IdentityPublicKeys(
@@ -1608,11 +2076,12 @@ public actor HandshakeContext {
         let signature: Data
         if let keyHandle = identityKeyHandle {
             signature = try await protocolSignatureProvider.sign(signaturePreimage, key: keyHandle)
+            try ensureActive(generation: generation)
         } else {
             throw HandshakeError.noSigningCapability
         }
         
-        return HandshakeMessageA(
+        let signedMessage = HandshakeMessageA(
             version: unsigned.version,
             supportedSuites: unsigned.supportedSuites,
             keyShares: unsigned.keyShares,
@@ -1624,6 +2093,8 @@ public actor HandshakeContext {
             extensionsRaw: unsigned.extensionsRaw,
             initiatorContribution: unsigned.initiatorContribution
         )
+        completed = true
+        return signedMessage
     }
     
     // MARK: - MessageA Processing (Responder)
@@ -1632,13 +2103,20 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
-        // 验证版本
-        guard messageA.version == HandshakeConstants.protocolVersion else {
-            throw HandshakeError.failed(.versionMismatch(
-                local: HandshakeConstants.protocolVersion,
-                remote: messageA.version
-            ))
+        guard role == .responder else {
+            throw HandshakeError.failed(.invalidMessageFormat("Only a responder context can process MessageA"))
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
         }
 
         if let unknown = messageA.supportedSuites.first(where: { !$0.isKnown }) {
@@ -1649,51 +2127,45 @@ public actor HandshakeContext {
             emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
             throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
         }
-        guard messageA.hasNegotiableOfferShape else {
-            throw HandshakeError.failed(.suiteNotSupported)
-        }
-        
+        let candidatePeerKeyShares = try Self.validatedMessageAKeyShares(messageA)
+
         // 解析身份公钥
         let identityKeys = try messageA.decodedIdentityPublicKeys()
-        
+
         // 验证签名
         let isValid = try await protocolSignatureProvider.verify(
             messageA.signaturePreimage,
             signature: messageA.signature,
             publicKey: identityKeys.protocolPublicKey
         )
+        try ensureActive(generation: generation)
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
-        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
-        
-        // 保存 nonce / keyShares
-        peerNonce = messageA.clientNonce
-        peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
-        
+        let candidateRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
+
         // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
         let suite = try selectResponderSuite(for: messageA)
-        
+
         // Anti-Downgrade: selectedSuite 必须有对应 keyShare
-        guard peerKeyShares[suite] != nil else {
+        guard candidatePeerKeyShares[suite] != nil else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
+        let candidateV2PeerContribution: Data?
         if suite.requiresV2EphemeralContribution {
             guard let contribution = messageA.initiatorContribution else {
                 throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
             }
-            v2PeerInitiatorContribution = contribution
+            candidateV2PeerContribution = contribution
         } else {
-            v2PeerInitiatorContribution = nil
+            candidateV2PeerContribution = nil
         }
-        negotiatedSuite = suite
-        
-        // 保存 transcript hash
-        transcriptHashA = Data(SHA256.hash(data: messageA.transcriptBytes))
 
         // PQC suites：responder 需要使用本地长期 KEM 身份私钥解封装 initiator 的 encapsulatedKey
+        var candidateKEMSharedSecret: SecureBytes?
+        defer { candidateKEMSharedSecret?.zeroize() }
         if suite.isPQC {
-            guard let encapsulatedKey = peerKeyShares[suite] else {
+            guard let encapsulatedKey = candidatePeerKeyShares[suite] else {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             guard let suiteProvider = provider(for: suite) else {
@@ -1703,12 +2175,53 @@ public actor HandshakeContext {
                 for: suite.canonicalKEMSuite,
                 provider: suiteProvider
             )
-            let sharedSecret = try await suiteProvider.kemDecapsulate(
-                encapsulatedKey: encapsulatedKey,
-                privateKey: local.privateKey
-            )
-            kemSharedSecrets[suite] = sharedSecret
+            try ensureActive(generation: generation)
+            let sharedSecret: SecureBytes
+            if suite == .qperiaptABI2PolicyBound {
+                guard let contextBoundProvider = suiteProvider as? any ApplicationContextBoundCryptoProvider else {
+                    throw HandshakeError.failed(
+                        .cryptoError("Q-Periapt provider lacks its application-context contract")
+                    )
+                }
+                let applicationContext = try QPeriaptHandshakeApplicationContext.messageA(
+                    version: messageA.version,
+                    suite: suite,
+                    clientNonce: messageA.clientNonce,
+                    recipientPublicKey: local.publicKey,
+                    policy: messageA.policy,
+                    offeredSuites: messageA.supportedSuites,
+                    capabilities: messageA.capabilities,
+                    identityPublicKey: messageA.identityPublicKey,
+                    extensionsRaw: messageA.extensionsRaw
+                )
+                sharedSecret = try await contextBoundProvider.kemDecapsulate(
+                    encapsulatedKey: encapsulatedKey,
+                    privateKey: local.privateKey,
+                    applicationContext: applicationContext
+                )
+            } else {
+                sharedSecret = try await suiteProvider.kemDecapsulate(
+                    encapsulatedKey: encapsulatedKey,
+                    privateKey: local.privateKey
+                )
+            }
+            candidateKEMSharedSecret = sharedSecret
+            try ensureActive(generation: generation)
         }
+
+        let candidateTranscriptHashA = Data(SHA256.hash(data: messageA.transcriptBytes))
+        peerKeyShares = candidatePeerKeyShares
+        peerNonce = messageA.clientNonce
+        peerCapabilities = messageA.capabilities
+        negotiatedSuite = suite
+        v2PeerInitiatorContribution = candidateV2PeerContribution
+        transcriptHashA = candidateTranscriptHashA
+        authenticatedRemoteAuthority = candidateRemoteAuthority
+        if let sharedSecret = candidateKEMSharedSecret {
+            kemSharedSecrets[suite] = sharedSecret
+            candidateKEMSharedSecret = nil
+        }
+        completed = true
     }
     
     // MARK: - MessageB Building (Responder)
@@ -1717,7 +2230,22 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
         guard let suite = negotiatedSuite else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        guard let suiteProvider = provider(for: suite) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
         
@@ -1757,7 +2285,10 @@ public actor HandshakeContext {
                 responderShare = Data()
                 payloadSecret = staticSecret
             }
-            let payloadPlaintext = try CryptoCapabilities.fromProvider(provider(for: suite) ?? cryptoProvider).deterministicEncode()
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(
+                suiteProvider,
+                protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+            ).deterministicEncode()
             encryptedPayload = try sealPayloadWithSharedSecret(
                 payloadSecret,
                 plaintext: payloadPlaintext,
@@ -1771,18 +2302,29 @@ public actor HandshakeContext {
             guard let peerShare = peerKeyShares[suite] else {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
-            guard let suiteProvider = provider(for: suite) else {
-                throw HandshakeError.failed(.suiteNegotiationFailed)
-            }
-            let payloadPlaintext = try CryptoCapabilities.fromProvider(suiteProvider).deterministicEncode()
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(
+                suiteProvider,
+                protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+            ).deterministicEncode()
             let sealResult = try await suiteProvider.kemDemSealWithSecret(
                 plaintext: payloadPlaintext,
                 recipientPublicKey: peerShare,
                 info: Data("handshake-payload".utf8)
             )
+            do {
+                try ensureActive(generation: generation)
+            } catch {
+                sealResult.sharedSecret.zeroize()
+                throw error
+            }
             encryptedPayload = sealResult.sealedBox
             sharedSecret = sealResult.sharedSecret
             responderShare = encryptedPayload.encapsulatedKey
+        }
+        defer {
+            if !completed {
+                sharedSecret.zeroize()
+            }
         }
         
         // 创建身份公钥结构
@@ -1812,6 +2354,7 @@ public actor HandshakeContext {
         let signature: Data
         if let keyHandle = identityKeyHandle {
             signature = try await protocolSignatureProvider.sign(signatureData, key: keyHandle)
+            try ensureActive(generation: generation)
         } else {
             throw HandshakeError.noSigningCapability
         }
@@ -1826,7 +2369,7 @@ public actor HandshakeContext {
             identityPublicKeys: identityKeys
         )
         transcriptHashB = Data(SHA256.hash(data: messageB.transcriptBytes))
-        
+        completed = true
         return (messageB, sharedSecret)
     }
     
@@ -1836,7 +2379,9 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+        guard role == .initiator else {
+            throw HandshakeError.failed(.invalidMessageFormat("Only an initiator context can process MessageB"))
+        }
         // 验证版本
         guard messageB.version == HandshakeConstants.protocolVersion else {
             throw HandshakeError.failed(.versionMismatch(
@@ -1844,13 +2389,8 @@ public actor HandshakeContext {
                 remote: messageB.version
             ))
         }
-
-        guard messageB.selectedSuite.isKnown else {
-            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
-            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
-        }
-        guard messageB.selectedSuite.isNegotiable else {
-            throw HandshakeError.failed(.suiteNotSupported)
+        guard messageB.serverNonce.count == HandshakeConstants.nonceSize else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB nonce length"))
         }
         
         // 解析身份公钥
@@ -1859,6 +2399,21 @@ public actor HandshakeContext {
         guard let transcriptHashA else {
             throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
         }
+        guard let candidateLocalNonce = localNonce else {
+            throw HandshakeError.failed(.cryptoError("Missing local nonce for MessageB"))
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
 
         // 验证签名
         let isValid = try await protocolSignatureProvider.verify(
@@ -1866,12 +2421,17 @@ public actor HandshakeContext {
             signature: messageB.signature,
             publicKey: identityKeys.protocolPublicKey
         )
+        try ensureActive(generation: generation)
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
-        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
+        let responderAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
         
         // Anti-Downgrade: 必须是我们在 MessageA 里发过的 suite
+        guard messageB.selectedSuite.isKnown else {
+            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
+        }
         guard sentSupportedSuites.contains(where: { $0.wireId == messageB.selectedSuite.wireId }) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
@@ -1896,11 +2456,7 @@ public actor HandshakeContext {
             }
         }
         
-        negotiatedSuite = messageB.selectedSuite
-        peerNonce = messageB.serverNonce
-
-        // 计算 transcriptB（与 macOS 一致：SHA256(MessageB.transcriptBytes)）
-        transcriptHashB = Data(SHA256.hash(data: messageB.transcriptBytes))
+        let candidateTranscriptHashB = Data(SHA256.hash(data: messageB.transcriptBytes))
         
         if messageB.selectedSuite.isPQC {
             guard let payloadSecret = kemSharedSecrets[messageB.selectedSuite] else {
@@ -1918,26 +2474,40 @@ public actor HandshakeContext {
                 )
                 ephemeralSecret.zeroize()
                 payloadSecret.zeroize()
-                v2InitiatorContributionPrivateKey?.zeroize()
-                v2InitiatorContributionPrivateKey = nil
             } else {
                 sessionSecret = payloadSecret
-                v2InitiatorContributionPrivateKey?.zeroize()
-                v2InitiatorContributionPrivateKey = nil
             }
-            _ = try openPayloadWithSharedSecret(
+            defer { sessionSecret.zeroize() }
+            let payload = try openPayloadWithSharedSecret(
                 messageB.encryptedPayload,
                 sharedSecret: sessionSecret,
                 info: Data("handshake-payload".utf8),
                 selectedSuite: messageB.selectedSuite
             )
+            let responderCapabilities = try Self.decodeResponderCapabilities(from: payload)
+            try validateResponderCapabilities(
+                responderCapabilities,
+                selectedSuite: messageB.selectedSuite
+            )
+            let sessionKeys = try deriveSessionKeys(
+                sharedSecret: sessionSecret,
+                suite: messageB.selectedSuite,
+                transcriptA: transcriptHashA,
+                transcriptB: candidateTranscriptHashB,
+                localNonce: candidateLocalNonce,
+                remoteNonce: messageB.serverNonce
+            )
+            kemSharedSecrets[messageB.selectedSuite]?.zeroize()
             kemSharedSecrets.removeValue(forKey: messageB.selectedSuite)
-            defer { sessionSecret.zeroize() }
-            return try deriveSessionKeys(sharedSecret: sessionSecret)
+            commitProcessedMessageB(
+                messageB,
+                transcriptB: candidateTranscriptHashB,
+                capabilities: responderCapabilities,
+                authority: responderAuthority
+            )
+            completed = true
+            return sessionKeys
         }
-
-        v2InitiatorContributionPrivateKey?.zeroize()
-        v2InitiatorContributionPrivateKey = nil
         
         guard let privateKey = ephemeralPrivateKey else {
             throw HandshakeError.failed(.cryptoError("Missing initiator ephemeral private key"))
@@ -1952,11 +2522,44 @@ public actor HandshakeContext {
             privateKey: privateKey,
             info: Data("handshake-payload".utf8)
         )
-        // plaintext=openResult.plaintext 可用于更新 peerCapabilities（此处先忽略）
-        let sharedSecret = openResult.sharedSecret
-        defer { sharedSecret.zeroize() }
-        
-        return try deriveSessionKeys(sharedSecret: sharedSecret)
+        defer { openResult.sharedSecret.zeroize() }
+        try ensureActive(generation: generation)
+        let responderCapabilities = try Self.decodeResponderCapabilities(from: openResult.plaintext)
+        try validateResponderCapabilities(
+            responderCapabilities,
+            selectedSuite: messageB.selectedSuite
+        )
+        let sessionKeys = try deriveSessionKeys(
+            sharedSecret: openResult.sharedSecret,
+            suite: messageB.selectedSuite,
+            transcriptA: transcriptHashA,
+            transcriptB: candidateTranscriptHashB,
+            localNonce: candidateLocalNonce,
+            remoteNonce: messageB.serverNonce
+        )
+        commitProcessedMessageB(
+            messageB,
+            transcriptB: candidateTranscriptHashB,
+            capabilities: responderCapabilities,
+            authority: responderAuthority
+        )
+        completed = true
+        return sessionKeys
+    }
+
+    private func commitProcessedMessageB(
+        _ messageB: HandshakeMessageB,
+        transcriptB: Data,
+        capabilities: CryptoCapabilities,
+        authority: AuthenticatedRemoteAuthority
+    ) {
+        negotiatedSuite = messageB.selectedSuite
+        peerNonce = messageB.serverNonce
+        transcriptHashB = transcriptB
+        peerCapabilities = capabilities
+        authenticatedRemoteAuthority = authority
+        v2InitiatorContributionPrivateKey?.zeroize()
+        v2InitiatorContributionPrivateKey = nil
     }
 
     private func generateV2InitiatorContribution() throws -> Data {
@@ -1984,7 +2587,7 @@ public actor HandshakeContext {
         guard responderContribution.count == 32 else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid v2 responder contribution length"))
         }
-        guard let privateKeyData = v2InitiatorContributionPrivateKey?.noCopyData() else {
+        guard let privateKeyData = v2InitiatorContributionPrivateKey?.copyData() else {
             throw HandshakeError.failed(.cryptoError("Missing v2 initiator private contribution"))
         }
         let initiatorPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
@@ -2000,8 +2603,8 @@ public actor HandshakeContext {
         suite: CryptoSuite
     ) throws -> SecureBytes {
         var ikm = Data("SkyBridge-v2-compose|".utf8)
-        ikm.append(staticSecret.noCopyData())
-        ikm.append(ephemeralSecret.noCopyData())
+        ikm.append(staticSecret.copyData())
+        ikm.append(ephemeralSecret.copyData())
         let inputKey = SymmetricKey(data: ikm)
         let salt = transcriptHashA ?? Data("SkyBridge-v2-salt".utf8)
         var info = Data("SkyBridge-v2-static+ephemeral".utf8)
@@ -2028,7 +2631,7 @@ public actor HandshakeContext {
             throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
         }
 
-        let inputKey = SymmetricKey(data: sharedSecret.noCopyData())
+        let inputKey = SymmetricKey(data: sharedSecret.copyData())
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
             salt: transcriptHashA,
@@ -2062,7 +2665,7 @@ public actor HandshakeContext {
             throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
         }
 
-        let inputKey = SymmetricKey(data: sharedSecret.noCopyData())
+        let inputKey = SymmetricKey(data: sharedSecret.copyData())
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
             salt: transcriptHashA,
@@ -2095,6 +2698,9 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
         defer { sharedSecret.zeroize() }
         return try deriveSessionKeys(sharedSecret: sharedSecret)
     }
@@ -2107,6 +2713,27 @@ public actor HandshakeContext {
               let remoteNonce = peerNonce else {
             throw HandshakeError.failed(.cryptoError("Missing transcript, suite, nonces, or shared secret"))
         }
+
+        return try deriveSessionKeys(
+            sharedSecret: sharedSecret,
+            suite: suite,
+            transcriptA: transcriptA,
+            transcriptB: transcriptB,
+            localNonce: localNonce,
+            remoteNonce: remoteNonce
+        )
+    }
+
+    /// Pure derivation used before an inbound MessageB is committed to actor
+    /// state. The caller retains ownership of the shared secret.
+    private func deriveSessionKeys(
+        sharedSecret: SecureBytes,
+        suite: CryptoSuite,
+        transcriptA: Data,
+        transcriptB: Data,
+        localNonce: Data,
+        remoteNonce: Data
+    ) throws -> SessionKeys {
         
         // role 决定 clientNonce/serverNonce 的归属（与 macOS 保持一致）
         let clientNonce: Data
@@ -2162,7 +2789,8 @@ public actor HandshakeContext {
     
     // MARK: - Cleanup
     
-    public func zeroize() async {
+    public func zeroize() {
+        lifecycleGeneration &+= 1
         ephemeralPrivateKey?.zeroize()
         ephemeralPrivateKey = nil
         ephemeralPublicKey = nil
@@ -2180,6 +2808,8 @@ public actor HandshakeContext {
         transcriptHashB = nil
         localNonce = nil
         peerNonce = nil
+        negotiatedSuite = nil
+        peerCapabilities = nil
         authenticatedRemoteAuthority = nil
         isZeroized = true
     }

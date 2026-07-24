@@ -2,6 +2,23 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class FramedReaderTests: XCTestCase {
+    private final class CancellationProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func markCancelled() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+
+        var wasCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
     actor ChunkSource {
         private var chunks: [Data]
         private let closesWhenEmpty: Bool
@@ -155,5 +172,31 @@ final class FramedReaderTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+    }
+
+    func testBootstrapReceiveTimeoutCancelsUnderlyingReceiveBeforeReturning() async {
+        let probe = CancellationProbe()
+        let startedAt = ContinuousClock.now
+
+        do {
+            _ = try await P2PDiscoveryService.raceBootstrapReceive(
+                timeoutSeconds: 0.02,
+                cancelReceive: { probe.markCancelled() },
+                receive: {
+                    try await Task.sleep(for: .seconds(60))
+                    return Data()
+                }
+            )
+            XCTFail("expected timeout")
+        } catch let error as P2PDiscoveryError {
+            guard case .timeout = error else {
+                return XCTFail("unexpected P2P error: \(error)")
+            }
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(probe.wasCancelled)
+        XCTAssertLessThan(startedAt.duration(to: .now), .seconds(1))
     }
 }

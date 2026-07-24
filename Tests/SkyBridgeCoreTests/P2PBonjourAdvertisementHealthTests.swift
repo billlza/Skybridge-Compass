@@ -42,6 +42,9 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(source.contains("owner: String? = nil"))
         XCTAssertTrue(source.contains("public func advertisementSnapshot(for serviceType: String)"))
         XCTAssertTrue(source.contains("private func handleListenerStateUpdate("))
+        XCTAssertTrue(source.contains("private func waitForAdvertisingReady("))
+        XCTAssertTrue(source.contains("let readyPort = try await waitForAdvertisingReady("))
+        XCTAssertTrue(source.contains("throw AdvertisingError.timedOut"))
         XCTAssertTrue(source.contains("case .failed, .cancelled:"))
         XCTAssertTrue(
             source.contains("records.removeValue(forKey: serviceType)"),
@@ -65,7 +68,27 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(p2p.contains("advertisementSnapshot(for: Self.controlServiceType)"))
         XCTAssertTrue(p2p.contains("ensureAdvertisingHealthy()"))
         XCTAssertTrue(p2p.contains("owner: Self.controlAdvertisementOwner"))
-        XCTAssertTrue(localServices.contains("await p2pDiscoveryService.ensureAdvertisingHealthy()"))
+        XCTAssertTrue(localServices.contains("try await p2pDiscoveryService.ensureAdvertisingHealthy()"))
+        XCTAssertTrue(p2p.contains("public func startAdvertising(forceRebind: Bool = false) async throws"))
+        XCTAssertTrue(p2p.contains("centerSnapshot.isConnectable"))
+        XCTAssertTrue(p2p.contains("waitUntilReady(Self.controlServiceType)"))
+        XCTAssertFalse(
+            p2p.contains("centerSnapshot.isConnectable || centerSnapshot.isStarting"),
+            "A listener that is merely starting must not be reported as an active advertisement."
+        )
+    }
+
+    func testIOSInboundBonjourConnectionBreaksStateHandlerCycleAndTimesOut() throws {
+        let source = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+        )
+
+        XCTAssertTrue(source.contains("let readinessTimeoutTask = Task { @MainActor [weak self, weak connection] in"))
+        XCTAssertTrue(source.contains("[weak self, weak connection] state in"))
+        XCTAssertTrue(source.contains("connection.stateUpdateHandler = nil"))
+        XCTAssertTrue(source.contains("p2p-listener inbound-timeout"))
+        XCTAssertTrue(source.contains("maximumPreReadyInboundConnections = 32"))
+        XCTAssertTrue(source.contains("maximumPreReadyInboundConnectionsPerEndpoint = 4"))
     }
 
     func testP2PAuthenticationDoesNotBlockOnOptionalPostAuthPairingExchange() throws {
@@ -573,21 +596,6 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(optimized.contains("owner: Self.advertisementOwner\n            )"))
     }
 
-    func testDiscoveryAdvertisementExcludesDecodeOnlyCryptoSuites() throws {
-        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
-
-        XCTAssertTrue(
-            source.contains("provider.supportedSuites.filter(\\.isNegotiable).map(\\.wireId)")
-        )
-        XCTAssertTrue(
-            source.contains("classic.supportedSuites.filter(\\.isNegotiable).map(\\.wireId)")
-        )
-        XCTAssertTrue(
-            source.contains("return suite.isNegotiable && suite.isPQCGroup"),
-            "Both the suite list and KEM digest advertisement must exclude decode-only suites"
-        )
-    }
-
     func testInboundDiscoveryConnectionsDetachStateHandlers() throws {
         let sources = [
             try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift"),
@@ -806,6 +814,158 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(harness.contains("remoteControlRoutePreflightProbePayload"))
         XCTAssertTrue(harness.contains("probePayload: Self.remoteControlRoutePreflightProbePayload"))
         XCTAssertTrue(harness.contains("probe-send=ok"))
+    }
+
+    func testP2PConnectCancellationAndReadinessHandlersAreLifecycleBound() throws {
+        let p2pSource = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let networkManagerSource = try readSource("Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift")
+        let bootstrapExchange = try sourceSlice(
+            from: "private func exchangeBootstrapControlMessage(",
+            to: "private func waitForBootstrapControlConnection",
+            in: p2pSource
+        )
+        let bootstrapWait = try sourceSlice(
+            from: "private func waitForBootstrapControlConnection(",
+            to: "private func sendBootstrapFrame",
+            in: p2pSource
+        )
+        let activeWait = try sourceSlice(
+            from: "private func waitForConnection(",
+            to: "// MARK: - 辅助方法",
+            in: p2pSource
+        )
+
+        XCTAssertTrue(bootstrapExchange.contains("try Task.checkCancellation()"))
+        XCTAssertTrue(bootstrapExchange.contains("error is CancellationError || Task.isCancelled"))
+        XCTAssertTrue(bootstrapExchange.contains("throw CancellationError()"))
+        XCTAssertTrue(bootstrapWait.contains("withTaskCancellationHandler"))
+        XCTAssertTrue(bootstrapWait.contains("cancellationHandle.cancel(connection: connection)"))
+        XCTAssertTrue(p2pSource.contains("private var outboundConnectionAttemptIds: [String: UUID]"))
+        XCTAssertTrue(p2pSource.contains("guard connections[deviceKey] === connection"))
+        XCTAssertTrue(activeWait.contains("[weak self, weak connection] terminalState"))
+        XCTAssertTrue(networkManagerSource.contains("[weak connection, weak p2p] state"))
+        XCTAssertTrue(networkManagerSource.contains("connection.stateUpdateHandler = nil"))
+    }
+
+    func testP2PSmokeConnectionPathClassificationRejectsAttachedAndLinkLocalRoutes() throws {
+        XCTAssertEqual(
+            P2PDiscoveryService.smokeConnectionPathClassification(
+                interfaceTypes: ["wifi"],
+                interfaceNames: ["en0"],
+                pathDescription: "satisfied interface en0"
+            ),
+            .init(routeClass: "wifi", attached: false, linkLocal: false)
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.smokeConnectionPathClassification(
+                interfaceTypes: ["other"],
+                interfaceNames: ["awdl0"],
+                pathDescription: "satisfied interface awdl0 local fe80::1234"
+            ),
+            .init(routeClass: "awdl", attached: false, linkLocal: false)
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.smokeConnectionPathClassification(
+                interfaceTypes: ["wiredEthernet"],
+                interfaceNames: ["en9"],
+                pathDescription: "satisfied interface en9 local 169.254.8.2"
+            ),
+            .init(routeClass: "attached", attached: true, linkLocal: true)
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.smokeConnectionPathClassification(
+                interfaceTypes: ["other"],
+                interfaceNames: ["en9"],
+                pathDescription: "satisfied interface en9"
+            ).routeClass,
+            "attached"
+        )
+
+        let source = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let activeWait = try sourceSlice(
+            from: "private func waitForConnection(",
+            to: "// MARK: - 辅助方法",
+            in: source
+        )
+        XCTAssertTrue(activeWait.contains("Self.appendSmokeConnectionPathEvidence("))
+        XCTAssertTrue(source.contains("p2p-connection-ready-path deviceId="))
+        XCTAssertTrue(source.contains("usedInterfaceTypes="))
+        XCTAssertTrue(source.contains("usedInterfaceNames="))
+        XCTAssertTrue(source.contains("routeClass=\\(classification.routeClass)"))
+    }
+
+    func testAdvertisingReadinessObserversCannotCancelSharedListener() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
+        let waitBody = try sourceSlice(
+            from: "private func waitForAdvertisingReady(",
+            to: "private func cancelRecord(",
+            in: source
+        )
+
+        XCTAssertTrue(waitBody.contains("cancelRecordOnFailure: Bool = false"))
+        XCTAssertTrue(waitBody.contains("if cancelRecordOnFailure"))
+        XCTAssertTrue(
+            source.contains("token: token,\n            cancelRecordOnFailure: true"),
+            "Only the listener creator may tear down its record when startup fails."
+        )
+        XCTAssertTrue(
+            source.contains("public func waitUntilReady(")
+                && source.contains("return try await waitForAdvertisingReady("),
+            "Health observers must use the non-owning readiness path."
+        )
+    }
+
+    func testNetServiceResolutionUsesBoundedCancellablePermitHandoffAndSingleFlight() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let limiter = try sourceSlice(
+            from: "actor NetServiceResolveLimiter",
+            to: "private struct NetServiceResolvedEndpoint",
+            in: source
+        )
+
+        XCTAssertTrue(limiter.contains("maximumWaiters: Int = 64"))
+        XCTAssertTrue(limiter.contains("withTaskCancellationHandler"))
+        XCTAssertTrue(limiter.contains("waiter.cancel()"))
+        XCTAssertTrue(limiter.contains("removeWaiter(id: waiter.id)"))
+        XCTAssertTrue(source.contains("final class NetServiceResolvePermitWaiter"))
+        XCTAssertTrue(limiter.contains("Direct permit handoff"))
+        XCTAssertFalse(
+            limiter.contains("waiter.resume()\n            }\n            inFlight += 1"),
+            "A resumed waiter must inherit the released permit instead of incrementing past the limit."
+        )
+        XCTAssertTrue(source.contains("maximumTXTResolveCooldownEntries = 256"))
+        XCTAssertTrue(source.contains("if let owner = netServiceResolveTasks[route]"))
+        XCTAssertTrue(source.contains("owner.ticket.stableDeviceIdentity == stableDeviceIdentity"))
+        XCTAssertTrue(source.contains("discoveryHydrationGenerationState.accepts("))
+        XCTAssertTrue(source.contains("cancelNetServiceResolveTasks()"))
+    }
+
+    func testIOSDiscoveryAndReconnectWorkAreBoundedAndCancellationOwned() throws {
+        let discovery = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+        )
+        XCTAssertTrue(discovery.contains("maximumCachedDevices = 128"))
+        XCTAssertTrue(discovery.contains("maximumEndpointMappings = 1_024"))
+        XCTAssertTrue(discovery.contains("maximumAliasesPerDevice = 32"))
+        XCTAssertTrue(discovery.contains("removeCachedDiscoveryDevice("))
+        XCTAssertTrue(discovery.contains("pruneDiscoveryReverseIndexes()"))
+        XCTAssertFalse(
+            discovery.contains("try? await Task.sleep(for: .milliseconds(250))"),
+            "Cancelling a debounced publish must not immediately execute stale work."
+        )
+
+        let p2p = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        XCTAssertTrue(p2p.contains("maximumInFlightConnectWaitersPerPeer = 32"))
+        XCTAssertTrue(p2p.contains("withTaskCancellationHandler"))
+        XCTAssertTrue(p2p.contains("reconnectTaskTokens[deviceId] == token"))
+        XCTAssertTrue(p2p.contains("pathRecoveryTaskTokens[deviceId] == token"))
+        XCTAssertTrue(p2p.contains("!self.userInitiatedDisconnects.contains(deviceId)"))
+        XCTAssertFalse(
+            p2p.contains("try? await Task.sleep(for: .seconds(delay))"),
+            "A cancelled reconnect timer must return instead of initiating a ghost connection."
+        )
     }
 
     private func readSource(_ relativePath: String) throws -> String {

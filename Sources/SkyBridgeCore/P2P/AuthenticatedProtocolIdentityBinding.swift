@@ -27,6 +27,8 @@ enum AuthenticatedProtocolIdentityBinding {
             key.protocolSigningAlgorithm
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .uppercased() == expectedAlgorithm
+                && (authority.protocolPublicKey == nil
+                    || key.publicKey == authority.protocolPublicKey)
                 && key.authoritativeFingerprint?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .lowercased() == expectedFingerprint

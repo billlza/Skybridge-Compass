@@ -1,7 +1,8 @@
 // PQCProtocolAdapter.swift
 // SkyBridgeCore
 //
-// PQC 跨平台协议适配器 - 封装现有 PQCProvider 为统一跨平台接口
+// Legacy ML-DSA-65 compatibility/test adapter. This is not the active
+// main-protocol identity authority and must not feed production capability UI.
 // Created for web-agent-integration spec 9
 
 import Foundation
@@ -73,7 +74,11 @@ public enum CrossPlatformSignatureVariant: String, Codable, Sendable, CaseIterab
 
 // MARK: - PQC 协议适配器
 
-/// PQC 跨平台协议适配器 - 提供统一的跨平台 PQC 接口
+/// Legacy ML-DSA-65-only compatibility/test surface.
+///
+/// Production handshake, TrustRecord, file-transfer, and settings paths use
+/// `CommittedLocalProtocolIdentitySnapshot` plus exact raw-key authority and
+/// never derive capability from this adapter.
 @available(macOS 14.0, *)
 public actor PQCProtocolAdapter {
     
@@ -84,10 +89,9 @@ public actor PQCProtocolAdapter {
     private let supportedSuites: [CrossPlatformPQCSuite]
     private let supportedKEMVariants: Set<CrossPlatformKEMVariant>
     private let supportedSignatureVariants: Set<CrossPlatformSignatureVariant>
-    /// The production handshake and TrustRecord contract currently bind only
-    /// ML-DSA-65. Providers may keep ML-DSA-87 for explicit primitive-level
-    /// interoperability, but the wire adapter must not advertise or dispatch it.
-    private static let productionSignatureVariants: Set<CrossPlatformSignatureVariant> = [.mldsa65]
+    /// This legacy adapter intentionally remains ML-DSA-65-only. It is not a
+    /// statement about the active production identity, which may be ML-DSA-87.
+    private static let legacyCompatibilitySignatureVariants: Set<CrossPlatformSignatureVariant> = [.mldsa65]
     
  /// 当前使用的算法套件
     public private(set) var currentSuite: CrossPlatformPQCSuite
@@ -120,7 +124,8 @@ public actor PQCProtocolAdapter {
         }
     }
     
- /// 使用指定 provider 初始化（用于测试）
+ #if DEBUG || SKYBRIDGE_TESTING
+ /// 使用指定 provider 初始化（仅用于测试）
     public init(provider: PQCProvider?, suite requestedSuite: CrossPlatformPQCSuite? = nil) {
         self.provider = provider
         
@@ -138,6 +143,7 @@ public actor PQCProtocolAdapter {
             self.currentSuite = .classic
         }
     }
+ #endif
 
     private static func supportedKEMVariants(for provider: PQCProvider) -> Set<CrossPlatformKEMVariant> {
         guard let reporter = provider as? any PQCProviderCapabilityReporting else { return [] }
@@ -151,7 +157,7 @@ public actor PQCProtocolAdapter {
         let providerVariants = Set(
             reporter.supportedSignatureAlgorithms.compactMap(CrossPlatformSignatureVariant.init(rawValue:))
         )
-        return providerVariants.intersection(productionSignatureVariants)
+        return providerVariants.intersection(legacyCompatibilitySignatureVariants)
     }
 
     private static func supportedSuites(for provider: PQCProvider) -> [CrossPlatformPQCSuite] {

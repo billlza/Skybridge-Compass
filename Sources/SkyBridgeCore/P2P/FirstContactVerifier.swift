@@ -57,15 +57,11 @@ public struct FirstContactVerifier: Sendable {
  /// Classic 签名 Provider
     private let classicProvider: ClassicSignatureProvider
     
- /// PQC 签名 Provider
-    private let pqcProvider: PQCSignatureProvider
-    
  // MARK: - Initialization
     
     public init() {
         self.legacyVerifier = P256LegacyVerifier()
         self.classicProvider = ClassicSignatureProvider()
-        self.pqcProvider = PQCSignatureProvider(backend: .auto)
     }
     
  // MARK: - Public Methods
@@ -92,6 +88,7 @@ public struct FirstContactVerifier: Sendable {
         publicKey: Data,
         encodingPath: MessageEncodingPath,
         offeredSuites: [CryptoSuite],
+        wireAlgorithm: SignatureAlgorithm? = nil,
         precondition: LegacyTrustPrecondition?
     ) async throws -> FirstContactVerificationResult {
         switch encodingPath {
@@ -104,11 +101,15 @@ public struct FirstContactVerifier: Sendable {
             )
             
         case .modern:
+            let algorithm = wireAlgorithm
+                .flatMap(ProtocolSigningAlgorithm.init(from:))
+                ?? selectModernAlgorithm(offeredSuites: offeredSuites)
             return try await verifyModern(
                 data: data,
                 signature: signature,
                 publicKey: publicKey,
-                offeredSuites: offeredSuites
+                offeredSuites: offeredSuites,
+                algorithm: algorithm
             )
         }
     }
@@ -125,7 +126,7 @@ public struct FirstContactVerifier: Sendable {
         switch wireAlgorithm {
         case .p256ECDSA:
             return .legacy
-        case .ed25519, .mlDSA65:
+        case .ed25519, .mlDSA65, .mlDSA87:
             return .modern
         }
     }
@@ -136,11 +137,12 @@ public struct FirstContactVerifier: Sendable {
  ///
  /// - Parameter offeredSuites: MessageA 中的 offeredSuites
  /// - Returns: 协议签名算法
- /// - Throws: 如果 modern offer 为空、重复、包含不可协商套件或混合密码组
     public func selectModernAlgorithm(
         offeredSuites: [CryptoSuite]
-    ) throws -> ProtocolSigningAlgorithm {
-        try validatedModernAlgorithm(offeredSuites: offeredSuites)
+    ) -> ProtocolSigningAlgorithm {
+ // 如果 offeredSuites 包含任何 isPQCGroup 的 suite → ML-DSA-65
+        let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
+        return hasPQCOrHybrid ? .mlDSA65 : .ed25519
     }
     
  // MARK: - Private Methods
@@ -182,12 +184,20 @@ public struct FirstContactVerifier: Sendable {
         data: Data,
         signature: Data,
         publicKey: Data,
-        offeredSuites: [CryptoSuite]
+        offeredSuites: [CryptoSuite],
+        algorithm: ProtocolSigningAlgorithm
     ) async throws -> FirstContactVerificationResult {
-        // Modern first contact is admitted structurally before selecting or
-        // invoking a cryptographic verifier. Legacy P-256 remains governed by
-        // its separate, explicit LegacyTrustPrecondition contract.
-        let algorithm = try selectModernAlgorithm(offeredSuites: offeredSuites)
+        guard PreNegotiationSignatureSelector.validateSuiteCompatibility(
+            selectedSuite: offeredSuites.first ?? .unknown(0xffff),
+            sigAAlgorithm: algorithm.wire
+        ), offeredSuites.allSatisfy({ suite in
+            PreNegotiationSignatureSelector.validateSuiteCompatibility(
+                selectedSuite: suite,
+                sigAAlgorithm: algorithm.wire
+            )
+        }) else {
+            return .failed(reason: "\(algorithm.rawValue) is incompatible with the offered suites")
+        }
         
  // 2. 选择对应的 Provider 验证
         let isValid: Bool
@@ -198,8 +208,9 @@ public struct FirstContactVerifier: Sendable {
                 signature: signature,
                 publicKey: publicKey
             )
-        case .mlDSA65:
-            isValid = try await pqcProvider.verify(
+        case .mlDSA65, .mlDSA87:
+            let provider = ProtocolSignatureProviderSelector.select(for: algorithm)
+            isValid = try await provider.verify(
                 data,
                 signature: signature,
                 publicKey: publicKey
@@ -211,32 +222,6 @@ public struct FirstContactVerifier: Sendable {
         } else {
             return .failed(reason: "\(algorithm.rawValue) signature verification failed")
         }
-    }
-
-    private func validatedModernAlgorithm(
-        offeredSuites: [CryptoSuite]
-    ) throws -> ProtocolSigningAlgorithm {
-        guard !offeredSuites.isEmpty else {
-            throw HandshakeError.emptyOfferedSuites
-        }
-        guard offeredSuites.allSatisfy(\.isNegotiable) else {
-            throw HandshakeError.homogeneityViolation(
-                message: "Modern first-contact offer contains a non-negotiable suite"
-            )
-        }
-        guard Set(offeredSuites.map(\.wireId)).count == offeredSuites.count else {
-            throw HandshakeError.homogeneityViolation(
-                message: "Modern first-contact offer contains duplicate suites"
-            )
-        }
-
-        let expectsPQC = offeredSuites[0].isPQCGroup
-        guard offeredSuites.allSatisfy({ $0.isPQCGroup == expectsPQC }) else {
-            throw HandshakeError.homogeneityViolation(
-                message: "Modern first-contact offer mixes PQC and classic suites"
-            )
-        }
-        return expectsPQC ? .mlDSA65 : .ed25519
     }
 }
 
@@ -289,6 +274,7 @@ extension FirstContactVerifier {
             publicKey: publicKey,
             encodingPath: encodingPath,
             offeredSuites: offeredSuites,
+            wireAlgorithm: wireAlgorithm,
             precondition: precondition
         )
         

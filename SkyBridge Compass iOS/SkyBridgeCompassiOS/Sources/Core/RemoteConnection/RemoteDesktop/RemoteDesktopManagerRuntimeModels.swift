@@ -1,6 +1,25 @@
 import Foundation
 import SkyBridgeRealtimeMedia
 
+actor RemoteDesktopViewerSettingsPersistenceCoordinator {
+    private let store: CodablePersistenceStore<RemoteDesktopViewerSettings>
+    private var latestSavedRevision: UInt64 = 0
+
+    init(store: CodablePersistenceStore<RemoteDesktopViewerSettings>) {
+        self.store = store
+    }
+
+    func loadOrThrow() throws -> RemoteDesktopViewerSettings? {
+        try store.loadOrThrow()
+    }
+
+    func save(_ settings: RemoteDesktopViewerSettings, revision: UInt64) throws {
+        guard revision > latestSavedRevision else { return }
+        try store.save(settings)
+        latestSavedRevision = revision
+    }
+}
+
 enum RemoteDesktopManagerRuntimeLimits {
     static let lanReceiveChunkMaxBytes: Int = 256 * 1024
     static let maxLANScreenFramesPerParserDrain = 4
@@ -29,6 +48,9 @@ enum RemoteDesktopManagerRuntimeConfig {
             path: "RemoteDesktop/viewer-settings.json",
             legacyUserDefaultsKey: "com.skybridge.remoteDesktop.viewerSettings.v1"
         )
+    )
+    static let viewerSettingsPersistence = RemoteDesktopViewerSettingsPersistenceCoordinator(
+        store: viewerSettingsStore
     )
 
     static var remoteDesktopBuildFingerprint: String {
@@ -264,7 +286,8 @@ extension RemoteDesktopManager {
         let decoded: DecodeOutput?
         let decodeFailureReason: String?
         let isStillImageFrame: Bool
-        let sourceFrame: ScreenData
+        let sourceFrameSequenceNumber: UInt64?
+        let frameTraits: RemoteDesktopVideoFrameTraits
         let format: String
         let decoder: VideoDecoder
         let generation: UInt64

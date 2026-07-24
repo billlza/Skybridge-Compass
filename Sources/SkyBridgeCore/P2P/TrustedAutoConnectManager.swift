@@ -44,7 +44,11 @@ public final class TrustedAutoConnectManager: ObservableObject {
                 guard let self else { return }
                 await self.reconcile()
                 let interval = self.currentIntervalSeconds()
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                do {
+                    try await Task.sleep(for: .seconds(interval))
+                } catch {
+                    return
+                }
             }
         }
         log.info("🔗 随航自动连接管理器已启动")

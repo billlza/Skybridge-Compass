@@ -43,6 +43,9 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         let readiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
         XCTAssertTrue(readiness.contains("validate_release_binary_provenance_strings"))
         XCTAssertTrue(readiness.contains("validate_release_app_binary_provenance_strings"))
+        XCTAssertTrue(readiness.contains("validate_release_binary_test_surface_strings"))
+        XCTAssertTrue(readiness.contains("SKYBRIDGE_SMOKE_"))
+        XCTAssertTrue(readiness.contains("SkyBridgeTestingBuild"))
         XCTAssertTrue(readiness.contains("release_app_binary_candidates"))
         XCTAssertTrue(readiness.contains("release app binary"))
         XCTAssertTrue(readiness.contains("validate_release_app_binary_provenance_strings \"${APP_PATH}\""))
@@ -69,15 +72,62 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         XCTAssertTrue(buildDMG.contains("\"$git_dirty_state\" == \"clean\""))
     }
 
-    func testQPeriaptVendorPolicyRejectsLocalPathArtifacts() throws {
+    func testReleaseBinarySurfaceGateRecursesAndInspectsDemangledSymbols() throws {
+        let readiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
+
+        XCTAssertTrue(readiness.contains("--scan-release-binaries-only"))
+        XCTAssertTrue(readiness.contains("find \"${app_path}\" -type f -print0"))
+        XCTAssertTrue(readiness.contains("while IFS= read -r -d '' binary_path"))
+        XCTAssertTrue(readiness.contains("validate_release_binary_test_surface_symbols"))
+        XCTAssertTrue(readiness.contains("validate_release_binary_test_surface \"${binary_path}\""))
+        XCTAssertTrue(readiness.contains("xcrun --find nm"))
+        XCTAssertTrue(readiness.contains("xcrun --find swift-demangle"))
+        XCTAssertTrue(readiness.contains("\"${RELEASE_SWIFT_DEMANGLE_TOOL}\" --compact"))
+
+        for marker in [
+            "SKYBRIDGE_TESTING",
+            "SKYBRIDGE_SMOKE_",
+            "SKYBRIDGE_KEYCHAIN_IN_MEMORY",
+            "UITEST_",
+            "XCTestSessionIdentifier",
+            "XCTestConfigurationFilePath",
+            "XCTestBundlePath",
+            "XCInjectBundleInto",
+            "RemoteControlSmokeStatusWriter",
+            "SmokeHarness",
+            "SmokeStatusWriter",
+            "SmokeStatusReporter",
+            "SmokeStreamOverrides",
+            "SmokeTraceWriter",
+            "SmokeStatusFileAppender",
+            "MacSmokeStatusFailClosedWriter",
+            "RemoteControlNoticePanelProbeHarness"
+        ] {
+            XCTAssertTrue(
+                readiness.contains(marker),
+                "release readiness must reject compiled test surface marker \(marker)"
+            )
+        }
+
+        let behaviorTest = try repositorySource("Scripts/test_macos_release_binary_surface_gate.sh")
+        XCTAssertTrue(behaviorTest.contains("Contents/Resources/Embedded/Nested/Helpers"))
+        XCTAssertTrue(behaviorTest.contains("NOT_SKYBRIDGE_TESTING"))
+        XCTAssertTrue(behaviorTest.contains("RemoteControlSmokeStatusWriterFactory"))
+        XCTAssertTrue(behaviorTest.contains("LocalCameraSmokeHarness"))
+        XCTAssertTrue(behaviorTest.contains("in its symbol table"))
+        XCTAssertTrue(behaviorTest.contains("after Swift symbol demangling"))
+        XCTAssertTrue(behaviorTest.contains("--scan-release-binaries-only"))
+    }
+
+    func testQPeriaptVendorPolicyInstallsOnlyTheAuthenticatedABI2Release() throws {
         let builder = try repositorySource("Scripts/build_qperiapt_xcframework.sh")
-        XCTAssertTrue(builder.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2\""))
+        XCTAssertTrue(builder.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2-r1\""))
         XCTAssertTrue(builder.contains("releases/download/${QPERIAPT_RELEASE_TAG}"))
         XCTAssertTrue(builder.contains("require_sha256 \"$DOWNLOAD_DIR/CQPeriapt.xcframework.zip\""))
         XCTAssertTrue(builder.contains("validate_archive_shape"))
         XCTAssertTrue(builder.contains("codesign --verify --deep --strict"))
         XCTAssertTrue(builder.contains("assert_exact_symbols \"$header\" \"$library\""))
-        XCTAssertTrue(builder.contains("PROVENANCE_SOURCE=\"$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2.json\""))
+        XCTAssertTrue(builder.contains("PROVENANCE_SOURCE=\"$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json\""))
         XCTAssertFalse(builder.contains("QPERIAPT_REPO"))
         XCTAssertFalse(builder.contains("CARGO_ENCODED_RUSTFLAGS"))
         XCTAssertFalse(builder.contains("IOS_VENDOR_OUT"))

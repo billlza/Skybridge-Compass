@@ -25,14 +25,20 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
  /// Mock CryptoProvider for testing
     private class MockCryptoProvider: CryptoProvider, @unchecked Sendable {
         let providerName: String = "MockProvider"
-        let tier: CryptoTier = .classic
-        let activeSuite: CryptoSuite = .x25519Ed25519
+        let tier: CryptoTier
+        let activeSuite: CryptoSuite
         private let _supportedSuites: [CryptoSuite]
         
         var supportedSuites: [CryptoSuite] { _supportedSuites }
         
-        init(supportedSuites: [CryptoSuite]) {
+        init(
+            supportedSuites: [CryptoSuite],
+            tier: CryptoTier = .classic,
+            activeSuite: CryptoSuite = .x25519Ed25519
+        ) {
             self._supportedSuites = supportedSuites
+            self.tier = tier
+            self.activeSuite = activeSuite
         }
         
         func supportsSuite(_ suite: CryptoSuite) -> Bool {
@@ -57,6 +63,33 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
         
         func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
             throw CryptoProviderError.notImplemented("Mock")
+        }
+    }
+
+    private actor QAttemptCounter {
+        struct Snapshot: Equatable, Sendable {
+            let pqc: Int
+            let compatibility: Int
+            let classic: Int
+        }
+
+        private var pqc = 0
+        private var compatibility = 0
+        private var classic = 0
+
+        func record(_ preparation: AttemptPreparation) {
+            switch preparation.strategy {
+            case .classicOnly:
+                classic += 1
+            case .pqcOnly where pqc == 0:
+                pqc += 1
+            case .pqcOnly:
+                compatibility += 1
+            }
+        }
+
+        func snapshot() -> Snapshot {
+            Snapshot(pqc: pqc, compatibility: compatibility, classic: classic)
         }
     }
     
@@ -240,6 +273,90 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
         
         XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNegotiationFailed),
             "suiteNegotiationFailed SHOULD trigger fallback")
+    }
+
+    func testQPeriaptFailureNeverAttemptsCompatibilityOrClassicFallback() async throws {
+        let provider = MockCryptoProvider(
+            supportedSuites: [.qperiaptABI2PolicyBound],
+            tier: .qperiaptPQC,
+            activeSuite: .qperiaptABI2PolicyBound
+        )
+
+        for failureReason in [
+            HandshakeFailureReason.pqcProviderUnavailable,
+            .suiteNegotiationFailed
+        ] {
+            let counter = QAttemptCounter()
+            do {
+                _ = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                    deviceId: "q-no-downgrade-\(failureReason.diagnosticReasonCode)",
+                    preferPQC: true,
+                    policy: .default,
+                    cryptoProvider: provider,
+                    executor: { preparation in
+                        await counter.record(preparation)
+                        throw HandshakeError.failed(failureReason)
+                    },
+                    enforceFallbackRateLimit: false,
+                    enablePQCBridgeRetry: true
+                )
+                XCTFail("Q-Periapt handshake failure must remain terminal")
+            } catch HandshakeError.failed(let reason) {
+                XCTAssertEqual(reason, failureReason)
+            }
+
+            let attempts = await counter.snapshot()
+            XCTAssertEqual(attempts, .init(pqc: 1, compatibility: 0, classic: 0))
+        }
+    }
+
+    func testMLDSA87QOnlyPreparationFailsBeforeExecutingAnyAttempt() async throws {
+        let provider = MockCryptoProvider(
+            supportedSuites: [.qperiaptABI2PolicyBound],
+            tier: .qperiaptPQC,
+            activeSuite: .qperiaptABI2PolicyBound
+        )
+        let counter = QAttemptCounter()
+
+        do {
+            _ = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: "q-ml-dsa-87-rejected",
+                preferPQC: true,
+                policy: .default,
+                cryptoProvider: provider,
+                executor: { preparation in
+                    await counter.record(preparation)
+                    throw HandshakeError.failed(.suiteNegotiationFailed)
+                },
+                enforceFallbackRateLimit: false,
+                enablePQCBridgeRetry: true,
+                pqcSignatureAlgorithm: .mlDSA87
+            )
+            XCTFail("ML-DSA-87 must not enter the Q-Periapt ABI2 attempt")
+        } catch AttemptPreparationError.pqcProviderUnavailable {
+            // Expected: Q is filtered before the executor is entered.
+        }
+
+        let attempts = await counter.snapshot()
+        XCTAssertEqual(attempts, .init(pqc: 0, compatibility: 0, classic: 0))
+    }
+
+    func testMLDSA87KeepsStandardMLKEMWhileExcludingQPeriapt() throws {
+        let provider = MockCryptoProvider(
+            supportedSuites: [.qperiaptABI2PolicyBound, .mlkem768MLDSA65],
+            tier: .liboqsPQC,
+            activeSuite: .mlkem768MLDSA65
+        )
+
+        let preparation = try TwoAttemptHandshakeManager.prepareAttempt(
+            strategy: .pqcOnly,
+            cryptoProvider: provider,
+            pqcOfferMode: .allAvailable,
+            pqcSignatureAlgorithm: .mlDSA87
+        )
+
+        XCTAssertEqual(preparation.sigAAlgorithm, .mlDSA87)
+        XCTAssertEqual(preparation.offeredSuites, [.mlkem768MLDSA65])
     }
     
  // MARK: - 17.5: Legacy 首次接触连通测试

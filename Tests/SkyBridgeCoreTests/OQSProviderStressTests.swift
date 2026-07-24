@@ -5,26 +5,22 @@ final class OQSProviderStressTests: XCTestCase {
     func testSignVerifyStress() async throws {
         #if canImport(OQSRAII)
         let keychain = PQCKeychainTestContext()
-        let provider = OQSProvider(scopeSource: keychain.scopeSource)
+        let provider = OQSProvider(
+            keyPairAuthority: .staged,
+            scopeSource: keychain.scopeSource
+        )
         let peer = "stress-peer"
         let message = Data(repeating: 0xAB, count: 1024)
-        let firstSignature = try await provider.sign(
-            data: message,
+        _ = try await provider.sign(data: message, peerId: peer, algorithm: "ML-DSA-65")
+        let publicKey = try await provider.localSigningPublicKey(
             peerId: peer,
             algorithm: "ML-DSA-65"
         )
-        _ = try await authenticateLocalSigningKeyForTesting(
-            signer: provider,
-            verifier: provider,
-            peerId: peer
-        )
-        let firstVerified = await provider.verify(
-            data: message,
-            signature: firstSignature,
+        try await provider.registerAuthenticatedSigningPublicKey(
+            publicKey,
             peerId: peer,
             algorithm: "ML-DSA-65"
         )
-        XCTAssertTrue(firstVerified)
         for _ in 0..<100 {
             let sig = try await provider.sign(data: message, peerId: peer, algorithm: "ML-DSA-65")
             let ok = await provider.verify(data: message, signature: sig, peerId: peer, algorithm: "ML-DSA-65")
@@ -37,7 +33,10 @@ final class OQSProviderStressTests: XCTestCase {
     func testKEMEncapDecapStress() async throws {
         #if canImport(OQSRAII)
         let keychain = PQCKeychainTestContext()
-        let provider = OQSProvider(scopeSource: keychain.scopeSource)
+        let provider = OQSProvider(
+            keyPairAuthority: .staged,
+            scopeSource: keychain.scopeSource
+        )
         let peer = "stress-peer-kem"
         for _ in 0..<100 {
             let r = try await provider.kemEncapsulate(peerId: peer, kemVariant: "ML-KEM-768")
@@ -51,7 +50,10 @@ final class OQSProviderStressTests: XCTestCase {
     func testConcurrentOperations() async throws {
         #if canImport(OQSRAII)
         let keychain = PQCKeychainTestContext()
-        let provider = OQSProvider(scopeSource: keychain.scopeSource)
+        let provider = OQSProvider(
+            keyPairAuthority: .staged,
+            scopeSource: keychain.scopeSource
+        )
         let peer = "stress-concurrent"
         let message = Data(repeating: 0xCD, count: 2048)
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -59,10 +61,14 @@ final class OQSProviderStressTests: XCTestCase {
                 group.addTask {
                     let id = peer + "-\(i)"
                     let sig = try await provider.sign(data: message, peerId: id, algorithm: "ML-DSA-65")
-                    _ = try await authenticateLocalSigningKeyForTesting(
-                        signer: provider,
-                        verifier: provider,
-                        peerId: id
+                    let publicKey = try await provider.localSigningPublicKey(
+                        peerId: id,
+                        algorithm: "ML-DSA-65"
+                    )
+                    try await provider.registerAuthenticatedSigningPublicKey(
+                        publicKey,
+                        peerId: id,
+                        algorithm: "ML-DSA-65"
                     )
                     let ok = await provider.verify(data: message, signature: sig, peerId: id, algorithm: "ML-DSA-65")
                     XCTAssertTrue(ok)

@@ -162,7 +162,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return deviceMap[identifier]
     }
 
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
     func replaceDevicesForTesting(_ devices: [OnlineDevice]) {
         onlineDevices = devices
         deviceMap = Dictionary(uniqueKeysWithValues: devices.map { ($0.uniqueIdentifier, $0) })
@@ -1101,7 +1101,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
     }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
     public struct SmokeDiscoveryDiagnostic {
         public let name: String
         public let uniqueIdentifier: String?
@@ -1216,7 +1216,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeCloud,
                 signalStrength: nil,
                 isConnectable: false,
-                isAuthorized: false,
+                isAuthorized: true,
                 lastSeen: device.lastSeen,
                 initialConnectionStatus: device.isOnline ? .online : .offline
             )
@@ -2531,7 +2531,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         var parent = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.id) })
-        let trustAliasRecords = TrustSyncService.shared.activeTrustRecords.filter(\.isAuthenticationEligible)
+        let trustAliasRecords = TrustSyncService.shared.activeTrustRecords.filter { !$0.isTombstone }
         let trustAliasCandidateSets: [Set<String>] = trustAliasRecords.compactMap { record in
             let candidates = Set(
                 PeerTrustLookup.recordLookupCandidates(record).map {
@@ -2742,7 +2742,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard !groupCandidates.isEmpty else { return nil }
 
         let matchingRecords = TrustSyncService.shared.activeTrustRecords
-            .filter(\.isAuthenticationEligible)
+            .filter { !$0.isTombstone && !$0.isExpired }
             .filter { record in
                 let recordCandidates = Set(
                     PeerTrustLookup.recordLookupCandidates(record).map {

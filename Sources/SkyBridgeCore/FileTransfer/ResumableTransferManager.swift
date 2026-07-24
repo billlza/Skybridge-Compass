@@ -53,8 +53,10 @@ public final class ResumableTransferManager: ObservableObject {
     private var transferTasks: [UUID: Task<Void, Never>] = [:]
     private var cancellables = Set<AnyCancellable>()
 
-    // 复用现有引擎（本期先保证可编译 + 基础队列；后续再把断点续传/进度回调与引擎更深度整合）
-    private let fileTransferEngine = FileTransferEngine()
+    // Queue orchestration delegates transport and authenticated key derivation to
+    // the canonical manager. The legacy engine writes an incompatible wire format
+    // onto the P2P control connection and must not be used by production callers.
+    private let fileTransferManager = FileTransferManager.shared
     
     // MARK: - 初始化
     
@@ -165,19 +167,13 @@ public final class ResumableTransferManager: ObservableObject {
         autoRetryFailedTransfers: Bool,
         maxRetryAttempts: Int,
         maxConcurrentTransfers: Int,
-        keepTransferHistory: Bool,
-        keepSystemAwakeDuringTransfer: Bool,
-        encryptionAlgorithm: FileTransferEncryptionAlgorithm
+        keepTransferHistory _: Bool,
+        keepSystemAwakeDuringTransfer _: Bool,
+        encryptionAlgorithm _: FileTransferEncryptionAlgorithm
     ) {
         self.autoRetryFailedTransfers = autoRetryFailedTransfers
         self.maxRetryAttempts = max(1, min(10, maxRetryAttempts))
         self.maxConcurrentTransfers = max(1, maxConcurrentTransfers)
-        fileTransferEngine.applyRuntimeSettings(
-            autoRetryFailedTransfers: autoRetryFailedTransfers,
-            keepTransferHistory: keepTransferHistory,
-            keepSystemAwakeDuringTransfer: keepSystemAwakeDuringTransfer,
-            encryptionAlgorithm: encryptionAlgorithm
-        )
     }
     
     /// 调整优先级
@@ -300,18 +296,15 @@ public final class ResumableTransferManager: ObservableObject {
     }
     
     private func executeOutgoingTransfer(_ transfer: ResumableTransfer) async throws {
-        // 先对齐现有 FileTransferEngine API（sendFile(at:to:...)），保证队列基础能力可用。
-        // 断点续传/分块进度：后续通过引擎 session/通知机制接入。
-        _ = try await fileTransferEngine.sendFile(
+        try await fileTransferManager.sendFileToActivePeer(
             at: transfer.fileURL,
-            to: transfer.targetDevice.deviceId,
-            compressionEnabled: transfer.fileSize > 1024 * 1024,
-            encryptionEnabled: true
+            matchingPeerIds: [transfer.targetDevice.deviceId],
+            preferredDeviceName: transfer.targetDevice.deviceName
         )
     }
     
     private func executeIncomingTransfer(_ transfer: ResumableTransfer) async throws {
-        // 接收传输由 FileTransferEngine 的监听器处理
+        // 接收传输由 canonical FileTransferManager 的监听器处理
         // 这里主要负责状态跟踪
         
         // 等待传输完成或超时
@@ -630,4 +623,3 @@ public enum ResumableTransferError: Error, LocalizedError {
         }
     }
 }
-

@@ -5,8 +5,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 use skybridge_agent::{
-    ensure_device_identity, ensure_rust_pqc_identity, load_auth_session, load_health_snapshot,
-    resolve_paths,
+    ensure_device_identity, ensure_rust_pqc_identity_for_algorithm, load_auth_session,
+    load_health_snapshot, resolve_paths,
 };
 use skybridge_core::{
     AuthState, CryptoSuite, EnrollmentStatus, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
@@ -19,13 +19,17 @@ async fn maybe_pqc_identity_report(
     paths: &skybridge_agent::AgentPaths,
     identity: &skybridge_agent::DeviceIdentityMaterial,
 ) -> Result<Option<serde_json::Value>> {
-    if identity.state.device.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65
-        && !crate::auth_support::pqc_bridge_identity_enabled()
-    {
+    let bridge_identity = crate::auth_support::pqc_bridge_identity_enabled()?;
+    if !identity.state.device.protocol_signing_algorithm.is_ml_dsa() && !bridge_identity {
         return Ok(None);
     }
 
-    let pqc_identity = ensure_rust_pqc_identity(paths).await?;
+    let signing_algorithm = if identity.state.device.protocol_signing_algorithm.is_ml_dsa() {
+        identity.state.device.protocol_signing_algorithm
+    } else {
+        ProtocolSigningAlgorithm::MlDsa65
+    };
+    let pqc_identity = ensure_rust_pqc_identity_for_algorithm(paths, signing_algorithm).await?;
     Ok(Some(json!({
         "signing_algorithm": pqc_identity.signing_algorithm,
         "supported_suites": [
@@ -50,7 +54,7 @@ async fn maybe_pqc_identity_report(
             }
         ],
         "bootstrap_env": {
-            "SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM": ProtocolSigningAlgorithm::MlDsa65.as_str(),
+            "SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM": pqc_identity.signing_algorithm.as_str(),
             "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64": STANDARD.encode(&pqc_identity.xwing_public_key),
             "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64": STANDARD.encode(&pqc_identity.mlkem768_public_key),
         }

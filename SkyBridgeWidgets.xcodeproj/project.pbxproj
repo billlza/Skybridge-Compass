@@ -92,7 +92,6 @@
 		AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */; };
 		AFCFB84CB3BED724BF7B7625 /* SkyBridgeCompassWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B024F123E545DB94D950046D /* CrossNetworkConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */; };
-		B4038A16C208252420D8A71F /* RemoteControlSecurityNoticePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */; };
 		B443104E298B5FCAAAC7AB11 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
 		B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */; };
 		B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59C11557E4D37206C350EB7 /* AuthenticationView.swift */; };
@@ -216,7 +215,6 @@
 		9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVGEmbeddedImageView.swift; sourceTree = "<group>"; };
 		9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeWeatherService.swift; sourceTree = "<group>"; };
 		A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitor.swift; sourceTree = "<group>"; };
-		A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlSecurityNoticePanelController.swift; sourceTree = "<group>"; };
 		A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherDashboardCard.swift; sourceTree = "<group>"; };
 		A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationNotifications.swift; sourceTree = "<group>"; };
 		A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
@@ -354,7 +352,6 @@
 				31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */,
 				E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
 				B94E56E85A4296340AE2361F /* PreferencesView.swift */,
-				A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */,
 				3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
 				8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */,
 				5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */,
@@ -775,7 +772,6 @@
 				195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */,
 				92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
 				4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
-				B4038A16C208252420D8A71F /* RemoteControlSecurityNoticePanelController.swift in Sources */,
 				941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
 				1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */,
 				F2AD1913110B4DC7058F4997 /* RemoteSessionRow.swift in Sources */,

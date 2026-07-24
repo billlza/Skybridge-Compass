@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import Darwin
 import Security
 import SkyBridgeCore
 import SkyBridgeSmokeSupport
@@ -57,8 +58,6 @@ struct LocalWebRTCSmokeHost {
             reporter.append("failed stage=auth error=\(sanitize(error.localizedDescription))")
             exit(EXIT_FAILURE)
         }
-        exportAuthContextIfRequested()
-
         let manager = CrossNetworkConnectionManager.shared
         await manager.disconnect()
 
@@ -126,7 +125,15 @@ struct LocalWebRTCSmokeHost {
                 let suiteName = negotiatedSuite.uppercased()
                 let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
                 if !reportedSuccess && (!expectsPQCRekey || !isClassicBootstrap || allowsClassicMediaSuccess) {
-                    let evidence = smokeEvidence(statusURL: statusURL())
+                    let evidence: (hasStream: Bool, hasDirectPath: Bool)
+                    do {
+                        evidence = try await smokeEvidence(statusURL: statusURL())
+                    } catch {
+                        reporter.append(
+                            "failed stage=evidence-read error=\(sanitize(error.localizedDescription))"
+                        )
+                        exit(EXIT_FAILURE)
+                    }
                     let streamSatisfied = !requiresStreamEvidence || evidence.hasStream
                     let directSatisfied = !requiresDirectPath || evidence.hasDirectPath
                     if streamSatisfied && directSatisfied {
@@ -147,7 +154,12 @@ struct LocalWebRTCSmokeHost {
                 }
             }
 
-            try? await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                reporter.append("failed stage=runtime error=smoke_task_cancelled")
+                exit(EXIT_FAILURE)
+            }
         }
 
         reporter.append("failed stage=timeout error=mac_smoke_timeout")
@@ -203,41 +215,6 @@ struct LocalWebRTCSmokeHost {
         return URL(fileURLWithPath: raw)
     }
 
-    private static func tokenURL() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TOKEN_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return nil
-        }
-        return URL(fileURLWithPath: raw)
-    }
-
-    private static func tenantURL() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TENANT_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return nil
-        }
-        return URL(fileURLWithPath: raw)
-    }
-
-    private static func exportAuthContextIfRequested() {
-        let accessToken = AuthenticationService.shared.currentAccessToken()?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if let tokenURL = tokenURL(), !accessToken.isEmpty {
-            try? writeText(accessToken, to: tokenURL)
-        }
-
-        let explicitTenant = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let effectiveTenant = !explicitTenant.isEmpty
-            ? explicitTenant
-            : (deriveTenantIdentifier(accessToken: accessToken) ?? "")
-        if let tenantURL = tenantURL(), !effectiveTenant.isEmpty {
-            try? writeText(effectiveTenant, to: tenantURL)
-        }
-    }
-
     private struct StoredSupabaseConfig {
         let url: String
         let anonKey: String
@@ -247,18 +224,38 @@ struct LocalWebRTCSmokeHost {
         reporter.append("auth-session-load-start")
         let session = try await currentAuthSession(reporter: reporter)
         try validateRegistrySmokeAuthSessionIfNeeded(session, reporter: reporter)
+        let effectiveTenantID = try CrossNetworkConnectionManager.resolveTenantIdentifier(
+            accessToken: session.accessToken,
+            explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"],
+            sessionTenantID: session.nebulaId,
+            sessionUserIdentifier: session.userIdentifier
+        )
+        guard !effectiveTenantID.isEmpty else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 925,
+                userInfo: [NSLocalizedDescriptionKey: "authenticated smoke session has no bound tenant identity"]
+            )
+        }
         reporter.append("auth-session-loaded")
         if shouldConfigureSupabaseForSmokeAuth() {
-            if let config = loadSupabaseConfig(),
-               let url = URL(string: config.url) {
-                reporter.append("auth-supabase-enable-start")
-                await MainActor.run {
-                    AuthenticationService.shared.enableSupabaseMode(
-                        supabaseConfig: SupabaseService.Configuration(url: url, anonKey: config.anonKey)
-                    )
-                }
-                reporter.append("auth-supabase-enable-done")
+            guard let config = try loadSupabaseConfig(),
+                  let url = URL(string: config.url),
+                  url.scheme?.lowercased() == "https",
+                  url.host?.isEmpty == false else {
+                throw NSError(
+                    domain: "LocalWebRTCSmokeHost",
+                    code: 931,
+                    userInfo: [NSLocalizedDescriptionKey: "registry smoke requires a complete HTTPS Supabase configuration"]
+                )
             }
+            reporter.append("auth-supabase-enable-start")
+            await MainActor.run {
+                AuthenticationService.shared.enableSupabaseMode(
+                    supabaseConfig: SupabaseService.Configuration(url: url, anonKey: config.anonKey)
+                )
+            }
+            reporter.append("auth-supabase-enable-done")
         } else {
             reporter.append("auth-supabase-skip-smoke")
         }
@@ -268,11 +265,16 @@ struct LocalWebRTCSmokeHost {
         reporter.append("auth-bind-tenant-start")
         await TenantAccessController.shared.bindAuthentication(session: session)
         reporter.append("auth-bind-tenant-done")
-        configureRemoteControlNoticeIdentity(session: session, reporter: reporter)
+        configureRemoteControlNoticeIdentity(
+            session: session,
+            effectiveTenantID: effectiveTenantID,
+            reporter: reporter
+        )
     }
 
     private static func configureRemoteControlNoticeIdentity(
         session: AuthSession,
+        effectiveTenantID: String,
         reporter: SmokeStatusReporter
     ) {
         let displayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -280,22 +282,22 @@ struct LocalWebRTCSmokeHost {
         RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider {
             RemoteControlSecurityIdentity(
                 accountDisplayName: account,
-                nebulaId: session.nebulaId,
+                nebulaId: effectiveTenantID,
                 deviceId: nil,
                 deviceName: Host.current().localizedName
             )
         }
         _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
-        reporter.append("remote-control-notice-identity account=\(sanitize(account)) nebula=\(sanitize(session.nebulaId ?? "missing"))")
+        reporter.append("remote-control-notice-identity account=present nebula=present")
     }
 
     private static func currentAuthSession(reporter: SmokeStatusReporter) async throws -> AuthSession {
-        if let injected = injectedAuthSession() {
+        if let injected = try injectedAuthSession() {
             reporter.append("auth-session-env-present")
             return injected
         }
 
-        guard let stored = loadStoredAuthSession() else {
+        guard let stored = try loadStoredAuthSession() else {
             throw NSError(
                 domain: "LocalWebRTCSmokeHost",
                 code: 1,
@@ -314,15 +316,12 @@ struct LocalWebRTCSmokeHost {
             forceRefresh: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_AUTH_REFRESH"] == "1"
            ) {
             reporter.append("auth-refresh-start")
-            do {
-                if let refreshed = try await refreshSupabaseSession(refreshToken: refreshToken, previous: stored) {
-                    reporter.append("auth-refresh-ok")
-                    return refreshed
-                }
-                reporter.append("auth-refresh-empty")
-            } catch {
-                reporter.append("auth-refresh-fallback error=\(sanitize(error.localizedDescription))")
-            }
+            let refreshed = try await refreshSupabaseSession(
+                refreshToken: refreshToken,
+                previous: stored
+            )
+            reporter.append("auth-refresh-ok")
+            return refreshed
         }
         reporter.append("auth-refresh-skip-using-stored")
         return stored
@@ -350,8 +349,8 @@ struct LocalWebRTCSmokeHost {
         return false
     }
 
-    private static func injectedAuthSession() -> AuthSession? {
-        if let session = injectedAuthSessionFromJSON() {
+    private static func injectedAuthSession() throws -> AuthSession? {
+        if let session = try injectedAuthSessionFromJSON() {
             return session
         }
         let env = ProcessInfo.processInfo.environment
@@ -369,7 +368,6 @@ struct LocalWebRTCSmokeHost {
         let userIdentifier = env["SKYBRIDGE_USER_ID"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             ?? deriveUserIdentifier(accessToken: accessToken)
-            ?? deriveTenantIdentifier(accessToken: accessToken)
             ?? "smoke-user"
         let displayName = env["SKYBRIDGE_DISPLAY_NAME"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -387,70 +385,192 @@ struct LocalWebRTCSmokeHost {
         )
     }
 
-    private static func injectedAuthSessionFromJSON() -> AuthSession? {
+    private static func injectedAuthSessionFromJSON() throws -> AuthSession? {
         let env = ProcessInfo.processInfo.environment
-        if let raw = env["SKYBRIDGE_AUTH_SESSION_JSON"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !raw.isEmpty,
-           let data = raw.data(using: .utf8),
-           let session = try? JSONDecoder().decode(AuthSession.self, from: data) {
-            return session
+        let inlineJSON = env["SKYBRIDGE_AUTH_SESSION_JSON"]
+        let filePath = env["SKYBRIDGE_AUTH_SESSION_FILE"]
+        if inlineJSON != nil, filePath != nil {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 917,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth session has multiple configured authorities"]
+            )
+        }
+        if let inlineJSON {
+            guard inlineJSON == inlineJSON.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !inlineJSON.isEmpty,
+                  inlineJSON.utf8.count <= 1_048_576,
+                  let data = inlineJSON.data(using: .utf8) else {
+                throw NSError(
+                    domain: "LocalWebRTCSmokeHost",
+                    code: 918,
+                    userInfo: [NSLocalizedDescriptionKey: "inline smoke auth session is malformed"]
+                )
+            }
+            return try decodeInjectedAuthSession(data)
         }
 
-        guard let rawPath = env["SKYBRIDGE_AUTH_SESSION_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawPath.isEmpty else {
-            return nil
+        guard let filePath else { return nil }
+        let rawPath = filePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawPath.isEmpty, rawPath == filePath else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 919,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth-session file path is malformed"]
+            )
         }
         let url = URL(fileURLWithPath: rawPath)
-        guard let data = try? Data(contentsOf: url) else {
-            return nil
-        }
-        return try? JSONDecoder().decode(AuthSession.self, from: data)
+        let data = try readPrivateAuthSessionFile(at: url)
+        return try decodeInjectedAuthSession(data)
     }
 
-    private static func loadStoredAuthSession() -> AuthSession? {
-        if let data = loadKeychainDataViaSecurityCLI(
+    private static func decodeInjectedAuthSession(_ data: Data) throws -> AuthSession {
+        do {
+            return try JSONDecoder().decode(AuthSession.self, from: data)
+        } catch {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 920,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth-session document is malformed"]
+            )
+        }
+    }
+
+    private static func readPrivateAuthSessionFile(at url: URL) throws -> Data {
+        let maximumByteCount = 1_048_576
+        var pathMetadata = stat()
+        guard lstat(url.path, &pathMetadata) == 0,
+              (pathMetadata.st_mode & S_IFMT) == S_IFREG,
+              pathMetadata.st_uid == geteuid(),
+              pathMetadata.st_nlink == 1,
+              (pathMetadata.st_mode & mode_t(0o777)) == mode_t(0o600),
+              pathMetadata.st_size > 0,
+              pathMetadata.st_size <= maximumByteCount else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 921,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth-session file must be a private bounded regular file"]
+            )
+        }
+
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 922,
+                userInfo: [NSLocalizedDescriptionKey: "unable to open private smoke auth-session file"]
+            )
+        }
+        defer { close(descriptor) }
+
+        var openedMetadata = stat()
+        guard fstat(descriptor, &openedMetadata) == 0,
+              (openedMetadata.st_mode & S_IFMT) == S_IFREG,
+              openedMetadata.st_dev == pathMetadata.st_dev,
+              openedMetadata.st_ino == pathMetadata.st_ino,
+              openedMetadata.st_uid == geteuid(),
+              openedMetadata.st_nlink == 1,
+              (openedMetadata.st_mode & mode_t(0o777)) == mode_t(0o600),
+              openedMetadata.st_size == pathMetadata.st_size else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 923,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth-session file changed while it was opened"]
+            )
+        }
+
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        var data = Data()
+        while data.count <= maximumByteCount {
+            let remaining = maximumByteCount + 1 - data.count
+            guard remaining > 0,
+                  let chunk = try handle.read(upToCount: min(64 * 1_024, remaining)),
+                  !chunk.isEmpty else {
+                break
+            }
+            data.append(chunk)
+        }
+        guard data.count == Int(openedMetadata.st_size) else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 924,
+                userInfo: [NSLocalizedDescriptionKey: "smoke auth-session file changed while it was read"]
+            )
+        }
+        return data
+    }
+
+    private static func loadStoredAuthSession() throws -> AuthSession? {
+        guard let data = try loadKeychainData(
             service: "com.skybridge.compass.authsession",
             account: "primary"
-        ) {
-            return try? JSONDecoder().decode(AuthSession.self, from: data)
+        ) else {
+            return nil
         }
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.skybridge.compass.authsession",
-            kSecAttrAccount as String: "primary",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess, let data = item as? Data {
-            return try? JSONDecoder().decode(AuthSession.self, from: data)
+        do {
+            return try JSONDecoder().decode(AuthSession.self, from: data)
+        } catch {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 926,
+                userInfo: [NSLocalizedDescriptionKey: "stored auth session is malformed"]
+            )
         }
-
-        return nil
     }
 
-    private static func loadSupabaseConfig() -> StoredSupabaseConfig? {
+    private static func loadSupabaseConfig() throws -> StoredSupabaseConfig? {
         let env = ProcessInfo.processInfo.environment
-        if let url = env["SKYBRIDGE_SMOKE_SUPABASE_URL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let anonKey = env["SKYBRIDGE_SMOKE_SUPABASE_ANON_KEY"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !url.isEmpty,
-           !anonKey.isEmpty {
+        let environmentURL = env["SKYBRIDGE_SMOKE_SUPABASE_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let environmentAnonKey = env["SKYBRIDGE_SMOKE_SUPABASE_ANON_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if environmentURL != nil || environmentAnonKey != nil {
+            guard let url = environmentURL,
+                  let anonKey = environmentAnonKey,
+                  !url.isEmpty,
+                  !anonKey.isEmpty else {
+                throw NSError(
+                    domain: "LocalWebRTCSmokeHost",
+                    code: 927,
+                    userInfo: [NSLocalizedDescriptionKey: "Supabase smoke configuration is incomplete"]
+                )
+            }
             return StoredSupabaseConfig(url: url, anonKey: anonKey)
         }
-        guard let url = loadKeychainString(service: "SkyBridge.Supabase", account: "URL"),
-              let anonKey = loadKeychainString(service: "SkyBridge.Supabase", account: "AnonKey") else {
+
+        let keychainURL = try loadKeychainString(service: "SkyBridge.Supabase", account: "URL")
+        let keychainAnonKey = try loadKeychainString(service: "SkyBridge.Supabase", account: "AnonKey")
+        if keychainURL == nil, keychainAnonKey == nil {
             return nil
+        }
+        guard let url = keychainURL,
+              let anonKey = keychainAnonKey,
+              !url.isEmpty,
+              !anonKey.isEmpty else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 928,
+                userInfo: [NSLocalizedDescriptionKey: "stored Supabase configuration is incomplete"]
+            )
         }
         return StoredSupabaseConfig(url: url, anonKey: anonKey)
     }
 
-    private static func loadKeychainString(service: String, account: String) -> String? {
+    private static func loadKeychainString(service: String, account: String) throws -> String? {
+        guard let data = try loadKeychainData(service: service, account: account) else {
+            return nil
+        }
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 929,
+                userInfo: [NSLocalizedDescriptionKey: "stored Keychain text is not UTF-8"]
+            )
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func loadKeychainData(service: String, account: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -460,81 +580,31 @@ struct LocalWebRTCSmokeHost {
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess,
-           let data = item as? Data,
-           let value = String(data: data, encoding: .utf8) {
-            return value
-        }
-
-        if let data = loadKeychainDataViaSecurityCLI(service: service, account: account),
-           let value = String(data: data, encoding: .utf8) {
-            return value
-        }
-        return nil
-    }
-
-    private static func loadKeychainDataViaSecurityCLI(service: String, account: String) -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "find-generic-password",
-            "-s", service,
-            "-a", account,
-            "-w",
-        ]
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
+        if status == errSecItemNotFound {
             return nil
         }
-
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            return nil
+        guard status == errSecSuccess else {
+            throw NSError(
+                domain: NSOSStatusErrorDomain,
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Keychain lookup failed"]
+            )
         }
-
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        return decodeSecurityCLIPasswordOutput(output)
-    }
-
-    private static func decodeSecurityCLIPasswordOutput(_ raw: Data) -> Data? {
-        let trimmed = raw.trimmingTrailingWhitespaceAndNewlines()
-        guard !trimmed.isEmpty else { return nil }
-
-        if let text = String(data: trimmed, encoding: .utf8),
-           isHexEncoded(text),
-           let decoded = decodeHex(text) {
-            return decoded
+        guard let data = item as? Data else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 930,
+                userInfo: [NSLocalizedDescriptionKey: "Keychain lookup returned an invalid value type"]
+            )
         }
-        return trimmed
-    }
-
-    private static func isHexEncoded(_ text: String) -> Bool {
-        !text.isEmpty
-            && text.count.isMultiple(of: 2)
-            && text.unicodeScalars.allSatisfy { scalar in
-                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(scalar)
-            }
-    }
-
-    private static func decodeHex(_ text: String) -> Data? {
-        var bytes = Data(capacity: text.count / 2)
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(index, offsetBy: 2)
-            guard let value = UInt8(text[index..<next], radix: 16) else {
-                return nil
-            }
-            bytes.append(value)
-            index = next
+        guard !data.isEmpty, data.count <= 1_048_576 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 937,
+                userInfo: [NSLocalizedDescriptionKey: "Keychain value size is invalid"]
+            )
         }
-        return bytes
+        return data
     }
 
     private struct RefreshResponse: Decodable {
@@ -555,6 +625,14 @@ struct LocalWebRTCSmokeHost {
             reporter.append("auth-registry-jwt-validation-skipped")
             return
         }
+        guard session.accessToken.utf8.count <= 64 * 1_024,
+              (session.refreshToken?.utf8.count ?? 0) <= 64 * 1_024 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 938,
+                userInfo: [NSLocalizedDescriptionKey: "registry smoke credentials exceed the size limit"]
+            )
+        }
         if let error = smokeAuthJWTValidationError(session.accessToken) {
             throw NSError(
                 domain: "LocalWebRTCSmokeHost",
@@ -571,13 +649,33 @@ struct LocalWebRTCSmokeHost {
     private static func refreshSupabaseSession(
         refreshToken: String,
         previous: AuthSession
-    ) async throws -> AuthSession? {
-        guard let config = loadSupabaseConfig(),
-              var components = URLComponents(string: config.url + "/auth/v1/token") else {
-            return nil
+    ) async throws -> AuthSession {
+        let normalizedRefreshToken = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRefreshToken.isEmpty, normalizedRefreshToken.utf8.count <= 64 * 1_024 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 939,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh token is malformed"]
+            )
+        }
+        guard let config = try loadSupabaseConfig(),
+              var components = URLComponents(string: config.url + "/auth/v1/token"),
+              components.scheme?.lowercased() == "https",
+              components.host?.isEmpty == false else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 932,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh requires a complete HTTPS Supabase configuration"]
+            )
         }
         components.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
-        guard let endpoint = components.url else { return nil }
+        guard let endpoint = components.url else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 933,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh endpoint is malformed"]
+            )
+        }
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -586,7 +684,7 @@ struct LocalWebRTCSmokeHost {
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
         request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["refresh_token": refreshToken]
+            withJSONObject: ["refresh_token": normalizedRefreshToken]
         )
 
         let sessionConfig = URLSessionConfiguration.ephemeral
@@ -594,15 +692,41 @@ struct LocalWebRTCSmokeHost {
         sessionConfig.timeoutIntervalForRequest = 15
         sessionConfig.timeoutIntervalForResource = 20
         let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            return nil
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 934,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh was rejected"]
+            )
+        }
+        guard !data.isEmpty, data.count <= 64 * 1_024 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 935,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh response size is invalid"]
+            )
         }
 
         let decoded = try JSONDecoder().decode(RefreshResponse.self, from: data)
+        let refreshedAccessToken = decoded.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let refreshedRefreshToken = decoded.refreshToken?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !refreshedAccessToken.isEmpty,
+              refreshedAccessToken.utf8.count <= 64 * 1_024,
+              (refreshedRefreshToken?.utf8.count ?? 0) <= 64 * 1_024 else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 936,
+                userInfo: [NSLocalizedDescriptionKey: "auth refresh returned malformed credentials"]
+            )
+        }
         return AuthSession(
-            accessToken: decoded.accessToken,
-            refreshToken: decoded.refreshToken ?? previous.refreshToken,
+            accessToken: refreshedAccessToken,
+            refreshToken: refreshedRefreshToken?.isEmpty == false
+                ? refreshedRefreshToken
+                : previous.refreshToken,
             userIdentifier: previous.userIdentifier,
             nebulaId: previous.nebulaId,
             displayName: previous.displayName,
@@ -697,45 +821,6 @@ struct LocalWebRTCSmokeHost {
         return nil
     }
 
-    private static func deriveTenantIdentifier(accessToken: String) -> String? {
-        guard !accessToken.isEmpty else { return nil }
-        guard let payload = accessToken.split(separator: ".").dropFirst().first else {
-            return nil
-        }
-        var base64 = payload.replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let remainder = base64.count % 4
-        if remainder != 0 {
-            base64.append(String(repeating: "=", count: 4 - remainder))
-        }
-        guard let data = Data(base64Encoded: base64),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        let appMetadata = object["app_metadata"] as? [String: Any]
-        let userMetadata = object["user_metadata"] as? [String: Any]
-        let candidates: [Any?] = [
-            appMetadata?["tenant_id"],
-            appMetadata?["tenantId"],
-            appMetadata?["org_id"],
-            appMetadata?["workspace_id"],
-            userMetadata?["tenant_id"],
-            userMetadata?["tenantId"],
-            userMetadata?["org_id"],
-            userMetadata?["workspace_id"],
-            object["tenant_id"],
-            object["tenantId"],
-            object["sub"]
-        ]
-        for candidate in candidates {
-            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty, value != "nil" {
-                return value
-            }
-        }
-        return nil
-    }
-
     private static func deriveUserIdentifier(accessToken: String) -> String? {
         guard !accessToken.isEmpty else { return nil }
         guard let payload = accessToken.split(separator: ".").dropFirst().first else {
@@ -802,13 +887,19 @@ struct LocalWebRTCSmokeHost {
         }
 
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
-        if let xwing = try decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64") {
+        if let xwing = try decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_216
+        ) {
             keysBySuite[xwingSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: xwingSuiteWireID,
                 publicKey: xwing
             )
         }
-        if let mlkem768 = try decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64") {
+        if let mlkem768 = try decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184
+        ) {
             keysBySuite[mlkem768SuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: mlkem768SuiteWireID,
                 publicKey: mlkem768
@@ -820,7 +911,10 @@ struct LocalWebRTCSmokeHost {
                 )
             }
         }
-        if let mlkem768fs = try decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") {
+        if let mlkem768fs = try decodeBase64Key(
+            "SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64",
+            expectedByteCount: 1_184
+        ) {
             keysBySuite[mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
                 suiteWireId: mlkem768FSSuiteWireID,
                 publicKey: mlkem768fs
@@ -842,20 +936,27 @@ struct LocalWebRTCSmokeHost {
         reporter.append("pqc-preseed device=\(sanitize(peerDeviceID)) suites=\(suites)")
     }
 
-    private static func decodeBase64Key(_ name: String) throws -> Data? {
+    private static func decodeBase64Key(
+        _ name: String,
+        expectedByteCount: Int
+    ) throws -> Data? {
         guard let raw = environmentValue(name) else { return nil }
-        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
+        guard raw.utf8.count <= 4_096,
+              let data = Data(base64Encoded: raw),
+              data.count == expectedByteCount else {
             throw NSError(
                 domain: "LocalWebRTCSmokeHost",
                 code: 914,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid base64 KEM public key in \(name)"]
+                userInfo: [NSLocalizedDescriptionKey: "Invalid base64 or KEM public-key length in \(name)"]
             )
         }
         return data
     }
 
     private static func writeText(_ text: String, to url: URL) throws {
-        guard let data = text.appending("\n").data(using: .utf8) else { return }
+        guard let data = text.appending("\n").data(using: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
         try writePrivateData(data, to: url)
     }
 
@@ -863,11 +964,15 @@ struct LocalWebRTCSmokeHost {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
 
-    private static func smokeEvidence(statusURL: URL?) -> (hasStream: Bool, hasDirectPath: Bool) {
-        guard let statusURL,
-              let contents = try? String(contentsOf: statusURL, encoding: .utf8) else {
+    private static func smokeEvidence(
+        statusURL: URL?
+    ) async throws -> (hasStream: Bool, hasDirectPath: Bool) {
+        guard let statusURL else {
             return (false, false)
         }
+        let contents = try await Task.detached(priority: .utility) {
+            try readBoundedPrivateUTF8File(at: statusURL, maximumByteCount: 8 * 1_024 * 1_024)
+        }.value
         let hasStream = contents.contains("stream-format ")
             || contents.contains("stream-stats ")
             || hasNativeVideoRTPEvidence(in: contents)
@@ -905,43 +1010,161 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? SmokeStatusFileAppender.reset(
-            at: statusURL,
-            protection: .completeUntilFirstUserAuthentication
-        )
+        do {
+            try SmokeStatusFileAppender.reset(
+                at: statusURL,
+                protection: .completeUntilFirstUserAuthentication
+            )
+        } catch {
+            failStatusWrite(operation: "reset", error: error)
+        }
     }
 
     func append(_ line: String) {
         guard let statusURL else { return }
         let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(sanitizeLocalWebRTCSmokeStatusLine(line))\n"
-        if let data = sanitizedLine.data(using: .utf8) {
-            try? SmokeStatusFileAppender.append(
+        guard let data = sanitizedLine.data(using: .utf8) else {
+            failStatusWrite(
+                operation: "encode",
+                error: CocoaError(.fileWriteInapplicableStringEncoding)
+            )
+        }
+        do {
+            try SmokeStatusFileAppender.append(
                 data,
                 to: statusURL,
                 protection: .completeUntilFirstUserAuthentication
             )
+        } catch {
+            failStatusWrite(operation: "append", error: error)
         }
+    }
+
+    private func failStatusWrite(operation: String, error: Error) -> Never {
+        let message = "Local WebRTC smoke status \(operation) failed: \(String(reflecting: type(of: error)))\n"
+        FileHandle.standardError.write(Data(message.utf8))
+        exit(EXIT_FAILURE)
     }
 }
 
 private func writePrivateData(_ data: Data, to url: URL) throws {
-    try FileManager.default.createDirectory(
-        at: url.deletingLastPathComponent(),
-        withIntermediateDirectories: true
+    guard !data.isEmpty, data.count <= 1_048_576 else {
+        throw POSIXError(.EFBIG)
+    }
+    try validatePrivateParentDirectory(url.deletingLastPathComponent())
+
+    let descriptor = open(
+        url.path,
+        O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+        mode_t(0o600)
     )
-    try data.write(to: url, options: .atomic)
-    try FileManager.default.setAttributes(
-        [.posixPermissions: 0o600],
-        ofItemAtPath: url.path
-    )
+    guard descriptor >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { close(descriptor) }
+
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0,
+          (metadata.st_mode & S_IFMT) == S_IFREG,
+          metadata.st_uid == geteuid(),
+          metadata.st_nlink == 1,
+          (metadata.st_mode & mode_t(0o777)) == mode_t(0o600),
+          ftruncate(descriptor, 0) == 0,
+          lseek(descriptor, 0, SEEK_SET) == 0 else {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+    try writeAll(data, to: descriptor)
+    guard fsync(descriptor) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    var pathMetadata = stat()
+    guard lstat(url.path, &pathMetadata) == 0,
+          pathMetadata.st_dev == metadata.st_dev,
+          pathMetadata.st_ino == metadata.st_ino else {
+        throw CocoaError(.fileWriteUnknown)
+    }
 }
 
-private extension Data {
-    func trimmingTrailingWhitespaceAndNewlines() -> Data {
-        var slice = self[...]
-        while let last = slice.last, last == 0x0a || last == 0x0d || last == 0x20 || last == 0x09 {
-            slice = slice.dropLast()
+private func readBoundedPrivateUTF8File(at url: URL, maximumByteCount: Int) throws -> String {
+    guard maximumByteCount > 0 else { throw POSIXError(.EINVAL) }
+    try validatePrivateParentDirectory(url.deletingLastPathComponent())
+
+    var pathMetadata = stat()
+    guard lstat(url.path, &pathMetadata) == 0,
+          (pathMetadata.st_mode & S_IFMT) == S_IFREG,
+          pathMetadata.st_uid == geteuid(),
+          pathMetadata.st_nlink == 1,
+          (pathMetadata.st_mode & mode_t(0o777)) == mode_t(0o600),
+          pathMetadata.st_size >= 0,
+          pathMetadata.st_size <= off_t(maximumByteCount) else {
+        throw CocoaError(.fileReadNoPermission)
+    }
+
+    let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { close(descriptor) }
+
+    var openedMetadata = stat()
+    guard fstat(descriptor, &openedMetadata) == 0,
+          openedMetadata.st_dev == pathMetadata.st_dev,
+          openedMetadata.st_ino == pathMetadata.st_ino,
+          openedMetadata.st_uid == geteuid(),
+          openedMetadata.st_nlink == 1,
+          (openedMetadata.st_mode & mode_t(0o777)) == mode_t(0o600) else {
+        throw CocoaError(.fileReadNoPermission)
+    }
+
+    let expectedByteCount = Int(openedMetadata.st_size)
+    var data = Data()
+    data.reserveCapacity(expectedByteCount)
+    var buffer = [UInt8](repeating: 0, count: min(64 * 1_024, max(1, expectedByteCount)))
+    while data.count < expectedByteCount {
+        let requested = min(buffer.count, expectedByteCount - data.count)
+        let count = buffer.withUnsafeMutableBytes { rawBuffer in
+            Darwin.read(descriptor, rawBuffer.baseAddress, requested)
         }
-        return Data(slice)
+        if count > 0 {
+            data.append(contentsOf: buffer.prefix(count))
+            continue
+        }
+        if count < 0, errno == EINTR { continue }
+        throw CocoaError(.fileReadCorruptFile)
+    }
+    guard let contents = String(data: data, encoding: .utf8) else {
+        throw CocoaError(.fileReadInapplicableStringEncoding)
+    }
+    return contents
+}
+
+private func validatePrivateParentDirectory(_ url: URL) throws {
+    var metadata = stat()
+    guard lstat(url.path, &metadata) == 0,
+          (metadata.st_mode & S_IFMT) == S_IFDIR,
+          metadata.st_uid == geteuid(),
+          (metadata.st_mode & mode_t(0o777)) == mode_t(0o700) else {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+}
+
+private func writeAll(_ data: Data, to descriptor: Int32) throws {
+    try data.withUnsafeBytes { buffer in
+        guard let baseAddress = buffer.baseAddress else { return }
+        var offset = 0
+        while offset < buffer.count {
+            let result = Darwin.write(
+                descriptor,
+                baseAddress.advanced(by: offset),
+                buffer.count - offset
+            )
+            if result > 0 {
+                offset += result
+                continue
+            }
+            if result < 0, errno == EINTR { continue }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 }

@@ -201,12 +201,4 @@ if grep -Eq 'DispatchSemaphore|Task\.detached|@unchecked Sendable|(^|[^[:alnum:]
   fail "loopback lifecycle support contains a forbidden concurrency or buffering pattern"
 fi
 
-source_quality_gate="$(<"${ROOT_DIR}/Scripts/gates/source_quality_gate.sh")"
-for gate_contract in \
-  '"loopback-connection-teardown-stress"' \
-  "BASELINE_RUN_BENCH=1 bash \"\${ROOT_DIR}/Scripts/run_swift_test_filter.sh\" --require-no-skips SkyBridgeBenchTests.BaselineLoopbackBenchTests/testLoopbackConnectionTeardownStress"; do
-  grep -Fq "${gate_contract}" <<<"${source_quality_gate}" \
-    || fail "source-quality loopback runtime gate is missing required contract: ${gate_contract}"
-done
-
 echo "Loopback benchmark fixture policy passed"

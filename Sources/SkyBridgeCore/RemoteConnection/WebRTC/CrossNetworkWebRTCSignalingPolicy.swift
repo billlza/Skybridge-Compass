@@ -1,6 +1,65 @@
 import Foundation
 
 extension CrossNetworkConnectionManager {
+    internal struct WebRTCOutboundProtocolIdentitySelection: Sendable, Equatable {
+        enum Mode: String, Sendable {
+            case configuredAuthority
+            case peerCompatibilityIdentity
+        }
+
+        let algorithm: ProtocolSigningAlgorithm
+        let protection: ProtocolSigningKeyProtection
+        let mode: Mode
+    }
+
+    nonisolated static func isExactMLDSA87Authority(
+        _ authority: CurrentPathRemoteAuthority
+    ) -> Bool {
+        guard authority.protocolSigningAlgorithm == .mlDSA87,
+              let publicKey = authority.protocolPublicKeyBytes else {
+            return false
+        }
+        do {
+            try ProtocolIdentityBinding.validateKeyEncoding(
+                bytes: publicKey,
+                algorithm: .mlDSA87
+            )
+        } catch {
+            return false
+        }
+        let expectedFingerprint = authority.protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: publicKey
+        ).lowercased() == expectedFingerprint
+    }
+
+    nonisolated static func selectWebRTCOutboundProtocolIdentity(
+        requestedAlgorithm: ProtocolSigningAlgorithm,
+        requestedProtection: ProtocolSigningKeyProtection,
+        remoteHasExactMLDSA87Authority: Bool
+    ) -> WebRTCOutboundProtocolIdentitySelection {
+        guard requestedAlgorithm == .mlDSA87,
+              remoteHasExactMLDSA87Authority else {
+            return WebRTCOutboundProtocolIdentitySelection(
+                algorithm: .mlDSA65,
+                protection: requestedAlgorithm == .mlDSA65
+                    ? requestedProtection
+                    : .softwareKeychain,
+                mode: requestedAlgorithm == .mlDSA65
+                    ? .configuredAuthority
+                    : .peerCompatibilityIdentity
+            )
+        }
+        return WebRTCOutboundProtocolIdentitySelection(
+            algorithm: .mlDSA87,
+            protection: requestedProtection,
+            mode: .configuredAuthority
+        )
+    }
+
     internal struct WebRTCInboundResponderSelection: Sendable {
         let selectionPolicy: CryptoProviderFactory.SelectionPolicy
         let cryptoProvider: any CryptoProvider
@@ -144,19 +203,133 @@ extension CrossNetworkConnectionManager {
 
     nonisolated static func selectWebRTCInboundResponder(
         peerSupportedSuites: [CryptoSuite],
-        policy: HandshakePolicy,
-        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
+        policy: HandshakePolicy
     ) -> WebRTCInboundResponderSelection? {
-        guard !peerSupportedSuites.isEmpty,
-              peerSupportedSuites.allSatisfy(\.isNegotiable) else {
-            return nil
+        selectWebRTCInboundResponder(
+            peerSupportedSuites: peerSupportedSuites,
+            policy: policy,
+            makeClassicProvider: {
+                CryptoProviderFactory.make(policy: .classicOnly)
+            },
+            makePQCProvider: { requestedSelection in
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: requestedSelection,
+                    peerSupportedSuites: peerSupportedSuites
+                )
+            }
+        )
+    }
+
+    nonisolated static func selectWebRTCInboundResponder(
+        peerSupportedSuites: [CryptoSuite],
+        policy: HandshakePolicy,
+        protocolIdentity: InboundProtocolIdentitySelection
+    ) -> WebRTCInboundResponderSelection? {
+        selectWebRTCInboundResponder(
+            peerSupportedSuites: peerSupportedSuites,
+            policy: policy,
+            protocolIdentity: protocolIdentity,
+            makeClassicProvider: {
+                CryptoProviderFactory.make(policy: .classicOnly)
+            },
+            makePQCProvider: { requestedSelection in
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: requestedSelection,
+                    peerSupportedSuites: peerSupportedSuites
+                )
+            }
+        )
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    nonisolated static func selectWebRTCInboundResponder(peerSupportedSuites: [CryptoSuite], policy: HandshakePolicy, environment: any CryptoEnvironment) -> WebRTCInboundResponderSelection? {
+        selectWebRTCInboundResponder(
+            peerSupportedSuites: peerSupportedSuites,
+            policy: policy,
+            makeClassicProvider: {
+                CryptoProviderFactory.make(policy: .classicOnly, environment: environment)
+            },
+            makePQCProvider: { requestedSelection in
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: requestedSelection,
+                    peerSupportedSuites: peerSupportedSuites,
+                    environment: environment
+                )
+            }
+        )
+    }
+
+    nonisolated static func selectWebRTCInboundResponder(
+        peerSupportedSuites: [CryptoSuite],
+        policy: HandshakePolicy,
+        protocolIdentity: InboundProtocolIdentitySelection,
+        environment: any CryptoEnvironment
+    ) -> WebRTCInboundResponderSelection? {
+        selectWebRTCInboundResponder(
+            peerSupportedSuites: peerSupportedSuites,
+            policy: policy,
+            protocolIdentity: protocolIdentity,
+            makeClassicProvider: {
+                CryptoProviderFactory.make(policy: .classicOnly, environment: environment)
+            },
+            makePQCProvider: { requestedSelection in
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: requestedSelection,
+                    peerSupportedSuites: peerSupportedSuites,
+                    environment: environment
+                )
+            }
+        )
+    }
+#endif
+
+    private nonisolated static func selectWebRTCInboundResponder(
+        peerSupportedSuites: [CryptoSuite],
+        policy: HandshakePolicy,
+        protocolIdentity: InboundProtocolIdentitySelection,
+        makeClassicProvider: () -> any CryptoProvider,
+        makePQCProvider: (CryptoProviderFactory.SelectionPolicy) -> any CryptoProvider
+    ) -> WebRTCInboundResponderSelection? {
+        let classicProvider = makeClassicProvider()
+        if protocolIdentity.algorithm == .ed25519 {
+            guard !policy.requirePQC else { return nil }
+            return WebRTCInboundResponderSelection(
+                selectionPolicy: .classicOnly,
+                cryptoProvider: classicProvider,
+                sigAAlgorithm: .ed25519,
+                offeredSuites: classicProvider.supportedSuites.filter { !$0.isPQCGroup },
+                fellBackToClassic: false
+            )
         }
-        let peerHasPQCGroup = peerSupportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
-        let peerHasClassicGroup = peerSupportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
-        let classicProvider = CryptoProviderFactory.make(policy: .classicOnly, environment: environment)
-        let classicSuites = classicProvider.supportedSuites.filter {
-            !$0.isPQCGroup && $0.isNegotiable
-        }
+
+        let requestedSelection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC
+            ? .requirePQC
+            : .preferPQC
+        let pqcProvider = makePQCProvider(requestedSelection)
+        let compatibleSuites = InboundProtocolIdentitySelectionPolicy.compatibleResponderPQCSuites(
+            CryptoProviderFactory.handshakeOfferedPQCSuites(using: pqcProvider),
+            algorithm: protocolIdentity.algorithm
+        )
+        guard !compatibleSuites.isEmpty else { return nil }
+        return WebRTCInboundResponderSelection(
+            selectionPolicy: requestedSelection,
+            cryptoProvider: pqcProvider,
+            sigAAlgorithm: protocolIdentity.algorithm,
+            offeredSuites: compatibleSuites,
+            fellBackToClassic: false
+        )
+    }
+
+    private nonisolated static func selectWebRTCInboundResponder(
+        peerSupportedSuites: [CryptoSuite],
+        policy: HandshakePolicy,
+        makeClassicProvider: () -> any CryptoProvider,
+        makePQCProvider: (CryptoProviderFactory.SelectionPolicy) -> any CryptoProvider
+    ) -> WebRTCInboundResponderSelection? {
+        let peerHasPQCGroup = peerSupportedSuites.contains { $0.isPQCGroup }
+        let peerHasClassicGroup = peerSupportedSuites.contains { !$0.isPQCGroup }
+        let classicProvider = makeClassicProvider()
+        let classicSuites = classicProvider.supportedSuites.filter { !$0.isPQCGroup }
 
         guard peerHasPQCGroup else {
             guard !policy.requirePQC else {
@@ -172,11 +345,7 @@ extension CrossNetworkConnectionManager {
         }
 
         let requestedSelection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
-        let pqcProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
-            policy: requestedSelection,
-            peerSupportedSuites: peerSupportedSuites,
-            environment: environment
-        )
+        let pqcProvider = makePQCProvider(requestedSelection)
         let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: pqcProvider)
         if !localPQCSuites.isEmpty {
             return WebRTCInboundResponderSelection(

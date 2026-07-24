@@ -226,26 +226,13 @@ public struct SecuritySettingsView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let data: Data
-        do {
-            data = try Data(contentsOf: url, options: .mappedIfSafe)
-        } catch {
-            certStatusMessage = "❌ 无法读取 PKCS#12：\(error.localizedDescription)"
-            return
-        }
-        let password = p12Password
-        let deviceId = certDeviceId
-        Task { @MainActor in
-            do {
-                try await TLSSecurityManager().importIdentityFromPKCS12OffMain(
-                    data,
-                    password: password,
-                    for: deviceId
-                )
-                certStatusMessage = "✅ PKCS#12 身份已导入"
-            } catch {
-                certStatusMessage = "❌ PKCS#12 导入失败：\(error.localizedDescription)"
+        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let password = p12Password
+            let deviceId = certDeviceId
+            // 重导入移出主线程（避免卡死/沙滩球）：await 期间主线程不被阻塞，仅 Bool 结果回主线程更新 UI。
+            Task { @MainActor in
+                let ok = await TLSSecurityManager().importIdentityFromPKCS12OffMain(data, password: password, for: deviceId)
+                certStatusMessage = ok ? "✅ PKCS#12 身份已导入" : "❌ PKCS#12 导入失败"
             }
         }
     }
@@ -260,19 +247,12 @@ public struct SecuritySettingsView: View {
         let org = csrO.isEmpty ? nil : csrO
         let ou = csrOU.isEmpty ? nil : csrOU
         Task { @MainActor in
-            do {
-                let pem = try await TLSSecurityManager().generateCSRPEMOffMain(
-                    for: deviceId,
-                    commonName: cn,
-                    organization: org,
-                    organizationalUnit: ou,
-                    sanDNS: dns,
-                    sanIP: ip
-                )
+            let pem = await TLSSecurityManager().generateCSRPEMOffMain(for: deviceId, commonName: cn, organization: org, organizationalUnit: ou, sanDNS: dns, sanIP: ip)
+            if let pem {
                 csrPEM = pem
                 certStatusMessage = "✅ CSR 已生成"
-            } catch {
-                certStatusMessage = "❌ CSR 生成失败：\(error.localizedDescription)"
+            } else {
+                certStatusMessage = "❌ CSR 生成失败（请先导入身份或生成自签证书）"
             }
         }
     }
@@ -314,15 +294,8 @@ public struct SecuritySettingsView: View {
     private func importIssuedCertificate() {
         Task { @MainActor in
             guard !issuedCertPEM.isEmpty else { certStatusMessage = "❌ PEM 内容为空"; return }
-            do {
-                try CAServiceManager().importIssuedCertificate(
-                    issuedCertPEM,
-                    for: certDeviceId
-                )
-                certStatusMessage = "✅ 已导入证书"
-            } catch {
-                certStatusMessage = "❌ 导入失败：\(error.localizedDescription)"
-            }
+            let ok = CAServiceManager().importIssuedCertificate(issuedCertPEM, for: certDeviceId)
+            certStatusMessage = ok ? "✅ 已导入证书" : "❌ 导入失败"
         }
     }
 
@@ -330,14 +303,9 @@ public struct SecuritySettingsView: View {
     private func generateSelfSigned() {
         let deviceId = certDeviceId
         Task { @MainActor in
-            do {
-                try await TLSSecurityManager().ensureSelfSignedCertificateOffMain(
-                    for: deviceId
-                )
-                certStatusMessage = "✅ 自签证书已生成或已存在"
-            } catch {
-                certStatusMessage = "❌ 自签生成失败：\(error.localizedDescription)"
-            }
+            // await 期间主线程不阻塞；仅回传 Bool（SecCertificate 非 Sendable）。
+            let ok = await TLSSecurityManager().generateSelfSignedCertificateSucceedsOffMain(for: deviceId)
+            certStatusMessage = ok ? "✅ 自签证书已生成" : "❌ 自签生成失败"
         }
     }
     
@@ -406,8 +374,10 @@ public struct SecuritySettingsView: View {
             
             EncryptionSettingRow(
                 title: "协议签名",
-                value: settingsManager.pqcSignatureAlgorithm,
-                description: "用于协议身份绑定和文件签名",
+                value: settingsManager.activeProtocolSigningAlgorithm.rawValue,
+                description: settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
+                    ? "主协议私钥由本机 Secure Enclave 管理"
+                    : "主协议私钥由本机软件 Keychain 管理",
                 isEnabled: cryptoCapability.hasApplePQC || cryptoCapability.hasLiboqs
             )
             
@@ -982,7 +952,7 @@ struct PostQuantumCryptoSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                Text("ML-DSA-65 · 协议身份绑定")
+                Text("\(settingsManager.activeProtocolSigningAlgorithm.rawValue) · 协议身份绑定")
                     .font(.callout.weight(.semibold))
 
                 HStack(spacing: 4) {
@@ -1016,11 +986,13 @@ struct PostQuantumCryptoSettingsView: View {
     }
     
     private var algorithmDescription: String {
-        switch settingsManager.pqcSignatureAlgorithm {
-        case "ML-DSA", "ML-DSA-65":
-            return "NIST Level 2；与当前握手身份和 TrustRecord 公钥绑定"
-        default:
-            return "当前配置不受生产协议身份信任链支持"
+        switch settingsManager.activeProtocolSigningAlgorithm {
+        case .mlDSA65:
+            return "NIST Category 3；与当前握手身份和 TrustRecord 公钥绑定"
+        case .mlDSA87:
+            return "NIST Category 5；仅对已认证并持久化 87 pin 的 peer 生效"
+        case .ed25519:
+            return "经典签名；仅用于 classic 握手"
         }
     }
     
@@ -1086,7 +1058,7 @@ struct PQCInfoView: View {
                         title: "支持的算法",
                         icon: "cpu",
                         color: .green,
-                        content: "• ML-DSA-65: 当前生产协议身份签名，绑定握手与 TrustRecord\n• ML-DSA-87: 仅保留底层互操作测试，尚未接入生产身份信任链\n• ML-KEM: 用于密钥封装机制"
+                        content: "• ML-DSA-65: Category 3 协议身份签名，绑定握手与 TrustRecord\n• ML-DSA-87: Category 5 协议身份签名，仅对已认证并持久化原始 87 公钥的 peer 生效\n• Secure Enclave: 保护所选主身份的 ML-DSA 私钥；该精确密钥槽失败时绝不回退软件密钥\n• 旧 peer 兼容: 在完成原始 87 公钥重新绑定前，会话可明确使用独立的 ML-DSA-65 软件兼容身份，并在连接状态中标记\n• ML-KEM: 用于密钥封装机制"
                     )
                     
                     InfoSection(

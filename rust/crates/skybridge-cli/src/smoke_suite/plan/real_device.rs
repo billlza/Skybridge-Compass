@@ -174,7 +174,7 @@ pub(super) fn push_real_device_p2p_security_notice_smoke_steps(
             },
         );
     }
-    push_remote_control_notice_check_step(root, steps, &artifact_dir, "p2p", false);
+    push_remote_control_notice_check_step(root, steps, &artifact_dir, "p2p", true);
 }
 
 fn push_real_device_p2p_remote_smoke_step(
@@ -231,11 +231,6 @@ fn push_real_device_p2p_remote_security_notice_smoke_step(
     push_env(
         &mut env,
         "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE",
-        "1",
-    );
-    push_env(
-        &mut env,
-        "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE",
         "1",
     );
     push_env(&mut env, "SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD", "0");

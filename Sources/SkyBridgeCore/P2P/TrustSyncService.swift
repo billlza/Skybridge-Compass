@@ -59,6 +59,55 @@ public struct ProtocolIdentityPin: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+/// Versioned, forward-compatible protocol-identity authority binding.
+///
+/// The algorithm, source, and state are deliberately persisted as raw strings.
+/// Older SkyBridge builds ignore this entire sidecar as an unknown JSON field,
+/// while newer builds can preserve future values without asking a legacy enum
+/// decoder to understand them. In particular, ML-DSA-87 must never be written
+/// into `protocolSigningAlgorithm` or `protocolIdentityPins`, whose enum values
+/// are part of the legacy record contract.
+public struct ProtocolIdentityBindingV2: Codable, Sendable, Equatable, Hashable {
+    public static let schemaVersion = 2
+    public static let activeState = "active"
+
+    public let version: Int
+    public let algorithm: String
+    public let publicKey: Data
+    public let fingerprint: String
+    public let source: String
+    public let approvedAt: Date
+    public let generation: UInt64
+    public let state: String
+
+    public init(
+        algorithm: ProtocolSigningAlgorithm,
+        publicKey: Data,
+        fingerprint: String,
+        source: ProtocolIdentityPinSource,
+        approvedAt: Date = Date(),
+        generation: UInt64,
+        state: String = ProtocolIdentityBindingV2.activeState
+    ) {
+        self.version = Self.schemaVersion
+        self.algorithm = algorithm.rawValue
+        self.publicKey = publicKey
+        self.fingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.source = source.rawValue
+        self.approvedAt = approvedAt
+        self.generation = generation
+        self.state = state
+    }
+
+    public var protocolSigningAlgorithm: ProtocolSigningAlgorithm? {
+        ProtocolSigningAlgorithm(rawValue: algorithm)
+    }
+
+    public var pinSource: ProtocolIdentityPinSource? {
+        ProtocolIdentityPinSource(rawValue: source)
+    }
+}
+
 // MARK: - Trust Record
 
 /// 信任记录
@@ -86,6 +135,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     public let protocolSigningAlgorithm: ProtocolSigningAlgorithm?
     public let protocolPublicKeyFingerprint: String?
     public let protocolIdentityPins: [ProtocolIdentityPin]?
+    public let protocolIdentityBindingsV2: [ProtocolIdentityBindingV2]?
 
  /// Legacy P-256 身份公钥（ 7.2）
  ///
@@ -176,11 +226,33 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     }
 
     public var currentPathAuthorityPins: [ProtocolIdentityPin] {
-        Self.normalizedProtocolIdentityPins(
+        guard Self.protocolIdentityBindingMapV2(protocolIdentityBindingsV2) != nil else {
+            return []
+        }
+        let legacyPins = Self.normalizedProtocolIdentityPins(
             protocolIdentityPins,
             legacyFingerprint: protocolPublicKeyFingerprint,
             legacyAlgorithm: protocolSigningAlgorithm,
             approvedAt: updatedAt
+        ) ?? []
+        let v2Pins = Self.validProtocolIdentityBindingsV2(protocolIdentityBindingsV2).compactMap { binding -> ProtocolIdentityPin? in
+            guard let algorithm = binding.protocolSigningAlgorithm,
+                  let source = binding.pinSource else {
+                return nil
+            }
+            return ProtocolIdentityPin(
+                algorithm: algorithm,
+                fingerprint: binding.fingerprint,
+                approvedAt: binding.approvedAt,
+                source: source
+            )
+        }
+        return Self.normalizedProtocolIdentityPins(
+            legacyPins + v2Pins,
+            legacyFingerprint: nil,
+            legacyAlgorithm: nil,
+            approvedAt: updatedAt,
+            includeMLDSA87: true
         ) ?? []
     }
 
@@ -203,10 +275,25 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
  /// - Returns: 用于验证的公钥，如果没有对应算法的公钥则返回 nil
     public func getVerificationPublicKey(for algorithm: SignatureAlgorithm) -> Data? {
         guard isAuthenticationEligible else { return nil }
+        guard Self.protocolIdentityBindingMapV2(protocolIdentityBindingsV2) != nil else {
+            return nil
+        }
+
+        if let protocolAlgorithm = ProtocolSigningAlgorithm(from: algorithm),
+           let binding = activeProtocolIdentityBindingV2(for: protocolAlgorithm) {
+            return binding.publicKey
+        }
+
         switch algorithm {
         case .ed25519, .mlDSA65:
- // 优先使用新的协议公钥，回退到旧的 publicKey
-            return protocolPublicKey ?? publicKey
+            guard let expectedAlgorithm = ProtocolSigningAlgorithm(from: algorithm) else {
+                return nil
+            }
+            return legacyVerificationPublicKey(for: expectedAlgorithm)
+        case .mlDSA87:
+            // ML-DSA-87 authority exists only in the v2 raw-string sidecar so an
+            // older decoder never encounters an unknown legacy enum value.
+            return nil
         case .p256ECDSA:
  // P-256 用于 legacy 验证或 SE PoP
             return legacyP256PublicKey ?? secureEnclavePublicKey
@@ -222,6 +309,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         protocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil,
         protocolPublicKeyFingerprint: String? = nil,
         protocolIdentityPins: [ProtocolIdentityPin]? = nil,
+        protocolIdentityBindingsV2: [ProtocolIdentityBindingV2]? = nil,
         legacyP256PublicKey: Data? = nil,
         signatureAlgorithm: SignatureAlgorithm? = nil,
         kemPublicKeys: [KEMPublicKeyInfo]? = nil,
@@ -252,6 +340,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             legacyAlgorithm: nil,
             approvedAt: updatedAt
         )
+        self.protocolIdentityBindingsV2 = protocolIdentityBindingsV2
         self.legacyP256PublicKey = legacyP256PublicKey
         self.signatureAlgorithm = signatureAlgorithm
         self.kemPublicKeys = kemPublicKeys
@@ -281,6 +370,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             protocolSigningAlgorithm: protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
             protocolIdentityPins: protocolIdentityPins,
+            protocolIdentityBindingsV2: protocolIdentityBindingsV2,
             legacyP256PublicKey: legacyP256PublicKey,
             signatureAlgorithm: signatureAlgorithm,
             kemPublicKeys: kemPublicKeys,
@@ -307,15 +397,162 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         return value
     }
 
+    private static func expectedProtocolPublicKeyLength(
+        for algorithm: ProtocolSigningAlgorithm
+    ) -> Int {
+        switch algorithm {
+        case .ed25519:
+            return 32
+        case .mlDSA65:
+            return 1_952
+        case .mlDSA87:
+            return 2_592
+        }
+    }
+
+    private static func validatedProtocolPublicKey(
+        _ publicKey: Data,
+        algorithm: ProtocolSigningAlgorithm,
+        fingerprint: String?
+    ) -> Data? {
+        guard publicKey.count == expectedProtocolPublicKeyLength(for: algorithm) else {
+            return nil
+        }
+        guard let fingerprint else { return publicKey }
+        guard let normalizedFingerprint = normalizedProtocolFingerprint(fingerprint) else {
+            return nil
+        }
+        let computedFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: algorithm,
+            publicKeyBytes: publicKey
+        )
+        return computedFingerprint == normalizedFingerprint ? publicKey : nil
+    }
+
+    private static func validatedProtocolIdentityBindingV2(
+        _ binding: ProtocolIdentityBindingV2
+    ) -> ProtocolIdentityBindingV2? {
+        guard binding.version == ProtocolIdentityBindingV2.schemaVersion,
+              binding.state == ProtocolIdentityBindingV2.activeState,
+              binding.generation > 0,
+              binding.approvedAt.timeIntervalSinceReferenceDate.isFinite,
+              let algorithm = binding.protocolSigningAlgorithm,
+              binding.pinSource != nil,
+              binding.fingerprint == binding.fingerprint.lowercased(),
+              validatedProtocolPublicKey(
+                binding.publicKey,
+                algorithm: algorithm,
+                fingerprint: binding.fingerprint
+              ) != nil else {
+            return nil
+        }
+        return binding
+    }
+
+    /// Returns unambiguous, fully validated active v2 authorities. Unknown
+    /// versions, algorithms, and non-active states remain forward-compatible
+    /// metadata. A malformed active binding or a same-algorithm key conflict
+    /// rejects the whole authority map instead of partially authenticating it.
+    private static func protocolIdentityBindingMapV2(
+        _ bindings: [ProtocolIdentityBindingV2]?
+    ) -> [ProtocolSigningAlgorithm: ProtocolIdentityBindingV2]? {
+        var bindingByAlgorithm: [ProtocolSigningAlgorithm: ProtocolIdentityBindingV2] = [:]
+
+        for candidate in bindings ?? [] {
+            guard candidate.version == ProtocolIdentityBindingV2.schemaVersion,
+                  candidate.state == ProtocolIdentityBindingV2.activeState,
+                  let algorithm = candidate.protocolSigningAlgorithm else {
+                continue
+            }
+            guard let binding = validatedProtocolIdentityBindingV2(candidate) else {
+                return nil
+            }
+            if let existing = bindingByAlgorithm[algorithm] {
+                guard existing.publicKey == binding.publicKey,
+                      existing.fingerprint == binding.fingerprint else {
+                    return nil
+                }
+                if binding.generation > existing.generation {
+                    bindingByAlgorithm[algorithm] = binding
+                }
+            } else {
+                bindingByAlgorithm[algorithm] = binding
+            }
+        }
+
+        return bindingByAlgorithm
+    }
+
+    private static func validProtocolIdentityBindingsV2(
+        _ bindings: [ProtocolIdentityBindingV2]?
+    ) -> [ProtocolIdentityBindingV2] {
+        guard let bindingMap = protocolIdentityBindingMapV2(bindings) else {
+            return []
+        }
+        return bindingMap.values.sorted { lhs, rhs in
+            lhs.algorithm < rhs.algorithm
+        }
+    }
+
+    private func activeProtocolIdentityBindingV2(
+        for algorithm: ProtocolSigningAlgorithm
+    ) -> ProtocolIdentityBindingV2? {
+        Self.validProtocolIdentityBindingsV2(protocolIdentityBindingsV2).first {
+            $0.protocolSigningAlgorithm == algorithm
+        }
+    }
+
+    /// Returns a raw-key authority only when this record can currently
+    /// authenticate and the v2 sidecar contains one unambiguous active binding.
+    public func authenticatedProtocolIdentityBinding(
+        for algorithm: ProtocolSigningAlgorithm
+    ) -> ProtocolIdentityBindingV2? {
+        guard isAuthenticationEligible else { return nil }
+        guard Self.protocolIdentityBindingMapV2(protocolIdentityBindingsV2) != nil else {
+            return nil
+        }
+        return activeProtocolIdentityBindingV2(for: algorithm)
+    }
+
+    private func legacyVerificationPublicKey(
+        for expectedAlgorithm: ProtocolSigningAlgorithm
+    ) -> Data? {
+        guard expectedAlgorithm != .mlDSA87 else { return nil }
+
+        let declaredAlgorithm: ProtocolSigningAlgorithm?
+        if let protocolSigningAlgorithm {
+            declaredAlgorithm = protocolSigningAlgorithm
+        } else if let signatureAlgorithm {
+            declaredAlgorithm = ProtocolSigningAlgorithm(from: signatureAlgorithm)
+        } else if expectedAlgorithm == .ed25519 {
+            // Records predating the protocol-algorithm field used a 32-byte
+            // Ed25519 `publicKey`. No equivalent untyped fallback is safe for
+            // either ML-DSA parameter set.
+            declaredAlgorithm = .ed25519
+        } else {
+            declaredAlgorithm = nil
+        }
+
+        guard declaredAlgorithm == expectedAlgorithm else { return nil }
+        let candidate = protocolPublicKey ?? publicKey
+        return Self.validatedProtocolPublicKey(
+            candidate,
+            algorithm: expectedAlgorithm,
+            fingerprint: protocolPublicKeyFingerprint
+        )
+    }
+
     public static func normalizedProtocolIdentityPins(
         _ pins: [ProtocolIdentityPin]?,
         legacyFingerprint: String?,
         legacyAlgorithm: ProtocolSigningAlgorithm?,
-        approvedAt: Date
+        approvedAt: Date,
+        includeMLDSA87: Bool = false
     ) -> [ProtocolIdentityPin]? {
         var pinsByAlgorithm: [ProtocolSigningAlgorithm: ProtocolIdentityPin] = [:]
 
         func upsert(_ pin: ProtocolIdentityPin) {
+            guard includeMLDSA87 || pin.algorithm != .mlDSA87 else { return }
             guard let fingerprint = normalizedProtocolFingerprint(pin.fingerprint) else { return }
             let normalized = ProtocolIdentityPin(
                 algorithm: pin.algorithm,
@@ -335,6 +572,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         }
 
         if let legacyAlgorithm,
+           (includeMLDSA87 || legacyAlgorithm != .mlDSA87),
            pinsByAlgorithm[legacyAlgorithm] == nil,
            let fingerprint = normalizedProtocolFingerprint(legacyFingerprint) {
             upsert(
@@ -365,6 +603,14 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         approvedAt: Date = Date(),
         source: ProtocolIdentityPinSource
     ) -> [ProtocolIdentityPin]? {
+        guard algorithm != .mlDSA87 else {
+            return normalizedProtocolIdentityPins(
+                pins,
+                legacyFingerprint: legacyFingerprint,
+                legacyAlgorithm: legacyAlgorithm,
+                approvedAt: approvedAt
+            )
+        }
         var normalized = normalizedProtocolIdentityPins(
             pins,
             legacyFingerprint: legacyFingerprint,
@@ -389,6 +635,266 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             legacyAlgorithm: nil,
             approvedAt: approvedAt
         )
+    }
+
+    private struct ProtocolAuthorityIdentity: Equatable {
+        let publicKey: Data?
+        let fingerprint: String
+    }
+
+    private static func insertingAuthorityIdentity(
+        _ identity: ProtocolAuthorityIdentity,
+        algorithm: ProtocolSigningAlgorithm,
+        into identities: inout [ProtocolSigningAlgorithm: ProtocolAuthorityIdentity]
+    ) -> Bool {
+        guard let existing = identities[algorithm] else {
+            identities[algorithm] = identity
+            return true
+        }
+        guard existing.fingerprint == identity.fingerprint else { return false }
+        if let existingKey = existing.publicKey,
+           let incomingKey = identity.publicKey,
+           existingKey != incomingKey {
+            return false
+        }
+        if existing.publicKey == nil, identity.publicKey != nil {
+            identities[algorithm] = identity
+        }
+        return true
+    }
+
+    private static func protocolAuthorityIdentityMap(
+        for record: TrustRecord
+    ) -> [ProtocolSigningAlgorithm: ProtocolAuthorityIdentity]? {
+        guard let v2Bindings = protocolIdentityBindingMapV2(record.protocolIdentityBindingsV2) else {
+            return nil
+        }
+        var identities: [ProtocolSigningAlgorithm: ProtocolAuthorityIdentity] = [:]
+
+        for (algorithm, binding) in v2Bindings {
+            guard insertingAuthorityIdentity(
+                ProtocolAuthorityIdentity(
+                    publicKey: binding.publicKey,
+                    fingerprint: binding.fingerprint
+                ),
+                algorithm: algorithm,
+                into: &identities
+            ) else {
+                return nil
+            }
+        }
+
+        for pin in record.protocolIdentityPins ?? [] where pin.algorithm != .mlDSA87 {
+            guard let fingerprint = normalizedProtocolFingerprint(pin.fingerprint) else { continue }
+            guard insertingAuthorityIdentity(
+                ProtocolAuthorityIdentity(publicKey: nil, fingerprint: fingerprint),
+                algorithm: pin.algorithm,
+                into: &identities
+            ) else {
+                return nil
+            }
+        }
+
+        if let legacyAlgorithm = record.protocolSigningAlgorithm,
+           legacyAlgorithm != .mlDSA87,
+           let fingerprint = normalizedProtocolFingerprint(record.protocolPublicKeyFingerprint) {
+            let candidate = record.protocolPublicKey ?? record.publicKey
+            let validatedKey = validatedProtocolPublicKey(
+                candidate,
+                algorithm: legacyAlgorithm,
+                fingerprint: fingerprint
+            )
+            guard insertingAuthorityIdentity(
+                ProtocolAuthorityIdentity(publicKey: validatedKey, fingerprint: fingerprint),
+                algorithm: legacyAlgorithm,
+                into: &identities
+            ) else {
+                return nil
+            }
+        }
+
+        return identities
+    }
+
+    fileprivate static func hasProtocolAuthorityConflict(
+        _ lhs: TrustRecord,
+        _ rhs: TrustRecord
+    ) -> Bool {
+        guard let lhsIdentities = protocolAuthorityIdentityMap(for: lhs),
+              let rhsIdentities = protocolAuthorityIdentityMap(for: rhs) else {
+            return true
+        }
+        for (algorithm, lhsIdentity) in lhsIdentities {
+            guard let rhsIdentity = rhsIdentities[algorithm] else { continue }
+            guard lhsIdentity.fingerprint == rhsIdentity.fingerprint else { return true }
+            if let lhsKey = lhsIdentity.publicKey,
+               let rhsKey = rhsIdentity.publicKey,
+               lhsKey != rhsKey {
+                return true
+            }
+        }
+        return false
+    }
+
+    fileprivate static func canonicalProtocolIdentityBindingsV2(
+        _ bindings: [ProtocolIdentityBindingV2]
+    ) -> [ProtocolIdentityBindingV2]? {
+        let sorted = bindings.sorted { lhs, rhs in
+            if lhs.version != rhs.version { return lhs.version < rhs.version }
+            if lhs.algorithm != rhs.algorithm { return lhs.algorithm < rhs.algorithm }
+            if lhs.generation != rhs.generation { return lhs.generation < rhs.generation }
+            if lhs.fingerprint != rhs.fingerprint { return lhs.fingerprint < rhs.fingerprint }
+            if lhs.state != rhs.state { return lhs.state < rhs.state }
+            if lhs.source != rhs.source { return lhs.source < rhs.source }
+            if lhs.approvedAt != rhs.approvedAt { return lhs.approvedAt < rhs.approvedAt }
+            return lhs.publicKey.lexicographicallyPrecedes(rhs.publicKey)
+        }
+        return sorted.isEmpty ? nil : sorted
+    }
+
+    fileprivate static func protocolIdentityBindingsV2(
+        existing record: TrustRecord?,
+        adding algorithm: ProtocolSigningAlgorithm,
+        publicKey: Data?,
+        fingerprint: String,
+        approvedAt: Date,
+        source: ProtocolIdentityPinSource
+    ) -> (accepted: Bool, bindings: [ProtocolIdentityBindingV2]?) {
+        let existingBindings = record?.protocolIdentityBindingsV2 ?? []
+        guard var existingMap = protocolIdentityBindingMapV2(existingBindings) else {
+            return (false, nil)
+        }
+        var updatedBindings = existingBindings
+        var nextGeneration = existingBindings.map(\.generation).max() ?? 0
+
+        func appendBinding(
+            algorithm: ProtocolSigningAlgorithm,
+            publicKey: Data,
+            fingerprint: String,
+            source: ProtocolIdentityPinSource,
+            approvedAt: Date
+        ) -> ProtocolIdentityBindingV2? {
+            guard nextGeneration < UInt64.max else { return nil }
+            nextGeneration += 1
+            let binding = ProtocolIdentityBindingV2(
+                algorithm: algorithm,
+                publicKey: publicKey,
+                fingerprint: fingerprint,
+                source: source,
+                approvedAt: approvedAt,
+                generation: nextGeneration
+            )
+            updatedBindings.append(binding)
+            return binding
+        }
+
+        // Migrate a fully bound legacy Ed25519/ML-DSA-65 authority into the
+        // sidecar before adding a second algorithm. Fingerprint-only legacy
+        // pins remain legacy metadata because they do not contain raw authority.
+        if let record,
+           let legacyAlgorithm = record.protocolSigningAlgorithm,
+           legacyAlgorithm != .mlDSA87,
+           existingMap[legacyAlgorithm] == nil,
+           let legacyFingerprint = normalizedProtocolFingerprint(record.protocolPublicKeyFingerprint) {
+            let legacyCandidate = record.protocolPublicKey ?? record.publicKey
+            if let legacyPublicKey = validatedProtocolPublicKey(
+                legacyCandidate,
+                algorithm: legacyAlgorithm,
+                fingerprint: legacyFingerprint
+            ) {
+                guard let migratedBinding = appendBinding(
+                    algorithm: legacyAlgorithm,
+                    publicKey: legacyPublicKey,
+                    fingerprint: legacyFingerprint,
+                    source: .legacyMigration,
+                    approvedAt: record.updatedAt
+                ) else {
+                    return (false, nil)
+                }
+                existingMap[legacyAlgorithm] = migratedBinding
+            }
+        }
+
+        guard let normalizedFingerprint = normalizedProtocolFingerprint(fingerprint) else {
+            return (false, nil)
+        }
+
+        if let existing = existingMap[algorithm] {
+            guard existing.fingerprint == normalizedFingerprint else {
+                return (false, nil)
+            }
+            if let publicKey, publicKey != existing.publicKey {
+                return (false, nil)
+            }
+            return (true, canonicalProtocolIdentityBindingsV2(updatedBindings))
+        }
+
+        if let record {
+            guard let legacyIdentities = protocolAuthorityIdentityMap(for: record) else {
+                return (false, nil)
+            }
+            if let legacyIdentity = legacyIdentities[algorithm] {
+                guard legacyIdentity.fingerprint == normalizedFingerprint else {
+                    return (false, nil)
+                }
+                if let legacyKey = legacyIdentity.publicKey,
+                   let publicKey,
+                   legacyKey != publicKey {
+                    return (false, nil)
+                }
+            }
+        }
+
+        guard let publicKey,
+              validatedProtocolPublicKey(
+                publicKey,
+                algorithm: algorithm,
+                fingerprint: normalizedFingerprint
+              ) != nil else {
+            // Fingerprint-only legacy updates remain representable for Ed25519
+            // and ML-DSA-65, but never manufacture a v2 raw-key authority.
+            return (algorithm != .mlDSA87, canonicalProtocolIdentityBindingsV2(updatedBindings))
+        }
+
+        guard appendBinding(
+            algorithm: algorithm,
+            publicKey: publicKey,
+            fingerprint: normalizedFingerprint,
+            source: source,
+            approvedAt: approvedAt
+        ) != nil else {
+            return (false, nil)
+        }
+        return (true, canonicalProtocolIdentityBindingsV2(updatedBindings))
+    }
+
+    fileprivate static func mergedProtocolIdentityBindingsV2(
+        existing: [ProtocolIdentityBindingV2]?,
+        incoming: [ProtocolIdentityBindingV2]?
+    ) -> (accepted: Bool, bindings: [ProtocolIdentityBindingV2]?) {
+        guard let existingMap = protocolIdentityBindingMapV2(existing),
+              let incomingMap = protocolIdentityBindingMapV2(incoming) else {
+            return (false, nil)
+        }
+        for (algorithm, existingBinding) in existingMap {
+            guard let incomingBinding = incomingMap[algorithm] else { continue }
+            guard existingBinding.publicKey == incomingBinding.publicKey,
+                  existingBinding.fingerprint == incomingBinding.fingerprint else {
+                return (false, nil)
+            }
+        }
+
+        var merged = incoming ?? []
+        for binding in existing ?? [] where !merged.contains(binding) {
+            if binding.version == ProtocolIdentityBindingV2.schemaVersion,
+               binding.state == ProtocolIdentityBindingV2.activeState,
+               let algorithm = binding.protocolSigningAlgorithm,
+               incomingMap[algorithm] != nil {
+                continue
+            }
+            merged.append(binding)
+        }
+        return (true, canonicalProtocolIdentityBindingsV2(merged))
     }
 }
 
@@ -547,7 +1053,7 @@ public final class TrustSyncService: ObservableObject {
  /// 本地缓存
     private var localCache: [String: TrustRecord] = [:]
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
     private var usesInMemoryPersistenceForTesting: Bool = false
 #endif
     
@@ -588,7 +1094,7 @@ public final class TrustSyncService: ObservableObject {
         let signedRecord = try await signRecord(record)
         
  // 保存到本地
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
         if usesInMemoryPersistenceForTesting {
             try removeFallbackRecord(deviceId: signedRecord.deviceId)
         } else {
@@ -619,7 +1125,7 @@ public final class TrustSyncService: ObservableObject {
         let revokedRecord = existing.revoked(signature: signature)
         
  // 保存到本地
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
         if usesInMemoryPersistenceForTesting {
             try removeFallbackRecord(deviceId: revokedRecord.deviceId)
         } else {
@@ -636,9 +1142,10 @@ public final class TrustSyncService: ObservableObject {
         SkyBridgeLogger.p2p.info("Revoked trust record: \(revokedRecord.shortId)")
     }
     
- /// 获取所有有效信任记录（排除 tombstone）
+ /// 获取所有可用于认证的信任记录。
+ /// 隔离、待重新验证、撤销和过期记录仍可留在管理面，但绝不能进入认证面。
     public func getActiveTrustRecords() async -> [TrustRecord] {
-        return localCache.values.filter { !$0.isTombstone && !$0.isExpired }
+        return localCache.values.filter(\.isAuthenticationEligible)
     }
     
  /// 获取信任记录
@@ -673,6 +1180,75 @@ public final class TrustSyncService: ObservableObject {
             guard record.isAuthenticationEligible else { return false }
             return record.currentPathAuthorityFingerprints.contains(normalized)
         }
+    }
+
+    /// Read-only peer-pinning lookup used by handshake policy. It deliberately
+    /// ignores fingerprint-only legacy pins and returns nil on alias ambiguity
+    /// or any same-algorithm raw-key disagreement.
+    public func authenticatedProtocolIdentityBinding(
+        deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) -> ProtocolIdentityBindingV2? {
+        let matchingBindings = localCache.values.compactMap { record -> ProtocolIdentityBindingV2? in
+            guard record.isAuthenticationEligible,
+                  currentPathDeviceMatches(record, deviceId: deviceId) else {
+                return nil
+            }
+            return record.authenticatedProtocolIdentityBinding(for: algorithm)
+        }
+        guard let first = matchingBindings.first else { return nil }
+        guard matchingBindings.dropFirst().allSatisfy({ binding in
+            binding.publicKey == first.publicKey && binding.fingerprint == first.fingerprint
+        }) else {
+            return nil
+        }
+        return matchingBindings.max { lhs, rhs in
+            lhs.generation < rhs.generation
+        }
+    }
+
+    public func hasAuthenticatedProtocolIdentity(
+        deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) -> Bool {
+        authenticatedProtocolIdentityBinding(deviceId: deviceId, algorithm: algorithm) != nil
+    }
+
+    /// Endpoint-based responders may not know the peer's stable device id yet.
+    /// This lookup treats possession of an already authenticated exact raw key
+    /// as the identity and never consults fingerprint-only legacy pins.
+    public func authenticatedProtocolIdentityBinding(
+        publicKey: Data,
+        algorithm: ProtocolSigningAlgorithm
+    ) -> ProtocolIdentityBindingV2? {
+        let matches = localCache.values.compactMap { record -> ProtocolIdentityBindingV2? in
+            guard let binding = record.authenticatedProtocolIdentityBinding(for: algorithm),
+                  binding.publicKey == publicKey else {
+                return nil
+            }
+            return binding
+        }
+        return matches.max { lhs, rhs in
+            lhs.generation < rhs.generation
+        }
+    }
+
+    /// Resolves the outbound PQC signature algorithm for one peer. ML-DSA-87
+    /// is opt-in on both sides: local settings must request it and the peer must
+    /// already have an authentication-eligible exact raw-key 87 authority.
+    /// Every unpinned or legacy peer remains on the established ML-DSA-65 path.
+    public func outboundPQCSignatureAlgorithm(
+        deviceId: String,
+        requestedAlgorithm: ProtocolSigningAlgorithm
+    ) -> ProtocolSigningAlgorithm {
+        guard requestedAlgorithm == .mlDSA87,
+              hasAuthenticatedProtocolIdentity(
+                deviceId: deviceId,
+                algorithm: .mlDSA87
+              ) else {
+            return .mlDSA65
+        }
+        return .mlDSA87
     }
 
     func getCurrentPathTrustRecord(
@@ -813,6 +1389,8 @@ public final class TrustSyncService: ObservableObject {
                 expectedLength = 32
             case .mlDSA65:
                 expectedLength = 1_952
+            case .mlDSA87:
+                expectedLength = 2_592
             }
             guard publicKey.count == expectedLength else { return nil }
             let fingerprint = ProtocolIdentityBinding.computeFingerprint(
@@ -886,25 +1464,57 @@ public final class TrustSyncService: ObservableObject {
 
         if let targetRecord {
             let canonicalDeviceId = stableCurrentDeviceId ?? targetRecord.deviceId
-            let protocolPublicKey = validatedProtocolPublicKey(authenticatedProtocolPublicKey)
-                ?? validatedProtocolPublicKey(targetRecord.protocolPublicKey)
-            let updatedProtocolIdentityPins = TrustRecord.protocolIdentityPins(
-                existing: targetRecord.currentPathAuthorityPins,
-                legacyFingerprint: nil,
-                legacyAlgorithm: nil,
+            let approvedAt = Date()
+            let v2Update = TrustRecord.protocolIdentityBindingsV2(
+                existing: targetRecord,
                 adding: protocolSigningAlgorithm,
+                publicKey: validatedProtocolPublicKey(authenticatedProtocolPublicKey),
                 fingerprint: normalizedFingerprint,
+                approvedAt: approvedAt,
                 source: pinSource
             )
+            guard v2Update.accepted else { return nil }
+
+            let preservesLegacyMLDSA65 = targetRecord.protocolSigningAlgorithm == .mlDSA65
+                && protocolSigningAlgorithm != .mlDSA65
+            let writesLegacyAuthority = protocolSigningAlgorithm != .mlDSA87
+                && !preservesLegacyMLDSA65
+            let legacyProtocolPublicKey: Data?
+            if writesLegacyAuthority {
+                legacyProtocolPublicKey = validatedProtocolPublicKey(authenticatedProtocolPublicKey)
+                    ?? (targetRecord.protocolSigningAlgorithm == protocolSigningAlgorithm
+                        ? validatedProtocolPublicKey(targetRecord.protocolPublicKey)
+                        : nil)
+            } else {
+                legacyProtocolPublicKey = targetRecord.protocolPublicKey
+            }
+            let legacyProtocolSigningAlgorithm = writesLegacyAuthority
+                ? protocolSigningAlgorithm
+                : targetRecord.protocolSigningAlgorithm
+            let legacyProtocolFingerprint = writesLegacyAuthority
+                ? normalizedFingerprint
+                : targetRecord.protocolPublicKeyFingerprint
+            let updatedProtocolIdentityPins = protocolSigningAlgorithm == .mlDSA87
+                ? targetRecord.protocolIdentityPins
+                : TrustRecord.protocolIdentityPins(
+                    existing: targetRecord.protocolIdentityPins,
+                    legacyFingerprint: targetRecord.protocolPublicKeyFingerprint,
+                    legacyAlgorithm: targetRecord.protocolSigningAlgorithm,
+                    adding: protocolSigningAlgorithm,
+                    fingerprint: normalizedFingerprint,
+                    approvedAt: approvedAt,
+                    source: pinSource
+                )
             return TrustRecord(
                 deviceId: canonicalDeviceId,
                 pubKeyFP: targetRecord.pubKeyFP,
                 publicKey: targetRecord.publicKey,
                 secureEnclavePublicKey: targetRecord.secureEnclavePublicKey,
-                protocolPublicKey: protocolPublicKey,
-                protocolSigningAlgorithm: protocolSigningAlgorithm,
-                protocolPublicKeyFingerprint: normalizedFingerprint,
+                protocolPublicKey: legacyProtocolPublicKey,
+                protocolSigningAlgorithm: legacyProtocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: legacyProtocolFingerprint,
                 protocolIdentityPins: updatedProtocolIdentityPins,
+                protocolIdentityBindingsV2: v2Update.bindings,
                 legacyP256PublicKey: targetRecord.legacyP256PublicKey,
                 signatureAlgorithm: targetRecord.signatureAlgorithm,
                 kemPublicKeys: targetRecord.kemPublicKeys,
@@ -927,21 +1537,39 @@ public final class TrustSyncService: ObservableObject {
             return nil
         }
 
+        let approvedAt = Date()
+        let v2Update = TrustRecord.protocolIdentityBindingsV2(
+            existing: nil,
+            adding: protocolSigningAlgorithm,
+            publicKey: validatedProtocolPublicKey(authenticatedProtocolPublicKey),
+            fingerprint: normalizedFingerprint,
+            approvedAt: approvedAt,
+            source: pinSource
+        )
+        guard v2Update.accepted else { return nil }
+        let writesLegacyAuthority = protocolSigningAlgorithm != .mlDSA87
+
         return TrustRecord(
             deviceId: stableCurrentDeviceId,
             pubKeyFP: "",
             publicKey: Data(),
-            protocolPublicKey: validatedProtocolPublicKey(authenticatedProtocolPublicKey),
-            protocolSigningAlgorithm: protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: normalizedFingerprint,
-            protocolIdentityPins: TrustRecord.protocolIdentityPins(
-                existing: nil,
-                legacyFingerprint: nil,
-                legacyAlgorithm: nil,
-                adding: protocolSigningAlgorithm,
-                fingerprint: normalizedFingerprint,
-                source: pinSource
-            ),
+            protocolPublicKey: writesLegacyAuthority
+                ? validatedProtocolPublicKey(authenticatedProtocolPublicKey)
+                : nil,
+            protocolSigningAlgorithm: writesLegacyAuthority ? protocolSigningAlgorithm : nil,
+            protocolPublicKeyFingerprint: writesLegacyAuthority ? normalizedFingerprint : nil,
+            protocolIdentityPins: writesLegacyAuthority
+                ? TrustRecord.protocolIdentityPins(
+                    existing: nil,
+                    legacyFingerprint: nil,
+                    legacyAlgorithm: nil,
+                    adding: protocolSigningAlgorithm,
+                    fingerprint: normalizedFingerprint,
+                    approvedAt: approvedAt,
+                    source: pinSource
+                )
+                : nil,
+            protocolIdentityBindingsV2: v2Update.bindings,
             signature: Data(),
             deviceName: normalizedDisplayName,
             currentDeviceId: stableCurrentDeviceId,
@@ -980,9 +1608,18 @@ public final class TrustSyncService: ObservableObject {
             .filter { !$0.isEmpty && $0 != signedRecord.deviceId }
         var removedAliasRecord = false
         for alias in aliasesToRemove where localCache[alias] != nil {
-            try deleteFromKeychain(deviceId: alias)
-            localCache.removeValue(forKey: alias)
-            removedAliasRecord = true
+            do {
+                try deleteFromKeychain(deviceId: alias)
+                localCache.removeValue(forKey: alias)
+                removedAliasRecord = true
+            } catch {
+                // The authoritative record above is already durably committed. Alias
+                // cleanup is post-commit maintenance and must never turn that success
+                // into a caller-visible rejection with live trust left behind.
+                SkyBridgeLogger.p2p.error(
+                    "Authoritative protocol identity committed but alias cleanup failed; retrying cleanup on a later maintenance pass. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
+            }
         }
         if removedAliasRecord {
             await updateActiveTrustRecords()
@@ -1007,7 +1644,7 @@ public final class TrustSyncService: ObservableObject {
  // 解决冲突
             for record in verifiedRecords {
                 if let existing = localCache[record.deviceId] {
-                    let resolved = resolveConflict(local: existing, remote: record)
+                    let resolved = try resolveConflict(local: existing, remote: record)
                     localCache[record.deviceId] = resolved
                 } else {
                     localCache[record.deviceId] = record
@@ -1083,11 +1720,11 @@ public final class TrustSyncService: ObservableObject {
 
     // MARK: - Conflict Resolution
 
-    /// 解决冲突（revoke 优先 + LWW）
+    /// 解决冲突（revoke 优先；无 authority 冲突时才允许 LWW）
     public func resolveConflict(
         local: TrustRecord,
         remote: TrustRecord
-    ) -> TrustRecord {
+    ) throws -> TrustRecord {
  // 1. revoke 永远优先于 add
         if local.recordType == .revoke || remote.recordType == .revoke {
             if local.recordType == .revoke && remote.recordType == .revoke {
@@ -1096,7 +1733,14 @@ public final class TrustSyncService: ObservableObject {
             return local.recordType == .revoke ? local : remote
         }
 
- // 2. 同类型使用 LWW (Last Writer Wins)
+        // A timestamp must never select between two different raw authorities
+        // for the same signing algorithm. Such a change requires an explicit,
+        // authenticated key-rotation protocol outside ordinary trust sync.
+        guard !TrustRecord.hasProtocolAuthorityConflict(local, remote) else {
+            throw TrustSyncError.conflictResolutionFailed
+        }
+
+ // 2. 同类型且 authority 一致时使用 LWW (Last Writer Wins)
         return local.updatedAt > remote.updatedAt ? local : remote
     }
     
@@ -1105,10 +1749,23 @@ public final class TrustSyncService: ObservableObject {
  /// 加载本地记录
     private func loadLocalRecords() async {
         var mergedCache: [String: TrustRecord] = [:]
+        var conflictedDeviceIds: Set<String> = []
 
         func merge(_ record: TrustRecord) {
+            guard !conflictedDeviceIds.contains(record.deviceId) else { return }
             if let existing = mergedCache[record.deviceId] {
-                mergedCache[record.deviceId] = resolveConflict(local: existing, remote: record)
+                do {
+                    mergedCache[record.deviceId] = try resolveConflict(local: existing, remote: record)
+                } catch {
+                    // Fail closed at startup: neither conflicting authority is
+                    // exposed to authentication until an explicit recovery.
+                    mergedCache.removeValue(forKey: record.deviceId)
+                    conflictedDeviceIds.insert(record.deviceId)
+                    syncStatus = .failed
+                    SkyBridgeLogger.p2p.error(
+                        "Rejected conflicting protocol authority during local trust load: device=redacted"
+                    )
+                }
             } else {
                 mergedCache[record.deviceId] = record
             }
@@ -1180,7 +1837,7 @@ public final class TrustSyncService: ObservableObject {
     
  /// 签名记录
     private func signRecord(_ record: TrustRecord) async throws -> TrustRecord {
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
         if usesInMemoryPersistenceForTesting {
             return TrustRecord(
                 deviceId: record.deviceId,
@@ -1191,6 +1848,7 @@ public final class TrustSyncService: ObservableObject {
                 protocolSigningAlgorithm: record.protocolSigningAlgorithm,
                 protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
                 protocolIdentityPins: record.protocolIdentityPins,
+                protocolIdentityBindingsV2: record.protocolIdentityBindingsV2,
                 legacyP256PublicKey: record.legacyP256PublicKey,
                 signatureAlgorithm: record.signatureAlgorithm,
                 kemPublicKeys: record.kemPublicKeys,
@@ -1223,6 +1881,7 @@ public final class TrustSyncService: ObservableObject {
             protocolSigningAlgorithm: record.protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
             protocolIdentityPins: record.protocolIdentityPins,
+            protocolIdentityBindingsV2: record.protocolIdentityBindingsV2,
             legacyP256PublicKey: record.legacyP256PublicKey,
             signatureAlgorithm: record.signatureAlgorithm,
             kemPublicKeys: record.kemPublicKeys,
@@ -1247,6 +1906,16 @@ public final class TrustSyncService: ObservableObject {
         guard let existing = localCache[record.deviceId] else {
             throw TrustSyncError.recordNotFound
         }
+        guard !TrustRecord.hasProtocolAuthorityConflict(existing, record) else {
+            throw TrustSyncError.conflictResolutionFailed
+        }
+        let v2Merge = TrustRecord.mergedProtocolIdentityBindingsV2(
+            existing: existing.protocolIdentityBindingsV2,
+            incoming: record.protocolIdentityBindingsV2
+        )
+        guard v2Merge.accepted else {
+            throw TrustSyncError.conflictResolutionFailed
+        }
         
         let updatedRecord = TrustRecord(
             deviceId: record.deviceId,
@@ -1257,6 +1926,7 @@ public final class TrustSyncService: ObservableObject {
             protocolSigningAlgorithm: record.protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
             protocolIdentityPins: record.protocolIdentityPins,
+            protocolIdentityBindingsV2: v2Merge.bindings,
             legacyP256PublicKey: record.legacyP256PublicKey,
             signatureAlgorithm: record.signatureAlgorithm,
             kemPublicKeys: record.kemPublicKeys,
@@ -1276,7 +1946,7 @@ public final class TrustSyncService: ObservableObject {
         )
         
         let signedRecord = try await signRecord(updatedRecord)
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
         if usesInMemoryPersistenceForTesting {
             try removeFallbackRecord(deviceId: signedRecord.deviceId)
         } else {
@@ -1296,14 +1966,16 @@ public final class TrustSyncService: ObservableObject {
         try createDataToSign(
             for: record,
             revoked: revoked,
-            includeProtocolIdentityPins: true
+            includeProtocolIdentityPins: true,
+            includeProtocolIdentityBindingsV2: true
         )
     }
 
     private func createDataToSign(
         for record: TrustRecord,
         revoked: Bool,
-        includeProtocolIdentityPins: Bool
+        includeProtocolIdentityPins: Bool,
+        includeProtocolIdentityBindingsV2: Bool
     ) throws -> Data {
         var encoder = DeterministicEncoder()
         encoder.encode(record.deviceId)
@@ -1334,6 +2006,21 @@ public final class TrustSyncService: ObservableObject {
                     inner.encode(pin.fingerprint)
                     inner.encode(pin.approvedAt)
                     inner.encode(pin.source.rawValue)
+                })
+            }
+        }
+        if includeProtocolIdentityBindingsV2 {
+            encoder.encode(record.protocolIdentityBindingsV2) { enc, bindings in
+                let canonicalBindings = TrustRecord.canonicalProtocolIdentityBindingsV2(bindings) ?? []
+                enc.encode(canonicalBindings, encoder: { inner, binding in
+                    inner.encode(Int64(binding.version))
+                    inner.encode(binding.algorithm)
+                    inner.encode(binding.publicKey)
+                    inner.encode(binding.fingerprint)
+                    inner.encode(binding.source)
+                    inner.encode(binding.approvedAt)
+                    inner.encode(binding.generation)
+                    inner.encode(binding.state)
                 })
             }
         }
@@ -1414,7 +2101,13 @@ public final class TrustSyncService: ObservableObject {
             [kSecValueData as String: data] as CFDictionary
         )
         if updateStatus == errSecSuccess {
-            try removeFallbackRecord(deviceId: record.deviceId)
+            do {
+                try removeFallbackRecord(deviceId: record.deviceId)
+            } catch {
+                SkyBridgeLogger.p2p.error(
+                    "Trust record Keychain update committed; stale fallback cleanup failed and will be retried. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
+            }
             return
         }
 
@@ -1441,7 +2134,13 @@ public final class TrustSyncService: ObservableObject {
 
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         if addStatus == errSecSuccess {
-            try removeFallbackRecord(deviceId: record.deviceId)
+            do {
+                try removeFallbackRecord(deviceId: record.deviceId)
+            } catch {
+                SkyBridgeLogger.p2p.error(
+                    "Trust record Keychain add committed; stale fallback cleanup failed and will be retried. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
+            }
             return
         }
 
@@ -1643,7 +2342,20 @@ public final class TrustSyncService: ObservableObject {
         }
     }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
+    func recordSignaturePayloadForTesting(
+        _ record: TrustRecord,
+        includeProtocolIdentityPins: Bool,
+        includeProtocolIdentityBindingsV2: Bool
+    ) throws -> Data {
+        try createDataToSign(
+            for: record,
+            revoked: record.isTombstone,
+            includeProtocolIdentityPins: includeProtocolIdentityPins,
+            includeProtocolIdentityBindingsV2: includeProtocolIdentityBindingsV2
+        )
+    }
+
     func setInMemoryPersistenceForTesting(_ enabled: Bool) {
         usesInMemoryPersistenceForTesting = enabled
     }
@@ -1682,10 +2394,32 @@ public final class TrustSyncService: ObservableObject {
             return true
         }
 
+        // A sidecar-bearing record must verify the payload that covers every
+        // raw binding. Otherwise an attacker could attach unsigned authority to
+        // a legitimately signed legacy record.
+        guard record.protocolIdentityBindingsV2?.isEmpty != false else {
+            return false
+        }
+
+        let preV2Payload = try createDataToSign(
+            for: record,
+            revoked: record.isTombstone,
+            includeProtocolIdentityPins: true,
+            includeProtocolIdentityBindingsV2: false
+        )
+        if try await keyManager.verify(
+            data: preV2Payload,
+            signature: record.signature,
+            publicKey: signerPublicKey
+        ) {
+            return true
+        }
+
         let preMultiPinPayload = try createDataToSign(
             for: record,
             revoked: record.isTombstone,
-            includeProtocolIdentityPins: false
+            includeProtocolIdentityPins: false,
+            includeProtocolIdentityBindingsV2: false
         )
         if try await keyManager.verify(
             data: preMultiPinPayload,

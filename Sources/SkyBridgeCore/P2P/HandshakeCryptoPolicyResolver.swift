@@ -7,7 +7,7 @@ import SkyBridgeProtocolCore
 /// same `X-Wing` suite as "experimental hybrid" during negotiation.
 public enum HandshakeCryptoPolicyResolver {
     public static func policy(for offeredSuites: [CryptoSuite]) -> CryptoPolicy {
-        let pqcSuites = offeredSuites.filter(\.isPQCGroup)
+        let pqcSuites = offeredSuites.filter { $0.isPQCGroup && $0.isNegotiable }
         let hasHybridSuites = pqcSuites.contains(where: \.isHybrid)
 
         guard hasHybridSuites else {

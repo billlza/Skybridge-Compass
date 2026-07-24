@@ -674,6 +674,23 @@ struct CrossNetworkConnectionView: View {
                     .foregroundColor(.secondary)
             }
 
+            if case .connected = connectionManager.connectionStatus,
+               let identityStatusText {
+                Label(
+                    identityStatusText,
+                    systemImage: connectionManager.protocolIdentityStatus?.usesPeerCompatibilityIdentity == true
+                        ? "person.badge.clock"
+                        : "checkmark.shield.fill"
+                )
+                .font(.caption)
+                .foregroundColor(
+                    connectionManager.protocolIdentityStatus?.usesPeerCompatibilityIdentity == true
+                        ? .orange
+                        : .secondary
+                )
+                .help(identityStatusHelpText)
+            }
+
             Spacer()
 
  // 操作按钮
@@ -710,6 +727,25 @@ struct CrossNetworkConnectionView: View {
         case .connected: return LocalizationManager.shared.localizedString("status.connected")
         case .failed(let error): return String(format: LocalizationManager.shared.localizedString("status.failed"), error)
         }
+    }
+
+    private var identityStatusText: String? {
+        guard let status = connectionManager.protocolIdentityStatus else { return nil }
+        let protection = status.sessionProtection == .secureEnclaveRequired
+            ? "Secure Enclave"
+            : "Software Keychain"
+        if status.usesPeerCompatibilityIdentity {
+            return "兼容身份 · \(status.sessionAlgorithm.rawValue) · \(protection)"
+        }
+        return "\(status.sessionAlgorithm.rawValue) · \(protection)"
+    }
+
+    private var identityStatusHelpText: String {
+        guard let status = connectionManager.protocolIdentityStatus else { return "" }
+        if status.usesPeerCompatibilityIdentity {
+            return "对端尚未绑定原始 ML-DSA-87 公钥；本会话明确使用独立的 ML-DSA-65 软件兼容身份。已配置的 \(status.configuredAlgorithm.rawValue) / Secure Enclave 身份未被降级或替换。"
+        }
+        return "本会话使用已配置的协议身份及其精确密钥保护槽。"
     }
 
     private func isCrossNetworkConnectLink(_ raw: String) -> Bool {

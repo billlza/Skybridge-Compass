@@ -25,6 +25,7 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
     }
 #endif
 
+#if DEBUG || SKYBRIDGE_TESTING
     static func requestedSmokeNativeVideoVisibleFrameSize() -> CGSize? {
         guard let width = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_WIDTH"),
               let height = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_HEIGHT") else {
@@ -32,6 +33,7 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
         }
         return CGSize(width: CGFloat(width), height: CGFloat(height))
     }
+#endif
 
     static func normalizedVisibleFrameSize(
         forCodedSize codedSize: CGSize,
@@ -75,6 +77,7 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
         }
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private static func positiveEnvironmentInteger(_ name: String) -> Int? {
         guard let rawValue = ProcessInfo.processInfo.environment[name],
               let value = Int(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -83,4 +86,5 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
         }
         return value
     }
+#endif
 }

@@ -273,7 +273,40 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
         }
     }
 
+    func testMessageASecureEnclaveSignatureRoundTripsWithoutLeavingUnreadBytes() throws {
+        let base = makeClassicMessageA()
+        let secureEnclaveSignature = Data(repeating: 0x5E, count: 96)
+        let message = HandshakeMessageA(
+            version: base.version,
+            supportedSuites: base.supportedSuites,
+            keyShares: base.keyShares,
+            clientNonce: base.clientNonce,
+            policy: base.policy,
+            capabilities: base.capabilities,
+            signature: base.signature,
+            identityPublicKey: base.identityPublicKey,
+            secureEnclaveSignature: secureEnclaveSignature
+        )
+
+        let decoded = try HandshakeMessageA.decode(from: message.encoded)
+        XCTAssertEqual(decoded.secureEnclaveSignature, secureEnclaveSignature)
+    }
+
+    func testMessageADecodeRejectsBytesAfterSecureEnclaveSignature() throws {
+        var encoded = makeClassicMessageA().encoded
+        encoded.append(0xA7)
+
+        XCTAssertThrowsError(try HandshakeMessageA.decode(from: encoded)) { error in
+            guard case HandshakeError.failed(.invalidMessageFormat(let reason)) = error else {
+                XCTFail("Expected typed trailing-byte rejection, got \(error)")
+                return
+            }
+            XCTAssertTrue(reason.contains("trailing"))
+        }
+    }
+
     func testMessageBDecodeRejectsOversizedPayload() throws {
+        XCTAssertEqual(HandshakeConstants.maxMessageBLength, 16 * 1_024)
         let oversized = Data(repeating: 0x00, count: HandshakeConstants.maxMessageBLength + 1)
         XCTAssertThrowsError(try HandshakeMessageB.decode(from: oversized)) { error in
             guard case HandshakeError.failed(let reason) = error else {
@@ -317,6 +350,87 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
         }
     }
 
+    func testBoundedHandshakeWireDecodersAcceptNonZeroStartIndexSlices() throws {
+        let messageA = makeClassicMessageA()
+        let decodedA = try HandshakeMessageA.decode(from: offsetSlice(messageA.encoded))
+        XCTAssertEqual(decodedA.supportedSuites, messageA.supportedSuites)
+        XCTAssertEqual(decodedA.capabilities, messageA.capabilities)
+
+        let messageB = makeClassicMessageB()
+        let decodedB = try HandshakeMessageB.decode(from: offsetSlice(messageB.encoded))
+        XCTAssertEqual(decodedB.selectedSuite, messageB.selectedSuite)
+        XCTAssertEqual(decodedB.encryptedPayload.ciphertext, messageB.encryptedPayload.ciphertext)
+
+        let finished = HandshakeFinished(
+            direction: .responderToInitiator,
+            mac: Data(repeating: 0x6A, count: 32)
+        )
+        XCTAssertEqual(try HandshakeFinished.decode(from: offsetSlice(finished.encoded)).mac, finished.mac)
+
+        let identity = IdentityPublicKeys(
+            protocolPublicKey: Data(repeating: 0x42, count: 32),
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: Data(repeating: 0x43, count: 65)
+        )
+        let decodedIdentity = try IdentityPublicKeys.decode(from: offsetSlice(identity.encoded))
+        XCTAssertEqual(decodedIdentity.protocolPublicKey, identity.protocolPublicKey)
+        XCTAssertEqual(decodedIdentity.secureEnclavePublicKey, identity.secureEnclavePublicKey)
+
+        let soa = try HandshakeSOAExtension(
+            initiatorPeerId: Data(repeating: 0x11, count: HandshakeSOAExtension.initiatorPeerIdLength),
+            targetPeerId: Data(repeating: 0x22, count: HandshakeSOAExtension.targetPeerIdLength),
+            attemptId: Data(repeating: 0x33, count: HandshakeSOAExtension.attemptIdLength)
+        )
+        let decodedSOA = try HandshakeSOAExtension.decodeValue(offsetSlice(soa.encodedValue))
+        XCTAssertEqual(decodedSOA.initiatorPeerId, soa.initiatorPeerId)
+        XCTAssertEqual(decodedSOA.targetPeerId, soa.targetPeerId)
+        XCTAssertEqual(decodedSOA.attemptId, soa.attemptId)
+
+        let sealedBoxWire = messageB.encryptedPayload.combinedWithHeader(suite: messageB.selectedSuite)
+        let decodedBox = try HPKESealedBox(combined: offsetSlice(sealedBoxWire), isHandshake: true)
+        XCTAssertEqual(decodedBox.encapsulatedKey, messageB.encryptedPayload.encapsulatedKey)
+        XCTAssertEqual(decodedBox.nonce, messageB.encryptedPayload.nonce)
+        XCTAssertEqual(decodedBox.ciphertext, messageB.encryptedPayload.ciphertext)
+        XCTAssertEqual(decodedBox.tag, messageB.encryptedPayload.tag)
+        XCTAssertEqual(decodedBox.encapsulatedKey.startIndex, 0)
+        XCTAssertEqual(decodedBox.nonce.startIndex, 0)
+        XCTAssertEqual(decodedBox.ciphertext.startIndex, 0)
+        XCTAssertEqual(decodedBox.tag.startIndex, 0)
+    }
+
+    func testPaddedHandshakeAndTrafficFramesAcceptNonZeroStartIndexSlices() throws {
+        let messageA = makeClassicMessageA()
+        let paddedHandshake = paddedFrame(
+            magic: [0x53, 0x42, 0x50, 0x31],
+            payload: messageA.encoded,
+            totalLength: messageA.encoded.count + 32
+        )
+        let decoded = try HandshakeMessageA.decode(from: offsetSlice(paddedHandshake))
+        XCTAssertEqual(decoded.supportedSuites, messageA.supportedSuites)
+        XCTAssertEqual(decoded.capabilities, messageA.capabilities)
+
+        let trafficPayload = Data(repeating: 0xA7, count: 4_096)
+        let paddedTraffic = paddedFrame(
+            magic: [0x53, 0x42, 0x50, 0x32],
+            payload: trafficPayload,
+            totalLength: trafficPayload.count + 64
+        )
+        XCTAssertEqual(
+            TrafficPadding.unwrapIfNeeded(offsetSlice(paddedTraffic), label: "slice-regression"),
+            trafficPayload
+        )
+    }
+
+    func testTruncatedNonZeroStartIndexHandshakeSliceFailsWithTypedError() {
+        let truncated = offsetSlice(Data(makeClassicMessageA().encoded.dropLast()))
+        XCTAssertThrowsError(try HandshakeMessageA.decode(from: truncated)) { error in
+            guard case HandshakeError.failed = error else {
+                XCTFail("Expected HandshakeError.failed, got \(error)")
+                return
+            }
+        }
+    }
+
     private func makeClassicMessageA() -> HandshakeMessageA {
         let capabilities = CryptoCapabilities(
             supportedKEM: ["X25519"],
@@ -355,6 +469,24 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
             signature: Data(repeating: 0xC3, count: 64),
             identityPublicKey: Data(repeating: 0xD4, count: 32)
         )
+    }
+
+    private func offsetSlice(_ payload: Data, prefixCount: Int = 17) -> Data {
+        var storage = Data(repeating: 0xEE, count: prefixCount)
+        storage.append(payload)
+        let slice = storage.dropFirst(prefixCount)
+        XCTAssertNotEqual(slice.startIndex, 0)
+        return slice
+    }
+
+    private func paddedFrame(magic: [UInt8], payload: Data, totalLength: Int) -> Data {
+        precondition(totalLength >= 8 + payload.count)
+        var frame = Data(magic)
+        var payloadLength = UInt32(payload.count).bigEndian
+        frame.append(Data(bytes: &payloadLength, count: 4))
+        frame.append(payload)
+        frame.append(Data(repeating: 0xA5, count: totalLength - frame.count))
+        return frame
     }
 
     private func assertThrowsSuiteNotSupported(

@@ -1036,7 +1036,11 @@ public final class RemoteControlManager: BaseManager {
                Self.noticeMetadataPresent(identity?.nebulaId) {
                 return identity
             }
-            try? await Task.sleep(for: .milliseconds(100))
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return nil
+            }
             identity = RemoteControlSecurityPeerIdentityStore.identity(forAliases: aliases)
         }
 
@@ -1159,9 +1163,7 @@ public final class RemoteControlManager: BaseManager {
         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
             guard keys.negotiatedSuite.isKnown else { return nil }
             let rawValue = keys.negotiatedSuite.rawValue
-            return keys.negotiatedSuite.isNegotiable && keys.negotiatedSuite.isPQCGroup
-                ? "\(rawValue) PQC"
-                : "\(rawValue) secure channel"
+            return keys.negotiatedSuite.isPQCGroup ? "\(rawValue) PQC" : "\(rawValue) secure channel"
         }
         return nil
     }
@@ -1512,7 +1514,11 @@ public final class RemoteControlManager: BaseManager {
             screenCaptureWatchdogTask = Task { [weak self, weak streamer] in
                 guard let self, let streamer else { return }
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(2))
+                    do {
+                        try await Task.sleep(for: .seconds(2))
+                    } catch {
+                        return
+                    }
                     guard !Task.isCancelled else { break }
                     guard self.captureStreamer === streamer,
                           self.isBeingControlled else { break }
@@ -1780,7 +1786,11 @@ public final class RemoteControlManager: BaseManager {
 
         Task { @MainActor [weak self, weak peer] in
             guard let self, let peer else { return }
-            try? await Task.sleep(for: delay)
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
             guard self.isCurrentPeer(peer), self.isBeingControlled else { return }
             guard self.captureStreamer == nil else { return }
             await self.startScreenSharing(to: peer)
@@ -1809,7 +1819,11 @@ public final class RemoteControlManager: BaseManager {
             realtimeAudioCaptureStrictMediaFallbacks = nil
         }
 
-        try? await Task.sleep(for: .milliseconds(150))
+        do {
+            try await Task.sleep(for: .milliseconds(150))
+        } catch {
+            return
+        }
         await startScreenSharing(to: peer)
     }
 
@@ -1930,12 +1944,20 @@ public final class RemoteControlManager: BaseManager {
                 overlayChannelWasEnabled = wantsOverlayChannel
 
                 guard wantsCursorChannel || wantsOverlayChannel else {
-                    try? await Task.sleep(for: .milliseconds(250))
+                    do {
+                        try await Task.sleep(for: .milliseconds(250))
+                    } catch {
+                        return
+                    }
                     continue
                 }
 
                 guard let captureContext = captureStreamer?.captureContextSnapshot() else {
-                    try? await Task.sleep(for: .milliseconds(50))
+                    do {
+                        try await Task.sleep(for: .milliseconds(50))
+                    } catch {
+                        return
+                    }
                     continue
                 }
 
@@ -1973,7 +1995,11 @@ public final class RemoteControlManager: BaseManager {
                     }
                 }
 
-                try? await Task.sleep(for: .milliseconds(16))
+                do {
+                    try await Task.sleep(for: .milliseconds(16))
+                } catch {
+                    return
+                }
             }
 #endif
         }
@@ -2042,7 +2068,12 @@ public final class RemoteControlManager: BaseManager {
             )
             if installed {
                 logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
-                emitSmokeTrace("mac remote established peer=\(peer.id) suite=\(keys.negotiatedSuite.rawValue)")
+                let remoteDeviceId = RemoteControlSmokeStatusWriter.fieldValue(
+                    peer.handshakePeer?.deviceId
+                )
+                emitSmokeTrace(
+                    "mac remote established peer=\(peer.id) remoteDeviceId=\(remoteDeviceId) suite=\(keys.negotiatedSuite.rawValue)"
+                )
             }
             return .established
         case .failed(let reason):
@@ -2149,63 +2180,80 @@ public final class RemoteControlManager: BaseManager {
         do {
             let trustProvider = try await makeRemoteControlTrustProvider(for: handshakePeer.deviceId)
             let transport = RemoteControlHandshakeTransport(connection: peer.connection)
+            let configuration = try await SettingsManager.shared
+                .committedProtocolIdentityConfiguration()
+            let peerAlgorithm = TrustSyncService.shared.outboundPQCSignatureAlgorithm(
+                deviceId: handshakePeer.deviceId,
+                requestedAlgorithm: configuration.algorithm
+            )
+            let outboundProtocolIdentity = (
+                requestedAlgorithm: configuration.algorithm,
+                requestedProtection: configuration.protection,
+                selectedAlgorithm: peerAlgorithm
+            )
             let keys = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
                 deviceId: handshakePeer.deviceId,
                 preferPQC: true,
                 policy: policy,
-                cryptoProvider: baseProvider
-            ) { [weak self] preparation in
-                let isStillCurrent = await MainActor.run { [weak self] in
-                    guard let self,
-                          let current = self.currentPeer(for: peerRole, deviceId: peerID) else { return false }
-                    return ObjectIdentifier(current) == peerIdentity
-                }
-                guard isStillCurrent else {
-                    throw RemoteControlError.connectionClosed
-                }
-
-                let cryptoProvider: any CryptoProvider = {
-                    switch preparation.strategy {
-                    case .pqcOnly:
-                        return CryptoProviderFactory.make(policy: selection)
-                    case .classicOnly:
-                        return CryptoProviderFactory.make(policy: .classicOnly)
+                cryptoProvider: baseProvider,
+                executor: { [weak self] preparation in
+                    let isStillCurrent = await MainActor.run { [weak self] in
+                        guard let self,
+                              let current = self.currentPeer(for: peerRole, deviceId: peerID) else { return false }
+                        return ObjectIdentifier(current) == peerIdentity
                     }
-                }()
+                    guard isStillCurrent else {
+                        throw RemoteControlError.connectionClosed
+                    }
 
-                let identityProvider = DeviceIdentityHandshakeProvider(
-                    sigAAlgorithm: preparation.sigAAlgorithm,
-                    includeSecureEnclavePoP: policy.requireSecureEnclavePoP
-                )
-                let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
-                let soaMetadata = try HandshakeSOAMetadata(
-                    initiatorPeerId: soaBinding.localPeerId,
-                    targetPeerId: soaBinding.expectedRemotePeerId,
-                    attemptId: Self.randomRemoteControlAttemptId()
-                )
-                let driver = try HandshakeDriver(
-                    transport: transport,
-                    cryptoProvider: cryptoProvider,
-                    protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
-                    identityProvider: identityProvider,
-                    sigAAlgorithm: preparation.sigAAlgorithm,
-                    offeredSuites: preparation.offeredSuites,
-                    policy: policy,
-                    cryptoPolicy: cryptoPolicy,
-                    trustProvider: trustProvider,
-                    soaMetadata: soaMetadata,
-                    localSOAPeerId: soaBinding.localPeerId,
-                    expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId,
-                    soaSessionScope: .remoteControl
-                )
-                await MainActor.run { [weak self] in
-                    guard let self,
-                          let current = self.currentPeer(for: peerRole, deviceId: peerID),
-                          ObjectIdentifier(current) == peerIdentity else { return }
-                    current.handshakeDriver = driver
-                }
-                return try await driver.initiateHandshake(with: handshakePeer)
-            }
+                    let cryptoProvider: any CryptoProvider = {
+                        switch preparation.strategy {
+                        case .pqcOnly:
+                            return CryptoProviderFactory.make(policy: selection)
+                        case .classicOnly:
+                            return CryptoProviderFactory.make(policy: .classicOnly)
+                        }
+                    }()
+
+                    let identityProvider = DeviceIdentityHandshakeProvider(
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        protocolSigningKeyProtection: preparation.sigAAlgorithm
+                            == outboundProtocolIdentity.requestedAlgorithm
+                            ? outboundProtocolIdentity.requestedProtection
+                            : .softwareKeychain,
+                        includeSecureEnclavePoP: policy.requireSecureEnclavePoP
+                    )
+                    let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
+                    let soaMetadata = try HandshakeSOAMetadata(
+                        initiatorPeerId: soaBinding.localPeerId,
+                        targetPeerId: soaBinding.expectedRemotePeerId,
+                        attemptId: Self.randomRemoteControlAttemptId()
+                    )
+                    let driver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: cryptoProvider,
+                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
+                        identityProvider: identityProvider,
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        offeredSuites: preparation.offeredSuites,
+                        policy: policy,
+                        cryptoPolicy: cryptoPolicy,
+                        trustProvider: trustProvider,
+                        soaMetadata: soaMetadata,
+                        localSOAPeerId: soaBinding.localPeerId,
+                        expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId,
+                        soaSessionScope: .remoteControl
+                    )
+                    await MainActor.run { [weak self] in
+                        guard let self,
+                              let current = self.currentPeer(for: peerRole, deviceId: peerID),
+                              ObjectIdentifier(current) == peerIdentity else { return }
+                        current.handshakeDriver = driver
+                    }
+                    return try await driver.initiateHandshake(with: handshakePeer)
+                },
+                pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm
+            )
 
             let installed = try await installSecureSessionKeys(
                 keys,
@@ -2237,7 +2285,11 @@ public final class RemoteControlManager: BaseManager {
         while isCurrentPeer(peer),
               peer.requestedStreamConfiguration == nil,
               ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return false
+            }
         }
 
         guard isCurrentPeer(peer) else { return false }
@@ -2966,7 +3018,11 @@ public final class RemoteControlManager: BaseManager {
             if currentPeer(for: peer.role, deviceId: peer.id) == nil {
                 return .aborted("secure channel aborted: peer closed before establishment")
             }
-            try? await Task.sleep(for: .milliseconds(100))
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return .aborted("secure channel establishment cancelled")
+            }
         }
         emitSmokeTrace("mac remote secure-timeout peer=\(peer.id)")
         return peer.sessionKeys != nil ? .established : .timedOut
@@ -2977,11 +3033,6 @@ public final class RemoteControlManager: BaseManager {
         for peer: PeerConnection,
         messageA: HandshakeMessageA
     ) async throws -> HandshakeDriver {
-        guard messageA.hasNegotiableOfferShape else {
-            throw RemoteControlError.handshakeInitializationFailed(
-                "inbound remote control MessageA contains a non-negotiable offer"
-            )
-        }
         let trustedPeerId: String
         switch RemoteControlInboundTrustResolver.resolve(
             remoteSOAPeerId: messageA.soaExtension?.initiatorPeerId,
@@ -3019,8 +3070,17 @@ public final class RemoteControlManager: BaseManager {
         await releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)
         peer.handshakePeer = PeerIdentifier(deviceId: trustedPeerId, displayName: nil, address: nil)
         let trustProvider = try await makeRemoteControlTrustProvider(for: trustedPeerId)
-        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
-        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
+        #if !os(macOS)
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        #endif
+        let configuration = try await SettingsManager.shared
+            .committedProtocolIdentityConfiguration()
+        let inboundProtocolIdentity = try InboundProtocolIdentitySelectionPolicy.resolve(
+            messageA: messageA,
+            candidateDeviceIds: [trustedPeerId],
+            activeLocalAlgorithm: configuration.algorithm,
+            activeLocalProtection: configuration.protection
+        )
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let capability = CryptoProviderFactory.detectCapability()
@@ -3029,9 +3089,7 @@ public final class RemoteControlManager: BaseManager {
         var effectivePolicy = requestedPolicy
         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter {
-            !$0.isPQCGroup && $0.isNegotiable
-        }
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
 
         if let rejection = StrictPQCAdmissionGate.inboundRejection(
             policy: requestedPolicy,
@@ -3041,7 +3099,7 @@ public final class RemoteControlManager: BaseManager {
             throw RemoteControlError.handshakeInitializationFailed(rejection.diagnosticMessage)
         }
 
-        if peerHasPQCGroup {
+        if inboundProtocolIdentity.algorithm != .ed25519 {
             let pqcSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
             cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
                 policy: pqcSelection,
@@ -3058,6 +3116,11 @@ public final class RemoteControlManager: BaseManager {
             }
 
             if localPQCSuites.isEmpty {
+                #if os(macOS)
+                throw InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(
+                    inboundProtocolIdentity.algorithm
+                )
+                #else
                 if requestedPolicy.requirePQC {
                     throw RemoteControlError.handshakeInitializationFailed(
                         "strictPQC enabled but local PQC provider is unavailable"
@@ -3070,9 +3133,7 @@ public final class RemoteControlManager: BaseManager {
                 }
                 cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                 sigAAlgorithm = .ed25519
-                offeredSuites = cryptoProvider.supportedSuites.filter {
-                    !$0.isPQCGroup && $0.isNegotiable
-                }
+                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
                 effectivePolicy = HandshakePolicy(
                     requirePQC: false,
                     allowClassicFallback: false,
@@ -3080,9 +3141,20 @@ public final class RemoteControlManager: BaseManager {
                     requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
                 )
                 logger.info("🧩 RemoteControl inbound fallback(classic): local PQC unavailable for \(peer.id, privacy: .public)")
+                #endif
             } else {
-                sigAAlgorithm = .mlDSA65
-                offeredSuites = localPQCSuites
+                let compatibleSuites = InboundProtocolIdentitySelectionPolicy
+                    .compatibleResponderPQCSuites(
+                        localPQCSuites,
+                        algorithm: inboundProtocolIdentity.algorithm
+                    )
+                guard !compatibleSuites.isEmpty else {
+                    throw InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(
+                        inboundProtocolIdentity.algorithm
+                    )
+                }
+                sigAAlgorithm = inboundProtocolIdentity.algorithm
+                offeredSuites = compatibleSuites
             }
         } else {
             if requestedPolicy.requirePQC {
@@ -3092,9 +3164,7 @@ public final class RemoteControlManager: BaseManager {
             }
             cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
             sigAAlgorithm = .ed25519
-            offeredSuites = cryptoProvider.supportedSuites.filter {
-                !$0.isPQCGroup && $0.isNegotiable
-            }
+            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
             effectivePolicy = HandshakePolicy(
                 requirePQC: false,
                 allowClassicFallback: false,
@@ -3105,6 +3175,7 @@ public final class RemoteControlManager: BaseManager {
 
         let identityProvider = DeviceIdentityHandshakeProvider(
             sigAAlgorithm: sigAAlgorithm,
+            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
             includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
         )
         let peerSuitesSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
@@ -3625,7 +3696,7 @@ public final class RemoteControlManager: BaseManager {
     }
 }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 struct RemoteControlManagerRoleSnapshot: Equatable {
     let controllingDeviceIds: [String]
     let beingControlledDeviceIds: [String]

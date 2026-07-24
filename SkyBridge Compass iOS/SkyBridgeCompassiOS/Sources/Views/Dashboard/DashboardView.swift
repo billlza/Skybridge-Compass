@@ -47,9 +47,13 @@ public struct DashboardView: View {
     }
 
     private static var initialSelectedTab: DashboardTab {
+#if DEBUG || SKYBRIDGE_TESTING
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
             ? .remote
             : .home
+#else
+        .home
+#endif
     }
     
     // MARK: - Body

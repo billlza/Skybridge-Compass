@@ -65,11 +65,13 @@ extension CrossNetworkWebRTCManager {
     enum FileTransferWaitError: LocalizedError {
         case timeout
         case cancelled
+        case transportClosed
 
         var errorDescription: String? {
             switch self {
             case .timeout: return "跨网文件传输等待超时"
             case .cancelled: return "跨网文件传输已取消"
+            case .transportClosed: return "跨网文件传输通道已关闭"
             }
         }
     }

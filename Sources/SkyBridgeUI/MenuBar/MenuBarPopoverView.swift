@@ -512,6 +512,7 @@ struct TransferRow: View {
 struct QuickActionsSection: View {
     @ObservedObject var viewModel: MenuBarViewModel
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 快捷操作按钮标识符（用于测试）
     static let buttonIdentifiers = [
         "deviceDiscovery",
@@ -519,6 +520,7 @@ struct QuickActionsSection: View {
         "screenMirror",
         "settings"
     ]
+#endif
     
     var body: some View {
         LazyVGrid(columns: [

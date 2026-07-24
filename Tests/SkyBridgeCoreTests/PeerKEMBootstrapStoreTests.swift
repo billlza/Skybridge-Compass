@@ -99,6 +99,10 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
             kemPublicKeys: [
                 KEMPublicKeyInfo(suiteWireId: 0x0000, publicKey: Data(repeating: 0x00, count: 1_216)),
                 KEMPublicKeyInfo(suiteWireId: CryptoSuite.x25519Ed25519.wireId, publicKey: Data(repeating: 0x11, count: 32)),
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.qperiaptContextBound.wireId,
+                    publicKey: Data(repeating: 0x12, count: QPeriaptPlatformPolicy.publicKeyLength)
+                ),
                 KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwingMLDSA.wireId, publicKey: Data(repeating: 0x22, count: 32)),
                 KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwingMLDSA.wireId, publicKey: Data(repeating: 0x23, count: 1_184)),
                 KEMPublicKeyInfo(suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId, publicKey: Data(repeating: 0x24, count: 1_216)),
@@ -216,7 +220,7 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
     }
 
-    func testLoadPurgesLegacyABI1AndMetadataFreeABI2QPeriaptKEM() async throws {
+    func testLoadPurgesLegacyABI1QPeriaptKEM() async throws {
         let suiteName = "PeerKEMBootstrapStoreLegacyQGateTests.\(UUID().uuidString)"
         guard let seedDefaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Unable to create isolated UserDefaults suite")
@@ -230,10 +234,6 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
                 kemPublicKeys: [
                     CryptoSuite.qperiaptContextBound.wireId: Data(
                         repeating: 0x51,
-                        count: QPeriaptPlatformPolicy.publicKeyLength
-                    ),
-                    CryptoSuite.qperiaptABI2PolicyBound.wireId: Data(
-                        repeating: 0x52,
                         count: QPeriaptPlatformPolicy.publicKeyLength
                     ),
                     CryptoSuite.mlkem768MLDSA65.wireId: validMLKEM

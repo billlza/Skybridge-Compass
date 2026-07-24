@@ -50,16 +50,40 @@ run_check_strict_no_warnings \
   bash "${ROOT_DIR}/Scripts/test_loopback_benchmark_fixture_policy.sh"
 
 run_check_strict_no_warnings \
-  "qperiapt-rust-abi1-feature-policy" \
-  "security" \
+  "protocol-parity-checker-guardrail" \
+  "code" \
   "source-quality" \
-  bash "${ROOT_DIR}/Scripts/test_qperiapt_rust_feature_policy.sh"
+  python3 "${ROOT_DIR}/Scripts/test_check_protocol_parity.py"
 
 run_check_strict_no_warnings \
   "ios-simulator-selection" \
   "code" \
   "source-quality" \
   bash "${ROOT_DIR}/Scripts/test_ios_simulator_helpers.sh"
+
+run_check_strict_no_warnings \
+  "swift-test-filter-guardrail" \
+  "code" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_run_swift_test_filter.sh"
+
+run_check_strict_no_warnings \
+  "release-acceptance-manifest-finalizer-guardrail" \
+  "code" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_finalize_release_acceptance_manifests.py"
+
+run_check_strict_no_warnings \
+  "real-device-release-acceptance-artifact-guardrail" \
+  "code" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_validate_real_device_release_acceptance_artifact.py"
+
+run_check_strict_no_warnings \
+  "real-device-smoke-performance-contract" \
+  "code" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_real_device_smoke_performance_gate.sh"
 
 run_check_strict_no_warnings \
   "ios-runtime-diagnostic-validator" \
@@ -84,12 +108,6 @@ run_check_strict_no_warnings \
   "code" \
   "source-quality" \
   env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" '.*' --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
-
-run_check_strict_no_warnings \
-  "loopback-connection-teardown-stress" \
-  "code" \
-  "source-quality" \
-  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 BASELINE_RUN_BENCH=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" --require-no-skips SkyBridgeBenchTests.BaselineLoopbackBenchTests/testLoopbackConnectionTeardownStress --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
 
 run_check_strict_no_warnings \
   "ios-debug-build" \

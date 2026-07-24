@@ -10,7 +10,7 @@ struct CurrentPathRemoteAuthority: Sendable, Equatable {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
-struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Sendable {
+struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, ExactProtocolIdentityHandshakeTrustProvider, Sendable {
     let expectedRemoteAuthority: CurrentPathRemoteAuthority?
     let fallbackPeerIDs: [String]
     let additionalTrustedFingerprints: Set<String>
@@ -54,6 +54,31 @@ struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider
             }
         }
         return fingerprints
+    }
+
+    func trustedProtocolIdentityRawKeys(for deviceId: String) async -> [TrustedProtocolIdentityRawKey] {
+        guard let expectedRemoteAuthority,
+              deviceId == expectedRemoteAuthority.deviceId || fallbackPeerIDs.contains(deviceId),
+              let publicKey = expectedRemoteAuthority.protocolPublicKeyBytes,
+              !publicKey.isEmpty else {
+            return []
+        }
+        let identity = IdentityPublicKeys(
+            protocolPublicKey: publicKey,
+            protocolAlgorithm: expectedRemoteAuthority.protocolSigningAlgorithm.wire
+        )
+        guard (try? identity.authoritativeProtocolFingerprint().lowercased())
+                == expectedRemoteAuthority.protocolPublicKeyFingerprint
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() else {
+            return []
+        }
+        return [
+            TrustedProtocolIdentityRawKey(
+                algorithm: expectedRemoteAuthority.protocolSigningAlgorithm,
+                publicKey: publicKey
+            )
+        ]
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {

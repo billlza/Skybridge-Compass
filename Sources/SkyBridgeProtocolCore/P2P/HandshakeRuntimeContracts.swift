@@ -40,6 +40,26 @@ public protocol MultiFingerprintHandshakeTrustProvider: HandshakeTrustProvider {
     func trustedFingerprints(for deviceId: String) async -> Set<String>
 }
 
+/// An algorithm-tagged, byte-exact protocol identity authority.
+///
+/// Fingerprints remain useful for indexing and legacy migration, but new
+/// high-assurance identities must be authorized by the exact public key bytes
+/// that the peer uses to verify the signed handshake transcript.
+public struct TrustedProtocolIdentityRawKey: Sendable, Equatable, Hashable {
+    public let algorithm: ProtocolSigningAlgorithm
+    public let publicKey: Data
+
+    public init(algorithm: ProtocolSigningAlgorithm, publicKey: Data) {
+        self.algorithm = algorithm
+        self.publicKey = publicKey
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+public protocol ExactProtocolIdentityHandshakeTrustProvider: HandshakeTrustProvider {
+    func trustedProtocolIdentityRawKeys(for deviceId: String) async -> [TrustedProtocolIdentityRawKey]
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 public extension HandshakeTrustProvider {
     func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {

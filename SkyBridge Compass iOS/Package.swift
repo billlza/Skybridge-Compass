@@ -62,21 +62,18 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(path: "LocalPackages/OQSRAIILocal"),
-        .package(path: "LocalPackages/SkyBridgeMediaLocal")
+        .package(name: "SkyBridgeRoot", path: ".."),
+        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0")
     ],
     targets: [
-        .binaryTarget(
-            name: "WebRTC",
-            path: "Vendor/WebRTC/WebRTC.xcframework"
-        ),
         // MARK: - iOS 主应用目标
         .target(
             name: "SkyBridgeCompassiOS",
             dependencies: [
-                "WebRTC",
-                .product(name: "OQSRAII", package: "OQSRAIILocal"),
-                .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeMediaLocal")
+                .product(name: "WebRTC", package: "WebRTC"),
+                .product(name: "SkyBridgeQPeriaptRuntime", package: "SkyBridgeRoot"),
+                .product(name: "OQSRAII", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeRoot")
             ],
             path: "SkyBridgeCompassiOS",
             exclude: [

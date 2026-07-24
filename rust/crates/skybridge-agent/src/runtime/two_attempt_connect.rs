@@ -3,7 +3,7 @@
 //!
 //! The core driver is transport-agnostic (it takes attempt closures + a
 //! classifier). This module supplies the *agent-specific* pieces the runtime alone
-//! has: the local ML-DSA-65 signing identity (from on-disk key material), the
+//! has: the local ML-DSA signing identity (from on-disk key material), the
 //! [`skybridge_core::PolicyGate`] posture, the PQC/Classic suites in play, and a
 //! tracing-backed audit sink for the emitted, signed [`skybridge_core::DowngradeEvent`].
 //!
@@ -16,8 +16,7 @@
 use anyhow::{Result, anyhow};
 use skybridge_core::{
     CryptoSuite, DowngradePolicy, DowngradeSigningIdentity, FallbackReason, HandshakeOutcome,
-    PolicyGate, ProtocolSigningAlgorithm, SignedDowngradeEvent, TwoAttemptError,
-    TwoAttemptHandshakeDriver,
+    PolicyGate, SignedDowngradeEvent, TwoAttemptError, TwoAttemptHandshakeDriver,
 };
 use tracing::{info, warn};
 
@@ -26,24 +25,24 @@ use crate::state::DeviceIdentityMaterial;
 /// Build the local [`DowngradeSigningIdentity`] used to sign authorized downgrade
 /// events from the agent's resolved device identity.
 ///
-/// Requires an ML-DSA-65 protocol identity (the same key the PQC handshake signs
+/// Requires an ML-DSA protocol identity (the same key the PQC handshake signs
 /// MessageA with). Returns an error for an Ed25519-only identity, since an
 /// auditable PQC->Classic downgrade is only meaningful when a PQC identity exists.
 pub(super) fn signing_identity_from_device(
     identity: &DeviceIdentityMaterial,
 ) -> Result<DowngradeSigningIdentity> {
-    if identity.signing_key.algorithm() != ProtocolSigningAlgorithm::MlDsa65 {
+    if !identity.signing_key.algorithm().is_ml_dsa() {
         return Err(anyhow!(
-            "downgrade-event signing requires an ML-DSA-65 protocol identity, got {}",
+            "downgrade-event signing requires an ML-DSA protocol identity, got {}",
             identity.signing_key.algorithm()
         ));
     }
     let secret_key = identity
         .signing_key
-        .mldsa65_secret_key_bytes()
-        .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key for downgrade signing"))?;
+        .ml_dsa_secret_key_bytes()
+        .ok_or_else(|| anyhow!("missing ML-DSA signing secret key for downgrade signing"))?;
     Ok(DowngradeSigningIdentity {
-        algorithm: ProtocolSigningAlgorithm::MlDsa65,
+        algorithm: identity.signing_key.algorithm(),
         public_key: identity.signing_key.public_key_bytes(),
         secret_key,
     })
@@ -67,7 +66,7 @@ pub(super) fn classify_agent_handshake_error(error: &anyhow::Error) -> FallbackR
         || message.contains("no peer pqc public keys")
         || message.contains("pqc provider")
         || message.contains("missing preferred pqc suites")
-        || message.contains("missing ml-dsa-65")
+        || message.contains("missing ml-dsa")
         || message.contains("no usable pqc");
     let mentions_suite_negotiation = message.contains("no mutually supported pqc suite")
         || message.contains("suite negotiation")
@@ -89,7 +88,7 @@ pub(super) fn classify_agent_handshake_error(error: &anyhow::Error) -> FallbackR
 ///
 /// - `gate`: the agent's [`PolicyGate`] (posture + per-peer cooldown). Carrying it
 ///   across calls is what makes the 300 s rate limit real.
-/// - `identity`: the agent device identity (must be ML-DSA-65).
+/// - `identity`: the agent device identity (must be ML-DSA-65 or ML-DSA-87).
 /// - `attempt_pqc` / `attempt_classic`: live attempt closures supplied by the
 ///   transport layer. `attempt_classic` is invoked **only** after the gate
 ///   authorizes a downgrade (local-only / pre-send).
@@ -187,7 +186,7 @@ pub(super) const AGENT_DEFAULT_DOWNGRADE_POLICY: DowngradePolicy = DowngradePoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skybridge_core::PolicyGate;
+    use skybridge_core::{PolicyGate, ProtocolSigningAlgorithm};
 
     fn mldsa_identity() -> DowngradeSigningIdentity {
         let (public_key, secret_key) = skybridge_core::mldsa65_generate_keypair();

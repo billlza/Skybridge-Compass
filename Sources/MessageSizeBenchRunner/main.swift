@@ -437,11 +437,7 @@ struct MessageSizeBenchRunner {
             }
             offeredSuites = suites
         case .appleXWing:
-            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .pqcOnly, cryptoProvider: provider)
-            guard case .suites(let suites) = offeredSuitesResult else {
-                throw HandshakeError.emptyOfferedSuites
-            }
-            offeredSuites = suites
+            offeredSuites = [.xwingMLDSA]
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -519,7 +515,7 @@ struct MessageSizeBenchRunner {
         offeredSuites: [CryptoSuite],
         provider: any CryptoProvider
     ) async throws -> [CryptoSuite: Data] {
-        let pqcSuites = offeredSuites.filter { $0.isPQC && $0.isNegotiable }
+        let pqcSuites = offeredSuites.filter { $0.isPQC }
         guard !pqcSuites.isEmpty else {
             return [:]
         }

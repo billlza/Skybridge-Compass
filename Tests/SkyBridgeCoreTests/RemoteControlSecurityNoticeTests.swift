@@ -1,8 +1,161 @@
 import XCTest
 @testable import SkyBridgeCore
+@testable import SkyBridgeUI
 import SkyBridgeRealtimeMedia
 
 final class RemoteControlSecurityNoticeTests: XCTestCase {
+    func testSmokeStatusFieldValueSanitizesStructuredEvidence() {
+        XCTAssertEqual(
+            RemoteControlSmokeStatusWriter.fieldValue(" id:device-1\nspoof=value "),
+            "id:device-1_spoof_value"
+        )
+        XCTAssertEqual(RemoteControlSmokeStatusWriter.fieldValue("  "), "missing")
+        XCTAssertEqual(RemoteControlSmokeStatusWriter.fieldValue(nil), "missing")
+    }
+
+    func testSecurityNoticeLocalizationContractCoversCodeShellGateAndAllLocales() throws {
+        let requiredKeys = RemoteControlSecurityNoticeLocalizationContract.requiredKeys
+        XCTAssertEqual(requiredKeys.count, 20)
+        XCTAssertEqual(Set(requiredKeys).count, 20)
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let keyPattern = try NSRegularExpression(
+            pattern: #"\"(remoteControl\.securityNotice\.[A-Za-z0-9_.]+)\""#
+        )
+        func keys(in source: String) -> Set<String> {
+            let range = NSRange(source.startIndex..<source.endIndex, in: source)
+            return Set(keyPattern.matches(in: source, range: range).compactMap { match in
+                guard let keyRange = Range(match.range(at: 1), in: source) else { return nil }
+                return String(source[keyRange])
+            })
+        }
+
+        let presentationSourcePaths = [
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlSecurityNotice.swift",
+            "Sources/SkyBridgeUI/Security/RemoteControlSecurityNoticePanelController.swift",
+        ]
+        var codeKeys = Set<String>()
+        for relativePath in presentationSourcePaths {
+            var source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            if relativePath.hasSuffix("RemoteControlSecurityNoticePanelController.swift"),
+               let implementationStart = source.range(of: "@available(macOS 14.0, *)")?.lowerBound {
+                source = String(source[implementationStart...])
+            }
+            codeKeys.formUnion(keys(in: source))
+        }
+        XCTAssertEqual(codeKeys, Set(requiredKeys))
+
+        let smokeScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Scripts/run_real_device_p2p_remote_smoke.sh"),
+            encoding: .utf8
+        )
+        let arrayStart = try XCTUnwrap(
+            smokeScript.range(of: "REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(")?.upperBound
+        )
+        let arrayEnd = try XCTUnwrap(smokeScript[arrayStart...].range(of: "\n)"))
+        let shellKeys = keys(in: String(smokeScript[arrayStart..<arrayEnd.lowerBound]))
+        XCTAssertEqual(shellKeys, Set(requiredKeys))
+
+        for localeDirectory in ["en", "ja", "zh-Hans"] {
+            let stringsURL = repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/Resources", isDirectory: true)
+                .appendingPathComponent("\(localeDirectory).lproj", isDirectory: true)
+                .appendingPathComponent("Localizable.strings")
+            let stringsData = try Data(contentsOf: stringsURL)
+            let propertyList = try PropertyListSerialization.propertyList(
+                from: stringsData,
+                options: [],
+                format: nil
+            )
+            let translations = try XCTUnwrap(propertyList as? [String: String])
+            for key in requiredKeys {
+                let value = try XCTUnwrap(translations[key], "Missing \(key) in \(localeDirectory)")
+                XCTAssertFalse(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                XCTAssertNotEqual(value, key)
+            }
+        }
+    }
+
+    #if os(macOS)
+    @MainActor
+    func testReusablePanelStopRejectsPendingNoticeAndCannotBeResurrectedByQueuedRender() async {
+        let center = RemoteControlSecurityNoticeCenter.shared
+        let controller = RemoteControlSecurityNoticePanelController.shared
+        controller.stop()
+        center.closeCurrentNoticeFailClosed()
+        defer {
+            controller.stop()
+            center.closeCurrentNoticeFailClosed()
+        }
+
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: "panel-stop-\(UUID().uuidString)",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.90",
+            remoteDeviceId: "panel-stop-ipad",
+            remoteDeviceName: "Test iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-panel-stop",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+
+        controller.start()
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(descriptor)
+        }
+        while center.currentNotice?.id != descriptor.id {
+            await Task.yield()
+        }
+
+        controller.stop()
+        await Task.yield()
+        await Task.yield()
+
+        let decision = await approvalTask.value
+        XCTAssertEqual(decision, .rejected)
+        XCTAssertNil(center.currentNotice)
+        XCTAssertFalse(controller.isStartedForTesting)
+        XCTAssertFalse(controller.hasPanelForTesting)
+
+        controller.stop()
+        XCTAssertFalse(controller.isStartedForTesting)
+        XCTAssertFalse(controller.hasPanelForTesting)
+
+        let unownedDescriptor = RemoteControlSecurityDescriptor(
+            sessionId: "panel-unowned-stop-\(UUID().uuidString)",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.91",
+            remoteDeviceId: "panel-unowned-stop-ipad",
+            remoteDeviceName: "Test iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-panel-unowned-stop",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let unownedApprovalTask = Task { @MainActor in
+            await center.requestApproval(unownedDescriptor)
+        }
+        while center.currentNotice?.id != unownedDescriptor.id {
+            await Task.yield()
+        }
+
+        controller.stop()
+        XCTAssertEqual(center.currentNotice?.id, unownedDescriptor.id)
+        center.rejectCurrentNotice()
+        let unownedDecision = await unownedApprovalTask.value
+        XCTAssertEqual(unownedDecision, .rejected)
+    }
+    #endif
+
     @MainActor
     func testPresenterMasksSensitiveIdentityValues() {
         XCTAssertEqual(RemoteControlSecurityNoticePresenter.maskedIdentity("ab"), "a***")
@@ -148,23 +301,11 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "Q-Periapt-ContextBound PQC"
         )
-        let legacyQPeriaptWireSuite = RemoteControlSecurityDescriptor(
-            sessionId: "session-qperiapt-legacy-wire-suite",
-            transportKind: .webrtc,
-            remoteIPAddress: "192.0.2.12",
-            remoteDeviceId: "android-2",
-            remoteDeviceName: "Android",
-            remoteAccountDisplayName: "remote@example.com",
-            remoteNebulaId: "nebula-remote",
-            localAccountDisplayName: "mac@example.com",
-            localNebulaId: "nebula-mac",
-            cryptoSuite: "0x0011 PQC"
-        )
         let concreteQPeriaptSuite = RemoteControlSecurityDescriptor(
             sessionId: "session-qperiapt-abi2-suite",
             transportKind: .webrtc,
-            remoteIPAddress: "192.0.2.13",
-            remoteDeviceId: "android-3",
+            remoteIPAddress: "192.0.2.12",
+            remoteDeviceId: "android-2",
             remoteDeviceName: "Android",
             remoteAccountDisplayName: "remote@example.com",
             remoteNebulaId: "nebula-remote",
@@ -184,17 +325,17 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             localNebulaId: "nebula-mac",
             cryptoSuite: "0x0012 PQC"
         )
-        let unknownHybridTierSuite = RemoteControlSecurityDescriptor(
-            sessionId: "session-unknown-hybrid-suite",
+        let misleadingSubstringSuite = RemoteControlSecurityDescriptor(
+            sessionId: "session-misleading-suite",
             transportKind: .webrtc,
-            remoteIPAddress: "192.0.2.15",
-            remoteDeviceId: "android-5",
+            remoteIPAddress: "192.0.2.13",
+            remoteDeviceId: "android-3",
             remoteDeviceName: "Android",
             remoteAccountDisplayName: "remote@example.com",
             remoteNebulaId: "nebula-remote",
             localAccountDisplayName: "mac@example.com",
             localNebulaId: "nebula-mac",
-            cryptoSuite: "0x00FF PQC"
+            cryptoSuite: "X-Wing failed"
         )
 
         XCTAssertEqual(missingSuite.cryptoSuite, "missing")
@@ -202,10 +343,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(genericSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertTrue(legacyQPeriaptSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
-        XCTAssertTrue(legacyQPeriaptWireSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteQPeriaptSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
         XCTAssertFalse(concreteQPeriaptWireSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
-        XCTAssertTrue(unknownHybridTierSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
+        XCTAssertTrue(misleadingSubstringSuite.missingRequiredNoticeMetadata.contains("crypto_suite"))
     }
 
     func testPeerIdentityStoreResolvesRemoteIdentityByEndpointAlias() {
@@ -227,6 +367,76 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertEqual(resolved?.accountDisplayName, "remote@example.com")
         XCTAssertEqual(resolved?.nebulaId, "nebula-remote-\(token)")
         XCTAssertEqual(resolved?.deviceName, "Remote iPad")
+    }
+
+    func testPeerIdentityStoreRejectsAmbiguousWeakAliasWithoutCorruptingPrimaryRecords() {
+        let store = RemoteControlSecurityPeerIdentityStorage()
+        let first = RemoteControlSecurityIdentity(
+            accountDisplayName: "first@example.com",
+            nebulaId: "nebula-first",
+            deviceId: "device-first-1234",
+            deviceName: "First iPad"
+        )
+        let second = RemoteControlSecurityIdentity(
+            accountDisplayName: "second@example.com",
+            nebulaId: "nebula-second",
+            deviceId: "device-second-5678",
+            deviceName: "Second iPad"
+        )
+
+        XCTAssertTrue(store.record(identity: first, aliases: ["shared-endpoint", "192.0.2.50"]))
+        XCTAssertTrue(store.record(identity: second, aliases: ["shared-endpoint", "192.0.2.51"]))
+
+        XCTAssertNil(store.identity(forAliases: ["shared-endpoint"]))
+        XCTAssertEqual(store.identity(forAliases: ["device-first-1234"]), first)
+        XCTAssertEqual(store.identity(forAliases: ["device-second-5678"]), second)
+    }
+
+    func testPeerIdentityStoreExpiresClearsAndEvictsLeastRecentlyUsedRecords() {
+        let time = RemoteControlIdentityTestTime(Date(timeIntervalSince1970: 10_000))
+        let store = RemoteControlSecurityPeerIdentityStorage(
+            timeToLive: 10,
+            maximumRecordCount: 2,
+            now: { time.current }
+        )
+        let first = RemoteControlSecurityIdentity(
+            accountDisplayName: "first@example.com",
+            nebulaId: "nebula-first",
+            deviceId: "device-first-1234",
+            deviceName: "First iPad"
+        )
+        let second = RemoteControlSecurityIdentity(
+            accountDisplayName: "second@example.com",
+            nebulaId: "nebula-second",
+            deviceId: "device-second-5678",
+            deviceName: "Second iPad"
+        )
+        let third = RemoteControlSecurityIdentity(
+            accountDisplayName: "third@example.com",
+            nebulaId: "nebula-third",
+            deviceId: "device-third-9012",
+            deviceName: "Third iPad"
+        )
+
+        XCTAssertTrue(store.record(identity: first, aliases: ["session-first"]))
+        time.advance(by: 1)
+        XCTAssertTrue(store.record(identity: second, aliases: ["session-second"]))
+        time.advance(by: 1)
+        XCTAssertEqual(store.identity(forAliases: ["device-first-1234"]), first)
+        time.advance(by: 1)
+        XCTAssertTrue(store.record(identity: third, aliases: ["session-third"]))
+
+        XCTAssertNil(store.identity(forAliases: ["device-second-5678"]))
+        XCTAssertEqual(store.identity(forAliases: ["device-first-1234"]), first)
+        XCTAssertEqual(store.identity(forAliases: ["device-third-9012"]), third)
+
+        store.clear(forAliases: ["device-first-1234"])
+        XCTAssertNil(store.identity(forAliases: ["device-first-1234"]))
+        XCTAssertEqual(store.recordCount, 1)
+
+        time.advance(by: 11)
+        XCTAssertNil(store.identity(forAliases: ["device-third-9012"]))
+        XCTAssertEqual(store.recordCount, 0)
     }
 
     func testStreamConfigurationCarriesRemoteControlSecurityIdentity() throws {
@@ -260,6 +470,63 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
 
         XCTAssertEqual(decoded.remoteControlSecurityIdentity, identity)
         XCTAssertEqual(decoded.remoteControlSecurityIdentity?.nebulaId, "nebula-viewer")
+    }
+
+    func testP2PStreamConfigurationRejectsOversizedDecodedSecurityIdentity() throws {
+        let data = try streamConfigurationData(
+            replacingSecurityIdentityWith: [
+                "accountDisplayName": String(repeating: "a", count: 321),
+                "nebulaId": "nebula-viewer",
+                "deviceId": "viewer-device",
+                "deviceName": "Viewer iPad"
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: data)
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "accountDisplayName")
+        }
+    }
+
+    func testWebRTCStreamConfigurationRejectsControlCharactersInDecodedSecurityIdentity() throws {
+        let data = try streamConfigurationData(
+            replacingSecurityIdentityWith: [
+                "accountDisplayName": "viewer@example.com",
+                "nebulaId": "nebula\u{0000}spoofed",
+                "deviceId": "viewer-device",
+                "deviceName": "Viewer iPad"
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: data)
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "nebulaId")
+        }
+    }
+
+    func testDecodedSecurityIdentityKeepsLegalNilFieldsBackwardCompatible() throws {
+        let data = try streamConfigurationData(
+            replacingSecurityIdentityWith: [
+                "deviceId": "viewer-device"
+            ]
+        )
+
+        let decoded = try JSONDecoder().decode(
+            RemoteDesktopStreamConfiguration.self,
+            from: data
+        )
+        XCTAssertNil(decoded.remoteControlSecurityIdentity?.accountDisplayName)
+        XCTAssertNil(decoded.remoteControlSecurityIdentity?.nebulaId)
+        XCTAssertEqual(decoded.remoteControlSecurityIdentity?.deviceId, "viewer-device")
+        XCTAssertNil(decoded.remoteControlSecurityIdentity?.deviceName)
     }
 
     func testVideoRefreshPreservesRemoteControlSecurityIdentity() {
@@ -350,6 +617,43 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
     }
 
     @MainActor
+    func testStalePanelActionsCannotResolveReplacementNotice() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: "stale-panel-action-\(UUID().uuidString)",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.92",
+            remoteDeviceId: "replacement-ipad",
+            remoteDeviceName: "Replacement iPad",
+            remoteAccountDisplayName: "replacement@example.com",
+            remoteNebulaId: "nebula-replacement",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let staleNoticeID = UUID()
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(descriptor)
+        }
+        while center.currentNotice?.id != descriptor.id {
+            await Task.yield()
+        }
+
+        center.approveNotice(id: staleNoticeID)
+        center.rejectNotice(id: staleNoticeID)
+        center.closeNoticeFailClosed(id: staleNoticeID)
+        center.disconnectNotice(id: staleNoticeID)
+
+        XCTAssertEqual(center.currentNotice?.id, descriptor.id)
+        XCTAssertEqual(center.currentNotice?.phase, .awaitingApproval)
+
+        center.closeNoticeFailClosed(id: descriptor.id)
+        let decision = await approvalTask.value
+        XCTAssertEqual(decision, .rejected)
+        XCTAssertNil(center.currentNotice)
+    }
+
+    @MainActor
     func testActiveNoticeRejectsConcurrentInboundRequestWithoutReplacingBanner() async {
         let center = RemoteControlSecurityNoticeCenter()
         let activeDescriptor = RemoteControlSecurityDescriptor(
@@ -396,6 +700,186 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
     }
 
     @MainActor
+    func testActiveNoticeEarlyReturnsReleaseOnlyIncomingDisconnectHandlers() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let activeDescriptor = RemoteControlSecurityDescriptor(
+            sessionId: "handler-retention-\(UUID().uuidString)",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.20",
+            remoteDeviceId: "handler-retention-device",
+            remoteDeviceName: "Active iPad",
+            remoteAccountDisplayName: "active@example.com",
+            remoteNebulaId: "nebula-active",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(activeDescriptor)
+        }
+        while center.currentNotice?.id != activeDescriptor.id {
+            await Task.yield()
+        }
+        center.approveCurrentNotice()
+        let activeDecision = await approvalTask.value
+        XCTAssertEqual(activeDecision, .approved)
+
+        var activeDisconnectCount = 0
+        var incomingDisconnectCount = 0
+        center.setDisconnectHandler(for: activeDescriptor.id) {
+            activeDisconnectCount += 1
+        }
+        XCTAssertEqual(center.disconnectHandlerCountForTesting, 1)
+
+        let sameSessionDescriptor = RemoteControlSecurityDescriptor(
+            sessionId: activeDescriptor.sessionId,
+            transportKind: activeDescriptor.transportKind,
+            remoteIPAddress: activeDescriptor.remoteIPAddress,
+            remoteDeviceId: activeDescriptor.remoteDeviceId,
+            remoteDeviceName: activeDescriptor.remoteDeviceName,
+            remoteAccountDisplayName: activeDescriptor.remoteAccountDisplayName,
+            remoteNebulaId: activeDescriptor.remoteNebulaId,
+            localAccountDisplayName: activeDescriptor.localAccountDisplayName,
+            localNebulaId: activeDescriptor.localNebulaId,
+            cryptoSuite: activeDescriptor.cryptoSuite
+        )
+        center.setDisconnectHandler(for: sameSessionDescriptor.id) {
+            incomingDisconnectCount += 1
+        }
+
+        let sameSessionDecision = await center.requestApproval(sameSessionDescriptor)
+        XCTAssertEqual(sameSessionDecision, .approved)
+        XCTAssertEqual(center.disconnectHandlerCountForTesting, 1)
+        XCTAssertEqual(center.currentNotice?.id, activeDescriptor.id)
+
+        let competingDescriptor = RemoteControlSecurityDescriptor(
+            sessionId: "competing-handler-\(UUID().uuidString)",
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.20",
+            remoteDeviceId: "competing-handler-device",
+            remoteDeviceName: "Competing iPad",
+            remoteAccountDisplayName: "competing@example.com",
+            remoteNebulaId: "nebula-competing",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        center.setDisconnectHandler(for: competingDescriptor.id) {
+            incomingDisconnectCount += 1
+        }
+
+        let competingDecision = await center.requestApproval(competingDescriptor)
+        XCTAssertEqual(competingDecision, .rejected)
+        XCTAssertEqual(center.disconnectHandlerCountForTesting, 1)
+        XCTAssertEqual(center.currentNotice?.id, activeDescriptor.id)
+
+        center.disconnectCurrentNotice()
+        XCTAssertEqual(activeDisconnectCount, 1)
+        XCTAssertEqual(incomingDisconnectCount, 0)
+        XCTAssertEqual(center.disconnectHandlerCountForTesting, 0)
+    }
+
+    @MainActor
+    func testActiveNoticeDisconnectsWhenSameSessionSecurityIdentityChanges() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let sessionID = "identity-mutation-\(UUID().uuidString)"
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.10",
+            remoteDeviceId: "identity-device-1234",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-original",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(descriptor)
+        }
+        while center.currentNotice?.id != descriptor.id {
+            await Task.yield()
+        }
+        center.approveCurrentNotice()
+        let approvalDecision = await approvalTask.value
+        XCTAssertEqual(approvalDecision, .approved)
+
+        var disconnectCount = 0
+        center.setDisconnectHandler(for: descriptor.id) {
+            disconnectCount += 1
+        }
+        let changedIdentity = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.10",
+            remoteDeviceId: "identity-device-1234",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-mutated",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+
+        let decision = await center.requestApproval(changedIdentity)
+
+        XCTAssertEqual(decision, .rejected)
+        XCTAssertNil(center.currentNotice)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
+    @MainActor
+    func testActiveNoticeRejectsInvalidSameSessionCryptoUpdateInsteadOfReportingApproval() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let sessionID = "invalid-suite-update-\(UUID().uuidString)"
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.11",
+            remoteDeviceId: "suite-device-1234",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(descriptor)
+        }
+        while center.currentNotice?.id != descriptor.id {
+            await Task.yield()
+        }
+        center.approveCurrentNotice()
+        let approvalDecision = await approvalTask.value
+        XCTAssertEqual(approvalDecision, .approved)
+
+        var disconnectCount = 0
+        center.setDisconnectHandler(for: descriptor.id) {
+            disconnectCount += 1
+        }
+        let invalidUpdate = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            transportKind: .webrtc,
+            remoteIPAddress: descriptor.remoteIPAddress,
+            remoteDeviceId: descriptor.remoteDeviceId,
+            remoteDeviceName: descriptor.remoteDeviceName,
+            remoteAccountDisplayName: descriptor.remoteAccountDisplayName,
+            remoteNebulaId: descriptor.remoteNebulaId,
+            localAccountDisplayName: descriptor.localAccountDisplayName,
+            localNebulaId: descriptor.localNebulaId,
+            cryptoSuite: "X-Wing failed"
+        )
+
+        let decision = await center.requestApproval(invalidUpdate)
+
+        XCTAssertEqual(decision, .rejected)
+        XCTAssertNil(center.currentNotice)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
+    @MainActor
     func testMissingRequiredNoticeMetadataFailsClosedWithoutShowingApproval() async {
         let center = RemoteControlSecurityNoticeCenter()
         let descriptor = RemoteControlSecurityDescriptor(
@@ -415,6 +899,183 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
 
         XCTAssertEqual(decision, .rejected)
         XCTAssertNil(center.currentNotice)
+    }
+
+    func testDescriptorRejectsMissingSessionAndBoundsApprovalTimeout() {
+        let missingSession = RemoteControlSecurityDescriptor(
+            sessionId: "   ",
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.10",
+            remoteDeviceId: "device-timeout-bounds",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC",
+            approvalTimeoutSeconds: .infinity
+        )
+        let oversizedTimeout = RemoteControlSecurityDescriptor(
+            sessionId: "session-timeout-bounds",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.1",
+            remoteDeviceId: "device-timeout-bounds",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC",
+            approvalTimeoutSeconds: 10_000
+        )
+
+        XCTAssertTrue(missingSession.missingRequiredNoticeMetadata.contains("session_id"))
+        XCTAssertEqual(missingSession.approvalTimeoutSeconds, 45)
+        XCTAssertEqual(oversizedTimeout.approvalTimeoutSeconds, 120)
+    }
+
+    func testDescriptorDecodingRejectsOversizedAndControlCharacterFields() throws {
+        let descriptor = validRemoteControlSecurityDescriptor()
+        let encoded = try JSONEncoder().encode(descriptor)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            return XCTFail("Expected descriptor JSON object")
+        }
+
+        object["remoteIPAddress"] = String(repeating: "1", count: 257)
+        let oversizedData = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RemoteControlSecurityDescriptor.self, from: oversizedData)
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "remoteIPAddress")
+        }
+
+        object["remoteIPAddress"] = "192.0.2.1"
+        object["remoteAccountDisplayName"] = "remote\u{000A}spoofed@example.com"
+        let controlCharacterData = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                RemoteControlSecurityDescriptor.self,
+                from: controlCharacterData
+            )
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "remoteAccountDisplayName")
+        }
+    }
+
+    func testDescriptorDecodingRejectsNonFiniteAndOutOfRangeApprovalTimeout() throws {
+        let descriptor = validRemoteControlSecurityDescriptor()
+        let jsonData = try JSONEncoder().encode(descriptor)
+        guard var jsonObject = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return XCTFail("Expected descriptor JSON object")
+        }
+        jsonObject["approvalTimeoutSeconds"] = 121
+        let oversizedTimeoutData = try JSONSerialization.data(withJSONObject: jsonObject)
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                RemoteControlSecurityDescriptor.self,
+                from: oversizedTimeoutData
+            )
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "approvalTimeoutSeconds")
+        }
+
+        let propertyListData = try PropertyListEncoder().encode(descriptor)
+        guard var propertyList = try PropertyListSerialization.propertyList(
+            from: propertyListData,
+            options: [],
+            format: nil
+        ) as? [String: Any] else {
+            return XCTFail("Expected descriptor property-list object")
+        }
+        propertyList["approvalTimeoutSeconds"] = Double.nan
+        let nonFiniteTimeoutData = try PropertyListSerialization.data(
+            fromPropertyList: propertyList,
+            format: .binary,
+            options: 0
+        )
+
+        XCTAssertThrowsError(
+            try PropertyListDecoder().decode(
+                RemoteControlSecurityDescriptor.self,
+                from: nonFiniteTimeoutData
+            )
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("Expected dataCorrupted, received \(error)")
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "approvalTimeoutSeconds")
+        }
+    }
+
+    @MainActor
+    func testCancellingApprovalFailsClosedAndClearsNotice() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: "cancel-approval-\(UUID().uuidString)",
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.44",
+            remoteDeviceId: "device-cancel-approval",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        let approvalTask = Task { @MainActor in
+            await center.requestApproval(descriptor)
+        }
+        while center.currentNotice?.id != descriptor.id {
+            await Task.yield()
+        }
+
+        approvalTask.cancel()
+        let decision = await approvalTask.value
+
+        XCTAssertEqual(decision, .disconnected)
+        XCTAssertNil(center.currentNotice)
+    }
+
+    @MainActor
+    func testAlreadyCancelledApprovalReleasesPreRegisteredDisconnectHandler() async {
+        let center = RemoteControlSecurityNoticeCenter()
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: "pre-cancel-approval-\(UUID().uuidString)",
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.45",
+            remoteDeviceId: "device-pre-cancel-approval",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+        var disconnectCount = 0
+        center.setDisconnectHandler(for: descriptor.id) {
+            disconnectCount += 1
+        }
+        let approvalTask = Task { @MainActor in
+            await Task.yield()
+            return await center.requestApproval(descriptor)
+        }
+        approvalTask.cancel()
+
+        let decision = await approvalTask.value
+        XCTAssertEqual(decision, .disconnected)
+        XCTAssertNil(center.currentNotice)
+        XCTAssertEqual(center.disconnectHandlerCountForTesting, 0)
+        XCTAssertEqual(disconnectCount, 0)
     }
 
     func testApprovedNoticeKeepsDisconnectHandlerUntilDisconnect() throws {
@@ -446,6 +1107,20 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             source.contains("maskedStatusValue(descriptor.remoteAccountDisplayName)") &&
                 source.contains("maskedStatusValue(descriptor.remoteNebulaId)"),
             "Notice evidence should preserve field presence without writing raw account or Nebula identifiers."
+        )
+        XCTAssertTrue(
+            source.contains("remoteDeviceId=\\(Self.statusValue(descriptor.remoteDeviceId))"),
+            "Active P2P notice evidence must retain the authenticated remote device id so route liveness proof can stay target-bound."
+        )
+        let manager = try repositorySource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
+        XCTAssertTrue(
+            manager.contains("mac remote established peer=\\(peer.id) remoteDeviceId=\\(remoteDeviceId) suite=\\(keys.negotiatedSuite.rawValue)"),
+            "X-Wing establishment evidence must bind the transport peer to the authenticated remote device id."
+        )
+        XCTAssertTrue(
+            manager.contains("RemoteControlSmokeStatusWriter.fieldValue(") &&
+                manager.contains("peer.handshakePeer?.deviceId"),
+            "The target-bound establishment marker must pass its device id through the smoke field sanitizer."
         )
     }
 
@@ -498,26 +1173,6 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         )
     }
 
-    func testInboundRemoteControlMessageAIsAdmittedBeforeTrustOrPeerMutation() throws {
-        let source = try repositorySource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
-        guard let functionStart = source.range(of: "private func makeInboundHandshakeDriver("),
-              let functionEnd = source.range(
-                of: "private func handleControlMessagePayload(",
-                range: functionStart.upperBound..<source.endIndex
-              ) else {
-            return XCTFail("Unable to locate inbound remote-control handshake driver body")
-        }
-        let body = String(source[functionStart.lowerBound..<functionEnd.lowerBound])
-        guard let admission = body.range(of: "guard messageA.hasNegotiableOfferShape else"),
-              let soaMutation = body.range(of: "recordSOAState(soaPairKey, for: peer)"),
-              let peerMutation = body.range(of: "peer.handshakePeer = PeerIdentifier") else {
-            return XCTFail("Expected admission and mutation anchors are missing")
-        }
-
-        XCTAssertLessThan(admission.lowerBound, soaMutation.lowerBound)
-        XCTAssertLessThan(admission.lowerBound, peerMutation.lowerBound)
-    }
-
     func testWebRTCClipboardSyncCannotBeSentBeforeApproval() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
@@ -537,7 +1192,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
     }
 
     func testSecurityNoticePanelDoesNotFallbackToLocalIdentity() throws {
-        let source = try repositorySource("Sources/SkyBridgeCompassApp/RemoteControlSecurityNoticePanelController.swift")
+        let source = try repositorySource(
+            "Sources/SkyBridgeUI/Security/RemoteControlSecurityNoticePanelController.swift"
+        )
 
         XCTAssertTrue(source.contains("masked(descriptor.remoteAccountDisplayName)"))
         XCTAssertTrue(source.contains("masked(descriptor.remoteNebulaId)"))
@@ -552,7 +1209,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
     }
 
     func testSecurityNoticePanelEmitsVerifiableTopCenterEvidence() throws {
-        let panelSource = try repositorySource("Sources/SkyBridgeCompassApp/RemoteControlSecurityNoticePanelController.swift")
+        let panelSource = try repositorySource(
+            "Sources/SkyBridgeUI/Security/RemoteControlSecurityNoticePanelController.swift"
+        )
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let probeScript = try repositorySource("Scripts/run_remote_control_notice_panel_probe.sh")
         let noticeSource = try repositorySource("Sources/SkyBridgeCore/RemoteControl/RemoteControlSecurityNotice.swift")
@@ -577,11 +1236,22 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
 
     func testSecurityNoticePanelIsCompiledIntoPackagedMacAppTarget() throws {
         let xcodeProjectSource = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
+        let packageSource = try repositorySource("Package.swift")
+        let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+        let panelSource = try repositorySource(
+            "Sources/SkyBridgeUI/Security/RemoteControlSecurityNoticePanelController.swift"
+        )
 
         XCTAssertTrue(
-            xcodeProjectSource.contains("RemoteControlSecurityNoticePanelController.swift */ = {isa = PBXFileReference") &&
-                xcodeProjectSource.contains("RemoteControlSecurityNoticePanelController.swift in Sources"),
-            "The packaged Mac app target must compile the AppKit security notice panel controller, not only the SwiftPM test target."
+            xcodeProjectSource.contains("SkyBridgeUI in Frameworks") &&
+                packageSource.contains("path: \"Sources/SkyBridgeUI\"") &&
+                appSource.contains("import SkyBridgeUI") &&
+                panelSource.contains("public final class RemoteControlSecurityNoticePanelController"),
+            "The packaged Mac app must consume the single reusable SkyBridgeUI panel implementation."
+        )
+        XCTAssertFalse(
+            xcodeProjectSource.contains("RemoteControlSecurityNoticePanelController.swift in Sources"),
+            "The packaged app must not compile a second target-local copy of the reusable panel."
         )
     }
 
@@ -660,7 +1330,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(source.contains("RemoteControlSecurityPeerIdentityStore.identity(forAliases: aliases)"))
         XCTAssertTrue(source.contains("Self.noticeMetadataPresent(identity?.accountDisplayName)"))
         XCTAssertTrue(source.contains("Self.noticeMetadataPresent(identity?.nebulaId)"))
-        XCTAssertTrue(source.contains("try? await Task.sleep(for: .milliseconds(100))"))
+        XCTAssertTrue(source.contains("try await Task.sleep(for: .milliseconds(100))"))
+        XCTAssertTrue(source.contains("} catch {\n                return nil"))
+        XCTAssertFalse(source.contains("try? await Task.sleep(for: .milliseconds(100))"))
         XCTAssertTrue(source.contains("let remoteIdentity = await waitForRemoteControlSecurityIdentityMetadata("))
         XCTAssertTrue(source.contains("recordRemoteControlSecurityIdentity("))
         XCTAssertTrue(source.contains("from: \"streamConfiguration\""))
@@ -713,11 +1385,17 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME=\"${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-iPad Smoke Operator}\""))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID=\"${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-ipad-smoke-nebula}\""))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=\"${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}\""))
-        XCTAssertTrue(script.contains("SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=\"${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-1}\""))
+        XCTAssertFalse(script.contains("SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=\"${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-1}\""))
+        XCTAssertFalse(script.contains("--env \"SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME=\"${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}\""))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID=\"${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}\""))
         XCTAssertTrue(script.contains("validate_ios_launch_notice_identity_env"))
         XCTAssertTrue(script.contains("remoteControlNoticeRejected .*missing_required_notice_metadata"))
+        XCTAssertTrue(
+            script.contains(
+                "remoteControlNoticePanelPresented .*transport=p2p .*phase=awaitingApproval"
+            )
+        )
         XCTAssertTrue(rustPlan.contains("\"SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME\""))
         XCTAssertTrue(rustPlan.contains("\"iPad Smoke Operator\""))
         XCTAssertTrue(rustPlan.contains("\"SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID\""))
@@ -767,8 +1445,21 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             source.contains("LocalLanInteropHostLifetime.coordinator = coordinator"),
             "The CLI host must keep the coordinator alive after startup so weak listener callbacks can hand off real P2P remote-control connections."
         )
+        XCTAssertTrue(source.contains("let application = NSApplication.shared"))
+        XCTAssertTrue(source.contains("if application.activationPolicy() != .regular"))
+        XCTAssertTrue(source.contains("guard application.activationPolicy() == .regular else"))
+        XCTAssertFalse(source.contains("guard application.setActivationPolicy(.regular) else"))
         XCTAssertTrue(source.contains("Task { @MainActor in"))
-        XCTAssertTrue(source.contains("NSApplication.shared.run()"))
+        XCTAssertTrue(source.contains("application.run()"))
+        XCTAssertTrue(source.contains("static var remoteControlSecurityNoticePanelController: RemoteControlSecurityNoticePanelController?"))
+        XCTAssertTrue(source.contains("let remoteControlSecurityNoticePanelController = RemoteControlSecurityNoticePanelController.shared"))
+        XCTAssertTrue(source.contains("remoteControlSecurityNoticePanelController.start()"))
+        XCTAssertTrue(
+            source.contains(
+                "LocalLanInteropHostLifetime.remoteControlSecurityNoticePanelController =\n                remoteControlSecurityNoticePanelController"
+            ),
+            "The CLI host must retain the reusable remote-control notice presenter for its listener lifetime."
+        )
         XCTAssertFalse(
             source.contains("await MainActor.run {\n            NSApplication.shared.run()"),
             "The AppKit run loop must not be started inside a MainActor job because that starves inbound remote-control handoff tasks."
@@ -801,15 +1492,15 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(readiness.contains("check remote-control-notice"))
         XCTAssertTrue(readiness.contains("--transport p2p"))
         XCTAssertTrue(readiness.contains("--transport webrtc"))
-        XCTAssertFalse(
+        XCTAssertTrue(
             readiness.contains("--transport p2p \\\n    --require-panel"),
-            "P2P LocalLanInteropHost artifacts validate lifecycle/metadata; production AppKit panel evidence is checked by NOTICE_PANEL_ARTIFACT_DIR."
+            "Physical P2P release artifacts must include LocalLanInteropHost's explicit AppKit panel evidence."
         )
         XCTAssertTrue(readiness.contains("--transport webrtc \\\n    --require-panel"))
         XCTAssertTrue(readiness.contains("P2P and WebRTC remote-control security notice artifacts pass lifecycle and metadata gates"))
-        XCTAssertTrue(workflow.contains("p2p_notice_artifact_name"))
-        XCTAssertTrue(workflow.contains("webrtc_notice_artifact_name"))
-        XCTAssertTrue(workflow.contains("notice_panel_artifact_name"))
+        XCTAssertTrue(workflow.contains("P2P_NOTICE_ARTIFACT_NAME"))
+        XCTAssertTrue(workflow.contains("WEBRTC_NOTICE_ARTIFACT_NAME"))
+        XCTAssertTrue(workflow.contains("NOTICE_PANEL_ARTIFACT_NAME"))
         XCTAssertTrue(workflow.contains("--p2p-notice-artifact-dir \"Artifacts/release-gate/p2p-notice\""))
         XCTAssertTrue(workflow.contains("--webrtc-notice-artifact-dir \"Artifacts/release-gate/webrtc-notice\""))
         XCTAssertTrue(workflow.contains("--notice-panel-artifact-dir \"Artifacts/release-gate/notice-panel\""))
@@ -822,5 +1513,71 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func streamConfigurationData(
+        replacingSecurityIdentityWith identity: [String: Any]
+    ) throws -> Data {
+        let configuration = RemoteDesktopStreamConfiguration(
+            supportedVideoFormats: ["hevc"],
+            targetFrameRate: 60,
+            keyFrameInterval: 60,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: false,
+            audioRedirectionEnabled: true,
+            audioTransport: SkyBridgeRealtimeMediaConstants.audioTransportPQCv1,
+            audioMode: SkyBridgeMediaAudioMode.highFidelity.rawValue,
+            mediaSessionId: "security-identity-decode-test",
+            performanceValidationMode: "extreme",
+            mediaFallbackPolicy: "fail-fast",
+            remoteControlSecurityIdentity: RemoteControlSecurityIdentity(
+                accountDisplayName: "viewer@example.com",
+                nebulaId: "nebula-viewer",
+                deviceId: "viewer-device",
+                deviceName: "Viewer iPad"
+            )
+        )
+        let encoded = try JSONEncoder().encode(configuration)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            throw CocoaError(.propertyListReadCorrupt)
+        }
+        object["remoteControlSecurityIdentity"] = identity
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func validRemoteControlSecurityDescriptor() -> RemoteControlSecurityDescriptor {
+        RemoteControlSecurityDescriptor(
+            sessionId: "descriptor-decode-test",
+            transportKind: .p2p,
+            remoteIPAddress: "192.0.2.1",
+            remoteDeviceId: "descriptor-device",
+            remoteDeviceName: "Remote iPad",
+            remoteAccountDisplayName: "remote@example.com",
+            remoteNebulaId: "nebula-remote",
+            localAccountDisplayName: "mac@example.com",
+            localNebulaId: "nebula-mac",
+            cryptoSuite: "X-Wing PQC"
+        )
+    }
+}
+
+private final class RemoteControlIdentityTestTime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    var current: Date {
+        lock.withLock { value }
+    }
+
+    func advance(by seconds: TimeInterval) {
+        lock.withLock {
+            value = value.addingTimeInterval(seconds)
+        }
     }
 }

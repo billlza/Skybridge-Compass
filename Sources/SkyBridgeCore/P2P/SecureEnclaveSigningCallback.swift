@@ -177,10 +177,14 @@ public enum SecureEnclaveError: Error, LocalizedError, Sendable {
 public enum SecureEnclaveKeyManager {
 
     private static var useInMemoryKeychain: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = ProcessInfo.processInfo.environment
         if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
         if env["XCTestConfigurationFilePath"] != nil { return true }
         return NSClassFromString("XCTestCase") != nil
+        #else
+        return false
+        #endif
     }
     
  /// 检查 Secure Enclave 是否可用

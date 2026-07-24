@@ -465,8 +465,9 @@ extension AirPlayManager: NetServiceBrowserDelegate {
     }
     
     nonisolated public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
+        let errorDescription = String(describing: errorDict)
         Task { @MainActor in
-            logger.error("AirPlay设备搜索失败: \(errorDict)")
+            logger.error("AirPlay设备搜索失败: \(errorDescription)")
             isScanning = false
         }
     }
@@ -558,8 +559,9 @@ extension AirPlayManager: NetServiceDelegate {
     
     nonisolated public func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
         let senderName = sender.name
+        let errorDescription = String(describing: errorDict)
         Task { @MainActor in
-            logger.error("AirPlay设备解析失败: \(senderName) - \(errorDict)")
+            logger.error("AirPlay设备解析失败: \(senderName) - \(errorDescription)")
         }
     }
 }

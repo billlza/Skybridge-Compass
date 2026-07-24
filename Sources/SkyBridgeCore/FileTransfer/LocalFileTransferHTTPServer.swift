@@ -5,7 +5,9 @@ import UniformTypeIdentifiers
 import os.lock
 
 final class LocalFileTransferHTTPServer: @unchecked Sendable {
+#if DEBUG || SKYBRIDGE_TESTING
     typealias TestingStartHook = @Sendable () async -> Void
+#endif
     private static let listenerStartTimeout: Duration = .seconds(5)
 
     struct AccessGrant: Sendable {
@@ -105,6 +107,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private var listener: NWListener?
     private let activeConnections = OSAllocatedUnfairLock(initialState: [ObjectIdentifier: NWConnection]())
 
+#if DEBUG || SKYBRIDGE_TESTING
     private static let testingDelay = OSAllocatedUnfairLock(initialState: UInt64(0))
     private static let testingStartHookStorage = OSAllocatedUnfairLock(initialState: TestingStartHook?.none)
 
@@ -117,6 +120,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         get { testingStartHookStorage.withLock { $0 } }
         set { testingStartHookStorage.withLock { $0 = newValue } }
     }
+#endif
 
     init(callbacks: Callbacks) {
         self.callbacks = callbacks
@@ -125,6 +129,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     func start(port: UInt16) async throws {
         guard listener == nil else { return }
 
+#if DEBUG || SKYBRIDGE_TESTING
         if let testingStartHook = Self.testingStartHook {
             await testingStartHook()
         }
@@ -133,6 +138,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         if startDelay > 0 {
             try await Task.sleep(nanoseconds: startDelay)
         }
+#endif
 
         let nwPort = try NWEndpoint.Port.validated(port)
         let parameters = NWParameters.tcp

@@ -721,6 +721,7 @@ public actor RegistrationSecurityService {
     }
 
     private static func makePersistenceURL() -> URL? {
+        #if DEBUG || SKYBRIDGE_TESTING
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil {
             return nil
@@ -730,6 +731,7 @@ public actor RegistrationSecurityService {
            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return URL(fileURLWithPath: override)
         }
+        #endif
 
         guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil

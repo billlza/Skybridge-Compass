@@ -1,47 +1,5 @@
 import Foundation
-import os
-#if canImport(CQPeriapt)
-import CQPeriapt
-#endif
-
-private final class QPeriaptRuntimeAdmissionState: Sendable {
-    private let runtimeSession = OSAllocatedUnfairLock<QPeriaptRuntimeSession?>(initialState: nil)
-
-    func session() -> QPeriaptRuntimeSession? {
-        runtimeSession.withLock { $0 }
-    }
-
-    func install(_ session: QPeriaptRuntimeSession) throws {
-        try runtimeSession.withLock { installedSession in
-            if let current = installedSession,
-               current.trustRootIdentifier != session.trustRootIdentifier {
-                throw CryptoProviderError.operationFailed(
-                    "Q-Periapt trust root replacement requires an explicit reset/re-enrollment flow"
-                )
-            }
-            if let current = installedSession {
-                guard session.policyVersion >= current.policyVersion else {
-                    throw CryptoProviderError.operationFailed(
-                        "Q-Periapt runtime session rollback was rejected"
-                    )
-                }
-                guard session.policyVersion != current.policyVersion
-                        || session.policyDigest == current.policyDigest else {
-                    throw CryptoProviderError.operationFailed(
-                        "Q-Periapt runtime session reused a policy version with a different digest"
-                    )
-                }
-            }
-            installedSession = session
-        }
-    }
-
-    #if DEBUG || SKYBRIDGE_TESTING
-    func resetForTesting() {
-        runtimeSession.withLock { $0 = nil }
-    }
-    #endif
-}
+import SkyBridgeQPeriaptRuntime
 
 /// Runtime admission policy for the experimental Q-Periapt suite.
 ///
@@ -54,23 +12,15 @@ public enum QPeriaptPlatformPolicy {
     /// placeholder is never advertised because runtime admission stays false
     /// until a verified session is activated.
     public static var authProfile: String {
-        runtimeAdmissionState.session()?.authProfile
+        runtimeSessionRegistry.snapshot()?.authProfile
             ?? "q-periapt-abi2-policy-unprovisioned"
     }
-    #if canImport(CQPeriapt)
-    public static let publicKeyLength = Int(Q_PERIAPT_MLKEM768_PK_LEN) + Int(Q_PERIAPT_X25519_LEN)
-    public static let privateKeyLength = Int(Q_PERIAPT_MLKEM768_SK_LEN)
-        + Int(Q_PERIAPT_X25519_LEN)
-        + Int(Q_PERIAPT_MLKEM768_PK_LEN)
-        + Int(Q_PERIAPT_X25519_LEN)
-    #else
-    public static let publicKeyLength = 1_216
-    public static let privateKeyLength = 3_648
-    #endif
+    public static let publicKeyLength = QPeriaptNativeAdapter.publicKeyLength
+    public static let privateKeyLength = QPeriaptNativeAdapter.privateKeyLength
 
     private static let minimumAppleMajorVersion = 26
 
-    private static let runtimeAdmissionState = QPeriaptRuntimeAdmissionState()
+    private static let runtimeSessionRegistry = QPeriaptRuntimeSessionRegistry()
 
     public static func isRequested(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -91,7 +41,7 @@ public enum QPeriaptPlatformPolicy {
     }
 
     public static var isLocalRuntimeSupported: Bool {
-        runtimeAdmissionState.session() != nil
+        runtimeSessionRegistry.snapshot() != nil
     }
 
     /// Existing settings initialization calls this method before a product
@@ -110,11 +60,15 @@ public enum QPeriaptPlatformPolicy {
         guard try await QPeriaptCryptoProvider.quickRuntimeProbe(session: session) else {
             throw CryptoProviderError.operationFailed("Q-Periapt ABI2 runtime round-trip probe failed")
         }
-        try runtimeAdmissionState.install(session)
+        do {
+            try runtimeSessionRegistry.install(session)
+        } catch let error as QPeriaptRuntimeSessionRegistryError {
+            throw CryptoProviderError.operationFailed(error.localizedDescription)
+        }
     }
 
     static func currentRuntimeSession() -> QPeriaptRuntimeSession? {
-        runtimeAdmissionState.session()
+        runtimeSessionRegistry.snapshot()
     }
 
     static func makeCryptoProvider() -> QPeriaptCryptoProvider? {
@@ -126,7 +80,7 @@ public enum QPeriaptPlatformPolicy {
     /// builds intentionally expose no reset because replacing an enrolled trust
     /// root requires the explicit product re-enrollment flow.
     static func resetRuntimeSessionForTesting() {
-        runtimeAdmissionState.resetForTesting()
+        runtimeSessionRegistry.resetForTesting()
     }
     #endif
 
@@ -157,11 +111,37 @@ public enum QPeriaptPlatformPolicy {
     }
 
     public static func isPeerAppPlatformEligible(platform: String?, osVersion: String?) -> Bool {
-        guard let trimmedPlatform = platform?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmedPlatform.isEmpty else {
+        guard let platform = platform?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              let osVersion = osVersion?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !platform.isEmpty,
+              !osVersion.isEmpty else {
             return false
         }
-        return isEligible(parsePeerPlatformVersion(platform: trimmedPlatform, osVersion: osVersion))
+
+        let expectedFamily: PeerPlatformFamily
+        switch platform {
+        case "ios": expectedFamily = .iOS
+        case "macos", "mac os": expectedFamily = .macOS
+        case "android": expectedFamily = .android
+        default: return false
+        }
+
+        let fullVersion: String
+        if Self.matches(osVersion, pattern: #"^\d{1,3}(?:\.\d{1,3}){0,2}$"#) {
+            guard expectedFamily != .android else { return false }
+            fullVersion = "\(expectedFamily.capabilityName) \(osVersion)"
+        } else {
+            fullVersion = osVersion
+        }
+
+        guard let parsed = parseFullPlatformVersion(fullVersion),
+              parsed.family == expectedFamily else {
+            return false
+        }
+        return parsed.isEligible
     }
 
     private static func isPeerPlatformVersionStringEligible(_ platformVersion: String?) -> Bool {
@@ -169,18 +149,7 @@ public enum QPeriaptPlatformPolicy {
               !trimmedPlatformVersion.isEmpty else {
             return false
         }
-        return isEligible(parsePeerPlatformVersion(platform: trimmedPlatformVersion, osVersion: nil))
-    }
-
-    private static func isEligible(_ parsed: PeerPlatformVersion) -> Bool {
-        switch parsed {
-        case .apple(_, let major):
-            return major.map { $0 >= minimumAppleMajorVersion } ?? false
-        case .android(let releaseMajor, let api):
-            return releaseMajor.map { $0 >= 16 } == true && api.map { $0 >= 36 } == true
-        case .unsupported:
-            return false
-        }
+        return parseFullPlatformVersion(trimmedPlatformVersion)?.isEligible == true
     }
 
     public static func requirePeerAppPlatformEligible(platform: String?, osVersion: String?) throws {
@@ -200,10 +169,25 @@ public enum QPeriaptPlatformPolicy {
         _ capabilities: CryptoCapabilities,
         for session: QPeriaptRuntimeSession
     ) -> Bool {
+        isHandshakePeerEligible(
+            capabilities,
+            for: QPeriaptProviderIdentity(
+                authProfile: session.authProfile,
+                trustRootFingerprint: session.trustRootFingerprint
+            )
+        )
+    }
+
+    static func isHandshakePeerEligible(
+        _ capabilities: CryptoCapabilities,
+        for identity: QPeriaptProviderIdentity
+    ) -> Bool {
         return capabilities.pqcAvailable &&
-            capabilities.supportedKEM.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue) } &&
-            capabilities.supportedSignature.contains { canonicalCapabilityToken($0) == canonicalCapabilityToken(P2PCryptoAlgorithm.mlDSA65.rawValue) } &&
-            capabilities.supportedAuthProfiles.contains { $0 == session.authProfile } &&
+            identity.trustRootFingerprint.count == 32 &&
+            capabilities.supportedKEM.contains(P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue) &&
+            capabilities.supportedSignature.contains(P2PCryptoAlgorithm.mlDSA65.rawValue) &&
+            capabilities.supportedAuthProfiles.contains(identity.authProfile) &&
+            capabilities.supportedAEAD.contains(P2PCryptoAlgorithm.aes256GCM.rawValue) &&
             capabilities.providerType == .qPeriapt &&
             isPeerPlatformVersionStringEligible(capabilities.platformVersion)
     }
@@ -226,75 +210,100 @@ public enum QPeriaptPlatformPolicy {
         return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
     }
 
-    private static func canonicalCapabilityToken(_ value: String) -> String {
-        value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .filter { character in
-                character.isLetter || character.isNumber
-            }
-    }
+    private static func parseFullPlatformVersion(
+        _ value: String
+    ) -> ParsedPeerPlatformVersion? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
 
-    private static func parsePeerPlatformVersion(platform: String?, osVersion: String?) -> PeerPlatformVersion {
-        let platformValue = platform?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let versionValue = osVersion?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = firstMatch(
+            in: trimmed,
+            pattern: #"(?i)^(ios|macos|mac\s+os)\s+(\d{1,3})(?:\.\d{1,3}){0,2}$"#
+        ), let familyName = capturedString(in: trimmed, match: match, capture: 1)?
+            .lowercased(),
+           let major = capturedInteger(in: trimmed, match: match, capture: 2) {
+            let family: PeerPlatformFamily = familyName == "ios" ? .iOS : .macOS
+            return ParsedPeerPlatformVersion(family: family, major: major, api: nil)
+        }
 
-        let combined = [platformValue, versionValue?.lowercased()]
-            .compactMap { value -> String? in
-                guard let value, !value.isEmpty else { return nil }
-                return value
-            }
-            .joined(separator: " ")
-
-        guard !combined.isEmpty else { return .unsupported }
-
-        if combined.contains("android") || combined.contains("api ") {
-            return .android(
-                releaseMajor: androidReleaseMajor(from: combined),
-                api: androidAPI(from: combined)
+        if let match = firstMatch(
+            in: trimmed,
+            pattern: #"(?i)^android\s+(\d{1,3})(?:\.\d{1,3}){0,2}\s*(?:\(\s*api\s*(\d{1,3})\s*\)|api\s*(\d{1,3}))$"#
+        ), let releaseMajor = capturedInteger(in: trimmed, match: match, capture: 1),
+           let api = capturedInteger(in: trimmed, match: match, capture: 2)
+            ?? capturedInteger(in: trimmed, match: match, capture: 3) {
+            return ParsedPeerPlatformVersion(
+                family: .android,
+                major: releaseMajor,
+                api: api
             )
         }
 
-        if combined.contains("macos") || combined.contains("mac os") {
-            return .apple(name: "macOS", major: firstMajor(from: versionValue ?? combined))
-        }
-
-        if combined.range(of: #"\bios\b"#, options: .regularExpression) != nil {
-            return .apple(name: "iOS", major: firstMajor(from: versionValue ?? combined))
-        }
-
-        return .unsupported
+        return nil
     }
 
-    private static func firstMajor(from value: String) -> Int? {
-        firstMatch(in: value, pattern: #"\d{1,3}"#)
+    private static func matches(_ value: String, pattern: String) -> Bool {
+        firstMatch(in: value, pattern: pattern) != nil
     }
 
-    private static func androidReleaseMajor(from value: String) -> Int? {
-        firstMatch(in: value, pattern: #"\bandroid\s+(\d{1,3})\b"#)
-    }
-
-    private static func androidAPI(from value: String) -> Int? {
-        firstMatch(in: value, pattern: #"\bapi\s*(\d{1,3})\b"#)
-    }
-
-    private static func firstMatch(in value: String, pattern: String) -> Int? {
+    private static func firstMatch(
+        in value: String,
+        pattern: String
+    ) -> NSTextCheckingResult? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        guard let match = regex.firstMatch(in: value, range: range) else { return nil }
-        let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
-        guard captureRange.location != NSNotFound,
-              let valueRange = Range(captureRange, in: value)
-        else { return nil }
-        return Int(value[valueRange])
+        return regex.firstMatch(in: value, range: range)
     }
 
-    private enum PeerPlatformVersion {
-        case apple(name: String, major: Int?)
-        case android(releaseMajor: Int?, api: Int?)
-        case unsupported
+    private static func capturedInteger(
+        in value: String,
+        match: NSTextCheckingResult,
+        capture: Int
+    ) -> Int? {
+        capturedString(in: value, match: match, capture: capture).flatMap(Int.init)
+    }
+
+    private static func capturedString(
+        in value: String,
+        match: NSTextCheckingResult,
+        capture: Int
+    ) -> String? {
+        guard capture < match.numberOfRanges else { return nil }
+        let captureRange = match.range(at: capture)
+        guard captureRange.location != NSNotFound,
+              let valueRange = Range(captureRange, in: value)
+        else {
+            return nil
+        }
+        return String(value[valueRange])
+    }
+
+    private enum PeerPlatformFamily: Equatable {
+        case iOS
+        case macOS
+        case android
+
+        var capabilityName: String {
+            switch self {
+            case .iOS: return "iOS"
+            case .macOS: return "macOS"
+            case .android: return "Android"
+            }
+        }
+    }
+
+    private struct ParsedPeerPlatformVersion {
+        let family: PeerPlatformFamily
+        let major: Int
+        let api: Int?
+
+        var isEligible: Bool {
+            switch family {
+            case .iOS, .macOS:
+                return major >= minimumAppleMajorVersion
+            case .android:
+                return major >= 16 && api.map { $0 >= 36 } == true
+            }
+        }
     }
 }

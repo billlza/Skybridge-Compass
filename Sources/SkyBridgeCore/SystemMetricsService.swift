@@ -203,7 +203,7 @@ public final class SystemMetricsService: ObservableObject {
         }
     }
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
     var notificationObserverCountForTesting: Int {
         notificationObserverTokens.count
     }

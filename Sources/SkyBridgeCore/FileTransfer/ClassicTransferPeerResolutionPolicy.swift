@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Network
 
@@ -19,8 +18,8 @@ enum ClassicTransferAuthenticatedSessionKind: Int, Sendable, Equatable {
 
 @available(macOS 14.0, iOS 17.0, *)
 struct ClassicTransferAuthenticatedSessionSource: Sendable {
+    let sourceIdentifier: UUID
     let candidate: ClassicTransferAuthenticatedPeerCandidate
-    let transferKey: SymmetricKey
     let lastSeenAt: Date
     let sourceKind: ClassicTransferAuthenticatedSessionKind
 }
@@ -75,11 +74,20 @@ enum ClassicTransferPeerResolutionPolicy {
         func exactDeclaredMatch() -> ClassicTransferAuthenticatedPeerCandidate? {
             guard let exactDeclared else { return nil }
             let exactLower = exactDeclared.lowercased()
-            return authenticatedPeers.first { candidate in
+            let directMatches = authenticatedPeers.filter { candidate in
                 candidate.matchDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
                     || candidate.resolvedPeerDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
-                    || candidate.aliases.contains(where: { $0.lowercased() == exactLower })
             }
+            let matches = directMatches.isEmpty
+                ? authenticatedPeers.filter { candidate in
+                    candidate.aliases.contains(where: { $0.lowercased() == exactLower })
+                }
+                : directMatches
+            let resolvedPeerIDs = Set(matches.map {
+                $0.resolvedPeerDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            })
+            guard resolvedPeerIDs.count == 1 else { return nil }
+            return matches.first
         }
 
         func candidateMatch(for requestedCandidates: [String]) -> ClassicTransferAuthenticatedPeerCandidate? {
@@ -88,7 +96,10 @@ enum ClassicTransferPeerResolutionPolicy {
             let matches = authenticatedPeers.filter { candidate in
                 !requestedLower.isDisjoint(with: candidate.aliases.map { $0.lowercased() })
             }
-            guard matches.count == 1 else { return nil }
+            let resolvedPeerIDs = Set(matches.map {
+                $0.resolvedPeerDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            })
+            guard resolvedPeerIDs.count == 1 else { return nil }
             return matches.first
         }
 
@@ -172,6 +183,11 @@ enum ClassicTransferPeerResolutionPolicy {
 
         func sourceMatchesResolution(_ source: ClassicTransferAuthenticatedSessionSource) -> Bool {
             let candidate = source.candidate
+            guard candidate.resolvedPeerDeviceId.caseInsensitiveCompare(
+                resolution.resolvedPeerDeviceId
+            ) == .orderedSame else {
+                return false
+            }
             switch resolution.matchedBy {
             case .declaredSenderDeviceId:
                 guard let exactDeclaredLower else { return false }

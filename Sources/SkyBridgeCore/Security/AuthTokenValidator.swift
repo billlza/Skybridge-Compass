@@ -309,7 +309,7 @@ private extension Character {
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 extension AuthTokenValidator {
  /// Generate a valid test token (base64url format).
     public static func generateTestToken(length: Int = 64) -> String {

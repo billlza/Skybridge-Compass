@@ -1,8 +1,18 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Network
 
 enum CrossNetworkConnectionRuntimeSupport {
+    static func deviceFingerprint(
+        localizedName: String? = Host.current().localizedName,
+        hostName: String = ProcessInfo.processInfo.hostName
+    ) -> String {
+        let deviceInfo = "\(localizedName ?? "")\(hostName)"
+        let hash = SHA256.hash(data: Data(deviceInfo.utf8))
+        return hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16).uppercased()
+    }
+
     static func localIPAddresses() -> [String] {
         var addresses: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?

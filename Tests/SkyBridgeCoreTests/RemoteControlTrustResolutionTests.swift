@@ -97,6 +97,33 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         )
     }
 
+    private func lifecycleRecord(
+        deviceId: String,
+        fingerprint: String,
+        state: TrustLifecycleState,
+        currentDeviceId: String? = nil
+    ) -> TrustRecord {
+        let canonicalDeviceId = currentDeviceId ?? deviceId
+        return TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: fingerprint,
+            publicKey: Data([0x01]),
+            protocolPublicKey: Data([0x02]),
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0x44, count: 1_184)
+                )
+            ],
+            signature: Data([0x03]),
+            currentDeviceId: canonicalDeviceId,
+            knownDeviceIds: [canonicalDeviceId],
+            lifecycleState: state
+        )
+    }
+
     func testDualAlgorithmInboundTrustRecordsResolveToSingleCanonicalDevice() {
         let deviceId = "id:11111111-2222-4333-8444-555555555555"
         let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
@@ -474,33 +501,6 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
                 deviceId: "id:\(rawUUID.lowercased())",
                 fingerprint: String(repeating: "c", count: 64)
             )
-        )
-    }
-
-    private func lifecycleRecord(
-        deviceId: String,
-        fingerprint: String,
-        state: TrustLifecycleState,
-        currentDeviceId: String? = nil
-    ) -> TrustRecord {
-        let canonicalDeviceId = currentDeviceId ?? deviceId
-        return TrustRecord(
-            deviceId: deviceId,
-            pubKeyFP: fingerprint,
-            publicKey: Data([0x01]),
-            protocolPublicKey: Data([0x02]),
-            protocolSigningAlgorithm: .mlDSA65,
-            protocolPublicKeyFingerprint: fingerprint,
-            kemPublicKeys: [
-                KEMPublicKeyInfo(
-                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
-                    publicKey: Data(repeating: 0x44, count: 1_184)
-                )
-            ],
-            signature: Data([0x03]),
-            currentDeviceId: canonicalDeviceId,
-            knownDeviceIds: [canonicalDeviceId],
-            lifecycleState: state
         )
     }
 }

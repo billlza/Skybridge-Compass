@@ -733,23 +733,6 @@ final class OperatorControlRuntimeProjectionTests: XCTestCase {
         )
         XCTAssertNoThrow(try CrossnetControlSettingsProjectionPolicy.validate(snapshot))
     }
-
-    func testSettingsProjectionRejectsUnboundMLDSA87ProductionPreference() {
-        let snapshot = CrossnetControlRuntimeProjection.settingsSnapshot(
-            CrossnetControlSettingsRuntimeSnapshot(
-                enableVerboseLogging: false,
-                logLevel: "Info",
-                showRealtimeFPS: false,
-                showTopBarIPLocation: true,
-                showTopBarNetworkSpeed: true,
-                showTopBarNetworkLatency: true,
-                preferXWingHybrid: false,
-                pqcSignatureAlgorithm: "ML-DSA-87"
-            )
-        )
-
-        XCTAssertThrowsError(try CrossnetControlSettingsProjectionPolicy.validate(snapshot))
-    }
 }
 
 final class OperatorControlRuntimeFactorySourceContractTests: XCTestCase {

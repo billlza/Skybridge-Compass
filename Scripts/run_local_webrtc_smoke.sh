@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/ios_simulator_helpers.sh"
@@ -43,6 +44,7 @@ MAC_DEVICE_ID="${SKYBRIDGE_SMOKE_MAC_DEVICE_ID:-smoke-mac-device-0001}"
 IOS_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-smoke-ios-device-0001}"
 
 mkdir -p "$ARTIFACT_DIR"
+chmod 0700 "$ARTIFACT_DIR"
 
 SIM_ID="$(
   skybridge_pick_bootable_ios_simulator_id \
@@ -136,6 +138,52 @@ wait_for_file_nonempty() {
     fi
     sleep 1
   done
+}
+
+read_private_auth_session_field() {
+  local field="$1"
+  python3 - "$AUTH_SESSION_FILE" "$field" <<'PY'
+import json
+import os
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1])
+field = sys.argv[2]
+metadata = path.lstat()
+if (
+    path.is_symlink()
+    or not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_uid != os.geteuid()
+    or metadata.st_nlink != 1
+    or stat.S_IMODE(metadata.st_mode) != 0o600
+    or metadata.st_size <= 0
+    or metadata.st_size > 1024 * 1024
+):
+    raise SystemExit("Local WebRTC auth session violates the private-file boundary")
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(path, flags)
+try:
+    opened = os.fstat(descriptor)
+    if (
+        (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        or opened.st_uid != os.geteuid()
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
+        raise SystemExit("Local WebRTC auth session changed while it was opened")
+    with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
+        descriptor = -1
+        payload = json.load(handle)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+value = payload.get(field) if isinstance(payload, dict) else None
+if not isinstance(value, str) or not value or value != value.strip() or "\n" in value or "\r" in value:
+    raise SystemExit(f"Local WebRTC auth session has an invalid {field}")
+print(value)
+PY
 }
 
 wait_for_file_pattern() {
@@ -384,22 +432,43 @@ require_registry_env() {
 
 export_smoke_auth_session() {
   AUTH_SESSION_FILE="$ARTIFACT_DIR/smoke_auth_session.json"
-  local cache_path="$ROOT_DIR/Artifacts/local_webrtc_smoke_auth_cache.json"
-  python3 - "$AUTH_SESSION_FILE" "$cache_path" "$SMOKE_AUTH_SESSION_SOURCE_FILE" <<'PY'
+  python3 - "$AUTH_SESSION_FILE" "$SMOKE_AUTH_SESSION_SOURCE_FILE" <<'PY'
 import json
 import pathlib
 import subprocess
 import sys
 import base64
 import os
+import stat
+import tempfile
 import time
 import urllib.request
 
 output_path = pathlib.Path(sys.argv[1])
-cache_path = pathlib.Path(sys.argv[2])
-source_path_raw = str(sys.argv[3] or "").strip()
+source_path_raw = str(sys.argv[2] or "").strip()
 source_path = pathlib.Path(source_path_raw).expanduser() if source_path_raw else None
 minimum_lifetime_seconds = 300
+
+def write_private_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = pathlib.Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 def decode_b64url_json(segment, label):
     try:
@@ -522,7 +591,29 @@ def load_candidate(path, label, fatal_invalid=False):
             raise SystemExit(message)
         return None
     try:
-        session = json.loads(path.read_text(encoding="utf-8"))
+        metadata = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size <= 0
+            or metadata.st_size > 1024 * 1024
+        ):
+            raise ValueError("file is not an owner-only 0600 regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o600
+            ):
+                raise ValueError("file changed while opening")
+            session = json.load(handle)
     except Exception as exc:
         message = f"{label} auth session is not readable JSON: {exc}"
         if fatal_invalid:
@@ -542,48 +633,36 @@ cached_session = None
 if source_path is not None:
     cached_session = load_candidate(source_path, f"explicit source file {source_path}", fatal_invalid=True)
     if cached_session is not None and token_is_fresh(cached_session):
-        output_path.write_text(json.dumps(cached_session), encoding="utf-8")
+        write_private_json(output_path, cached_session)
         raise SystemExit(0)
 else:
     env_session = load_environment_session()
     if env_session is not None:
         cached_session = env_session
         if token_is_fresh(env_session):
-            output_path.write_text(json.dumps(env_session), encoding="utf-8")
-            raise SystemExit(0)
-    for candidate, label in ((output_path, "artifact"), (cache_path, "cache")):
-        cached = load_candidate(candidate, label)
-        if cached is None:
-            continue
-        if cached_session is None:
-            cached_session = cached
-        if token_is_fresh(cached):
-            output_path.write_text(json.dumps(cached), encoding="utf-8")
+            write_private_json(output_path, env_session)
             raise SystemExit(0)
 
-cmd = [
-    "security",
-    "find-generic-password",
-    "-s", "com.skybridge.compass.authsession",
-    "-a", "primary",
-    "-w",
-]
-try:
-    raw = subprocess.check_output(cmd, timeout=65).strip()
-except subprocess.TimeoutExpired:
-    if cached_session is None:
-        raise SystemExit("Timed out reading auth session from macOS keychain.")
-    session = cached_session
-except subprocess.CalledProcessError as exc:
-    if cached_session is None:
-        raise SystemExit(f"Unable to read auth session from macOS keychain (exit {exc.returncode}).")
+if cached_session is not None:
     session = cached_session
 else:
+    cmd = [
+        "security",
+        "find-generic-password",
+        "-s", "com.skybridge.compass.authsession",
+        "-a", "primary",
+        "-w",
+    ]
+    try:
+        raw = subprocess.check_output(cmd, timeout=65).strip()
+    except subprocess.TimeoutExpired:
+        raise SystemExit("Timed out reading auth session from macOS keychain.")
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"Unable to read auth session from macOS keychain (exit {exc.returncode}).")
     try:
         payload = bytes.fromhex(raw.decode())
-    except Exception:
+    except (UnicodeError, ValueError):
         payload = raw
-
     try:
         session = json.loads(payload)
     except Exception as exc:
@@ -611,15 +690,16 @@ if refresh_token and supabase_url and supabase_anon_key:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
             refreshed_access_token = str(payload.get("access_token") or "").strip()
-            if refreshed_access_token:
-                session["accessToken"] = refreshed_access_token
-                refreshed_refresh_token = str(payload.get("refresh_token") or "").strip()
-                if refreshed_refresh_token:
-                    session["refreshToken"] = refreshed_refresh_token
+            if not refreshed_access_token:
+                raise ValueError("refresh response is missing access_token")
+            session["accessToken"] = refreshed_access_token
+            refreshed_refresh_token = str(payload.get("refresh_token") or "").strip()
+            if refreshed_refresh_token:
+                session["refreshToken"] = refreshed_refresh_token
     except Exception as exc:
-        print(
-            f"Warning: failed to refresh smoke auth session; using stored access token ({exc}).",
-            file=sys.stderr,
+        raise SystemExit(
+            "Failed to refresh the selected local WebRTC auth session "
+            f"({type(exc).__name__}); refusing to use the stale bearer."
         )
 
 access_token = str(session.get("accessToken") or "").strip()
@@ -630,8 +710,7 @@ if jwt_error:
         f"{jwt_error}. Refresh or log in before running local WebRTC smoke."
     )
 
-output_path.write_text(json.dumps(session), encoding="utf-8")
-cache_path.write_text(json.dumps(session), encoding="utf-8")
+write_private_json(output_path, session)
 PY
 }
 
@@ -640,11 +719,28 @@ export_compat_smoke_auth_session() {
   python3 - "$AUTH_SESSION_FILE" <<'PY'
 import base64
 import json
+import os
 import pathlib
 import sys
+import tempfile
 import time
 
 output_path = pathlib.Path(sys.argv[1])
+
+def write_private_json(path, payload):
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = pathlib.Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 def b64url_json(value):
     return base64.urlsafe_b64encode(
@@ -671,7 +767,7 @@ session = {
     "displayName": "Local Smoke",
     "issuedAt": time.time(),
 }
-output_path.write_text(json.dumps(session), encoding="utf-8")
+write_private_json(output_path, session)
 PY
 }
 
@@ -804,8 +900,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 
   MAC_STATUS="$ARTIFACT_DIR/mac_round_${round}.status.log"
   MAC_CODE="$ARTIFACT_DIR/mac_round_${round}.code"
-  MAC_TOKEN="$ARTIFACT_DIR/mac_round_${round}.token"
-  MAC_TENANT="$ARTIFACT_DIR/mac_round_${round}.tenant"
   MAC_PQC_REPORT="$ARTIFACT_DIR/mac_round_${round}.pqc.json"
   MAC_STDOUT="$ARTIFACT_DIR/mac_round_${round}.stdout.log"
   IOS_STATUS_BASENAME="ios_round_${round}.status.log"
@@ -820,7 +914,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   ROUND_MAC_DEVICE_ID="${MAC_DEVICE_ID}-${round}"
   ROUND_IOS_DEVICE_ID="${IOS_DEVICE_ID}-${round}"
 
-  rm -f "$MAC_STATUS" "$MAC_CODE" "$MAC_TOKEN" "$MAC_TENANT" "$MAC_PQC_REPORT" "$MAC_STDOUT" \
+  rm -f "$MAC_STATUS" "$MAC_CODE" "$MAC_PQC_REPORT" "$MAC_STDOUT" \
     "$IOS_STATUS_PATH" "$ARTIFACT_DIR/$IOS_PREFLIGHT_STATUS_BASENAME" \
     "$ARTIFACT_DIR/$IOS_PREFLIGHT_STATUS_BASENAME.trace.log" \
     "$IOS_PQC_REPORT" "$IOS_PREFLIGHT_STDOUT" "$IOS_PREFLIGHT_STDERR" "$IOS_STDOUT" "$IOS_STDERR"
@@ -835,7 +929,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 
   if [[ "$SMOKE_SCENARIO" == "xwing-only" ]]; then
     SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-    SIMCTL_CHILD_SKYBRIDGE_SMOKE_ALLOW_IDENTITY_OVERRIDE=1 \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-client \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_STATUS_BASENAME="$IOS_PREFLIGHT_STATUS_BASENAME" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME="$IOS_PQC_REPORT_BASENAME" \
@@ -866,8 +959,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_SMOKE_ROLE=mac-host \
     SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_STATUS" \
     SKYBRIDGE_SMOKE_CODE_FILE="$MAC_CODE" \
-    SKYBRIDGE_SMOKE_TOKEN_FILE="$MAC_TOKEN" \
-    SKYBRIDGE_SMOKE_TENANT_FILE="$MAC_TENANT" \
     SKYBRIDGE_SMOKE_SKIP_AUTH_REFRESH=1 \
     SKYBRIDGE_SMOKE_REQUIRE_STREAM=1 \
     SKYBRIDGE_SMOKE_SYNTHETIC_SCREEN="$SMOKE_SYNTHETIC_SCREEN" \
@@ -876,7 +967,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_WEBRTC_EXTREME_MEDIA="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_SMOKE_ALLOW_CLASSIC_MEDIA_SUCCESS="$SMOKE_MEDIA_GATE" \
-    SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 \
     SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS="${SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS:-20}" \
     SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY=1 \
     SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
@@ -900,8 +990,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_SMOKE_ROLE=mac-host \
     SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_STATUS" \
     SKYBRIDGE_SMOKE_CODE_FILE="$MAC_CODE" \
-    SKYBRIDGE_SMOKE_TOKEN_FILE="$MAC_TOKEN" \
-    SKYBRIDGE_SMOKE_TENANT_FILE="$MAC_TENANT" \
     SKYBRIDGE_SMOKE_SKIP_AUTH_REFRESH=1 \
     SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$MAC_PQC_REPORT" \
     SKYBRIDGE_SMOKE_SYNTHETIC_SCREEN="$SMOKE_SYNTHETIC_SCREEN" \
@@ -909,7 +997,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_SMOKE_EXTREME_MEDIA="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_WEBRTC_EXTREME_MEDIA="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK="$SMOKE_EXTREME_MEDIA" \
-    SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 \
     SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS="$SMOKE_HOLD_AFTER_SUCCESS_SECONDS" \
     SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
     "$MAC_APP_BIN" >"$MAC_STDOUT" 2>&1 &
@@ -917,15 +1004,13 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   MAC_PID="$!"
 
   wait_for_file_nonempty "$MAC_CODE" 60 "macOS connection code"
-  wait_for_file_nonempty "$MAC_TOKEN" 60 "macOS access token"
-  wait_for_file_nonempty "$MAC_TENANT" 60 "macOS tenant id"
   if [[ "$SMOKE_SCENARIO" == "xwing-only" ]]; then
     wait_for_file_nonempty "$MAC_PQC_REPORT" 60 "macOS PQC report"
     load_pqc_report "$MAC_PQC_REPORT"
   fi
   CONNECTION_CODE="$(tr -d '\r\n' < "$MAC_CODE")"
-  ACCESS_TOKEN="$(tr -d '\r\n' < "$MAC_TOKEN")"
-  TENANT_ID="$(tr -d '\r\n' < "$MAC_TENANT")"
+  ACCESS_TOKEN="$(read_private_auth_session_field accessToken)"
+  TENANT_ID="$(read_private_auth_session_field nebulaId)"
   if [[ -z "$CONNECTION_CODE" ]]; then
     echo "macOS smoke produced an empty connection code" >&2
     exit 1
@@ -942,7 +1027,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   if [[ "$SMOKE_SCENARIO" == "bootstrap-rekey" ]]; then
     SIMCTL_CHILD_SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
 	    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_ALLOW_IDENTITY_OVERRIDE=1 \
 	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
 	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
 	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \
@@ -970,7 +1054,6 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   else
     SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE=xwing \
 	    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_ALLOW_IDENTITY_OVERRIDE=1 \
 	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
 	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
 	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \

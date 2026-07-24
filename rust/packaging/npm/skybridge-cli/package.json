@@ -1,7 +1,7 @@
 {
   "name": "skybridge-cli",
   "version": "1.0.0",
-  "description": "SkyBridge CLI npm wrapper for signed Rust release binaries",
+  "description": "SkyBridge CLI npm wrapper for immutable Rust release binaries",
   "license": "MIT",
   "homepage": "https://github.com/billlza/Skybridge-Compass",
   "repository": {
@@ -16,10 +16,11 @@
     "bin",
     "dist",
     "lib",
-    "README.md"
+    "README.md",
+    "release-assets.json"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.14.0"
   },
   "os": [
     "darwin",

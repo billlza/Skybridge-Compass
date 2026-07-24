@@ -48,6 +48,24 @@ public struct RemoteConnection: @unchecked Sendable {
     public let transport: Transport
 }
 
+public struct CrossNetworkProtocolIdentityStatus: Sendable, Equatable {
+    public enum Mode: String, Sendable {
+        case configuredAuthority
+        case peerCompatibilityIdentity
+    }
+
+    public let sessionID: String
+    public let configuredAlgorithm: ProtocolSigningAlgorithm
+    public let configuredProtection: ProtocolSigningKeyProtection
+    public let sessionAlgorithm: ProtocolSigningAlgorithm
+    public let sessionProtection: ProtocolSigningKeyProtection
+    public let mode: Mode
+
+    public var usesPeerCompatibilityIdentity: Bool {
+        mode == .peerCompatibilityIdentity
+    }
+}
+
 public enum CrossNetworkConnectionError: Error {
     case invalidQRCode
     case qrCodeExpired

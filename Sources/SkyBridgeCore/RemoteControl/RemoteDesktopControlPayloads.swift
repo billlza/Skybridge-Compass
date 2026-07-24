@@ -430,7 +430,7 @@ enum RemoteDesktopAudioChunkWire {
         guard data.count >= version1HeaderSize else { return nil }
         guard readUInt32(from: data, offset: 0) == magic else { return nil }
 
-        switch data[4] {
+        switch byte(in: data, at: 4) {
         case 1:
             return decodeVersion1(data)
         case version:
@@ -442,9 +442,9 @@ enum RemoteDesktopAudioChunkWire {
 
     private static func decodeVersion1(_ data: Data) -> RemoteDesktopAudioChunkPayload? {
         guard data.count >= version1HeaderSize else { return nil }
-        guard let encodingTag = EncodingTag(rawValue: data[5]) else { return nil }
+        guard let encodingTag = EncodingTag(rawValue: byte(in: data, at: 5)) else { return nil }
 
-        let channelCount = Int(data[6])
+        let channelCount = Int(byte(in: data, at: 6))
         let sampleRate = Int(readUInt32(from: data, offset: 8))
         let frameCount = Int(readUInt32(from: data, offset: 12))
         let sequenceNumber = readUInt64(from: data, offset: 16)
@@ -461,15 +461,15 @@ enum RemoteDesktopAudioChunkWire {
             frameCount: frameCount,
             sequenceNumber: sequenceNumber,
             sentAt: TimeInterval(timestampMicros) / 1_000_000.0,
-            data: data.subdata(in: version1HeaderSize..<data.count)
+            data: subdata(in: data, offsetRange: version1HeaderSize..<data.count)
         )
     }
 
     private static func decodeVersion2(_ data: Data) -> RemoteDesktopAudioChunkPayload? {
         guard data.count >= headerSize else { return nil }
-        guard let encodingTag = EncodingTag(rawValue: data[5]) else { return nil }
+        guard let encodingTag = EncodingTag(rawValue: byte(in: data, at: 5)) else { return nil }
 
-        let channelCount = Int(data[6])
+        let channelCount = Int(byte(in: data, at: 6))
         let sampleRate = Int(readUInt32(from: data, offset: 8))
         let frameCount = Int(readUInt32(from: data, offset: 12))
         let packetCount = Int(readUInt32(from: data, offset: 16))
@@ -491,7 +491,9 @@ enum RemoteDesktopAudioChunkWire {
         let packetDescriptionsEnd = packetDescriptionsStart + packetDescriptionsByteLength
         let payloadStart = packetDescriptionsEnd
 
-        let magicCookie = magicCookieLength > 0 ? data.subdata(in: magicCookieRange) : nil
+        let magicCookie = magicCookieLength > 0
+            ? subdata(in: data, offsetRange: magicCookieRange)
+            : nil
         let packetDescriptions: [RemoteDesktopAudioChunkPayload.PacketDescription]? = {
             guard packetDescriptionCount > 0 else { return nil }
             return (0..<packetDescriptionCount).map { index in
@@ -514,7 +516,7 @@ enum RemoteDesktopAudioChunkWire {
             magicCookie: magicCookie,
             sequenceNumber: sequenceNumber,
             sentAt: TimeInterval(timestampMicros) / 1_000_000.0,
-            data: data.subdata(in: payloadStart..<(payloadStart + payloadLength))
+            data: subdata(in: data, offsetRange: payloadStart..<(payloadStart + payloadLength))
         )
     }
 
@@ -527,6 +529,16 @@ enum RemoteDesktopAudioChunkWire {
                 )
             )
         }
+    }
+
+    private static func byte(in data: Data, at offset: Int) -> UInt8 {
+        data[data.index(data.startIndex, offsetBy: offset)]
+    }
+
+    private static func subdata(in data: Data, offsetRange: Range<Int>) -> Data {
+        let lowerBound = data.index(data.startIndex, offsetBy: offsetRange.lowerBound)
+        let upperBound = data.index(data.startIndex, offsetBy: offsetRange.upperBound)
+        return data.subdata(in: lowerBound..<upperBound)
     }
 
     private static func readUInt64(from data: Data, offset: Int) -> UInt64 {

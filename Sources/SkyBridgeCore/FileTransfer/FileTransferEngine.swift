@@ -20,16 +20,22 @@ public class FileTransferEngine: ObservableObject {
         location: .protectedApplicationSupport(
             path: "FileTransfer/engine-history.json",
             legacyUserDefaultsKey: "FileTransferHistory"
-        )
+        ),
+        maximumPayloadBytes: 2 * 1_024 * 1_024
     )
-    
+    private static let transferHistoryRepository = BoundedCodableHistoryRepository(
+        store: transferHistoryStore,
+        maximumEntryCount: 100
+    )
+
  // MARK: - 发布属性
-    
+
     @Published public var activeTransfers: [String: FileTransferSession] = [:]
     @Published public var transferHistory: [FileTransferRecord] = []
     @Published public var totalProgress: Double = 0.0
     @Published public var transferSpeed: Double = 0.0 // 字节/秒
     @Published public var videoTransferConfiguration: VideoTransferConfiguration = .default
+    @Published public private(set) var historyPersistenceError: FileTransferHistoryPersistenceFailure?
     
  // MARK: - 私有属性
     
@@ -41,7 +47,11 @@ public class FileTransferEngine: ObservableObject {
     private var lastBytesTransferred: Int64 = 0
     private var cancellables = Set<AnyCancellable>()
     private let fileHashWorker = FileHashWorker()
+    private let fileTransformWorker = FileTransformWorker()
     private var isCleanedUp: Bool = false
+    private var historyPersistenceTask: Task<Void, Never>?
+    private var historyRequestGeneration: UInt64 = 0
+    private var appliedHistoryRepositoryGeneration: UInt64 = 0
 
  // 量子安全：密钥与加密组件
     private let quantumKeyManager = EnhancedQuantumKeyManager()
@@ -49,14 +59,6 @@ public class FileTransferEngine: ObservableObject {
     private let rotationManager = CryptoKitEnhancements.KeyRotationManager()
     private let logger = Logger(subsystem: "com.skybridge.filetransfer", category: "Engine")
 
- // 大文件流式加密缓存（transferId -> (tempURL, AEAD info)）
-    private var streamingEncryptedFiles: [String: (url: URL, aead: EncryptedData)] = [:]
- // 大文件接收端临时密文缓存（transferId -> tempEncURL）
-    private var streamingEncryptedRecvFiles: [String: URL] = [:]
-    
- // 并行加密/解密（P2）
-    private let parallelCrypto = PerformanceOptimizations.ParallelEncryptionManager()
-    
  // 错误处理和重试 - 利用Swift 6.2.1的并发改进
     private let retryManager = RetryManager(policy: .default)
     private var automaticRetryEnabled: Bool
@@ -77,7 +79,6 @@ public class FileTransferEngine: ObservableObject {
     
  // Apple Silicon优化相关（简化实现）
     private let isAppleSilicon = true // 简化检测
-    private let metalAccel = PerformanceOptimizations.MetalAcceleration()
     private var metalAvailable: Bool { PerformanceOptimizations.MetalAcceleration.isMetalAvailable() }
     private func threadsPerTransfer() -> Int {
  // Metal 可用时适度提升并发度
@@ -215,12 +216,12 @@ public class FileTransferEngine: ObservableObject {
             return nil
         }
         
-        logger.info("🛡️ 开始扫描接收的文件: \(url.lastPathComponent) [级别: \(self.currentScanLevel.rawValue)]")
+        logger.info("🛡️ 开始扫描接收文件: level=\(self.currentScanLevel.rawValue, privacy: .public)")
         let configuration = FileScanService.ScanConfiguration(level: self.currentScanLevel)
         let result = await FileScanService.shared.scanFile(at: url, configuration: configuration)
         
         if !result.isSafe {
-            logger.warning("🚨 检测到威胁: \(result.threatName ?? "未知") - \(url.lastPathComponent)")
+            logger.warning("🚨 接收文件扫描命中威胁")
             
  // 发送威胁检测通知
             NotificationCenter.default.post(
@@ -286,7 +287,7 @@ public class FileTransferEngine: ObservableObject {
         keepTransferHistory = keepHistory
         if !keepHistory {
             transferHistory.removeAll()
-            try? Self.transferHistoryStore.remove()
+            enqueueHistoryClear()
         }
     }
     
@@ -355,22 +356,39 @@ public class FileTransferEngine: ObservableObject {
         }
  // 在 MainActor 上下文读取运行时加密开关并定型为不可变本地值，供 @Sendable 闭包安全捕获。
         let effectiveEncryptionEnabled = encryptionEnabled ?? self.runtimeEncryptionEnabled
+        let retryOperationID = "legacy-file-send-\(UUID().uuidString)"
  // 使用重试管理器执行传输 - 利用Swift 6.2.1的并发改进
         let sendOperation: @Sendable () async throws -> String = { [self] in
- // 检查文件是否存在
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw FileTransferEngineError.fileNotFound
-        }
-        
- // 获取文件大小
-        let fileAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-        let fileSize = fileAttributes[.size] as? Int64 ?? 0
-        
- // 计算文件校验和
-            _ = try await self.calculateFileChecksum(fileURL)
-        
+            let fileSize: Int64
+            do {
+                fileSize = try await ClassicTransferSourceFileInspectionWorker.shared.regularFileSize(
+                    at: fileURL,
+                    maximumSize: LegacyFileTransferWirePolicy.maximumFileSizeBytes
+                )
+            } catch ClassicTransferSourceFileInspectionError.notFound {
+                throw FileTransferEngineError.fileNotFound
+            } catch {
+                throw FileTransferEngineError.invalidSourceFile
+            }
+
  // 创建传输会话 - 需要在MainActor上下文中创建
-        let transferId = UUID().uuidString
+            let transferId = UUID().uuidString
+            do {
+                try LegacyFileTransferWireContract.validatePreflight(
+                    transferID: transferId,
+                    fileName: fileURL.lastPathComponent,
+                    fileSize: fileSize,
+                    chunkSize: self.configuration.chunkSize,
+                    encryptionEnabled: effectiveEncryptionEnabled
+                )
+            } catch LegacyFileTransferWireContractError.unsupportedEncryptedFileSize {
+                throw FileTransferEngineError.unsupportedLegacyEncryptedFileSize(
+                    maximumBytes: LegacyFileTransferWirePolicy.maximumEncryptedFileSizeBytes
+                )
+            } catch {
+                throw FileTransferEngineError.invalidProtocolMetadata
+            }
+
             let sessionConfig = TransferConfiguration(
                 maxConcurrentTransfers: self.configuration.maxConcurrentTransfers,
                 chunkSize: self.configuration.chunkSize,
@@ -434,7 +452,6 @@ public class FileTransferEngine: ObservableObject {
                 session.state = .completed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
-                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
             }
 
@@ -449,7 +466,6 @@ public class FileTransferEngine: ObservableObject {
                 session.state = .failed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
-                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
             }
 
@@ -464,7 +480,6 @@ public class FileTransferEngine: ObservableObject {
                     session.state = .failed
                     self.addToHistory(session)
                     self.removeActiveTransfer(transferId)
-                    self.cleanupStreamingArtifacts(for: transferId)
                     self.speedLimiter = nil
                 }
  // 将非FileTransferEngineError错误包装为networkError
@@ -474,7 +489,7 @@ public class FileTransferEngine: ObservableObject {
 
         if automaticRetryEnabled {
             return try await retryManager.executeWithRetry(
-                operationId: "sendFile-\(fileURL.lastPathComponent)",
+                operationId: retryOperationID,
                 operation: sendOperation
             )
         }
@@ -509,10 +524,24 @@ public class FileTransferEngine: ObservableObject {
         let metadata = try await receiveFileMetadata(from: connection)
         
  // 确定目标目录
-        let targetDirectory = destinationDirectory ?? getDefaultDownloadDirectory()
-        let destinationURL = try FileTransferPathPolicy.uniqueDestinationURL(
-            baseDirectory: targetDirectory,
-            fileName: metadata.fileName
+        let resolvedDestinationDirectory: URL
+        if let destinationDirectory {
+            resolvedDestinationDirectory = destinationDirectory
+        } else {
+            resolvedDestinationDirectory = try getDefaultDownloadDirectory()
+        }
+        let targetDirectory = resolvedDestinationDirectory.standardizedFileURL
+        let stagingDirectory = targetDirectory.appendingPathComponent(
+            ".SkyBridgeLegacyInbound",
+            isDirectory: true
+        )
+        let stagingURL = stagingDirectory.appendingPathComponent(
+            "legacy-\(UUID().uuidString).partial",
+            isDirectory: false
+        )
+        let proposedDestinationURL = targetDirectory.appendingPathComponent(
+            metadata.fileName,
+            isDirectory: false
         )
         
  // 创建传输会话
@@ -521,7 +550,7 @@ public class FileTransferEngine: ObservableObject {
             type: .receive,
             fileName: metadata.fileName,
             fileSize: metadata.fileSize,
-            localURL: destinationURL,
+            localURL: proposedDestinationURL,
             remoteDeviceId: deviceId,
             configuration: TransferConfiguration(
                 maxConcurrentTransfers: configuration.maxConcurrentTransfers,
@@ -539,28 +568,55 @@ public class FileTransferEngine: ObservableObject {
             registerActiveTransfer(session, transferId: metadata.transferId)
         }
         
+        var inboundIOHandle: InboundFileTransferIOHandle?
+        var committed = false
         do {
+            try await InboundFileTransferIOActor.shared.validateSameVolumeCommit(
+                stagingURL: stagingURL,
+                destinationDirectory: targetDirectory
+            )
+            let ioHandle = try await InboundFileTransferIOActor.shared.createTemporaryFile(
+                at: stagingURL,
+                declaredFileSize: metadata.fileSize
+            )
+            inboundIOHandle = ioHandle
+
  // 发送传输确认
             try await sendTransferAcknowledgment(to: connection)
             
  // 执行文件接收
-            try await performFileReceive(session, connection: connection, metadata: metadata)
+            try await performFileReceive(
+                session,
+                connection: connection,
+                metadata: metadata,
+                stagingURL: stagingURL,
+                ioHandle: ioHandle
+            )
             
  // 文件接收完成后进行病毒扫描（如果启用）
-            if let scanResult = await scanReceivedFileIfEnabled(destinationURL) {
+            if let scanResult = await scanReceivedFileIfEnabled(stagingURL) {
                 if !scanResult.isSafe {
- // 扫描检测到威胁，标记传输失败
-                    logger.warning("🚨 文件扫描检测到威胁: \(scanResult.threatName ?? "未知")")
-                    await MainActor.run {
-                        session.error = FileTransferEngineError.securityThreatDetected(threatName: scanResult.threatName ?? "未知威胁")
-                        session.state = .failed
-                        addToHistory(session)
-                        removeActiveTransfer(metadata.transferId)
-                    }
+                    logger.warning("🚨 文件扫描检测到威胁")
                     throw FileTransferEngineError.securityThreatDetected(threatName: scanResult.threatName ?? "未知威胁")
                 }
-                logger.info("✅ 文件扫描通过: \(destinationURL.lastPathComponent)")
+                logger.info("✅ 文件扫描通过")
             }
+
+            _ = try await InboundFileTransferIOActor.shared.commit(
+                using: ioHandle,
+                destinationDirectory: targetDirectory,
+                fileName: metadata.fileName
+            )
+            committed = true
+            try await InboundFileTransferIOActor.shared.releaseCommittedFile(using: ioHandle)
+            inboundIOHandle = nil
+
+            // The terminal success is truthful only after verified bytes have
+            // been atomically published and I/O ownership has been released.
+            try await sendFinalAcknowledgment(
+                to: connection,
+                transferId: session.id
+            )
             
  // 接收成功
             await MainActor.run {
@@ -572,15 +628,31 @@ public class FileTransferEngine: ObservableObject {
             return metadata.transferId
             
         } catch {
+            let primaryError = error
+            connection.connection.cancel()
+            var reportedError = primaryError
+            if let ioHandle = inboundIOHandle {
+                do {
+                    if committed {
+                        try await InboundFileTransferIOActor.shared.releaseCommittedFile(using: ioHandle)
+                    } else {
+                        try await InboundFileTransferIOActor.shared.discard(ioHandle)
+                    }
+                } catch {
+                    reportedError = Self.resourceCleanupFailure(
+                        primary: primaryError,
+                        cleanup: error
+                    )
+                }
+            }
  // 接收失败
             await MainActor.run {
-                session.error = error
+                session.error = reportedError
                 session.state = .failed
                 addToHistory(session)
                 removeActiveTransfer(metadata.transferId)
-                cleanupStreamingArtifacts(for: metadata.transferId)
             }
-            throw error
+            throw reportedError
         }
     }
     
@@ -590,22 +662,19 @@ public class FileTransferEngine: ObservableObject {
     private func performFileTransfer(_ session: FileTransferSession, connection: P2PConnection) async throws {
  // 创建文件元数据
         let merkleStart = Date()
-        let merkle = try? computeMerkleRoot(for: session.localURL, chunkSize: configuration.chunkSize)
+        let merkle = try await fileHashWorker.merkleRoot(
+            url: session.localURL,
+            chunkSize: configuration.chunkSize
+        )
         let merkleElapsedMs = Date().timeIntervalSince(merkleStart) * 1000
         NotificationCenter.default.post(name: .fileMerkleTiming, object: nil, userInfo: [
             "phase": "compute",
-            "fileName": session.localURL.lastPathComponent,
             "fileSize": session.fileSize,
             "chunkSize": configuration.chunkSize,
-            "elapsedMs": merkleElapsedMs,
-            "metalAvailable": self.metalAvailable
+            "elapsedMs": merkleElapsedMs
         ])
         let checksum = try await calculateFileChecksum(session.localURL)
-        let signerPeerId = try await DeviceIdentityKeyManager.shared.getDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !signerPeerId.isEmpty else {
-            throw FileTransferEngineError.localIdentityUnavailable
-        }
+        let signerPeerId = securityManager.getDeviceId()
         let requiredSignature = try await pqCrypto.signPQCRequiredWithAlgorithm(
             Data(checksum.utf8),
             for: signerPeerId
@@ -624,6 +693,15 @@ public class FileTransferEngine: ObservableObject {
             signatureAlgorithm: requiredSignature.algorithm,
             signerPeerId: signerPeerId
         )
+        do {
+            try LegacyFileTransferWireContract.validate(metadata)
+        } catch LegacyFileTransferWireContractError.unsupportedEncryptedFileSize {
+            throw FileTransferEngineError.unsupportedLegacyEncryptedFileSize(
+                maximumBytes: LegacyFileTransferWirePolicy.maximumEncryptedFileSizeBytes
+            )
+        } catch {
+            throw FileTransferEngineError.invalidProtocolMetadata
+        }
         
  // 发送文件元数据
         try await sendFileMetadata(metadata, to: connection)
@@ -631,48 +709,30 @@ public class FileTransferEngine: ObservableObject {
  // 等待传输确认
         try await waitForTransferAcknowledgment(from: connection)
         
- // 若启用加密且文件较大，先进行流式加密到临时文件
-        if session.configuration.encryptionEnabled && session.fileSize > 32 * 1024 * 1024 { // >32MB
-            do {
-                let (tempURL, aead) = try await prepareStreamingEncryptedFile(for: session)
-                streamingEncryptedFiles[session.id] = (tempURL, aead)
-                logger.info("🔒 已对大文件执行流式预加密: \(session.fileName)")
-            } catch {
-                logger.error("❌ 流式预加密失败，回退到块内加密: \(error.localizedDescription)")
-            }
-        }
-
  // 分块发送文件
         try await sendFileInChunks(session, connection: connection)
         
  // 等待传输完成确认
-        try await waitForTransferComplete(from: connection)
+        try await waitForTransferComplete(from: connection, expectedTransferId: session.id)
     }
     
  /// 执行文件接收
-    private func performFileReceive(_ session: FileTransferSession, connection: P2PConnection, metadata: FileTransferMetadata) async throws {
- // 创建目标文件
-        try createDestinationFile(at: session.localURL)
-        
- // 分块接收文件（若为大文件加密流，先写入临时密文文件，结束后再流式解密到最终目标）
-        try await receiveFileInChunks(session, connection: connection, metadata: metadata)
+    private func performFileReceive(
+        _ session: FileTransferSession,
+        connection: P2PConnection,
+        metadata: FileTransferMetadata,
+        stagingURL: URL,
+        ioHandle: InboundFileTransferIOHandle
+    ) async throws {
+        let receivedDigest = try await receiveFileInChunks(
+            session,
+            connection: connection,
+            metadata: metadata,
+            ioHandle: ioHandle
+        )
 
- // 流式解密（接收端）：如果之前采用临时密文路径，现将其解密到目标文件
-        if metadata.encryptionEnabled, metadata.fileSize > 32 * 1024 * 1024, let encURL = streamingEncryptedRecvFiles[session.id] {
-            let key = try await deriveSessionKey(for: session.remoteDeviceId)
-            guard let inStream = InputStream(url: encURL),
-                  let outStream = OutputStream(url: session.localURL, append: false) else {
-                throw FileTransferEngineError.encryptionError(underlying: nil)
-            }
-            let decryptor = PerformanceOptimizations.StreamingDecryptor(key: key, chunkSize: configuration.bufferSize)
-            try await decryptor.decryptStream(from: inStream, to: outStream)
- // 清理临时密文
-            try? FileManager.default.removeItem(at: encURL)
-            streamingEncryptedRecvFiles.removeValue(forKey: session.id)
-        }
-        
  // 验证文件完整性
-        let receivedChecksum = try await calculateFileChecksum(session.localURL)
+        let receivedChecksum = Self.lowercaseHex(receivedDigest)
         guard receivedChecksum == metadata.checksum else {
             throw FileTransferEngineError.checksumMismatch
         }
@@ -681,9 +741,7 @@ public class FileTransferEngine: ObservableObject {
               let signerId = metadata.signerPeerId?.trimmingCharacters(in: .whitespacesAndNewlines),
               !signerId.isEmpty else {
             NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
-                "transferId": session.id,
-                "ok": false,
-                "error": "missing_strict_pqc_signature"
+                "ok": false
             ])
             throw FileTransferEngineError.checksumMismatch
         }
@@ -696,200 +754,202 @@ public class FileTransferEngine: ObservableObject {
                 algorithm: metadata.signatureAlgorithm
             )
             NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
-                "transferId": session.id,
-                "signerId": signerId,
                 "algorithm": metadata.signatureAlgorithm ?? "",
                 "ok": ok
             ])
             if !ok { throw FileTransferEngineError.checksumMismatch }
         } catch {
             NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
-                "transferId": session.id,
-                "signerId": signerId,
                 "algorithm": metadata.signatureAlgorithm ?? "",
-                "ok": false,
-                "error": String(describing: error)
+                "ok": false
             ])
             throw FileTransferEngineError.checksumMismatch
         }
  // 可选：Merkle 根校验
         if let merkleRoot = metadata.merkleRoot {
             let merkleStart2 = Date()
-            let localMerkle = try? computeMerkleRoot(for: session.localURL, chunkSize: metadata.chunkSize)
+            let localMerkle = try await fileHashWorker.merkleRoot(
+                url: stagingURL,
+                chunkSize: metadata.chunkSize
+            )
             let verifyElapsedMs = Date().timeIntervalSince(merkleStart2) * 1000
             NotificationCenter.default.post(name: .fileMerkleTiming,
                                             object: nil,
                                             userInfo: [
                                                 "phase": "verify",
-                                                "fileName": session.fileName,
                                                 "fileSize": session.fileSize,
                                                 "chunkSize": metadata.chunkSize,
-                                                "elapsedMs": verifyElapsedMs,
-                                                "metalAvailable": self.metalAvailable
+                                                "elapsedMs": verifyElapsedMs
                                             ])
             if localMerkle != merkleRoot {
                 NotificationCenter.default.post(name: .fileMerkleVerified,
                                                 object: nil,
                                                 userInfo: [
-                                                    "transferId": session.id,
-                                                    "ok": false,
-                                                    "expected": merkleRoot,
-                                                    "actual": localMerkle ?? "",
-                                                    "fileName": session.fileName
+                                                    "ok": false
                                                 ])
                 throw FileTransferEngineError.checksumMismatch
             } else {
                 NotificationCenter.default.post(name: .fileMerkleVerified,
                                                 object: nil,
                                                 userInfo: [
-                                                    "transferId": session.id,
-                                                    "ok": true,
-                                                    "expected": merkleRoot,
-                                                    "actual": localMerkle ?? merkleRoot,
-                                                    "fileName": session.fileName
+                                                    "ok": true
                                                 ])
             }
         }
-        
- // 发送最终确认（携带整文件 HMAC 标记，便于与签名对比调试）
-        var hmacTag: Data? = nil
-        if metadata.encryptionEnabled, metadata.fileSize > 32 * 1024 * 1024, let encURL = streamingEncryptedRecvFiles[session.id] {
-            let key = try await deriveSessionKey(for: session.remoteDeviceId)
-            hmacTag = try computeFileHMACTag(url: encURL, key: key, chunkSize: metadata.chunkSize)
-        }
-        try await sendFinalAcknowledgment(to: connection, transferId: session.id, hmacTag: hmacTag)
     }
     
  /// 分块发送文件
     private func sendFileInChunks(_ session: FileTransferSession, connection: P2PConnection) async throws {
- // 若存在流式预加密临时文件，从该文件读取；wire chunk 本身不再声明 per-chunk AEAD。
-        let readingURL = streamingEncryptedFiles[session.id]?.url ?? session.localURL
-        let fileHandle = try FileHandle(forReadingFrom: readingURL)
-        defer { fileHandle.closeFile() }
-        
-        let totalChunks = Int((session.fileSize + Int64(configuration.chunkSize) - 1) / Int64(configuration.chunkSize))
-        var chunkIndex = 0
-        
-        while chunkIndex < totalChunks {
-            if session.state == .cancelled { throw FileTransferEngineError.transferCancelled }
- // 批处理窗口，提升加密/压缩并发
-            let window = max(1, threadsPerTransfer())
-            var batch: [(idx: Int, raw: Data)] = []
-            batch.reserveCapacity(window)
-            var readCount = 0
-            while readCount < window && chunkIndex + readCount < totalChunks {
-                let raw = fileHandle.readData(ofLength: configuration.chunkSize)
-                if raw.isEmpty { break }
-                batch.append((idx: chunkIndex + readCount, raw: raw))
-                readCount += 1
-            }
-            if batch.isEmpty { break }
- // 预先读取Actor隔离状态（避免在并发闭包内直接访问）
-            let compressionOn = session.configuration.compressionEnabled
-            let encryptionOn = session.configuration.encryptionEnabled
-            let hasPreEncrypted = (self.streamingEncryptedFiles[session.id] != nil)
+        let sourceReader = try await ClassicTransferOutboundFileReadSession.open(
+            url: session.localURL,
+            tracksSHA256: false
+        )
+        do {
+            let totalChunks = try LegacyFileTransferWireContract.expectedChunkCount(
+                fileSize: session.fileSize,
+                chunkSize: configuration.chunkSize
+            )
+            var chunkIndex = 0
 
- // 并发处理批次中的数据块（P2：利用并行管理器加速加密）
-            let processed: [(idx: Int, data: Data, aead: EncryptedData?, isCompressed: Bool, isEncrypted: Bool)] = try await {
- // 1) 先处理压缩（保持顺序映射）。流式预加密文件已经是密文，不能再压缩。
-                var plainChunks: [(idx: Int, data: Data, isCompressed: Bool)] = []
-                plainChunks.reserveCapacity(batch.count)
-                if hasPreEncrypted {
-                    plainChunks = batch.map { ($0.idx, $0.raw, false) }
-                } else if compressionOn {
-                    for item in batch {
-                        let payload = try Self.compressDataIfBeneficial(item.raw)
-                        plainChunks.append((idx: item.idx, data: payload.data, isCompressed: payload.isCompressed))
-                    }
-                } else {
-                    plainChunks = batch.map { ($0.idx, $0.raw, false) }
+            while chunkIndex < totalChunks {
+                try Task.checkCancellation()
+                if session.state == .cancelled {
+                    throw FileTransferEngineError.transferCancelled
+                }
+                let window = max(1, threadsPerTransfer())
+                var batch: [(idx: Int, raw: Data)] = []
+                batch.reserveCapacity(window)
+                var readCount = 0
+                while readCount < window && chunkIndex + readCount < totalChunks {
+                    let index = chunkIndex + readCount
+                    let offset = Int64(index) * Int64(configuration.chunkSize)
+                    let expectedLength = Int(
+                        min(Int64(configuration.chunkSize), session.fileSize - offset)
+                    )
+                    let raw = try await sourceReader.read(
+                        offset: UInt64(offset),
+                        length: expectedLength
+                    )
+                    batch.append((idx: index, raw: raw))
+                    readCount += 1
                 }
 
- // 2) 加密分支：使用并行加密；否则按原逻辑处理（含预加密路径）
-                if encryptionOn && !hasPreEncrypted {
-                    let key = try await deriveSessionKey(for: session.remoteDeviceId)
-                    let keys = Array(repeating: key, count: plainChunks.count)
- // 避免捕获 MainActor 隔离的 self 成员，使用局部实例
-                    let pem = PerformanceOptimizations.ParallelEncryptionManager()
-                    let encrypted = try await pem.encryptInParallel(
-                        chunks: plainChunks.map { $0.data },
-                        using: keys,
-                        maxConcurrency: threadsPerTransfer()
-                    )
- // 组装结果（保持索引顺序）
-                    return zip(plainChunks, encrypted).map { (p, e) in
-                        (idx: p.idx, data: e.ciphertext, aead: e, isCompressed: p.isCompressed, isEncrypted: true)
+                let compressionOn = session.configuration.compressionEnabled
+                let encryptionOn = session.configuration.encryptionEnabled
+                let processed: [(idx: Int, data: Data, aead: EncryptedData?, isCompressed: Bool, isEncrypted: Bool)] = try await {
+                    var plainChunks: [(idx: Int, data: Data, isCompressed: Bool)] = []
+                    plainChunks.reserveCapacity(batch.count)
+                    if compressionOn {
+                        for item in batch {
+                            let payload = try await fileTransformWorker.compressIfBeneficial(item.raw)
+                            plainChunks.append((
+                                idx: item.idx,
+                                data: payload.data,
+                                isCompressed: payload.isCompressed
+                            ))
+                        }
+                    } else {
+                        plainChunks = batch.map { ($0.idx, $0.raw, false) }
                     }
-                        .sorted { $0.0 < $1.0 }
-                } else {
- // 无加密或已预加密：直接发送明文/流式密文，wire flags 必须反映每个 chunk 的实际编码。
+
+                    if encryptionOn {
+                        let key = try await deriveSessionKey(for: session.remoteDeviceId)
+                        let keys = Array(repeating: key, count: plainChunks.count)
+                        let cryptoWorker = PerformanceOptimizations.ParallelEncryptionManager()
+                        let encrypted = try await cryptoWorker.encryptInParallel(
+                            chunks: plainChunks.map {
+                                LegacyFileTransferWireContract.encryptionPlaintext(for: $0.data)
+                            },
+                            using: keys,
+                            maxConcurrency: threadsPerTransfer()
+                        )
+                        guard encrypted.count == plainChunks.count else {
+                            throw FileTransferEngineError.encryptionError(underlying: nil)
+                        }
+                        return zip(plainChunks, encrypted).map { plain, encryptedChunk in
+                            (
+                                idx: plain.idx,
+                                data: encryptedChunk.ciphertext,
+                                aead: encryptedChunk,
+                                isCompressed: plain.isCompressed,
+                                isEncrypted: true
+                            )
+                        }
+                        .sorted { $0.idx < $1.idx }
+                    }
                     return plainChunks.map {
                         (idx: $0.idx, data: $0.data, aead: nil, isCompressed: $0.isCompressed, isEncrypted: false)
                     }
                     .sorted { $0.idx < $1.idx }
+                }()
+
+                guard processed.count == batch.count else {
+                    throw FileTransferEngineError.networkError(underlying: nil)
                 }
-            }()
- // 顺序发送并等待确认
-            for (idx, dataOut, aead, isCompressed, isEncrypted) in processed {
-                let packet = FileChunkPacket(
-                    transferId: session.id,
-                    chunkIndex: idx,
-                    totalChunks: totalChunks,
-                    data: dataOut,
-                    aeadNonce: aead?.nonce,
-                    aeadTag: aead?.tag,
-                    isCompressed: isCompressed,
-                    isEncrypted: isEncrypted,
-                    checksum: calculateChecksum(dataOut)
-                )
-                try await sendChunkPacket(packet, to: connection)
-                try await waitForChunkAcknowledgment(session.id, chunkIndex: idx, from: connection)
-                let sentRaw = batch.first(where: { $0.idx == idx })?.raw.count ?? dataOut.count
-                session.updateBytesTransferred(Int64(sentRaw))
+                for (idx, dataOut, aead, isCompressed, isEncrypted) in processed {
+                    guard let rawChunk = batch.first(where: { $0.idx == idx }) else {
+                        throw FileTransferEngineError.networkError(underlying: nil)
+                    }
+                    let packet = FileChunkPacket(
+                        transferId: session.id,
+                        chunkIndex: idx,
+                        totalChunks: totalChunks,
+                        data: dataOut,
+                        aeadNonce: aead?.nonce,
+                        aeadTag: aead?.tag,
+                        isCompressed: isCompressed,
+                        isEncrypted: isEncrypted,
+                        checksum: calculateChecksum(dataOut)
+                    )
+                    try await sendChunkPacket(packet, to: connection)
+                    try await waitForChunkAcknowledgment(
+                        session.id,
+                        chunkIndex: idx,
+                        from: connection
+                    )
+                    session.updateBytesTransferred(Int64(rawChunk.raw.count))
+                }
+                chunkIndex += processed.count
+                let progress = Double(chunkIndex) / Double(totalChunks)
+                await updateProgress(for: session.id, progress: progress)
             }
-            chunkIndex += processed.count
-            let progress = Double(chunkIndex) / Double(totalChunks)
-            await updateProgress(for: session.id, progress: progress)
+            try await sourceReader.close()
+        } catch {
+            let primaryError = error
+            do {
+                try await sourceReader.close()
+            } catch {
+                throw Self.resourceCleanupFailure(primary: primaryError, cleanup: error)
+            }
+            throw primaryError
         }
     }
     
  /// 分块接收文件
-    private func receiveFileInChunks(_ session: FileTransferSession, connection: P2PConnection, metadata: FileTransferMetadata) async throws {
- // 若是大文件加密流，则写入到临时密文文件
-        let writingURL: URL
-        if metadata.encryptionEnabled, metadata.fileSize > 32 * 1024 * 1024 {
-            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("ft_recv_enc_\(session.id).bin")
-            if FileManager.default.fileExists(atPath: tempURL.path) {
-                try? FileManager.default.removeItem(at: tempURL)
-            }
-            FileManager.default.createFile(atPath: tempURL.path, contents: nil)
-            streamingEncryptedRecvFiles[session.id] = tempURL
-            writingURL = tempURL
-        } else {
-            writingURL = session.localURL
-        }
-
-        let fileHandle = try FileHandle(forWritingTo: writingURL)
-        defer { fileHandle.closeFile() }
-        
- // 分解复杂表达式以避免类型检查问题
-        let chunkSizeInt64 = Int64(metadata.chunkSize)
-        let totalChunks = Int((metadata.fileSize + chunkSizeInt64 - 1) / chunkSizeInt64)
+    private func receiveFileInChunks(
+        _ session: FileTransferSession,
+        connection: P2PConnection,
+        metadata: FileTransferMetadata,
+        ioHandle: InboundFileTransferIOHandle
+    ) async throws -> Data {
+        let totalChunks = try LegacyFileTransferWireContract.expectedChunkCount(
+            fileSize: metadata.fileSize,
+            chunkSize: metadata.chunkSize
+        )
         var receivedChunks = 0
+        var receivedBytes: Int64 = 0
         
         while receivedChunks < totalChunks {
- // 检查传输状态
+            try Task.checkCancellation()
             if session.state == .cancelled {
                 throw FileTransferEngineError.transferCancelled
             }
             
- // 接收数据包
-            let packet = try await receiveChunkPacket(from: connection)
-            
- // 验证数据包
-            guard packet.transferId == session.id else {
-                throw FileTransferEngineError.networkError(underlying: nil)
-            }
+            let packet = try await receiveChunkPacket(
+                from: connection,
+                metadata: metadata,
+                expectedChunkIndex: receivedChunks
+            )
             
  // 验证校验和
             let calculatedChecksum = calculateChecksum(packet.data)
@@ -898,50 +958,53 @@ public class FileTransferEngine: ObservableObject {
             }
             
  // 处理数据块（解密/解压）
-            let processedData: Data
-            if metadata.encryptionEnabled, metadata.fileSize > 32 * 1024 * 1024 {
- // 大文件加密流：包内数据已是密文，直接写入，解密在完成后统一进行
-                guard !packet.isEncrypted, packet.aeadNonce == nil, packet.aeadTag == nil else {
-                    throw FileTransferEngineError.encryptionError(underlying: nil)
-                }
-                guard !packet.isCompressed else {
-                    throw FileTransferEngineError.compressionError(underlying: nil)
-                }
-                processedData = packet.data
-            } else {
-                var payload = packet.data
-                if packet.isEncrypted {
+            var payload = packet.data
+            if packet.isEncrypted {
  // 分块AEAD校验与解密
-                    do {
-                        guard let nonce = packet.aeadNonce, let tag = packet.aeadTag else {
-                            throw FileTransferEngineError.encryptionError(underlying: nil)
-                        }
-                        let enc = EncryptedData(ciphertext: payload, nonce: nonce, tag: tag)
-                        payload = try await decryptDataDetailed(enc, fromPeer: session.remoteDeviceId)
-                        NotificationCenter.default.post(name: .fileChunkVerified, object: nil, userInfo: [
-                            "transferId": session.id,
-                            "chunkIndex": packet.chunkIndex,
-                            "ok": true
-                        ])
-                    } catch {
-                        NotificationCenter.default.post(name: .fileChunkVerifyFailed, object: nil, userInfo: [
-                            "transferId": session.id,
-                            "chunkIndex": packet.chunkIndex,
-                            "error": String(describing: error)
-                        ])
-                        throw error
+                do {
+                    guard let nonce = packet.aeadNonce, let tag = packet.aeadTag else {
+                        throw FileTransferEngineError.encryptionError(underlying: nil)
                     }
-                } else if metadata.encryptionEnabled {
-                    throw FileTransferEngineError.encryptionError(underlying: nil)
+                    let encrypted = EncryptedData(ciphertext: payload, nonce: nonce, tag: tag)
+                    payload = try await decryptDataDetailed(
+                        encrypted,
+                        fromPeer: session.remoteDeviceId
+                    )
+                    NotificationCenter.default.post(name: .fileChunkVerified, object: nil, userInfo: [
+                        "chunkIndex": packet.chunkIndex,
+                        "ok": true
+                    ])
+                } catch {
+                    NotificationCenter.default.post(name: .fileChunkVerifyFailed, object: nil, userInfo: [
+                        "chunkIndex": packet.chunkIndex,
+                        "ok": false
+                    ])
+                    throw error
                 }
-                if packet.isCompressed {
-                    payload = try Self.decompressData(payload, maxOutputSize: metadata.chunkSize)
-                }
-                processedData = payload
+            } else if metadata.encryptionEnabled {
+                throw FileTransferEngineError.encryptionError(underlying: nil)
             }
-            
- // 写入文件
-            fileHandle.write(processedData)
+            if packet.isCompressed {
+                payload = try await fileTransformWorker.decompress(
+                    payload,
+                    maximumOutputSize: metadata.chunkSize
+                )
+            }
+
+            do {
+                try LegacyFileTransferWireContract.validateDecodedChunkLength(
+                    payload.count,
+                    metadata: metadata,
+                    receivedBytes: receivedBytes
+                )
+            } catch {
+                throw FileTransferEngineError.invalidProtocolChunk
+            }
+            _ = try await InboundFileTransferIOActor.shared.write(
+                payload,
+                atOffset: UInt64(receivedBytes),
+                using: ioHandle
+            )
             
  // 发送块确认
             try await sendChunkAcknowledgment(session.id, chunkIndex: packet.chunkIndex, to: connection)
@@ -952,16 +1015,25 @@ public class FileTransferEngine: ObservableObject {
             await updateProgress(for: session.id, progress: progress)
             
  // 更新传输字节数
-            session.updateBytesTransferred(Int64(processedData.count))
+            receivedBytes += Int64(payload.count)
+            session.updateBytesTransferred(Int64(payload.count))
         }
+        do {
+            try LegacyFileTransferWireContract.validateCompletion(
+                receivedBytes: receivedBytes,
+                metadata: metadata
+            )
+        } catch {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
+        return try await InboundFileTransferIOActor.shared.closeAndDigest(using: ioHandle)
     }
     
  // MARK: - 辅助方法
     
  /// 获取默认下载目录
- /// - Returns: 下载目录 URL，如果无法获取则返回 nil
- /// - Note: 18.1 - 移除 force unwrap，返回 Optional 并发射 SecurityEvent
-    private func getDefaultDownloadDirectory() -> URL {
+ /// - Returns: 下载目录 URL；系统未提供该目录时显式失败。
+    private func getDefaultDownloadDirectory() throws -> URL {
         guard let downloadDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
  // 发射安全事件 (Requirements 8.1, 8.4)
             SecurityEventEmitter.emitDetached(SecurityEvent(
@@ -974,67 +1046,15 @@ public class FileTransferEngine: ObservableObject {
                     "domain": "userDomainMask"
                 ]
             ))
-            logger.error("❌ 无法获取默认下载目录，回退到临时目录")
- // 回退到临时目录
-            return FileManager.default.temporaryDirectory
+            logger.error("❌ 无法获取默认下载目录")
+            throw FileTransferEngineError.invalidDestination
         }
         return downloadDir
-    }
-    
- /// 创建目标文件
-    private func createDestinationFile(at url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
     }
     
  /// 计算文件校验和
     private func calculateFileChecksum(_ url: URL) async throws -> String {
         return try await fileHashWorker.sha256Hex(url: url)
-    }
-
- /// 计算文件的 Merkle 根（基于分块 SHA256），在可用时使用 Metal 进行哈希预处理
-    private func computeMerkleRoot(for url: URL, chunkSize: Int) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { handle.closeFile() }
-        var leafHashes: [Data] = []
-        while true {
-            let chunk = handle.readData(ofLength: chunkSize)
-            if chunk.isEmpty { break }
-            if let fast = metalAccel.acceleratedHashingIfAvailable(data: chunk) {
-                leafHashes.append(fast)
-            } else {
-                let h = SHA256.hash(data: chunk)
-                leafHashes.append(Data(h))
-            }
-        }
- // 空文件的根
-        if leafHashes.isEmpty {
-            if let fast = metalAccel.acceleratedHashingIfAvailable(data: Data()) {
-                return fast.map { String(format: "%02x", $0) }.joined()
-            }
-            return SHA256.hash(data: Data()).compactMap { String(format: "%02x", $0) }.joined()
-        }
-        var level = leafHashes
-        while level.count > 1 {
-            var next: [Data] = []
-            var i = 0
-            while i < level.count {
-                let left = level[i]
-                let right = (i + 1 < level.count) ? level[i + 1] : left // 尾部补齐
-                var combined = Data()
-                combined.append(left)
-                combined.append(right)
-                if let fast = metalAccel.acceleratedHashingIfAvailable(data: combined) {
-                    next.append(fast)
-                } else {
-                    next.append(Data(SHA256.hash(data: combined)))
-                }
-                i += 2
-            }
-            level = next
-        }
-        return level[0].map { String(format: "%02x", $0) }.joined()
     }
     
  // MARK: - 网络通信方法（完整实现 - 利用macOS 26.x Network Framework改进）
@@ -1049,7 +1069,7 @@ public class FileTransferEngine: ObservableObject {
     private func sendFileMetadata(_ metadata: FileTransferMetadata, to connection: P2PConnection) async throws {
         let nwConnection = getNWConnection(from: connection)
         
-        logger.info("📤 发送文件元数据: \(metadata.fileName)")
+        logger.info("📤 发送文件元数据")
         
         do {
  // 编码元数据
@@ -1077,9 +1097,12 @@ public class FileTransferEngine: ObservableObject {
                 offset += currentChunkSize
             }
             
-            logger.info("✅ 文件元数据发送完成: \(metadata.fileName)")
+            logger.info("✅ 文件元数据发送完成")
         } catch {
-            logger.error("❌ 发送文件元数据失败: \(error.localizedDescription)")
+            let metadataError = error as NSError
+            logger.error(
+                "❌ 发送文件元数据失败: domain=\(metadataError.domain, privacy: .private) code=\(metadataError.code, privacy: .public)"
+            )
             throw error
         }
     }
@@ -1101,7 +1124,9 @@ public class FileTransferEngine: ObservableObject {
             let messageType = headerData.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
             let dataLength = headerData.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
             
-            guard messageType == 0x01 else { // METADATA
+            guard messageType == 0x01,
+                  dataLength > 0,
+                  dataLength <= LegacyFileTransferWirePolicy.maximumMetadataBytes else {
                 throw FileTransferEngineError.networkError(underlying: nil)
             }
             
@@ -1122,11 +1147,23 @@ public class FileTransferEngine: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let metadata = try decoder.decode(FileTransferMetadata.self, from: metadataData)
+            do {
+                try LegacyFileTransferWireContract.validate(metadata)
+            } catch LegacyFileTransferWireContractError.unsupportedEncryptedFileSize {
+                throw FileTransferEngineError.unsupportedLegacyEncryptedFileSize(
+                    maximumBytes: LegacyFileTransferWirePolicy.maximumEncryptedFileSizeBytes
+                )
+            } catch {
+                throw FileTransferEngineError.invalidProtocolMetadata
+            }
             
-            logger.info("✅ 文件元数据接收完成: \(metadata.fileName)")
+            logger.info("✅ 文件元数据接收完成")
             return metadata
         } catch {
-            logger.error("❌ 接收文件元数据失败: \(error.localizedDescription)")
+            let metadataError = error as NSError
+            logger.error(
+                "❌ 接收文件元数据失败: domain=\(metadataError.domain, privacy: .private) code=\(metadataError.code, privacy: .public)"
+            )
             throw error
         }
     }
@@ -1160,7 +1197,11 @@ public class FileTransferEngine: ObservableObject {
     }
     
  /// 接收数据包 - 完整实现
-    private func receiveChunkPacket(from connection: P2PConnection) async throws -> FileChunkPacket {
+    private func receiveChunkPacket(
+        from connection: P2PConnection,
+        metadata: FileTransferMetadata,
+        expectedChunkIndex: Int
+    ) async throws -> FileChunkPacket {
         let nwConnection = getNWConnection(from: connection)
         
  // 接收数据包头（固定大小）
@@ -1204,11 +1245,33 @@ public class FileTransferEngine: ObservableObject {
         offset += 1
         
  // 解析timestamp (8字节) - 符合Swift 6.2.1最佳实践：未使用的值使用 _ 忽略
-        let _ = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.loadUnaligned(as: TimeInterval.self) }
+        let timestamp = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes {
+            $0.loadUnaligned(as: TimeInterval.self)
+        }
+        guard timestamp.isFinite else {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
         
+        let normalizedChecksum = checksum.trimmingCharacters(in: .whitespaces)
+        let dataLengthInt: Int
+        do {
+            dataLengthInt = try LegacyFileTransferWireContract.validatePacketHeader(
+                transferID: transferId,
+                chunkIndex: chunkIndex,
+                totalChunks: totalChunks,
+                dataLength: dataLength,
+                checksum: normalizedChecksum,
+                flags: flags,
+                metadata: metadata,
+                expectedChunkIndex: expectedChunkIndex
+            )
+        } catch {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
+
  // 接收数据块
-        let dataLengthInt = Int(dataLength)
         var chunkData = Data()
+        chunkData.reserveCapacity(dataLengthInt)
         var received = 0
         
         while received < dataLengthInt {
@@ -1237,7 +1300,7 @@ public class FileTransferEngine: ObservableObject {
             aeadTag: aeadTag,
             isCompressed: isCompressed,
             isEncrypted: isEncrypted,
-            checksum: checksum.trimmingCharacters(in: .whitespaces)
+            checksum: normalizedChecksum
         )
     }
     
@@ -1290,7 +1353,10 @@ public class FileTransferEngine: ObservableObject {
     }
     
  /// 等待传输完成
-    private func waitForTransferComplete(from connection: P2PConnection) async throws {
+    private func waitForTransferComplete(
+        from connection: P2PConnection,
+        expectedTransferId: String
+    ) async throws {
         let nwConnection = getNWConnection(from: connection)
         
         logger.debug("⏳ 等待传输完成确认")
@@ -1298,39 +1364,37 @@ public class FileTransferEngine: ObservableObject {
  // 接收完成消息（扩展格式：0x02 | transferId(36) | tagLen(2) | tag）
         let code = try await receiveData(length: 1, from: nwConnection)
         guard code.count == 1, code[0] == 0x02 else { throw FileTransferEngineError.networkError(underlying: nil) }
- // 尝试读取扩展信息（若旧版本未发送则读取会失败，容错）
-        do {
-            let extHeader = try await receiveData(length: 38, from: nwConnection)
-            let tid = String(data: extHeader.prefix(36), encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
-            let tagLen = extHeader.suffix(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).bigEndian }
-            var tag = Data()
-            if tagLen > 0 { tag = try await receiveData(length: Int(tagLen), from: nwConnection) }
-            let hex = hexString(tag)
-            logger.info("📎 完成确认包含 HMAC 标记: transferId=\(tid), tagLen=\(tag.count), tagHex=\(hex)")
-            NotificationCenter.default.post(name: Notification.Name("fileHmacTagReported"), object: nil, userInfo: [
-                "transferId": tid,
-                "hmacTagHex": hex
-            ])
-        } catch {
-            logger.debug("ℹ️ 完成确认不包含扩展 HMAC 标记（兼容旧版本）")
+        let extHeader = try await receiveData(length: 38, from: nwConnection)
+        guard let transferId = String(data: extHeader.prefix(36), encoding: .utf8)?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\0")),
+              transferId == expectedTransferId else {
+            throw FileTransferEngineError.networkError(underlying: nil)
         }
+        let tagLength = Int(
+            extHeader.suffix(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).bigEndian }
+        )
+        guard tagLength == 0 else {
+            throw FileTransferEngineError.networkError(underlying: nil)
+        }
+        logger.info("📎 完成确认扩展已校验: tagLength=\(tagLength, privacy: .public)")
         logger.debug("✅ 传输完成确认已收到")
     }
     
  /// 发送最终确认
-    private func sendFinalAcknowledgment(to connection: P2PConnection, transferId: String, hmacTag: Data?) async throws {
+    private func sendFinalAcknowledgment(to connection: P2PConnection, transferId: String) async throws {
         let nwConnection = getNWConnection(from: connection)
         
         logger.debug("📤 发送最终确认")
         
  // 扩展完成消息：0x02 | transferId(36) | tagLen(2) | tag
         var payload = Data([0x02])
-        var tidBytes = transferId.data(using: .utf8) ?? Data()
+        guard var tidBytes = transferId.data(using: .utf8), tidBytes.count <= 36 else {
+            throw FileTransferEngineError.networkError(underlying: nil)
+        }
         tidBytes.resize(to: 36, padding: 0)
         payload.append(tidBytes)
-        let tagLen = UInt16(hmacTag?.count ?? 0).bigEndian
+        let tagLen = UInt16(0).bigEndian
         payload.append(contentsOf: withUnsafeBytes(of: tagLen) { Array($0) })
-        if let tag = hmacTag { payload.append(tag) }
         try await sendData(payload, to: nwConnection)
     }
     
@@ -1353,6 +1417,27 @@ public class FileTransferEngine: ObservableObject {
  /// 发送数据包 - 完整实现，利用macOS 26.x的大数据优化
     private func sendChunkPacket(_ packet: FileChunkPacket, to connection: P2PConnection) async throws {
         let nwConnection = getNWConnection(from: connection)
+        guard packet.transferId.utf8.count == 36,
+              UUID(uuidString: packet.transferId)?.uuidString == packet.transferId,
+              packet.chunkIndex >= 0,
+              packet.totalChunks > 0,
+              packet.chunkIndex < packet.totalChunks,
+              packet.chunkIndex <= Int(UInt32.max),
+              packet.totalChunks <= LegacyFileTransferWirePolicy.maximumChunkCount else {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
+        do {
+            try ClassicTransferMetadataContract.validateSHA256Hex(packet.checksum)
+        } catch {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
+        if packet.isEncrypted {
+            guard packet.aeadNonce?.count == 12, packet.aeadTag?.count == 16 else {
+                throw FileTransferEngineError.encryptionError(underlying: nil)
+            }
+        } else if packet.aeadNonce != nil || packet.aeadTag != nil {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
         
  // 构建数据包头
         var header = Data()
@@ -1399,7 +1484,7 @@ public class FileTransferEngine: ObservableObject {
  // 应用速度限制（如果启用）- 符合Swift 6.2.1的MainActor使用规范
             let limiter = await MainActor.run { speedLimiter }
             if let limiter = limiter {
-                await limiter.waitIfNeeded(for: chunk.count)
+                try await limiter.waitIfNeeded(for: chunk.count)
             }
             
             try await sendData(chunk, to: nwConnection)
@@ -1421,49 +1506,119 @@ public class FileTransferEngine: ObservableObject {
     
  /// 发送数据到NWConnection - 利用macOS 26.x的性能优化
     private func sendData(_ data: Data, to connection: NWConnection) async throws {
-        return try await withCheckedThrowingContinuation { continuation in
- // macOS 26.x改进了NWConnection的send性能，特别是大数据传输
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        let operation = ClassicTransferSendOperation()
+        let timeoutTask = Task.detached(priority: .utility) {
+            do {
+                try await Task.sleep(
+                    for: .seconds(ClassicTransferInboundPolicy.frameSendTimeoutSeconds)
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                if operation.fail(error) {
+                    connection.cancel()
                 }
-            })
+                return
+            }
+            if operation.fail(FileTransferEngineError.connectionTimeout) {
+                connection.cancel()
+            }
         }
+        defer { timeoutTask.cancel() }
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                operation.install(continuation)
+                guard !operation.isCompleted else { return }
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error {
+                        if operation.fail(FileTransferEngineError.networkError(underlying: error)) {
+                            connection.cancel()
+                        }
+                    } else {
+                        _ = operation.succeed()
+                    }
+                })
+            }
+        }, onCancel: {
+            if operation.fail(FileTransferEngineError.transferCancelled) {
+                connection.cancel()
+            }
+        })
     }
     
  /// 从NWConnection接收数据 - 利用macOS 26.x的性能优化
-    private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
-        return try await withCheckedThrowingContinuation { continuation in
- // macOS 26.x改进了NWConnection的receive性能
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let data = data, data.count == length {
-                    continuation.resume(returning: data)
-                } else if let data = data, data.count < length {
- // 部分数据，继续接收
-                    Task {
-                        do {
-                            var fullData = data
-                            var received = data.count
-                            while received < length {
-                                let remaining = length - received
-                                let chunk = try await self.receiveData(length: remaining, from: connection)
-                                fullData.append(chunk)
-                                received += chunk.count
-                            }
-                            continuation.resume(returning: fullData)
-                        } catch {
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                } else {
-                    continuation.resume(throwing: FileTransferEngineError.networkError(underlying: nil))
+    private func receiveData(
+        length: Int,
+        from connection: NWConnection,
+        timeout: TimeInterval = ClassicTransferInboundPolicy.frameIdleTimeoutSeconds
+    ) async throws -> Data {
+        guard length >= 0, timeout > 0 else {
+            throw FileTransferEngineError.invalidProtocolChunk
+        }
+        let operation = ClassicTransferReceiveOperation(expectedLength: length)
+        let timeoutTask = Task.detached(priority: .utility) {
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch is CancellationError {
+                return
+            } catch {
+                if operation.fail(error) {
+                    connection.cancel()
                 }
+                return
+            }
+            if operation.fail(FileTransferEngineError.connectionTimeout) {
+                connection.cancel()
             }
         }
+        defer { timeoutTask.cancel() }
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                operation.install(continuation)
+                guard !operation.isCompleted else { return }
+
+                @Sendable func receiveMore() {
+                    guard let remaining = operation.remainingLength(), remaining > 0 else { return }
+                    connection.receive(
+                        minimumIncompleteLength: 1,
+                        maximumLength: remaining
+                    ) { data, _, isComplete, error in
+                        guard !operation.isCompleted else { return }
+                        if let error {
+                            _ = operation.fail(
+                                FileTransferEngineError.networkError(underlying: error)
+                            )
+                            return
+                        }
+                        if let data, !data.isEmpty {
+                            switch operation.append(data) {
+                            case .completed, .ignoredAfterCompletion:
+                                return
+                            case .overflow:
+                                if operation.fail(FileTransferEngineError.invalidProtocolChunk) {
+                                    connection.cancel()
+                                }
+                                return
+                            case .pending:
+                                break
+                            }
+                        }
+                        if isComplete {
+                            _ = operation.fail(FileTransferEngineError.connectionLost)
+                            return
+                        }
+                        guard !operation.isCompleted else { return }
+                        receiveMore()
+                    }
+                }
+
+                receiveMore()
+            }
+        }, onCancel: {
+            if operation.fail(FileTransferEngineError.transferCancelled) {
+                connection.cancel()
+            }
+        })
     }
     
  /// 计算校验和
@@ -1569,7 +1724,12 @@ public class FileTransferEngine: ObservableObject {
  /// 获取或创建对等方的主密钥（持久化在Keychain）
     private func getOrCreateMasterKey(for peerId: String) async throws -> SymmetricKey {
         let keychainKey = "ft-master-\(peerId)"
-        if let storedData = try? quantumKeyManager.retrieveKeyFromKeychain(identifier: keychainKey) {
+        if let storedData = try quantumKeyManager.retrieveKeyFromKeychainIfPresent(
+            identifier: keychainKey
+        ) {
+            guard storedData.count == 32 else {
+                throw EnhancedQuantumKeyManagerError.invalidKeychainPayload
+            }
             return SymmetricKey(data: storedData)
         }
         let newKey = try await quantumKeyManager.generateQuantumKey()
@@ -1598,94 +1758,15 @@ public class FileTransferEngine: ObservableObject {
         }
     }
 
- /// 组合密文格式：nonce(12) | ciphertext | tag(16)
-    private func combineEncryptedData(_ enc: EncryptedData) -> Data {
-        var out = Data()
-        out.append(enc.nonce)
-        out.append(enc.ciphertext)
-        out.append(enc.tag)
-        return out
-    }
-
- /// 拆分组合密文
-    private func splitEncryptedData(_ data: Data) throws -> EncryptedData {
- // AES.GCM 标准 nonce 12 字节，tag 16 字节
-        guard data.count >= 12 + 16 else { throw FileTransferEngineError.encryptionError(underlying: nil) }
-        let nonce = data.prefix(12)
-        let tag = data.suffix(16)
-        let ciphertext = data.dropFirst(12).dropLast(16)
-        return EncryptedData(ciphertext: Data(ciphertext), nonce: Data(nonce), tag: Data(tag))
-    }
-
- /// 加密数据（使用派生的会话密钥）
-    private func encryptData(_ data: Data, forPeer peerId: String) async throws -> Data {
-        let sessionKey = try await deriveSessionKey(for: peerId)
-        let base64 = data.base64EncodedString()
-        let enc = try await pqCrypto.encrypt(base64, using: sessionKey)
-        return enc.combined
-    }
-    
- /// 加密数据（详细版，返回AEAD字段）
-    private func encryptDataDetailed(_ data: Data, forPeer peerId: String) async throws -> EncryptedData {
-        let sessionKey = try await deriveSessionKey(for: peerId)
-        let base64 = data.base64EncodedString()
-        return try await pqCrypto.encrypt(base64, using: sessionKey)
-    }
-    
- /// 解密数据（使用派生的会话密钥）
-    private func decryptData(_ data: Data, fromPeer peerId: String) async throws -> Data {
-        let enc = try EncryptedData.from(combined: data)
-        let sessionKey = try await deriveSessionKey(for: peerId)
-        let base64 = try await pqCrypto.decrypt(enc, using: sessionKey)
-        guard let decoded = Data(base64Encoded: base64) else { throw FileTransferEngineError.encryptionError(underlying: nil) }
-        return decoded
-    }
-    
  /// 解密数据（详细版，使用AEAD字段）
     private func decryptDataDetailed(_ enc: EncryptedData, fromPeer peerId: String) async throws -> Data {
         let sessionKey = try await deriveSessionKey(for: peerId)
-        let base64 = try await pqCrypto.decrypt(enc, using: sessionKey)
-        guard let decoded = Data(base64Encoded: base64) else { throw FileTransferEngineError.encryptionError(underlying: nil) }
-        return decoded
-    }
-
- // MARK: - 流式预加密（针对大文件）
-    private func prepareStreamingEncryptedFile(for session: FileTransferSession) async throws -> (URL, EncryptedData) {
-        let key = try await deriveSessionKey(for: session.remoteDeviceId)
-        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
-        let tempURL = tempDir.appendingPathComponent("ft_enc_\(session.id).bin")
-        if FileManager.default.fileExists(atPath: tempURL.path) {
-            try? FileManager.default.removeItem(at: tempURL)
+        let encodedPayload = try await pqCrypto.decrypt(enc, using: sessionKey)
+        do {
+            return try LegacyFileTransferWireContract.decodeEncryptionPlaintext(encodedPayload)
+        } catch {
+            throw FileTransferEngineError.encryptionError(underlying: error)
         }
-        guard let inStream = InputStream(url: session.localURL),
-              let outStream = OutputStream(url: tempURL, append: false) else {
-            throw FileTransferEngineError.encryptionError(underlying: nil)
-        }
-        let streamer = PerformanceOptimizations.StreamingEncryptor(key: key, chunkSize: configuration.bufferSize)
-        try await streamer.encryptStream(from: inStream, to: outStream)
- // 生成整文件级 HMAC-SHA256 标记，作为汇总 AEAD tag（ciphertext/nonce为空）
-        let finalTag = try computeFileHMACTag(url: tempURL, key: key, chunkSize: configuration.bufferSize)
-        let aead = EncryptedData(ciphertext: Data(), nonce: Data(), tag: finalTag)
-        return (tempURL, aead)
-    }
-
- /// 计算整文件 HMAC-SHA256（用于流式加密的汇总标记）
-    private func computeFileHMACTag(url: URL, key: SymmetricKey, chunkSize: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { handle.closeFile() }
-        var hmac = HMAC<SHA256>.init(key: key)
-        while true {
-            let chunk = handle.readData(ofLength: chunkSize)
-            if chunk.isEmpty { break }
-            hmac.update(data: chunk)
-        }
-        let mac = hmac.finalize()
-        return Data(mac)
-    }
-
- /// 将二进制数据转换为十六进制字符串（调试用）
-    private func hexString(_ data: Data) -> String {
-        return data.map { String(format: "%02x", $0) }.joined()
     }
     
  /// 更新传输进度
@@ -1730,17 +1811,6 @@ public class FileTransferEngine: ObservableObject {
         lastBytesTransferred = totalBytes
     }
 
- /// 清理单次传输产生的流式临时密文（发送端预加密文件 / 接收端临时密文文件）
- /// 在每个传输的终止点调用，避免大文件加密传输在临时目录中永久泄漏密文副本。
-    private func cleanupStreamingArtifacts(for transferId: String) {
-        if let info = streamingEncryptedFiles.removeValue(forKey: transferId) {
-            try? FileManager.default.removeItem(at: info.url)
-        }
-        if let recvURL = streamingEncryptedRecvFiles.removeValue(forKey: transferId) {
-            try? FileManager.default.removeItem(at: recvURL)
-        }
-    }
-    
  /// 添加到历史记录
     private func addToHistory(_ session: FileTransferSession) {
         guard keepTransferHistory else { return }
@@ -1760,6 +1830,10 @@ public class FileTransferEngine: ObservableObject {
             ]
         )
         transferHistory.append(record)
+        if transferHistory.count > 100 {
+            transferHistory = Array(transferHistory.suffix(100))
+        }
+        enqueueHistoryAppend(record)
     }
 
     private func registerActiveTransfer(_ session: FileTransferSession, transferId: String) {
@@ -1772,45 +1846,219 @@ public class FileTransferEngine: ObservableObject {
         updateSystemAwakeAssertion()
     }
     
- /// 加载传输历史记录
+    /// 加载传输历史记录
     private func loadTransferHistory() {
- // 从统一受保护状态存储加载历史记录
-        transferHistory = Self.transferHistoryStore.load() ?? []
+        enqueueHistoryLoad()
     }
-    
- /// 保存传输历史记录
-    private func saveTransferHistory() {
-        try? Self.transferHistoryStore.save(transferHistory)
-    }
-    
- /// 计算文件校验和
-    nonisolated private func calculateFileChecksum(for url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var hasher = SHA256()
+
+    func awaitHistoryPersistence() async {
         while true {
-            let maybeChunk = try autoreleasepool { try handle.read(upToCount: 1_048_576) }
-            guard let chunk = maybeChunk, !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
+            let expectedGeneration = historyRequestGeneration
+            let task = historyPersistenceTask
+            await task?.value
+            guard expectedGeneration != historyRequestGeneration else { return }
         }
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func enqueueHistoryLoad() {
+        let requestGeneration = nextHistoryRequestGeneration()
+        let previousTask = historyPersistenceTask
+        let repository = Self.transferHistoryRepository
+        historyPersistenceTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            do {
+                let snapshot = try await repository.load()
+                self?.applyHistorySnapshot(snapshot, requestGeneration: requestGeneration)
+            } catch {
+                self?.recordHistoryPersistenceFailure(
+                    operation: .load,
+                    error: error,
+                    requestGeneration: requestGeneration
+                )
+            }
+        }
+    }
+
+    private func enqueueHistoryAppend(_ record: FileTransferRecord) {
+        let requestGeneration = nextHistoryRequestGeneration()
+        let previousTask = historyPersistenceTask
+        let repository = Self.transferHistoryRepository
+        historyPersistenceTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            do {
+                let snapshot = try await repository.append(record)
+                self?.applyHistorySnapshot(snapshot, requestGeneration: requestGeneration)
+            } catch {
+                self?.recordHistoryPersistenceFailure(
+                    operation: .append,
+                    error: error,
+                    requestGeneration: requestGeneration
+                )
+            }
+        }
+    }
+
+    private func enqueueHistoryClear() {
+        let requestGeneration = nextHistoryRequestGeneration()
+        let previousTask = historyPersistenceTask
+        let repository = Self.transferHistoryRepository
+        historyPersistenceTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            do {
+                let snapshot = try await repository.clear()
+                self?.applyHistorySnapshot(snapshot, requestGeneration: requestGeneration)
+            } catch {
+                self?.recordHistoryPersistenceFailure(
+                    operation: .clear,
+                    error: error,
+                    requestGeneration: requestGeneration
+                )
+            }
+        }
+    }
+
+    private func nextHistoryRequestGeneration() -> UInt64 {
+        historyRequestGeneration += 1
+        return historyRequestGeneration
+    }
+
+    private func applyHistorySnapshot(
+        _ snapshot: BoundedHistorySnapshot<FileTransferRecord>,
+        requestGeneration: UInt64
+    ) {
+        guard requestGeneration == historyRequestGeneration,
+              snapshot.generation >= appliedHistoryRepositoryGeneration else {
+            return
+        }
+        appliedHistoryRepositoryGeneration = snapshot.generation
+        transferHistory = snapshot.entries
+        historyPersistenceError = nil
+    }
+
+    private func recordHistoryPersistenceFailure(
+        operation: FileTransferHistoryPersistenceOperation,
+        error: Error,
+        requestGeneration: UInt64
+    ) {
+        guard requestGeneration == historyRequestGeneration else { return }
+        let failure = FileTransferHistoryPersistenceFailure(operation: operation, error: error)
+        historyPersistenceError = failure
+        logger.error(
+            "❌ 旧版传输历史持久化失败: operation=\(failure.operation, privacy: .public) domain=\(failure.domain, privacy: .private) code=\(failure.code, privacy: .public)"
+        )
     }
 
     private actor FileHashWorker {
-        func sha256Hex(url: URL, chunkSize: Int = 1_048_576) async throws -> String {
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            var hasher = SHA256()
-            while true {
-                try Task.checkCancellation()
-                let maybeChunk = try autoreleasepool { try handle.read(upToCount: chunkSize) }
-                guard let chunk = maybeChunk, !chunk.isEmpty else { break }
-                hasher.update(data: chunk)
-            }
-            let digest = hasher.finalize()
-            return digest.map { String(format: "%02x", $0) }.joined()
+        func sha256Hex(url: URL) async throws -> String {
+            let reader = try await ClassicTransferOutboundFileReadSession.open(
+                url: url,
+                tracksSHA256: false
+            )
+            let digest = try await reader.hashWholeFileAndClose()
+            return FileTransferEngine.lowercaseHex(digest)
         }
+
+        func merkleRoot(url: URL, chunkSize: Int) async throws -> String {
+            guard chunkSize >= LegacyFileTransferWirePolicy.minimumChunkSizeBytes,
+                  chunkSize <= LegacyFileTransferWirePolicy.maximumChunkSizeBytes else {
+                throw FileTransferEngineError.invalidProtocolMetadata
+            }
+            let fileSize = try await ClassicTransferSourceFileInspectionWorker.shared.regularFileSize(
+                at: url,
+                maximumSize: LegacyFileTransferWirePolicy.maximumFileSizeBytes
+            )
+            let reader = try await ClassicTransferOutboundFileReadSession.open(
+                url: url,
+                tracksSHA256: false
+            )
+            do {
+                var leafHashes: [Data] = []
+                if fileSize > 0 {
+                    let chunkCount = try LegacyFileTransferWireContract.expectedChunkCount(
+                        fileSize: fileSize,
+                        chunkSize: chunkSize
+                    )
+                    leafHashes.reserveCapacity(chunkCount)
+                    for index in 0..<chunkCount {
+                        try Task.checkCancellation()
+                        let offset = Int64(index) * Int64(chunkSize)
+                        let length = Int(min(Int64(chunkSize), fileSize - offset))
+                        let chunk = try await reader.read(
+                            offset: UInt64(offset),
+                            length: length
+                        )
+                        leafHashes.append(Data(SHA256.hash(data: chunk)))
+                    }
+                }
+                try await reader.close()
+
+                if leafHashes.isEmpty {
+                    return FileTransferEngine.lowercaseHex(Data(SHA256.hash(data: Data())))
+                }
+                var level = leafHashes
+                while level.count > 1 {
+                    try Task.checkCancellation()
+                    var nextLevel: [Data] = []
+                    nextLevel.reserveCapacity((level.count + 1) / 2)
+                    var index = 0
+                    while index < level.count {
+                        let left = level[index]
+                        let right = index + 1 < level.count ? level[index + 1] : left
+                        var combined = Data(capacity: left.count + right.count)
+                        combined.append(left)
+                        combined.append(right)
+                        nextLevel.append(Data(SHA256.hash(data: combined)))
+                        index += 2
+                    }
+                    level = nextLevel
+                }
+                return FileTransferEngine.lowercaseHex(level[0])
+            } catch {
+                let primaryError = error
+                do {
+                    try await reader.close()
+                } catch {
+                    throw FileTransferEngine.resourceCleanupFailure(
+                        primary: primaryError,
+                        cleanup: error
+                    )
+                }
+                throw primaryError
+            }
+        }
+    }
+
+    private actor FileTransformWorker {
+        func compressIfBeneficial(_ data: Data) throws -> ChunkCompressionResult {
+            try Task.checkCancellation()
+            return try FileTransferEngine.compressDataIfBeneficial(data)
+        }
+
+        func decompress(_ data: Data, maximumOutputSize: Int) throws -> Data {
+            try Task.checkCancellation()
+            return try FileTransferEngine.decompressData(
+                data,
+                maxOutputSize: maximumOutputSize
+            )
+        }
+    }
+
+    nonisolated private static func lowercaseHex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func resourceCleanupFailure(
+        primary: Error,
+        cleanup: Error
+    ) -> FileTransferEngineError {
+        let primaryError = primary as NSError
+        let cleanupError = cleanup as NSError
+        return .resourceCleanupFailed(
+            primaryDomain: primaryError.domain,
+            primaryCode: primaryError.code,
+            cleanupDomain: cleanupError.domain,
+            cleanupCode: cleanupError.code
+        )
     }
     
  /// 执行文件传输（旧版兼容方法）
@@ -1869,15 +2117,6 @@ public class FileTransferEngine: ObservableObject {
         
         powerAssertion.release()
 
- // 清理流式临时文件
-        for (_, info) in streamingEncryptedFiles {
-            try? FileManager.default.removeItem(at: info.url)
-        }
-        streamingEncryptedFiles.removeAll()
-        for (_, url) in streamingEncryptedRecvFiles {
-            try? FileManager.default.removeItem(at: url)
-        }
-        streamingEncryptedRecvFiles.removeAll()
         isCleanedUp = true
     }
 }
@@ -1887,7 +2126,11 @@ public class FileTransferEngine: ObservableObject {
 /// 文件传输错误类型 - 符合Swift 6.2.1的Sendable协议
 public enum FileTransferEngineError: LocalizedError, Sendable {
     case fileNotFound
+    case invalidSourceFile
     case invalidDestination
+    case invalidProtocolMetadata
+    case invalidProtocolChunk
+    case unsupportedLegacyEncryptedFileSize(maximumBytes: Int64)
     case connectionNotFound
     case transferRejected
     case transferCancelled
@@ -1897,18 +2140,31 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
     case compressionError(underlying: Error?)
     case connectionTimeout
     case connectionLost
-    case localIdentityUnavailable
     case retryLimitExceeded(attempts: Int)
     case insufficientPermissions
     case diskSpaceInsufficient(required: Int64, available: Int64)
     case securityThreatDetected(threatName: String)
+    case resourceCleanupFailed(
+        primaryDomain: String,
+        primaryCode: Int,
+        cleanupDomain: String,
+        cleanupCode: Int
+    )
     
     public var errorDescription: String? {
         switch self {
         case .fileNotFound:
             return "文件未找到"
+        case .invalidSourceFile:
+            return "源文件不是可安全读取的普通文件"
         case .invalidDestination:
             return "无效的目标路径"
+        case .invalidProtocolMetadata:
+            return "文件传输元数据无效"
+        case .invalidProtocolChunk:
+            return "文件传输数据块违反协议约束"
+        case .unsupportedLegacyEncryptedFileSize(let maximumBytes):
+            return "旧版传输协议不支持超过 \(formatBytes(maximumBytes)) 的加密文件，请使用新版文件传输"
         case .connectionNotFound:
             return "连接未找到"
         case .transferRejected:
@@ -1936,8 +2192,6 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
             return "连接超时"
         case .connectionLost:
             return "连接已断开"
-        case .localIdentityUnavailable:
-            return "本机协议身份不可用"
         case .retryLimitExceeded(let attempts):
             return "重试次数已达上限（\(attempts)次）"
         case .insufficientPermissions:
@@ -1946,6 +2200,13 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
             return "磁盘空间不足（需要: \(formatBytes(required)), 可用: \(formatBytes(available))）"
         case .securityThreatDetected(let threatName):
             return "检测到安全威胁: \(threatName)"
+        case .resourceCleanupFailed(
+            let primaryDomain,
+            let primaryCode,
+            let cleanupDomain,
+            let cleanupCode
+        ):
+            return "文件传输失败且资源清理失败（primary=\(primaryDomain):\(primaryCode), cleanup=\(cleanupDomain):\(cleanupCode)）"
         }
     }
     
@@ -1954,8 +2215,16 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
         switch self {
         case .networkError, .connectionTimeout, .connectionLost:
             return true
-        case .retryLimitExceeded, .fileNotFound, .invalidDestination, .localIdentityUnavailable,
-             .insufficientPermissions, .diskSpaceInsufficient:
+        case .retryLimitExceeded,
+             .fileNotFound,
+             .invalidSourceFile,
+             .invalidDestination,
+             .invalidProtocolMetadata,
+             .invalidProtocolChunk,
+             .unsupportedLegacyEncryptedFileSize,
+             .insufficientPermissions,
+             .diskSpaceInsufficient,
+             .resourceCleanupFailed:
             return false
         default:
             return false
@@ -2176,19 +2445,28 @@ public extension Notification.Name {
 
 // MARK: - 传输速度限制器（利用macOS 26.x的网络改进）
 
+public enum TransferSpeedLimiterError: Error, Sendable {
+    case invalidByteCount
+}
+
 /// 传输速度限制器 - 符合Swift 6.2.1的Sendable协议
-public actor TransferSpeedLimiter: @unchecked Sendable {
+public actor TransferSpeedLimiter {
     private let maxSpeed: Double // 字节/秒
     private var lastSendTime: Date = Date()
     private var bytesSent: Int64 = 0
     private let timeWindow: TimeInterval = 1.0 // 1秒时间窗口
     
     public init(maxSpeed: Double) {
+        precondition(maxSpeed > 0, "maxSpeed must be positive")
         self.maxSpeed = maxSpeed
     }
     
  /// 等待以确保不超过速度限制
-    public func waitIfNeeded(for bytes: Int) async {
+    public func waitIfNeeded(for bytes: Int) async throws {
+        try Task.checkCancellation()
+        guard bytes >= 0 else {
+            throw TransferSpeedLimiterError.invalidByteCount
+        }
         let now = Date()
         let elapsed = now.timeIntervalSince(lastSendTime)
         
@@ -2210,7 +2488,7 @@ public actor TransferSpeedLimiter: @unchecked Sendable {
             let waitTime = targetTime - elapsed
             
             if waitTime > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(waitTime * 1_000_000_000))
+                try await Task.sleep(for: .seconds(waitTime))
                 lastSendTime = Date()
                 bytesSent = 0
             }
@@ -2272,12 +2550,11 @@ public struct DeviceInfo: Codable, Sendable, Identifiable {
 @MainActor
 public class DeviceConnectionManager: ObservableObject {
     @Published public var devices: [String: DeviceInfo] = [:]
-    private let persistenceKey = "SkyBridge.DeviceConnections"
+    @Published public private(set) var persistenceError: DeviceConnectionPersistenceFailure?
     private let logger = Logger(subsystem: "com.skybridge.filetransfer", category: "DeviceManager")
     private static let devicesStore = CodablePersistenceStore<TransferDeviceCacheEnvelope<[String: DeviceInfo]>>(
         location: .protectedApplicationSupport(
-            path: "FileTransfer/device-connections.json",
-            legacyUserDefaultsKey: "SkyBridge.DeviceConnections"
+            path: "FileTransfer/device-connections.json"
         ),
         encoder: {
             let encoder = JSONEncoder()
@@ -2288,25 +2565,44 @@ public class DeviceConnectionManager: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             return decoder
-        }()
+        }(),
+        maximumPayloadBytes: 2 * 1_024 * 1_024
     )
- // 为传输设备缓存增加 schemaVersion 顶层信封，统一版本管理与迁移。
- // 当前版本采用 V2：使用 JSON 包装结构 { schemaVersion, payload }。
-    private let transferCacheSchemaVersion = 2
-    private struct TransferDeviceCacheEnvelope<T: Codable>: Codable {
-        let schemaVersion: Int
-        let payload: T
+    private let repository: DeviceConnectionRepository
+    private var persistenceTask: Task<Void, Never>?
+    private var persistenceRequestGeneration: UInt64 = 0
+    private var appliedRepositoryGeneration: UInt64 = 0
+    private enum PersistenceCommand: Sendable {
+        case load
+        case upsert(DeviceInfo)
+        case remove(String)
+        case updateStatus(id: String, status: ConnectionStatus)
+        case updateStatistics(id: String, bytesTransferred: Int64, speed: Double)
+        case clear
     }
     
     public init() {
-        loadDevices()
+        repository = DeviceConnectionRepository(store: Self.devicesStore)
+        enqueueLoad()
     }
     
  /// 添加或更新设备
     public func addOrUpdateDevice(_ device: DeviceInfo) {
-        devices[device.id] = device
-        saveDevices()
-        logger.info("📱 设备已添加/更新: \(device.name) (\(device.ipAddress))")
+        do {
+            try DeviceConnectionRepository.validateInput(device)
+        } catch {
+            recordPersistenceFailure(operation: .upsert, error: error)
+            return
+        }
+        guard devices[device.id] != nil || devices.count < DeviceConnectionRepository.maximumDeviceCount else {
+            recordPersistenceFailure(
+                operation: .upsert,
+                error: DeviceConnectionRepositoryError.capacityExceeded
+            )
+            return
+        }
+        enqueue(.upsert(device), operation: .upsert)
+        logger.info("📱 设备已添加/更新")
     }
     
  /// 获取设备
@@ -2316,111 +2612,117 @@ public class DeviceConnectionManager: ObservableObject {
     
  /// 移除设备
     public func removeDevice(id: String) {
-        devices.removeValue(forKey: id)
-        saveDevices()
-        logger.info("🗑️ 设备已移除: \(id)")
+        enqueue(.remove(id), operation: .remove)
+        logger.info("🗑️ 设备已移除")
     }
     
  /// 更新设备连接状态
     public func updateConnectionStatus(id: String, status: ConnectionStatus) {
-        guard var device = devices[id] else { return }
-        device.connectionStatus = status
-        if status == ConnectionStatus.connected {
-            device.lastConnected = Date()
-        }
-        devices[id] = device
-        saveDevices()
+        enqueue(.updateStatus(id: id, status: status), operation: .updateStatus)
     }
     
  /// 更新设备传输统计
     public func updateDeviceStats(id: String, bytesTransferred: Int64, speed: Double) {
-        guard var device = devices[id] else { return }
-        device.totalTransfers += 1
-        device.totalBytesTransferred += bytesTransferred
- // 计算新的平均速度（加权平均）
-        let totalTransfers = Double(device.totalTransfers)
-        device.averageSpeed = (device.averageSpeed * (totalTransfers - 1) + speed) / totalTransfers
-        devices[id] = device
-        saveDevices()
-    }
-    
- /// 保存设备列表 - 利用macOS 26.x的改进文件系统性能
-    private func saveDevices() {
-        do {
- // V2 写入使用顶层信封，包含 schemaVersion。
-            let env = TransferDeviceCacheEnvelope(schemaVersion: transferCacheSchemaVersion, payload: self.devices)
-            try Self.devicesStore.save(env)
-            logger.debug("💾 设备列表已保存: \(self.devices.count) 个设备")
-        } catch {
-            logger.error("❌ 保存设备列表失败: \(error.localizedDescription)")
-        }
-    }
-    
- /// 加载设备列表 - 利用macOS 26.x的改进文件系统性能
-    private func loadDevices() {
-        if let env = Self.devicesStore.load() {
-            if env.schemaVersion == transferCacheSchemaVersion {
-                self.devices = env.payload
-                logger.info("✅ 设备列表已加载(V2): \(self.devices.count) 个设备")
-                return
-            } else {
-                logger.warning("传输设备缓存版本不匹配(schemaVersion=\(env.schemaVersion))，将清空缓存重建")
-                try? Self.devicesStore.remove()
-                UserDefaults.standard.removeObject(forKey: persistenceKey)
-                self.devices = [:]
-                return
-            }
-        }
-
-        guard let data = UserDefaults.standard.data(forKey: persistenceKey) else {
-            logger.debug("📂 未找到保存的设备列表")
+        guard bytesTransferred >= 0, speed.isFinite, speed >= 0 else {
+            recordPersistenceFailure(
+                operation: .updateStatistics,
+                error: DeviceConnectionRepositoryError.invalidEntry
+            )
             return
         }
-        
- // 优先按 V2 顶层信封解析，版本不匹配则清理并降级为“无历史”。
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        if let env = try? decoder.decode(TransferDeviceCacheEnvelope<[String: DeviceInfo]>.self, from: data) {
-            if env.schemaVersion == transferCacheSchemaVersion {
-                self.devices = env.payload
-                try? Self.devicesStore.save(env)
-                UserDefaults.standard.removeObject(forKey: persistenceKey)
-                logger.info("✅ 设备列表已加载(V2): \(self.devices.count) 个设备")
-                return
-            } else {
-                logger.warning("传输设备缓存版本不匹配(schemaVersion=\(env.schemaVersion))，将清空缓存重建")
-                try? Self.devicesStore.remove()
-                UserDefaults.standard.removeObject(forKey: persistenceKey)
-                self.devices = [:]
-                return
-            }
-        }
-        
- // 兼容旧版(V1)——直接存储为 [String: DeviceInfo]，成功则迁移写回为 V2。
-        if let legacy = try? decoder.decode([String: DeviceInfo].self, from: data) {
-            self.devices = legacy
-            logger.info("📂 检测到旧版传输设备缓存(V1)，执行一次性迁移: \(legacy.count) 个设备")
-            let env = TransferDeviceCacheEnvelope(schemaVersion: transferCacheSchemaVersion, payload: legacy)
-            if (try? Self.devicesStore.save(env)) != nil {
-                UserDefaults.standard.removeObject(forKey: persistenceKey)
-                logger.debug("🔄 传输设备缓存已升级至统一受保护存储")
-            }
-            return
-        }
-        
-// 两种格式均解析失败，视为损坏缓存，直接清理。
-        logger.warning("传输设备缓存读取失败/版本不匹配，清理重建: \(String(data: data, encoding: .utf8) ?? "<binary>")")
-        try? Self.devicesStore.remove()
-        UserDefaults.standard.removeObject(forKey: persistenceKey)
-        self.devices = [:]
+        enqueue(
+            .updateStatistics(id: id, bytesTransferred: bytesTransferred, speed: speed),
+            operation: .updateStatistics
+        )
     }
     
  /// 清除所有设备
     public func clearAll() {
-        devices.removeAll()
-        try? Self.devicesStore.remove()
-        UserDefaults.standard.removeObject(forKey: persistenceKey)
+        enqueue(.clear, operation: .clear)
         logger.info("🗑️ 所有设备已清除")
+    }
+
+    func awaitPersistence() async {
+        while true {
+            let expectedGeneration = persistenceRequestGeneration
+            let task = persistenceTask
+            await task?.value
+            guard expectedGeneration == persistenceRequestGeneration else { continue }
+            return
+        }
+    }
+
+    private func enqueueLoad() {
+        enqueue(.load, operation: .load)
+    }
+
+    private func enqueue(
+        _ command: PersistenceCommand,
+        operation: DeviceConnectionPersistenceOperation
+    ) {
+        let nextGeneration = persistenceRequestGeneration.addingReportingOverflow(1)
+        precondition(!nextGeneration.overflow, "Device connection persistence generation overflow")
+        persistenceRequestGeneration = nextGeneration.partialValue
+        let requestGeneration = persistenceRequestGeneration
+        let previousTask = persistenceTask
+        let repository = self.repository
+        persistenceTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            do {
+                let snapshot: DeviceConnectionSnapshot
+                switch command {
+                case .load:
+                    snapshot = try await repository.load()
+                case let .upsert(device):
+                    snapshot = try await repository.upsert(device)
+                case let .remove(id):
+                    snapshot = try await repository.remove(id: id)
+                case let .updateStatus(id, status):
+                    snapshot = try await repository.updateStatus(id: id, status: status)
+                case let .updateStatistics(id, bytesTransferred, speed):
+                    snapshot = try await repository.updateStatistics(
+                        id: id,
+                        bytesTransferred: bytesTransferred,
+                        speed: speed
+                    )
+                case .clear:
+                    snapshot = try await repository.clear()
+                }
+                self?.apply(snapshot, requestGeneration: requestGeneration)
+            } catch {
+                self?.recordPersistenceFailure(
+                    operation: operation,
+                    error: error,
+                    requestGeneration: requestGeneration
+                )
+            }
+        }
+    }
+
+    private func apply(_ snapshot: DeviceConnectionSnapshot, requestGeneration: UInt64) {
+        guard requestGeneration == persistenceRequestGeneration,
+              snapshot.generation >= appliedRepositoryGeneration else {
+            return
+        }
+        appliedRepositoryGeneration = snapshot.generation
+        devices = snapshot.devices
+        persistenceError = nil
+        logger.debug("💾 设备列表已同步: count=\(self.devices.count, privacy: .public)")
+    }
+
+    private func recordPersistenceFailure(
+        operation: DeviceConnectionPersistenceOperation,
+        error: Error,
+        requestGeneration: UInt64? = nil
+    ) {
+        if let requestGeneration, requestGeneration != persistenceRequestGeneration {
+            return
+        }
+        let failure = DeviceConnectionPersistenceFailure(operation: operation, error: error)
+        persistenceError = failure
+        logger.error(
+            "❌ 设备列表持久化失败: operation=\(failure.operation, privacy: .public) domain=\(failure.domain, privacy: .private) code=\(failure.code, privacy: .public)"
+        )
     }
 }
 

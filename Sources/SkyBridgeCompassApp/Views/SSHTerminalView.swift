@@ -1,29 +1,36 @@
-import SwiftUI
 import AppKit
-import SkyBridgeCore
+import Combine
 import Foundation
+import SkyBridgeCore
+import SwiftUI
 
-/// SSH 交互式终端窗口视图
+/// SSH 交互式终端窗口视图。
+///
+/// 输出由单个 `NSTextStorage` 增量维护。SwiftUI 不接收完整 transcript，也不会在每个网络
+/// 批次上重新 split、解析 ANSI 或构造整份 `AttributedString`。
 struct SSHTerminalView: View {
+    let launchRequestID: UUID
+
     @EnvironmentObject private var sshLaunch: SSHLaunchContext
     @State private var session: SSHSession?
-    @State private var inputLine: String = ""
+    @State private var inputLine = ""
     @State private var connectError: String?
- // 终端滚动与缓冲控制
-    @AppStorage("ssh.autoScrollToBottom") private var autoScrollToBottom: Bool = true // 是否在新输出时自动滚动到底部
-    @State private var bufferedOutput: String = ""     // 环形缓冲区的当前文本视图
-    private let bufferLineLimit: Int = 2000             // 缓冲区行数上限，避免内存无限增长
+    @State private var terminalOperationError: String?
+    @StateObject private var terminalActions = SSHTerminalSurfaceActions()
+    @AppStorage("ssh.autoScrollToBottom") private var autoScrollToBottom = true
 
     var body: some View {
         VStack(spacing: 0) {
- // 工具栏
             HStack(spacing: 12) {
                 Button {
-                    session?.disconnect(); session = nil
-                } label: { Label("断开", systemImage: "xmark.circle") }
+                    session?.disconnect()
+                    session = nil
+                } label: {
+                    Label("断开", systemImage: "xmark.circle")
+                }
                 Spacer()
-                if let host = sshLaunch.host, let port = sshLaunch.port, let username = sshLaunch.username {
-                    Text("SSH: \(username)@\(host):\(port)")
+                if let presentation = connectionPresentation {
+                    Text("SSH: \(presentation.username)@\(presentation.host):\(presentation.port)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
@@ -35,148 +42,409 @@ struct SSHTerminalView: View {
             .padding(8)
             .background(.ultraThinMaterial)
 
- // 输出区（支持选择复制、滚动缓冲与自动滚动）
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(formatANSI(bufferedOutput))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                        .font(.system(.body, design: .monospaced))
-                        .background(Color.black.opacity(0.85))
-                        .textSelection(.enabled) // 启用文本选择，支持复制
-                    Color.clear.frame(height: 1).id("terminal-bottom-anchor")
-                }
-                .onChange(of: session?.outputText ?? "") { _, newValue in
- // 当输出变化时更新缓冲并根据设置滚动到底部
-                    bufferedOutput = trimToBufferLimit(newValue, limit: bufferLineLimit)
-                    if autoScrollToBottom {
-                        proxy.scrollTo("terminal-bottom-anchor", anchor: .bottom)
-                    }
+            Group {
+                if let session {
+                    SSHTerminalTranscriptView(
+                        session: session,
+                        autoScrollToBottom: autoScrollToBottom,
+                        actions: terminalActions
+                    )
+                } else {
+                    Color.black.opacity(0.85)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
- // 输入区
             HStack {
- // 使用 App 内封装的 NSTextFieldRepresentable 保持更好键盘体验
                 NSTextFieldRepresentable.textField(
                     text: $inputLine,
                     placeholder: "输入命令...",
-                    onRawKeyInput: { seq in
- // 将方向键等控制序列直接发送到远端 Shell（不追加换行）
-                        session?.send(seq)
+                    onRawKeyInput: { sequence in
+                        session?.send(sequence)
                     }
                 )
-                    .onSubmit {
-                        guard !inputLine.isEmpty else { return }
-                        session?.sendLine(inputLine)
-                        inputLine = ""
-                    }
- /* 原 TextField 作为备用
-                TextField("输入命令...", text: $inputLine, onCommit: {
-                    guard !inputLine.isEmpty else { return }
-                    session?.sendLine(inputLine)
-                    inputLine = ""
-                })
-                .textFieldStyle(.roundedBorder) */
-                Button("发送") {
-                    guard !inputLine.isEmpty else { return }
-                    session?.sendLine(inputLine)
-                    inputLine = ""
-                }
- // 自动滚动开关与复制/清空辅助按钮
+                .onSubmit { sendInputLine() }
+
+                Button("发送") { sendInputLine() }
+
                 Toggle("自动滚动", isOn: $autoScrollToBottom)
                     .toggleStyle(.switch)
                     .help("新输出到达时自动滚动到底部")
+
                 Button {
- // 复制缓冲区全部文本到粘贴板
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(bufferedOutput, forType: .string)
-                } label: { Label("复制全部", systemImage: "doc.on.doc") }
+                    do {
+                        try terminalActions.copyAll()
+                    } catch {
+                        terminalOperationError = error.localizedDescription
+                    }
+                } label: {
+                    Label("复制全部", systemImage: "doc.on.doc")
+                }
+
                 Button {
- // 清空缓冲区（不影响会话内部输出累积，仅清理视图缓冲）
-                    bufferedOutput = ""
-                } label: { Label("清空缓冲", systemImage: "trash") }
+                    terminalActions.clear()
+                } label: {
+                    Label("清空缓冲", systemImage: "trash")
+                }
             }
             .padding(8)
         }
-        .task { await startIfNeeded() }
-        .alert("连接失败", isPresented: Binding(get: { connectError != nil }, set: { if !$0 { connectError = nil } })) {
+        .task(id: launchRequestID) { await startIfNeeded() }
+        .onDisappear {
+            session?.disconnect()
+            session = nil
+            sshLaunch.clearPendingCredentials(requestID: launchRequestID)
+        }
+        .alert(
+            "连接失败",
+            isPresented: Binding(
+                get: { connectError != nil },
+                set: { if !$0 { connectError = nil } }
+            )
+        ) {
             Button("确定") { connectError = nil }
-        } message: { Text(connectError ?? "") }
+        } message: {
+            Text(connectError ?? "")
+        }
+        .alert(
+            "终端操作失败",
+            isPresented: Binding(
+                get: { terminalOperationError != nil },
+                set: { if !$0 { terminalOperationError = nil } }
+            )
+        ) {
+            Button("确定") { terminalOperationError = nil }
+        } message: {
+            Text(terminalOperationError ?? "")
+        }
+    }
+
+    private func sendInputLine() {
+        guard !inputLine.isEmpty else { return }
+        session?.sendLine(inputLine)
+        inputLine = ""
     }
 
     private func startIfNeeded() async {
-        guard session == nil,
-              let host = sshLaunch.host,
-              let port = sshLaunch.port,
-              let username = sshLaunch.username,
-              let password = sshLaunch.password else { return }
-        let s = SSHSession(host: host, port: port, username: username)
-        session = s
-        do { try await s.connect(password: password) } catch { await MainActor.run { self.connectError = error.localizedDescription } }
- // 初始化缓冲区为当前输出的剪裁结果
-        bufferedOutput = trimToBufferLimit(session?.outputText ?? "", limit: bufferLineLimit)
+        guard session == nil else { return }
+        guard let request = sshLaunch.consumeConnectionRequest(requestID: launchRequestID) else {
+            connectError = SSHLaunchContextError.requestExpired.localizedDescription
+            return
+        }
+        let newSession = SSHSession(
+            host: request.host,
+            port: request.port,
+            username: request.username
+        )
+        session = newSession
+        do {
+            try await newSession.connect(password: request.password)
+        } catch is CancellationError {
+            newSession.disconnect()
+        } catch {
+            connectError = error.localizedDescription
+        }
     }
 
- /// ANSI 颜色与样式格式化（简化版，支持常见SGR）
-    private func formatANSI(_ text: String) -> AttributedString {
-        var result = AttributedString("")
-        var currentAttrs = AttributeContainer()
-        var isBold = false
-        let parts = text.split(separator: "\u{001B}", omittingEmptySubsequences: false)
-        for part in parts {
-            if part.isEmpty { continue }
-            let str = String(part)
-            if str.first == "[" {
- // 解析 SGR 序列，如 "[31m" 或 "[0m"
-                if let mIdx = str.firstIndex(of: "m") {
-                    let codeStr = String(str[str.index(after: str.startIndex)..<mIdx])
-                    let remaining = String(str[str.index(after: mIdx)..<str.endIndex])
- // 更新样式
-                    for code in codeStr.split(separator: ";") {
-                        switch code {
-                        case "0": currentAttrs = AttributeContainer() // reset
-                        case "1": isBold = true
-                        case "4": currentAttrs.underlineStyle = .single
-                        case "30": currentAttrs.foregroundColor = .black
-                        case "31": currentAttrs.foregroundColor = .red
-                        case "32": currentAttrs.foregroundColor = .green
-                        case "33": currentAttrs.foregroundColor = .yellow
-                        case "34": currentAttrs.foregroundColor = .blue
-                        case "35": currentAttrs.foregroundColor = .purple
-                        case "36": currentAttrs.foregroundColor = .cyan
-                        case "37": currentAttrs.foregroundColor = .white
-                        default: break
-                        }
+    private var connectionPresentation: SSHLaunchPresentation? {
+        if let session {
+            return SSHLaunchPresentation(
+                host: session.host,
+                port: session.port,
+                username: session.username
+            )
+        }
+        return sshLaunch.presentation(for: launchRequestID)
+    }
+}
+
+@MainActor
+private protocol SSHTerminalSurfaceCommandTarget: AnyObject {
+    func copyAll() throws
+    func clear()
+}
+
+@MainActor
+private final class SSHTerminalSurfaceActions: ObservableObject {
+    private weak var target: (any SSHTerminalSurfaceCommandTarget)?
+
+    func attach(_ target: any SSHTerminalSurfaceCommandTarget) {
+        self.target = target
+    }
+
+    func detach(_ target: any SSHTerminalSurfaceCommandTarget) {
+        guard self.target === target else { return }
+        self.target = nil
+    }
+
+    func copyAll() throws {
+        guard let target else { throw SSHTerminalSurfaceError.unavailable }
+        try target.copyAll()
+    }
+
+    func clear() {
+        target?.clear()
+    }
+}
+
+private enum SSHTerminalSurfaceError: LocalizedError {
+    case unavailable
+    case pasteboardWriteFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            "终端视图当前不可用。"
+        case .pasteboardWriteFailed:
+            "无法将终端内容写入系统剪贴板。"
+        }
+    }
+}
+
+@MainActor
+private struct SSHTerminalTranscriptView: NSViewRepresentable {
+    let session: SSHSession
+    let autoScrollToBottom: Bool
+    let actions: SSHTerminalSurfaceActions
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(actions: actions)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor.black.withAlphaComponent(0.85)
+
+        let textView = NSTextView(frame: .zero)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = true
+        textView.backgroundColor = NSColor.black.withAlphaComponent(0.85)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: 0,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        scrollView.documentView = textView
+
+        context.coordinator.attach(
+            textView: textView,
+            session: session,
+            autoScrollToBottom: autoScrollToBottom
+        )
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        context.coordinator.attach(
+            textView: textView,
+            session: session,
+            autoScrollToBottom: autoScrollToBottom
+        )
+    }
+
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, SSHTerminalSurfaceCommandTarget {
+        private static let truncationMarker = "[earlier terminal history truncated]\n"
+
+        private let actions: SSHTerminalSurfaceActions
+        private weak var textView: NSTextView?
+        private weak var observedSession: SSHSession?
+        private var outputObservation: AnyCancellable?
+        private var historyIndex = SSHTerminalHistoryIndex()
+        private var lastSequence: UInt64 = 0
+        private var markerUTF16Length = 0
+        private var autoScrollToBottom = true
+
+        init(actions: SSHTerminalSurfaceActions) {
+            self.actions = actions
+        }
+
+        func attach(
+            textView: NSTextView,
+            session: SSHSession,
+            autoScrollToBottom: Bool
+        ) {
+            self.textView = textView
+            self.autoScrollToBottom = autoScrollToBottom
+            actions.attach(self)
+            guard observedSession !== session else { return }
+
+            outputObservation?.cancel()
+            observedSession = session
+            resetForNewSession()
+
+            let replay = session.terminalPresentationReplay
+            if replay.didTruncateEarlierOutput {
+                installTruncationMarkerIfNeeded()
+            }
+            for batch in replay.batches {
+                consume(batch)
+            }
+            outputObservation = session.$terminalPresentationBatch
+                .compactMap { $0 }
+                .sink { [weak self] batch in
+                    MainActor.assumeIsolated {
+                        self?.consume(batch)
                     }
-                    var segment = AttributedString(remaining)
-                    segment.mergeAttributes(currentAttrs)
-                    if isBold {
- // 使用粗体字体作为近似效果
-                        segment.font = .system(.body, design: .monospaced).bold()
-                    }
-                    result += segment
-                } else {
-                    result += AttributedString(str)
                 }
-            } else {
-                result += AttributedString(str)
+        }
+
+        func detach() {
+            outputObservation?.cancel()
+            outputObservation = nil
+            observedSession = nil
+            textView = nil
+            actions.detach(self)
+        }
+
+        func copyAll() throws {
+            guard let textView else { throw SSHTerminalSurfaceError.unavailable }
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            guard pasteboard.setString(textView.string, forType: .string) else {
+                throw SSHTerminalSurfaceError.pasteboardWriteFailed
             }
         }
-        return result
-    }
 
- /// 将原始输出按行截断到指定上限（环形缓冲思路）
- /// - Parameters:
- /// - text: 原始完整输出文本
- /// - limit: 保留的最大行数
- /// - Returns: 截断后的文本
-    private func trimToBufferLimit(_ text: String, limit: Int) -> String {
- // 为保证性能，仅按换行分割并保留最后 N 行
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.count > limit else { return text }
-        let start = max(0, lines.count - limit)
-        return lines[start...].joined(separator: "\n")
+        func clear() {
+            guard let textStorage = textView?.textStorage else { return }
+            textStorage.setAttributedString(NSAttributedString())
+            historyIndex.reset()
+            markerUTF16Length = 0
+            // The canonical parser is owned by the session pipeline. Clearing presentation
+            // history must not reset its live ANSI/control state. Clear the surface first so a
+            // persistent desynchronization marker republished synchronously by the session remains
+            // visible instead of being erased by this command.
+            observedSession?.clearTerminalOutputHistory()
+        }
+
+        private func resetForNewSession() {
+            historyIndex.reset()
+            lastSequence = 0
+            markerUTF16Length = 0
+            textView?.textStorage?.setAttributedString(NSAttributedString())
+        }
+
+        private func consume(_ batch: SSHTerminalPresentationBatch) {
+            guard batch.sequence > lastSequence else { return }
+            lastSequence = batch.sequence
+            guard !batch.operations.isEmpty,
+                  let textStorage = textView?.textStorage else {
+                return
+            }
+
+            var didTruncate = false
+            textStorage.beginEditing()
+            for operation in batch.operations {
+                switch operation {
+                case .append(let run):
+                    textStorage.append(
+                        NSAttributedString(
+                            string: run.text,
+                            attributes: attributes(for: run.style)
+                        )
+                    )
+                    let mutation = historyIndex.append(run.text)
+                    if mutation.prefixUTF16UnitsToRemove > 0 {
+                        textStorage.deleteCharacters(
+                            in: NSRange(
+                                location: markerUTF16Length,
+                                length: mutation.prefixUTF16UnitsToRemove
+                            )
+                        )
+                    }
+                    didTruncate = didTruncate || mutation.didTruncate
+
+                case .erasePreviousCharacter:
+                    erasePreviousCharacter(from: textStorage)
+                }
+            }
+            textStorage.endEditing()
+            if didTruncate {
+                installTruncationMarkerIfNeeded()
+            }
+            if autoScrollToBottom {
+                textView?.scrollToEndOfDocument(nil)
+            }
+        }
+
+        private func erasePreviousCharacter(from textStorage: NSTextStorage) {
+            let mutableString = textStorage.mutableString
+            guard mutableString.length > markerUTF16Length else { return }
+            let candidateIndex = mutableString.length - 1
+            let range = mutableString.rangeOfComposedCharacterSequence(at: candidateIndex)
+            guard range.location >= markerUTF16Length else { return }
+            let removedText = mutableString.substring(with: range)
+            // Backspace never crosses a completed transcript line boundary.
+            guard removedText != "\n" else { return }
+            textStorage.deleteCharacters(in: range)
+            historyIndex.removeSuffix(removedText)
+        }
+
+        private func installTruncationMarkerIfNeeded() {
+            guard markerUTF16Length == 0, let textStorage = textView?.textStorage else { return }
+            let marker = NSAttributedString(
+                string: Self.truncationMarker,
+                attributes: attributes(
+                    for: SSHTerminalTextStyle(
+                        foregroundColor: .brightYellow,
+                        isBold: false,
+                        isUnderlined: false
+                    )
+                )
+            )
+            textStorage.insert(marker, at: 0)
+            markerUTF16Length = (Self.truncationMarker as NSString).length
+        }
+
+        private func attributes(
+            for style: SSHTerminalTextStyle
+        ) -> [NSAttributedString.Key: Any] {
+            let weight: NSFont.Weight = style.isBold ? .bold : .regular
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: weight),
+                .foregroundColor: color(for: style.foregroundColor)
+            ]
+            if style.isUnderlined {
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
+            return attributes
+        }
+
+        private func color(for color: SSHTerminalANSIColor?) -> NSColor {
+            switch color {
+            case .black: .black
+            case .red: .systemRed
+            case .green: .systemGreen
+            case .yellow: .systemYellow
+            case .blue: .systemBlue
+            case .magenta: .systemPurple
+            case .cyan: .systemCyan
+            case .white: .white
+            case .brightBlack: .darkGray
+            case .brightRed: .systemRed
+            case .brightGreen: .systemGreen
+            case .brightYellow: .systemYellow
+            case .brightBlue: .systemBlue
+            case .brightMagenta: .systemPurple
+            case .brightCyan: .systemCyan
+            case .brightWhite, .none: .white
+            }
+        }
     }
 }

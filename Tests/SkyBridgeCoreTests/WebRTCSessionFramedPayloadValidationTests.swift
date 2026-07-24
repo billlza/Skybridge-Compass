@@ -415,6 +415,26 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(hostSource.contains("registry smoke auth requires a usable signed Supabase JWT"))
     }
 
+    @Test("real-device WebRTC host treats an injected auth file as a strict single authority")
+    func realDeviceSmokeHostFailsClosedOnInjectedAuthFileErrors() throws {
+        let hostSource = try readSource("Sources/LocalWebRTCSmokeHost/main.swift")
+
+        #expect(hostSource.contains("if let injected = try injectedAuthSession()"))
+        #expect(hostSource.contains("smoke auth session has multiple configured authorities"))
+        #expect(hostSource.contains("O_RDONLY | O_CLOEXEC | O_NOFOLLOW"))
+        #expect(hostSource.contains("openedMetadata.st_ino == pathMetadata.st_ino"))
+        #expect(!hostSource.contains("exportAuthContextIfRequested"))
+        #expect(!hostSource.contains("SKYBRIDGE_SMOKE_TOKEN_FILE"))
+        #expect(!hostSource.contains("SKYBRIDGE_SMOKE_TENANT_FILE"))
+        #expect(hostSource.contains("CrossNetworkConnectionManager.resolveTenantIdentifier("))
+        #expect(hostSource.contains("nebulaId: effectiveTenantID"))
+        #expect(!hostSource.contains("deriveTenantIdentifier(accessToken:"))
+        #expect(!hostSource.contains("userMetadata?[\"tenant_id\"]"))
+        #expect(!hostSource.contains("guard let data = try? Data(contentsOf: url)"))
+        #expect(!hostSource.contains("try? writeText(accessToken, to: tokenURL)"))
+        #expect(!hostSource.contains("try? writeText(effectiveTenant, to: tenantURL)"))
+    }
+
     @Test("WebRTC stream configuration ACK and nonblocking audio receiver startup are wired")
     func streamConfigurationAckAndNonblockingAudioReceiverStartupAreWired() throws {
         let hostSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")

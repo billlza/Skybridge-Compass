@@ -121,16 +121,6 @@ final class SystemImpactBenchTests: XCTestCase {
 
     // MARK: - Test entrypoint
 
-    func testFreshCSVAssemblyIncludesHeaderExactlyOnce() {
-        let header = "column_a,column_b\n"
-        let rows = "value_a,value_b\n"
-
-        let output = Self.freshCSV(header: header, rows: rows)
-
-        XCTAssertEqual(output, header + rows)
-        XCTAssertEqual(output.components(separatedBy: header).count - 1, 1)
-    }
-
     func testSystemImpactArtifactsCSV() async throws {
         try XCTSkipUnless(shouldRun, "Set SKYBRIDGE_RUN_SYSTEM_IMPACT=1 to run system-impact bench")
         try XCTSkipUnless(connectIterations > 0, "SKYBRIDGE_SYSTEM_IMPACT_CONNECT_ITERATIONS must be > 0")
@@ -151,10 +141,14 @@ final class SystemImpactBenchTests: XCTestCase {
         let csvPath = artifactsDir.appendingPathComponent("system_impact_\(runDate).csv")
 
         let header = "date,condition,suite,iteration,file_bytes,frame_bytes,t_connect_ms,t_first_frame_ms,t_file_total_ms,t_file_first_byte_ms\n"
-        var csv = ""
+        var csv = header
 
         // If appending, load existing counts to skip already-satisfied work.
         let existing = appendMode ? readExistingCounts(csvPath: csvPath) : ExistingCounts.empty
+        if appendMode, FileManager.default.fileExists(atPath: csvPath.path) {
+            // Avoid duplicating header when appending.
+            csv = ""
+        }
 
         let frameBytes = frameSize.w * frameSize.h * 4
         let fileBytesList = fileSizesMB.map { Int64($0) * 1024 * 1024 }
@@ -246,14 +240,14 @@ final class SystemImpactBenchTests: XCTestCase {
                 try handle.close()
             }
         } else {
-            try Self.freshCSV(header: header, rows: csv)
-                .write(to: csvPath, atomically: true, encoding: .utf8)
+            // Fresh write
+            if csv.isEmpty {
+                try header.write(to: csvPath, atomically: true, encoding: .utf8)
+            } else {
+                try (header + csv).write(to: csvPath, atomically: true, encoding: .utf8)
+            }
         }
         print("[SYSTEM-IMPACT] wrote \(csvPath.path)")
-    }
-
-    private static func freshCSV(header: String, rows: String) -> String {
-        header + rows
     }
 
     // MARK: - Append mode: existing counts

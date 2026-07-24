@@ -68,6 +68,13 @@ public actor HandshakeContext {
 
     private let kemIdentityStore: any HandshakeKEMIdentityStore
 
+    /// Q-Periapt is captured once at context creation. No handshake operation
+    /// may re-read the mutable process registry after this snapshot exists.
+    private let qPeriaptProvider: (any QPeriaptSessionBoundCryptoProvider)?
+    private let qPeriaptProviderIdentity: QPeriaptProviderIdentity?
+    private let frozenLocalOfferedSuites: [CryptoSuite]?
+    private let activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm?
+
  /// 对端 KEM 身份公钥（按套件）
     private let peerKEMPublicKeys: [CryptoSuite: Data]
 
@@ -140,7 +147,10 @@ public actor HandshakeContext {
         cryptoPolicy: CryptoPolicy,
         kemIdentityStore: any HandshakeKEMIdentityStore,
         localCapabilities: CryptoCapabilities,
-        peerKEMPublicKeys: [CryptoSuite: Data]
+        peerKEMPublicKeys: [CryptoSuite: Data],
+        qPeriaptProvider: (any QPeriaptSessionBoundCryptoProvider)?,
+        frozenLocalOfferedSuites: [CryptoSuite]?,
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm?
     ) {
         self.role = role
         self.cryptoProvider = cryptoProvider
@@ -153,6 +163,10 @@ public actor HandshakeContext {
         self.kemIdentityStore = kemIdentityStore
         self.localCapabilities = localCapabilities
         self.peerKEMPublicKeys = peerKEMPublicKeys
+        self.qPeriaptProvider = qPeriaptProvider
+        self.qPeriaptProviderIdentity = qPeriaptProvider?.qPeriaptProviderIdentity
+        self.frozenLocalOfferedSuites = frozenLocalOfferedSuites
+        self.activeProtocolSigningAlgorithm = activeProtocolSigningAlgorithm
     }
 
  // MARK: - Factory Method
@@ -177,7 +191,9 @@ public actor HandshakeContext {
         sePoPSignatureProvider: (any SePoPSignatureProvider)? = nil,
         cryptoPolicy: CryptoPolicy = .default,
         kemIdentityStore: (any HandshakeKEMIdentityStore)? = nil,
-        peerKEMPublicKeys: [CryptoSuite: Data] = [:]
+        peerKEMPublicKeys: [CryptoSuite: Data] = [:],
+        offeredSuites: [CryptoSuite]? = nil,
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil
     ) async throws -> HandshakeContext {
  // 获取本地能力
  // 注：CryptoProviderSelector.shared 是 static let，无需 await
@@ -185,6 +201,46 @@ public actor HandshakeContext {
         let localCapabilities = await selector.getLocalCapabilities()
         let signatureProvider = signatureProvider ?? ClassicProvider()
         let classicProvider = ClassicProvider()
+        let frozenSigningAlgorithm = activeProtocolSigningAlgorithm
+            ?? protocolSignatureProvider?.signatureAlgorithm
+
+        let qPeriaptWasOffered = offeredSuites?.contains {
+            $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+        } ?? false
+        let suppliedQPeriaptProvider = cryptoProvider as? any QPeriaptSessionBoundCryptoProvider
+        if suppliedQPeriaptProvider != nil, frozenSigningAlgorithm != .mlDSA65 {
+            throw HandshakeError.invalidState(
+                "Q-Periapt ABI2 requires an explicitly frozen ML-DSA-65 protocol identity"
+            )
+        }
+        let shouldCaptureQPeriapt = qPeriaptWasOffered || suppliedQPeriaptProvider != nil
+        let frozenQPeriaptProvider: (any QPeriaptSessionBoundCryptoProvider)?
+        if frozenSigningAlgorithm == .mlDSA65, shouldCaptureQPeriapt {
+            if let suppliedQPeriaptProvider {
+                frozenQPeriaptProvider = suppliedQPeriaptProvider
+            } else if QPeriaptPlatformPolicy.isEnabledForLocalRuntime(),
+                      let admittedProvider = QPeriaptPlatformPolicy.makeCryptoProvider() {
+                frozenQPeriaptProvider = admittedProvider
+            } else {
+                frozenQPeriaptProvider = nil
+            }
+        } else {
+            frozenQPeriaptProvider = nil
+        }
+
+        let admittedOfferedSuites = offeredSuites?.filter { suite in
+            suite.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId
+                || frozenQPeriaptProvider != nil
+        }
+        let frozenOfferedSuites: [CryptoSuite]?
+        if frozenQPeriaptProvider != nil {
+            // A session-bound Q provider is a single-suite authority. This also
+            // covers direct responder contexts whose caller omitted an offer
+            // list; `nil` must not reopen the classic provider path later.
+            frozenOfferedSuites = [.qperiaptABI2PolicyBound]
+        } else {
+            frozenOfferedSuites = admittedOfferedSuites
+        }
 
         let hybridProvider: (any CryptoProvider)?
         #if HAS_APPLE_PQC_SDK
@@ -212,7 +268,10 @@ public actor HandshakeContext {
             cryptoPolicy: cryptoPolicy,
             kemIdentityStore: kemIdentityStore ?? DefaultHandshakeKEMIdentityStore(),
             localCapabilities: localCapabilities,
-            peerKEMPublicKeys: peerKEMPublicKeys
+            peerKEMPublicKeys: peerKEMPublicKeys,
+            qPeriaptProvider: frozenQPeriaptProvider,
+            frozenLocalOfferedSuites: frozenOfferedSuites,
+            activeProtocolSigningAlgorithm: frozenSigningAlgorithm
         )
 
  // 生成 nonce
@@ -285,7 +344,8 @@ public actor HandshakeContext {
 
         return AuthenticatedRemoteAuthority(
             protocolSigningAlgorithm: protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased(),
+            protocolPublicKey: identityKeys.protocolPublicKey
         )
     }
 
@@ -333,12 +393,23 @@ public actor HandshakeContext {
         }
 
         let supportedSuites: [CryptoSuite]
-        if let offeredSuites {
+        if let frozenLocalOfferedSuites {
+            if let offeredSuites,
+               offeredSuites.map(\.wireId) != frozenLocalOfferedSuites.map(\.wireId) {
+                throw HandshakeError.invalidState(
+                    "MessageA offered suites differ from the context creation snapshot"
+                )
+            }
+            supportedSuites = try resolveSupportedSuites(
+                offeredSuites: frozenLocalOfferedSuites,
+                policy: policy
+            )
+        } else if let offeredSuites {
             supportedSuites = try resolveSupportedSuites(offeredSuites: offeredSuites, policy: policy)
         } else {
             supportedSuites = try resolveSupportedSuites(policy: policy)
         }
-        let messageACapabilities = Self.advertisedCapabilities(
+        let messageACapabilities = advertisedCapabilities(
             localCapabilities,
             for: supportedSuites
         )
@@ -355,7 +426,7 @@ public actor HandshakeContext {
                 }
                 let encapsResult: (encapsulatedKey: Data, sharedSecret: SecureBytes)
                 if suite == .qperiaptABI2PolicyBound {
-                    guard let policyBoundProvider = provider as? any ApplicationPolicyBoundCryptoProvider else {
+                    guard let policyBoundProvider = provider as? any ApplicationContextBoundCryptoProvider else {
                         throw HandshakeError.invalidState(
                             "Q-Periapt ABI2 provider does not expose its application-context contract"
                         )
@@ -496,39 +567,90 @@ public actor HandshakeContext {
         return signedMessage
     }
 
-    private static func advertisedCapabilities(
+    private func advertisedCapabilities(
         _ capabilities: CryptoCapabilities,
         for supportedSuites: [CryptoSuite]
     ) -> CryptoCapabilities {
-        guard supportedSuites.contains(.qperiaptABI2PolicyBound) else {
-            return capabilities
+        let withoutQPeriapt = capabilitiesWithoutQPeriaptOverlay(capabilities)
+        guard supportedSuites.contains(.qperiaptABI2PolicyBound),
+              let qPeriaptProviderIdentity else {
+            return withoutQPeriapt
         }
 
         return CryptoCapabilities(
-            supportedKEM: prependIfMissing(
+            supportedKEM: Self.replacingCanonicalAliases(
                 P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue,
-                to: capabilities.supportedKEM
+                in: withoutQPeriapt.supportedKEM
             ),
-            supportedSignature: prependIfMissing(
+            supportedSignature: Self.replacingCanonicalAliases(
                 P2PCryptoAlgorithm.mlDSA65.rawValue,
-                to: capabilities.supportedSignature
+                in: withoutQPeriapt.supportedSignature
             ),
-            supportedAuthProfiles: prependIfMissing(
-                QPeriaptPlatformPolicy.authProfile,
-                to: capabilities.supportedAuthProfiles
+            supportedAuthProfiles: [qPeriaptProviderIdentity.authProfile]
+                + withoutQPeriapt.supportedAuthProfiles.filter {
+                    !$0.hasPrefix("q-periapt-abi2-policy-v1/")
+                        && $0 != qPeriaptProviderIdentity.authProfile
+                },
+            supportedAEAD: Self.replacingCanonicalAliases(
+                P2PCryptoAlgorithm.aes256GCM.rawValue,
+                in: withoutQPeriapt.supportedAEAD
             ),
-            supportedAEAD: capabilities.supportedAEAD,
             pqcAvailable: true,
-            platformVersion: capabilities.platformVersion,
+            platformVersion: withoutQPeriapt.platformVersion,
             providerType: .qPeriapt
         )
     }
 
-    private static func prependIfMissing(_ value: String, to values: [String]) -> [String] {
-        if values.contains(value) {
-            return values
+    private func capabilitiesWithoutQPeriaptOverlay(
+        _ capabilities: CryptoCapabilities
+    ) -> CryptoCapabilities {
+        var signatures = capabilities.supportedSignature
+        if let activeProtocolSigningAlgorithm {
+            signatures.removeAll {
+                $0 == ProtocolSigningAlgorithm.mlDSA65.rawValue
+                    || $0 == ProtocolSigningAlgorithm.mlDSA87.rawValue
+            }
+            signatures.insert(activeProtocolSigningAlgorithm.rawValue, at: 0)
         }
-        return [value] + values
+
+        let providerType: CryptoProviderType
+        if capabilities.providerType == .qPeriapt {
+            switch cryptoProvider.tier {
+            case .nativePQC: providerType = .cryptoKitPQC
+            case .liboqsPQC: providerType = .liboqs
+            case .classic: providerType = .classic
+            case .qperiaptPQC: providerType = .liboqs
+            }
+        } else {
+            providerType = capabilities.providerType
+        }
+
+        return CryptoCapabilities(
+            supportedKEM: capabilities.supportedKEM.filter {
+                Self.canonicalCapabilityToken($0)
+                    != Self.canonicalCapabilityToken(
+                        P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue
+                    )
+            },
+            supportedSignature: signatures,
+            supportedAuthProfiles: capabilities.supportedAuthProfiles.filter {
+                !$0.hasPrefix("q-periapt-abi2-policy-v1/")
+            },
+            supportedAEAD: capabilities.supportedAEAD,
+            pqcAvailable: capabilities.pqcAvailable,
+            platformVersion: capabilities.platformVersion,
+            providerType: providerType
+        )
+    }
+
+    private static func replacingCanonicalAliases(
+        _ exactValue: String,
+        in values: [String]
+    ) -> [String] {
+        let canonicalExact = canonicalCapabilityToken(exactValue)
+        return [exactValue] + values.filter {
+            canonicalCapabilityToken($0) != canonicalExact
+        }
     }
 
     private static func decodeResponderCapabilities(from payload: Data) throws -> CryptoCapabilities {
@@ -589,7 +711,11 @@ public actor HandshakeContext {
         }
 
         if selectedSuite == .qperiaptABI2PolicyBound {
-            guard QPeriaptPlatformPolicy.isHandshakePeerEligible(capabilities) else {
+            guard let qPeriaptProviderIdentity,
+                  QPeriaptPlatformPolicy.isHandshakePeerEligible(
+                    capabilities,
+                    for: qPeriaptProviderIdentity
+                  ) else {
                 throw Self.responderCapabilityBindingFailure(
                     "Q-Periapt ABI2 signed-policy capability binding is invalid"
                 )
@@ -669,8 +795,7 @@ public actor HandshakeContext {
               Set(messageA.supportedSuites.map(\.wireId)).count == messageA.supportedSuites.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid or duplicate supported suite"))
         }
-        guard !messageA.keyShares.isEmpty,
-              messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
+        guard messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
               messageA.keyShares.count <= messageA.supportedSuites.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA keyShare count"))
         }
@@ -684,7 +809,7 @@ public actor HandshakeContext {
         for keyShare in messageA.keyShares {
             guard keyShare.suite.isNegotiable,
                   let index = supportedIndexes[keyShare.suite.wireId],
-                  index > previousIndex else {
+                  index >= previousIndex else {
                 throw HandshakeError.failed(
                     .invalidMessageFormat("MessageA keyShares are unsupported or out of order")
                 )
@@ -708,8 +833,7 @@ public actor HandshakeContext {
         _ messageA: HandshakeMessageA,
         policy: HandshakePolicy = .default,
         postSignatureValidation: (@Sendable (IdentityPublicKeys) async throws -> Void)? = nil,
-        secureEnclavePublicKey: Data? = nil,
-        rawSignaturePreimage: Data? = nil
+        secureEnclavePublicKey: Data? = nil
     ) async throws {
         RemoteControlSmokeStatusWriter.append("mac-handshake processA begin")
         guard !isZeroized else {
@@ -747,47 +871,18 @@ public actor HandshakeContext {
         }
 
         let canonicalPreimage = messageA.signaturePreimage
-        let canonicalDigest = SHA256.hash(data: canonicalPreimage).map { String(format: "%02x", $0) }.joined().prefix(16)
-        let rawDigest = rawSignaturePreimage.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined().prefix(16) }
-
  // 验证签名
-        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-canonical-start")
-        var isValid = try await verifyHandshakeData(
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-start")
+        let isValid = try await verifyHandshakeData(
             canonicalPreimage,
             signature: messageA.signature,
             publicKey: identityKeys.protocolPublicKey
         )
         try ensureActive(generation: generation)
-        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-canonical-done ok=\(isValid)")
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-done ok=\(isValid)")
         SkyBridgeLogger.p2p.info(
-            "🧪 processMessageA verify canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) sigBytes=\(messageA.signature.count, privacy: .public) pubBytes=\(identityKeys.protocolPublicKey.count, privacy: .public) preimageSha256=\(canonicalDigest, privacy: .public) ok=\(isValid, privacy: .public)"
+            "processMessageA canonical signature verification alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) sigBytes=\(messageA.signature.count, privacy: .public) pubBytes=\(identityKeys.protocolPublicKey.count, privacy: .public) ok=\(isValid, privacy: .public)"
         )
-
-        if !isValid,
-           let rawSignaturePreimage,
-           rawSignaturePreimage != canonicalPreimage {
-            RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-raw-start")
-            let rawValid = try await verifyHandshakeData(
-                rawSignaturePreimage,
-                signature: messageA.signature,
-                publicKey: identityKeys.protocolPublicKey
-            )
-            try ensureActive(generation: generation)
-            RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-raw-done ok=\(rawValid)")
-            SkyBridgeLogger.p2p.info(
-                "🧪 processMessageA verify raw alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) preimageSha256=\(rawDigest ?? "n/a", privacy: .public) ok=\(rawValid, privacy: .public)"
-            )
-            if rawValid {
-                SkyBridgeLogger.p2p.warning(
-                    "🧪 MessageA signature verified via raw-wire fallback alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public)"
-                )
-                isValid = true
-            }
-        } else if let rawDigest {
-            SkyBridgeLogger.p2p.info(
-                "🧪 processMessageA raw preimage matches canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) preimageSha256=\(rawDigest, privacy: .public)"
-            )
-        }
 
         guard isValid else {
             RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-failed")
@@ -883,7 +978,7 @@ public actor HandshakeContext {
             RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-decapsulate-start suite=\(selectedSuite.rawValue)")
             let sharedSecret: SecureBytes
             if selectedSuite == .qperiaptABI2PolicyBound {
-                guard let policyBoundProvider = provider as? any ApplicationPolicyBoundCryptoProvider else {
+                guard let policyBoundProvider = provider as? any ApplicationContextBoundCryptoProvider else {
                     throw HandshakeError.invalidState(
                         "Q-Periapt ABI2 provider does not expose its application-context contract"
                     )
@@ -1023,7 +1118,7 @@ public actor HandshakeContext {
 
             // 本端 capabilities 编码失败属内部不变量被破坏，必须显式失败，
             // 不得静默发送空载荷把内部错误伪装成"无能力"的合法握手。
-            let responderCapabilities = Self.advertisedCapabilities(
+            let responderCapabilities = advertisedCapabilities(
                 localCapabilities,
                 for: [suite]
             )
@@ -1038,7 +1133,7 @@ public actor HandshakeContext {
             kemSharedSecrets.removeValue(forKey: suite)
             v2PeerInitiatorContribution = nil
         } else {
-            let responderCapabilities = Self.advertisedCapabilities(
+            let responderCapabilities = advertisedCapabilities(
                 localCapabilities,
                 for: [suite]
             )
@@ -1172,7 +1267,6 @@ public actor HandshakeContext {
         guard messageB.serverNonce.count == 32 else {
             throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB nonce length"))
         }
-        try validateMessageBAdmission(messageB)
         if policy.requirePQC && !messageB.selectedSuite.isPQC {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
@@ -1258,7 +1352,12 @@ public actor HandshakeContext {
 
         let candidateTranscriptB = Data(SHA256.hash(data: messageB.transcriptBytes))
 
+ // 检查 suite 是否在 supportedSuites 且有 keyShare
         let selectedSuite = messageB.selectedSuite
+        guard sentSupportedSuites.contains(selectedSuite),
+              sentKeyShares[selectedSuite] != nil else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
 
         if selectedSuite.requiresV2EphemeralContribution {
             guard messageB.responderShare.count == 32 else {
@@ -1405,18 +1504,6 @@ public actor HandshakeContext {
         )
         completed = true
         return sessionKeys
-    }
-
-    /// Performs the initiator's structural MessageB admission before signature
-    /// verification or any identity-pinning/trust callback. The responder may
-    /// select only a currently negotiable suite for which this exact context
-    /// sent both an offer and a key share.
-    func validateMessageBAdmission(_ messageB: HandshakeMessageB) throws {
-        guard messageB.selectedSuite.isNegotiable,
-              sentSupportedSuites.contains(messageB.selectedSuite),
-              sentKeyShares[messageB.selectedSuite] != nil else {
-            throw HandshakeError.failed(.suiteNegotiationFailed)
-        }
     }
 
     private func commitProcessedMessageB(
@@ -1852,16 +1939,8 @@ extension HandshakeContext {
     private func providerForSuite(_ suite: CryptoSuite) -> (any CryptoProvider)? {
         guard suite.isNegotiable else { return nil }
 
-        // ABI2 is routable only after an authenticated PolicyBound runtime
-        // session has been installed. A preference or environment request alone
-        // cannot construct the provider or advertise the suite.
         if suite == .qperiaptABI2PolicyBound {
-            #if canImport(CQPeriapt)
-            if QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
-                return QPeriaptPlatformPolicy.makeCryptoProvider()
-            }
-            #endif
-            return nil
+            return qPeriaptProvider
         }
 
  // 显式按能力路由，避免 provider 同时支持多套件时的隐含假设
@@ -1875,18 +1954,6 @@ extension HandshakeContext {
             return classicProvider
         }
         return nil
-    }
-
-    /// Q-Periapt ABI2 PolicyBound 是否已被显式请求且完成运行时 admission。
-    ///
-    /// 默认 OFF。镜像 `CryptoProviderSelector.isQPeriaptBetaEnabled()` 的判定逻辑：
-    /// - 环境变量 `SB_ENABLE_QPERIAPT` 为真值（1/true/yes/on）；或
-    /// - UserDefaults 中 `SettingsStorageKeys.preferQPeriaptBeta` 为 true。
-    ///
-    /// 仅当签名策略与信任根已验证、持久化状态已提交、原生 ABI 与 round trip
-    /// 均通过，并且调用方明确请求该套件时才可能为真。
-    nonisolated static func isQPeriaptBetaEnabled() -> Bool {
-        QPeriaptPlatformPolicy.isEnabledForLocalRuntime()
     }
 
     private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
@@ -1998,6 +2065,10 @@ extension HandshakeContext {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
 
+        if suites.contains(.qperiaptABI2PolicyBound) {
+            return [.qperiaptABI2PolicyBound]
+        }
+
         return suites
     }
 
@@ -2038,6 +2109,10 @@ extension HandshakeContext {
 
         if suites.isEmpty {
             throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        if suites.contains(.qperiaptABI2PolicyBound) {
+            return [.qperiaptABI2PolicyBound]
         }
 
         let reserveSecondSlotForHybrid = cryptoPolicy.allowExperimentalHybrid && cryptoPolicy.advertiseHybrid && hybridProvider != nil
@@ -2117,12 +2192,13 @@ extension HandshakeContext {
            cryptoPolicy.requireHybridIfAvailable {
             if let forcedHybrid = messageA.supportedSuites.first(where: { suite in
                 guard suite.isHybrid else { return false }
+                if !isFrozenLocalSuiteOffered(suite) { return false }
                 if providerForSuite(suite) == nil { return false }
                 if !suiteMeetsHandshakePolicy(suite, policy: localPolicy) { return false }
                 if !suiteMeetsLocalCryptoPolicy(suite) { return false }
                 if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) { return false }
                 if suite == .qperiaptABI2PolicyBound,
-                   !QPeriaptPlatformPolicy.isHandshakePeerEligible(messageA.capabilities) {
+                   !isFrozenQPeriaptPeerEligible(messageA.capabilities) {
                     return false
                 }
                 if role == .initiator, peerKEMPublicKey(for: suite) == nil { return false }
@@ -2136,14 +2212,16 @@ extension HandshakeContext {
 
         for (index, suite) in messageA.supportedSuites.enumerated() {
             let reason: String?
-            if providerForSuite(suite) == nil {
+            if !isFrozenLocalSuiteOffered(suite) {
+                reason = "not_in_frozen_local_offer"
+            } else if providerForSuite(suite) == nil {
                 reason = "provider_unavailable"
             } else if !suiteMeetsHandshakePolicy(suite, policy: localPolicy) || !suiteMeetsLocalCryptoPolicy(suite) {
                 reason = "local_policy_rejected"
             } else if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) {
                 reason = "peer_policy_rejected"
             } else if suite == .qperiaptABI2PolicyBound,
-                      !QPeriaptPlatformPolicy.isHandshakePeerEligible(messageA.capabilities) {
+                      !isFrozenQPeriaptPeerEligible(messageA.capabilities) {
                 reason = "qperiapt_peer_capability_invalid"
             } else if role == .initiator, suite.isPQC && peerKEMPublicKey(for: suite) == nil {
                 reason = "missing_peer_kem_key"
@@ -2180,6 +2258,19 @@ extension HandshakeContext {
         }
 
         throw HandshakeError.failed(.suiteNegotiationFailed)
+    }
+
+    private func isFrozenLocalSuiteOffered(_ suite: CryptoSuite) -> Bool {
+        guard let frozenLocalOfferedSuites else { return true }
+        return frozenLocalOfferedSuites.contains { $0.wireId == suite.wireId }
+    }
+
+    private func isFrozenQPeriaptPeerEligible(_ capabilities: CryptoCapabilities) -> Bool {
+        guard let qPeriaptProviderIdentity else { return false }
+        return QPeriaptPlatformPolicy.isHandshakePeerEligible(
+            capabilities,
+            for: qPeriaptProviderIdentity
+        )
     }
 }
 

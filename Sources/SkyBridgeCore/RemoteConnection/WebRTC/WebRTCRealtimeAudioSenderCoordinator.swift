@@ -39,7 +39,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
         config: RemoteDesktopStreamConfiguration?,
         relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy,
         continuityState: RemoteRealtimeMediaAudioSender.ContinuityState? = nil
-    ) async -> StartedSender? {
+    ) async throws(CancellationError) -> StartedSender? {
         guard let config else {
             logger.info("🎧 WebRTC PQC media audio sender skipped: session=\(sessionID, privacy: .public) reason=missingStreamConfig")
             return nil
@@ -133,6 +133,8 @@ struct WebRTCRealtimeAudioSenderCoordinator {
                 sessionID
             )
             return StartedSender(sender: sender, endpoint: endpoint)
+        } catch let cancellation as CancellationError {
+            throw cancellation
         } catch {
             logger.warning(
                 "⚠️ WebRTC PQC media relay 不可用，保持视频优先并禁用旧音频回退: session=\(sessionID, privacy: .public) reason=\(CrossNetworkConnectionManager.mediaAdmissionFailureReason(for: error), privacy: .public) err=\(error.localizedDescription, privacy: .public)"

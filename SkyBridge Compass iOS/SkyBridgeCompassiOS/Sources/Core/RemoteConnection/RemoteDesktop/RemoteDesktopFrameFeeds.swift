@@ -5,6 +5,14 @@ import CoreVideo
 import Foundation
 
 @available(iOS 17.0, *)
+struct CameraFramePresentationContext: Equatable, Sendable {
+    let sessionGeneration: UInt64
+    let sessionID: String
+    let width: Int
+    let height: Int
+}
+
+@available(iOS 17.0, *)
 final class DecodedImageFrame: @unchecked Sendable {
     let image: CGImage
 
@@ -19,17 +27,20 @@ final class DecodedPixelBufferFrame: @unchecked Sendable {
     let width: Int
     let height: Int
     let presentationTimeStamp: CMTime
+    let cameraPresentationContext: CameraFramePresentationContext?
 
     init(
         pixelBuffer: CVPixelBuffer,
         width: Int,
         height: Int,
-        presentationTimeStamp: CMTime
+        presentationTimeStamp: CMTime,
+        cameraPresentationContext: CameraFramePresentationContext? = nil
     ) {
         self.pixelBuffer = pixelBuffer
         self.width = width
         self.height = height
         self.presentationTimeStamp = presentationTimeStamp
+        self.cameraPresentationContext = cameraPresentationContext
     }
 }
 
@@ -39,17 +50,20 @@ final class DisplaySampleBufferFrame: @unchecked Sendable {
     let width: Int
     let height: Int
     let presentationTimeStamp: CMTime
+    let cameraPresentationContext: CameraFramePresentationContext?
 
     init(
         sampleBuffer: CMSampleBuffer,
         width: Int,
         height: Int,
-        presentationTimeStamp: CMTime
+        presentationTimeStamp: CMTime,
+        cameraPresentationContext: CameraFramePresentationContext? = nil
     ) {
         self.sampleBuffer = sampleBuffer
         self.width = width
         self.height = height
         self.presentationTimeStamp = presentationTimeStamp
+        self.cameraPresentationContext = cameraPresentationContext
     }
 }
 

@@ -17,9 +17,11 @@ struct FileTransferView: View {
     @State private var shareItem: FilePreviewItem?
     @State private var fileOpenErrorMessage: String?
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var isUITestFilesScenario: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_FILES")
     }
+#endif
     
     var body: some View {
         NavigationStack {
@@ -313,33 +315,47 @@ struct FileTransferView: View {
 
     private func handleQuickSendTargetSelection(_ device: DiscoveredDevice) {
         targetDevice = device
+#if DEBUG || SKYBRIDGE_TESTING
         if isUITestFilesScenario {
             fileTransferManager.performUITestQuickSend(to: device)
-        } else {
-            showFilePicker = true
+            return
         }
+#endif
+        showFilePicker = true
     }
 
     private func openLocalFile(_ transfer: FileTransfer) {
-        guard let resolvedURL = fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
-            fileOpenErrorMessage = String(
-                format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
-                transfer.localPath ?? "Downloads/\(transfer.fileName)"
-            )
-            return
+        Task { @MainActor in
+            do {
+                guard let resolvedURL = try await fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
+                    fileOpenErrorMessage = String(
+                        format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
+                        transfer.localPath ?? "Downloads/\(transfer.fileName)"
+                    )
+                    return
+                }
+                previewItem = FilePreviewItem(url: resolvedURL)
+            } catch {
+                fileOpenErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
+            }
         }
-        previewItem = FilePreviewItem(url: resolvedURL)
     }
 
     private func shareLocalFile(_ transfer: FileTransfer) {
-        guard let resolvedURL = fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
-            fileOpenErrorMessage = String(
-                format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
-                transfer.localPath ?? "Downloads/\(transfer.fileName)"
-            )
-            return
+        Task { @MainActor in
+            do {
+                guard let resolvedURL = try await fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
+                    fileOpenErrorMessage = String(
+                        format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
+                        transfer.localPath ?? "Downloads/\(transfer.fileName)"
+                    )
+                    return
+                }
+                shareItem = FilePreviewItem(url: resolvedURL)
+            } catch {
+                fileOpenErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
+            }
         }
-        shareItem = FilePreviewItem(url: resolvedURL)
     }
 }
 
@@ -456,6 +472,20 @@ struct FileTransferCard: View {
                     .foregroundColor(.white.opacity(0.35))
                     .lineLimit(1)
             }
+
+            if transfer.receiptDeliveryStatus == .unknown {
+                Text(RuntimeLocalization.string("fileTransfer.receiptDeliveryUnknown"))
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+            }
+
+            if transfer.operationalWarning == .committedFileReleaseFailed {
+                Text(RuntimeLocalization.string("fileTransfer.committedFileReleaseFailed"))
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+            }
         }
         .padding(12)
         .background(Color.white.opacity(0.04))
@@ -495,11 +525,15 @@ struct FileTransferCard: View {
                     .tint(.cyan)
                     .scaleEffect(0.8)
             case .completed:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
+                Image(systemName: transfer.receiptDeliveryStatus == .unknown
+                    ? "exclamationmark.triangle.fill"
+                    : "checkmark.circle.fill")
+                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .green)
             case .failed:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
+                Image(systemName: transfer.receiptDeliveryStatus == .unknown
+                    ? "exclamationmark.triangle.fill"
+                    : "xmark.circle.fill")
+                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .red)
             }
         }
         .font(.body)
@@ -597,6 +631,20 @@ struct FileTransferHistoryCard: View {
                     .foregroundColor(.white.opacity(0.75))
                     .buttonStyle(.borderless)
                 }
+            }
+
+            if transfer.receiptDeliveryStatus == .unknown {
+                Text(RuntimeLocalization.string("fileTransfer.receiptDeliveryUnknown"))
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+            }
+
+            if transfer.operationalWarning == .committedFileReleaseFailed {
+                Text(RuntimeLocalization.string("fileTransfer.committedFileReleaseFailed"))
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
             }
         }
         .padding(12)

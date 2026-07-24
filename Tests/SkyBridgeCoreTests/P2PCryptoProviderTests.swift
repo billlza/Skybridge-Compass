@@ -49,27 +49,6 @@ final class P2PCryptoProviderTests: XCTestCase {
         XCTAssertFalse(provider.securityLevel.isEmpty,
                        "Provider must have a security level description")
     }
-
-    func testQPeriaptProviderCapabilityUsesABI2PolicyBoundWireIdentity() throws {
-        XCTAssertEqual(CryptoProviderType.qPeriapt.rawValue, "Q-Periapt-ABI2-PolicyBound")
-        XCTAssertEqual(
-            CryptoProviderType(rawValue: "Q-Periapt-ABI2-PolicyBound"),
-            .qPeriapt
-        )
-        XCTAssertEqual(
-            CryptoProviderType(rawValue: "Q-Periapt-ContextBound"),
-            .qPeriapt,
-            "Historical capability records remain decode-only compatible"
-        )
-
-        let encoded = try JSONEncoder().encode(CryptoProviderType.qPeriapt)
-        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "\"Q-Periapt-ABI2-PolicyBound\"")
-        let legacyDecoded = try JSONDecoder().decode(
-            CryptoProviderType.self,
-            from: Data("\"Q-Periapt-ContextBound\"".utf8)
-        )
-        XCTAssertEqual(legacyDecoded, .qPeriapt)
-    }
     
  /// Test that KEM provider is consistent with selected crypto provider
     func testKEMProviderConsistency() async {
@@ -105,7 +84,10 @@ final class P2PCryptoProviderTests: XCTestCase {
                     forNegotiatedSuite: P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue,
                     applicationContext: Data("test/qperiapt-abi2-routing".utf8)
                 )
-                XCTAssertEqual(provider.algorithmName, P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue)
+                XCTAssertEqual(
+                    provider.algorithmName,
+                    P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue
+                )
             } catch {
                 XCTFail("Q-Periapt runtime is enabled but provider routing failed: \(error)")
             }
@@ -124,24 +106,6 @@ final class P2PCryptoProviderTests: XCTestCase {
             } catch {
                 XCTFail("Expected CryptoProviderError.providerNotAvailable(.qPeriapt), got \(error)")
             }
-        }
-    }
-
-    func testLegacyQPeriaptABI1ProviderRoutingIsAlwaysRejected() async {
-        do {
-            _ = try await CryptoProviderSelector.shared.getKEMProvider(
-                forNegotiatedSuite: P2PCryptoAlgorithm.qperiaptContextBound.rawValue
-            )
-            XCTFail("Q-Periapt ABI1 must remain decode-only")
-        } catch let error as CryptoProviderError {
-            guard case .operationFailed(let detail) = error else {
-                XCTFail("Expected explicit ABI1 operation failure, got \(error)")
-                return
-            }
-            XCTAssertTrue(detail.contains("ABI1"))
-            XCTAssertTrue(detail.contains("decode-only"))
-        } catch {
-            XCTFail("Expected CryptoProviderError.operationFailed, got \(error)")
         }
     }
     

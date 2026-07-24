@@ -110,6 +110,36 @@ final class PQCSignatureProviderAutoFallbackSemanticsTests: XCTestCase {
         throw XCTSkip("OQSRAII not available")
         #endif
     }
+
+    func testMLDSA87UsesOQSOnlyForTheExplicitPublicKeyVerifier() throws {
+        #if canImport(OQSRAII)
+        XCTAssertFalse(
+            PQCSignatureProvider.shouldRetrySignWithLiboqs(
+                algorithm: .mlDSA87,
+                key: .softwareKey(Data(count: 4_896))
+            )
+        )
+        #if canImport(liboqs)
+        XCTAssertTrue(
+            PQCSignatureProvider.shouldRetryVerifyWithLiboqs(
+                algorithm: .mlDSA87,
+                signature: Data(count: 4_627),
+                publicKey: Data(count: 2_592)
+            )
+        )
+        #else
+        XCTAssertFalse(
+            PQCSignatureProvider.shouldRetryVerifyWithLiboqs(
+                algorithm: .mlDSA87,
+                signature: Data(count: 4_627),
+                publicKey: Data(count: 2_592)
+            )
+        )
+        #endif
+        #else
+        throw XCTSkip("OQSRAII not available")
+        #endif
+    }
     #endif
 
     /// liboqs 4032 字节私钥经 .auto 签名必须成功（覆盖 Apple 失败 → OQS 回退），

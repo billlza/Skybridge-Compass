@@ -906,7 +906,11 @@ public actor P2PChunkTransferService {
                 return true
             }
             group.addTask {
-                try? await Task.sleep(for: timeout)
+                do {
+                    try await Task.sleep(for: timeout)
+                } catch {
+                    return false
+                }
                 return false
             }
             let result = await group.next() ?? false
@@ -939,7 +943,12 @@ public actor P2PChunkTransferService {
 
             if ackFlushTasks[ack.transferId] == nil {
                 ackFlushTasks[ack.transferId] = Task { [transferId = ack.transferId] in
-                    try? await Task.sleep(for: .milliseconds(20))
+                    do {
+                        try await Task.sleep(for: .milliseconds(20))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
                     await self.flushAck(transferId: transferId, ackType: .received)
                 }
             }

@@ -27,6 +27,22 @@ struct CurrentPathHandshakeTrustProviderCompat: MultiFingerprintHandshakeTrustPr
     let expectedRemoteAuthority: CurrentPathRemoteAuthorityCompat?
     let fallbackPeerIDs: [String]
     let additionalTrustedFingerprints: Set<String>
+    let exactMLDSA87PublicKey: Data?
+
+    init(
+        expectedRemoteAuthority: CurrentPathRemoteAuthorityCompat?,
+        fallbackPeerIDs: [String],
+        additionalTrustedFingerprints: Set<String>,
+        exactMLDSA87PublicKey: Data? = nil
+    ) {
+        self.expectedRemoteAuthority = expectedRemoteAuthority
+        self.fallbackPeerIDs = fallbackPeerIDs
+        self.additionalTrustedFingerprints = additionalTrustedFingerprints
+        self.exactMLDSA87PublicKey = exactMLDSA87PublicKey
+            ?? (expectedRemoteAuthority?.protocolSigningAlgorithm == .mlDSA87
+                ? expectedRemoteAuthority?.protocolPublicKeyBytes
+                : nil)
+    }
 
     func trustedFingerprint(for deviceId: String) async -> String? {
         if let expectedRemoteAuthority,
@@ -54,13 +70,31 @@ struct CurrentPathHandshakeTrustProviderCompat: MultiFingerprintHandshakeTrustPr
         return fingerprints
     }
 
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data? {
+        guard algorithm == .mlDSA87,
+              let expectedRemoteAuthority,
+              deviceId == expectedRemoteAuthority.deviceId
+                || fallbackPeerIDs.contains(deviceId) else {
+            return nil
+        }
+        return exactMLDSA87PublicKey
+    }
+
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
         let pinnedFingerprints = await trustedFingerprints(for: deviceId)
         guard !pinnedFingerprints.isEmpty else { return [:] }
-        return await KEMTrustStore.shared.signedRefreshKEMPublicKeys(
+        let signedRefresh = await KEMTrustStore.shared.signedRefreshKEMPublicKeys(
             forAny: [deviceId] + fallbackPeerIDs,
             pinnedProtocolFingerprints: pinnedFingerprints
         )
+        let joinBootstrap = await KEMTrustStore.shared.authorityBoundBootstrapKEMPublicKeys(
+            forAny: [deviceId] + fallbackPeerIDs,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
+        return joinBootstrap.merging(signedRefresh) { _, signed in signed }
     }
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {

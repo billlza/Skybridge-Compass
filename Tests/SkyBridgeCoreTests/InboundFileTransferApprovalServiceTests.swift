@@ -43,6 +43,37 @@ final class InboundFileTransferApprovalServiceTests: XCTestCase {
         XCTAssertEqual(firstDecision, .reject)
     }
 
+    func testCancelledApprovalCallerIsReleasedAndPromptIsCleared() async throws {
+        let service = InboundFileTransferApprovalService.shared
+        service.userDismissedCurrentPrompt()
+
+        let request = Self.request()
+        let approvalTask = Task { @MainActor in
+            await service.decide(for: request)
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertNotNil(service.pendingRequest)
+
+        approvalTask.cancel()
+        let decision = await approvalTask.value
+        XCTAssertEqual(decision, .reject)
+        XCTAssertNil(service.pendingRequest)
+    }
+
+    func testProductionApprovalServiceHasNoEnvironmentAutoApproveBypass() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "Sources/SkyBridgeCore/FileTransfer/InboundFileTransferApprovalService.swift"
+            )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertFalse(source.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_INBOUND_FILE_TRANSFER"))
+        XCTAssertTrue(source.contains("maximumCoalescedWaiters = 8"))
+        XCTAssertTrue(source.contains("withTaskCancellationHandler"))
+    }
+
     private static func request(transferId: String = UUID().uuidString) -> InboundFileTransferApprovalService.Request {
         InboundFileTransferApprovalService.Request(
             transferId: transferId,

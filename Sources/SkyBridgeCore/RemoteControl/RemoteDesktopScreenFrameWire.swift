@@ -109,11 +109,11 @@ enum RemoteDesktopScreenFrameWire {
     static func decodeIfPresent(_ data: Data) -> Frame? {
         guard data.count >= headerSizeV1 else { return nil }
         guard readUInt32(from: data, offset: 0) == magic else { return nil }
-        let version = data[4]
+        let version = byte(in: data, at: 4)
         guard version == versionV1 || version == versionV2 else { return nil }
         let headerSize = version == versionV2 ? headerSizeV2 : headerSizeV1
         guard data.count >= headerSize else { return nil }
-        guard let codecTag = CodecTag(rawValue: data[5]) else { return nil }
+        guard let codecTag = CodecTag(rawValue: byte(in: data, at: 5)) else { return nil }
 
         let width = Int(readUInt32(from: data, offset: 8))
         let height = Int(readUInt32(from: data, offset: 12))
@@ -133,7 +133,7 @@ enum RemoteDesktopScreenFrameWire {
         return Frame(
             width: width,
             height: height,
-            imageData: data.subdata(in: headerSize..<data.count),
+            imageData: subdata(in: data, offsetRange: headerSize..<data.count),
             timestamp: TimeInterval(timestampMicros) / 1_000_000.0,
             format: codecTag.format,
             isSyncFrame: (flags & 0x0001) != 0,
@@ -149,12 +149,12 @@ enum RemoteDesktopScreenFrameWire {
     static func decodeChunkEnvelopeIfPresent(_ data: Data) -> ChunkEnvelope? {
         guard data.count >= screenChunkHeaderByteCount,
               readUInt32(from: data, offset: 0) == screenChunkMagic,
-              data[4] == screenChunkVersion,
+              byte(in: data, at: 4) == screenChunkVersion,
               Int(readUInt16(from: data, offset: 6)) == screenChunkHeaderByteCount else {
             return nil
         }
 
-        let flags = data[5]
+        let flags = byte(in: data, at: 5)
         let chunkIndex = Int(readUInt32(from: data, offset: 16))
         let chunkCount = Int(readUInt32(from: data, offset: 20))
         let totalBytes = Int(readUInt32(from: data, offset: 24))
@@ -175,7 +175,7 @@ enum RemoteDesktopScreenFrameWire {
             return nil
         }
 
-        let payload = data.subdata(in: payloadStart..<data.count)
+        let payload = subdata(in: data, offsetRange: payloadStart..<data.count)
         guard chunkOffset + payload.count <= totalBytes else { return nil }
         return ChunkEnvelope(
             frameId: readUInt64(from: data, offset: 8),
@@ -320,7 +320,7 @@ enum RemoteDesktopScreenFrameWire {
             }
             offset += 4
             guard length > 0, offset + length <= data.count else { break }
-            nalus.append(data.subdata(in: offset..<(offset + length)))
+            nalus.append(subdata(in: data, offsetRange: offset..<(offset + length)))
             offset += length
         }
         return nalus
@@ -330,10 +330,15 @@ enum RemoteDesktopScreenFrameWire {
         func startCodeLength(at index: Int) -> Int? {
             guard index + 3 <= data.count else { return nil }
             if index + 4 <= data.count,
-               data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x00, data[index + 3] == 0x01 {
+               byte(in: data, at: index) == 0x00,
+               byte(in: data, at: index + 1) == 0x00,
+               byte(in: data, at: index + 2) == 0x00,
+               byte(in: data, at: index + 3) == 0x01 {
                 return 4
             }
-            if data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x01 {
+            if byte(in: data, at: index) == 0x00,
+               byte(in: data, at: index + 1) == 0x00,
+               byte(in: data, at: index + 2) == 0x01 {
                 return 3
             }
             return nil
@@ -349,7 +354,7 @@ enum RemoteDesktopScreenFrameWire {
                 if let start = currentStart {
                     let naluStart = start + currentSkip
                     if naluStart < index {
-                        nalus.append(data.subdata(in: naluStart..<index))
+                        nalus.append(subdata(in: data, offsetRange: naluStart..<index))
                     }
                 }
                 currentStart = index
@@ -363,7 +368,7 @@ enum RemoteDesktopScreenFrameWire {
         if let start = currentStart {
             let naluStart = start + currentSkip
             if naluStart < data.count {
-                nalus.append(data.subdata(in: naluStart..<data.count))
+                nalus.append(subdata(in: data, offsetRange: naluStart..<data.count))
             }
         }
         return nalus
@@ -378,6 +383,16 @@ enum RemoteDesktopScreenFrameWire {
                 )
             )
         }
+    }
+
+    private static func byte(in data: Data, at offset: Int) -> UInt8 {
+        data[data.index(data.startIndex, offsetBy: offset)]
+    }
+
+    private static func subdata(in data: Data, offsetRange: Range<Int>) -> Data {
+        let lowerBound = data.index(data.startIndex, offsetBy: offsetRange.lowerBound)
+        let upperBound = data.index(data.startIndex, offsetBy: offsetRange.upperBound)
+        return data.subdata(in: lowerBound..<upperBound)
     }
 
     private static func appendUInt16(_ value: UInt16, to data: inout Data) {

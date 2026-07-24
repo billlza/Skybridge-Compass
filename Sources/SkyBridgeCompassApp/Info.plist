@@ -55,13 +55,13 @@
     <key>NEBULA_CLIENT_SECRET</key>
     <string></string>
     <key>SKYBRIDGE_UPDATE_MANIFEST_URL</key>
-    <string>https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json</string>
+    <string>https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json</string>
     <key>SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS</key>
     <string>skybridge-release-ed25519-2026-05:7YfzSjWPooUG0H+ZcMR1DSTub46Vgl+cIX09VsrOrGY=,skybridge-release-ed25519-2026-05-local:/qMG5MTYvBioM7VHZEfqUNt+lcPLNGNxgzZJ6M0sR+g=</string>
 
     <!-- 网络权限配置 -->
     <key>NSLocalNetworkUsageDescription</key>
-    <string>SkyBridge Compass Pro 需要访问本地网络以发现和连接附近的设备，实现安全的点对点通信和文件传输功能。</string>
+    <string>SkyBridge Compass Pro 需要访问本地网络，以发现和连接附近设备，并显示你明确配置的家庭摄像头视频流。</string>
 
     <!-- 摄像头/麦克风权限 -->
     <key>NSCameraUsageDescription</key>
@@ -96,6 +96,7 @@
         <string>_sftp-ssh._tcp</string>
         <string>_http._tcp</string>
         <string>_https._tcp</string>
+        <string>_rtsp._tcp</string>
     </array>
 
     <!-- 位置服务权限（用于网络发现、天气显示） -->

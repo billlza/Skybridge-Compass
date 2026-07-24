@@ -87,4 +87,43 @@ final class PeerProtocolIdentityBootstrapStoreTests: XCTestCase {
         XCTAssertEqual(keptPins, [kept])
         await store.clearForTesting()
     }
+
+    func testPersistenceFailureIsReturnedWhileDerivedRuntimeEntryRemainsAvailable() async throws {
+        let store = PeerProtocolIdentityBootstrapStore.shared
+        await store.clearForTesting()
+        await store.setPersistenceResultOverrideForTesting(false)
+        defer {
+            Task {
+                await store.setPersistenceResultOverrideForTesting(nil)
+                await store.clearForTesting()
+            }
+        }
+
+        let fingerprint = String(repeating: "f", count: 64)
+        let persisted = await store.upsert(deviceIds: ["id:cache-failure"], fingerprints: [fingerprint])
+        let runtimePins = await store.trustedFingerprints(forCandidates: ["id:cache-failure"])
+
+        XCTAssertFalse(persisted)
+        XCTAssertEqual(runtimePins, [fingerprint])
+    }
+
+    func testClearReportsPersistenceFailureInsteadOfSilentlyClaimingCleanup() async {
+        let store = PeerProtocolIdentityBootstrapStore.shared
+        await store.clearForTesting()
+        let first = String(repeating: "1", count: 64)
+        let second = String(repeating: "2", count: 64)
+        let firstPersisted = await store.upsert(deviceIds: ["id:first"], fingerprints: [first])
+        let secondPersisted = await store.upsert(deviceIds: ["id:second"], fingerprints: [second])
+        XCTAssertTrue(firstPersisted)
+        XCTAssertTrue(secondPersisted)
+        await store.setPersistenceResultOverrideForTesting(false)
+
+        let persisted = await store.clear(deviceIds: ["id:first"])
+        let runtimePins = await store.trustedFingerprints(forCandidates: ["id:first"])
+
+        XCTAssertFalse(persisted)
+        XCTAssertTrue(runtimePins.isEmpty)
+        await store.setPersistenceResultOverrideForTesting(nil)
+        await store.clearForTesting()
+    }
 }

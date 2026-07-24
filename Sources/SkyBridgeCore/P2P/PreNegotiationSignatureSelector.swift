@@ -67,11 +67,26 @@ public struct PreNegotiationSignatureSelector: Sendable {
  /// **Property 1: Pre-Negotiation Signature Algorithm Rule**
  /// **Validates: Requirements 1.1, 1.2, 1.4**
     public static func selectForMessageA(offeredSuites: [CryptoSuite]) -> SignatureAlgorithm {
+        selectForMessageA(
+            offeredSuites: offeredSuites,
+            pqcAlgorithm: .mlDSA65
+        )
+    }
+
+    public static func selectForMessageA(
+        offeredSuites: [CryptoSuite],
+        pqcAlgorithm: ProtocolSigningAlgorithm
+    ) -> SignatureAlgorithm {
  // 检查是否包含任何 PQC 或 Hybrid suite
  // isPQCGroup 是唯一分类函数
         let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
-        
-        return hasPQCOrHybrid ? .mlDSA65 : .ed25519
+        guard hasPQCOrHybrid else { return .ed25519 }
+        switch pqcAlgorithm {
+        case .mlDSA65, .mlDSA87:
+            return pqcAlgorithm.wire
+        case .ed25519:
+            return .ed25519
+        }
     }
     
  /// 根据 offeredSuites 选择 sigA 的签名算法（返回 SelectionResult）
@@ -84,12 +99,28 @@ public struct PreNegotiationSignatureSelector: Sendable {
  ///
  /// **Requirements: 6.3**
     public static func selectForMessageAResult(offeredSuites: [CryptoSuite]) -> SelectionResult {
+        selectForMessageAResult(
+            offeredSuites: offeredSuites,
+            pqcAlgorithm: .mlDSA65
+        )
+    }
+
+    public static func selectForMessageAResult(
+        offeredSuites: [CryptoSuite],
+        pqcAlgorithm: ProtocolSigningAlgorithm
+    ) -> SelectionResult {
         guard !offeredSuites.isEmpty else {
             return .empty
         }
         
         let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
-        let algorithm: ProtocolSigningAlgorithm = hasPQCOrHybrid ? .mlDSA65 : .ed25519
+        let algorithm: ProtocolSigningAlgorithm
+        if hasPQCOrHybrid {
+            guard pqcAlgorithm != .ed25519 else { return .empty }
+            algorithm = pqcAlgorithm
+        } else {
+            algorithm = .ed25519
+        }
         let provider = selectProvider(for: algorithm)
         
         return .success(algorithm: algorithm, provider: provider)
@@ -113,16 +144,12 @@ public struct PreNegotiationSignatureSelector: Sendable {
         selectedSuite: CryptoSuite,
         sigAAlgorithm: SignatureAlgorithm
     ) -> Bool {
-        guard selectedSuite.isNegotiable else {
-            return false
-        }
-
  // isPQC 涵盖 PQC + Hybrid，或者显式检查两者
         let isPQCOrHybrid = selectedSuite.isPQC || selectedSuite.isHybrid
         
         switch sigAAlgorithm {
-        case .mlDSA65:
- // sigA 是 ML-DSA-65，selectedSuite 必须是 PQC 或 Hybrid
+        case .mlDSA65, .mlDSA87:
+ // sigA 是 ML-DSA，selectedSuite 必须是 PQC 或 Hybrid
             return isPQCOrHybrid
             
         case .ed25519:
@@ -145,9 +172,11 @@ public struct PreNegotiationSignatureSelector: Sendable {
     @available(*, deprecated, message: "请使用 selectProvider(for: ProtocolSigningAlgorithm)。P-256 ECDSA 不允许用于主协议签名（sigA/sigB）。若需要 P-256（legacy 验证 / Secure Enclave PoP），请使用 P256SignatureProvider。")
     public static func selectProvider(for algorithm: SignatureAlgorithm) -> any ProtocolSignatureProvider {
         switch algorithm {
-        case .mlDSA65:
- // 优先使用 Apple PQC，回退到 OQS
-            return PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            guard let protocolAlgorithm = ProtocolSigningAlgorithm(from: algorithm) else {
+                return ClassicSignatureProvider()
+            }
+            return ProtocolSignatureProviderSelector.select(for: protocolAlgorithm)
             
         case .ed25519:
             return ClassicSignatureProvider()
@@ -169,8 +198,8 @@ public struct PreNegotiationSignatureSelector: Sendable {
  /// **Requirements: 1.1, 1.2, 3.4, 3.5**
     public static func selectProvider(for algorithm: ProtocolSigningAlgorithm) -> any ProtocolSignatureProvider {
         switch algorithm {
-        case .mlDSA65:
-            return PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            return ProtocolSignatureProviderSelector.select(for: algorithm)
         case .ed25519:
             return ClassicSignatureProvider()
         }
@@ -246,8 +275,8 @@ public struct HandshakeOfferedSuites: Sendable {
  /// 不使用静态的 CryptoSuite.allPQCSuites（会 offer 本地不支持的 suite）
  ///
  /// **规则**:
- /// - pqcOnly：只取可协商且 `isPQCGroup == true` 的套件
- /// - classicOnly：只取可协商且 `isPQCGroup == false` 的套件
+ /// - pqcOnly：只取 `isPQCGroup == true`
+ /// - classicOnly：只取 `isPQCGroup == false`
  /// - 过滤后为空：返回 `.empty(strategy)`（不偷偷变成其他算法）
  ///
  /// **Requirements: 9.1**
@@ -295,7 +324,7 @@ public struct HandshakeOfferedSuites: Sendable {
         
         switch strategy {
         case .pqcOnly:
-            let pqcSuites = availableSuites.filter { $0.isNegotiable && $0.isPQCGroup }
+            let pqcSuites = availableSuites.filter { $0.isPQCGroup && $0.isNegotiable }
             guard !pqcSuites.isEmpty else {
                 return .empty(strategy)
             }
@@ -320,7 +349,7 @@ public struct HandshakeOfferedSuites: Sendable {
                 }
             }
         case .classicOnly:
-            filtered = availableSuites.filter { $0.isNegotiable && !$0.isPQCGroup }
+            filtered = availableSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
         }
         
         guard !filtered.isEmpty else {

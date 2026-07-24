@@ -195,6 +195,7 @@ public actor DeviceIdentityKeyManager {
         static let mldsaPublicKeyLength = 1_952
         static let mldsaPrivateKeyLength = 4_032
         static let mldsaSignatureLength = 3_309
+        static let secureEnclaveMLDSAService = "com.skybridge.p2p.identity.protocol.secure-enclave.v1"
         static let mirroredDeviceIdDefaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
         static let mirroredProtocolSigningPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.ProtocolSigningPublicKey"
         static let mirroredMLDSAPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.MLDSA65PublicKey"
@@ -207,6 +208,7 @@ public actor DeviceIdentityKeyManager {
         if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
         if env["XCTestConfigurationFilePath"] != nil { return true }
         return NSClassFromString("XCTestCase") != nil
+            || NSClassFromString("XCTest.XCTestCase") != nil
         #else
         return false
         #endif
@@ -229,7 +231,21 @@ public actor DeviceIdentityKeyManager {
     }
 
     private func resolvedSharedIdentityKeychainScope() throws -> KeychainGenericPasswordScope {
-        try sharedIdentityScopeSource.resolve()
+        try effectiveSharedIdentityScopeSource.resolve()
+    }
+
+    /// The shipping singleton always requires the signed shared-access-group
+    /// entitlement. SwiftPM XCTest processes cannot carry that entitlement, so
+    /// their already-selected process-local backend receives an equally
+    /// explicit synthetic scope instead of accidentally reaching production
+    /// Keychain authority through one of the PQC helper layers.
+    private var effectiveSharedIdentityScopeSource: SkyBridgeSharedIdentityScopeSource {
+        #if DEBUG || SKYBRIDGE_TESTING
+        if Self.useInMemoryKeychain {
+            return .explicitForTesting(.inMemorySharedIdentityForTesting)
+        }
+        #endif
+        return sharedIdentityScopeSource
     }
     
  // MARK: - Properties
@@ -243,8 +259,12 @@ public actor DeviceIdentityKeyManager {
  /// 缓存的 Ed25519 协议签名密钥
     private var cachedProtocolSigningKey: (publicKey: Data, privateKey: Data)?
     
- /// 缓存的 ML-DSA-65 协议签名密钥
+    /// 缓存的 ML-DSA-65 协议签名密钥
     private var cachedMLDSASigningKey: (publicKey: Data, privateKey: Data)?
+    private var cachedMLDSA87SigningIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)?
+    private var cachedSecureEnclaveMLDSAIdentities: [
+        ProtocolSigningAlgorithm: SecureEnclaveMLDSAIdentityMaterial
+    ] = [:]
     
     /// 设备 ID
     private var _deviceId: String?
@@ -298,6 +318,22 @@ public actor DeviceIdentityKeyManager {
         return .testing("device-protocol-signing.\(testingStorageNamespace)")
     }
 
+    private var mldsa87StoreIdentity: String {
+        guard let testingStorageNamespace else {
+            return "device-protocol-signing-mldsa87"
+        }
+        return "device-protocol-signing-mldsa87.testing.\(testingStorageNamespace)"
+    }
+
+    private var secureEnclaveMLDSAService: String {
+        guard let testingStorageNamespace else {
+            return KeychainConstants.secureEnclaveMLDSAService
+        }
+        return KeychainConstants.secureEnclaveMLDSAService
+            + ".testing."
+            + testingStorageNamespace
+    }
+
     private var mldsaStoreDescriptor: PQCKeyPairStoreDescriptor {
         PQCKeyPairStoreDescriptor(
             backend: .liboqs,
@@ -311,7 +347,7 @@ public actor DeviceIdentityKeyManager {
                     service: mldsaStorageService,
                     account: KeychainConstants.mldsaCanonicalKeyPairAccount
                 ),
-                keychainScopeSource: sharedIdentityScopeSource,
+                keychainScopeSource: effectiveSharedIdentityScopeSource,
                 includeLegacyKeychain: true
             ),
             recordAlgorithmIdentifier: KeychainConstants.mldsaAlgorithmIdentifier
@@ -328,7 +364,7 @@ public actor DeviceIdentityKeyManager {
                 service: mldsaStorageService,
                 account: KeychainConstants.mldsaSecretKeyAccount
             ),
-            keychainScopeSource: sharedIdentityScopeSource,
+            keychainScopeSource: effectiveSharedIdentityScopeSource,
             includeLegacyKeychain: true
         )
     }
@@ -559,12 +595,31 @@ public actor DeviceIdentityKeyManager {
     public func getProtocolSigningKeyHandle(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> SigningKeyHandle {
+        try await getProtocolSigningIdentity(
+            for: algorithm,
+            protection: .softwareKeychain
+        ).keyHandle
+    }
+
+    /// Resolves the main-protocol signing identity under an explicit key
+    /// protection policy. The policy is part of the identity authority; a
+    /// Secure Enclave request never falls back to software.
+    public func getProtocolSigningIdentity(
+        for algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        if protection == .secureEnclaveRequired {
+            return try await getOrCreateSecureEnclaveMLDSAIdentity(for: algorithm)
+        }
         switch algorithm {
         case .ed25519:
-            return try await getProtocolSigningKeyHandle()
+            let publicKey = try await getProtocolSigningPublicKey()
+            let keyHandle = try await getProtocolSigningKeyHandle()
+            return (publicKey, keyHandle)
         case .mlDSA65:
-            let (_, keyHandle) = try await getOrCreateMLDSASigningKey()
-            return keyHandle
+            return try await getOrCreateMLDSASigningKey()
+        case .mlDSA87:
+            return try await getOrCreateMLDSA87SigningIdentity()
         }
     }
     
@@ -576,45 +631,125 @@ public actor DeviceIdentityKeyManager {
     public func getProtocolSigningPublicKey(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> Data {
-        switch algorithm {
-        case .ed25519:
-            return try await getProtocolSigningPublicKey()
-        case .mlDSA65:
-            let (publicKey, _) = try await getOrCreateMLDSASigningKey()
-            return publicKey
-        }
+        try await getProtocolSigningIdentity(
+            for: algorithm,
+            protection: .softwareKeychain
+        ).publicKey
+    }
+
+    public func getProtocolSigningPublicKey(
+        for algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> Data {
+        try await getProtocolSigningIdentity(
+            for: algorithm,
+            protection: protection
+        ).publicKey
     }
 
     /// 仅加载已存在的协议签名公钥；不会在缺失时补建 Keychain 条目。
     public func existingProtocolSigningPublicKey(
         for algorithm: ProtocolSigningAlgorithm
     ) async -> Data? {
-        switch algorithm {
-        case .ed25519:
-            do {
-                if let existing = try loadProtocolSigningKey() {
-                    cachedProtocolSigningKey = existing
-                    return existing.publicKey
-                }
-            } catch {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ 非交互读取现有 Ed25519 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
-                )
-            }
+        do {
+            return try await existingProtocolSigningPublicKey(
+                for: algorithm,
+                protection: .softwareKeychain
+            )
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ 非交互读取现有 \(algorithm.rawValue, privacy: .public) software 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
+            )
             return nil
+        }
+    }
 
-        case .mlDSA65:
-            do {
-                if let existing = try loadMLDSASigningKey() {
-                    cachedMLDSASigningKey = existing
-                    return existing.publicKey
-                }
-            } catch {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ 非交互读取现有 ML-DSA-65 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
+    /// Loads one exact `(algorithm, protection)` authority without creating or
+    /// switching key material. Software and Secure Enclave identities occupy
+    /// independent immutable slots and may coexist during peer re-pinning.
+    public func existingProtocolSigningPublicKey(
+        for algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> Data? {
+        switch protection {
+        case .secureEnclaveRequired:
+            return try loadSecureEnclaveMLDSARecord(for: algorithm)?.publicKey
+        case .softwareKeychain:
+            switch algorithm {
+            case .ed25519:
+                guard let existing = try loadProtocolSigningKey() else { return nil }
+                cachedProtocolSigningKey = existing
+                return existing.publicKey
+            case .mlDSA65:
+                guard let existing = try loadMLDSASigningKey() else { return nil }
+                cachedMLDSASigningKey = existing
+                return existing.publicKey
+            case .mlDSA87:
+                let persistedPublicKey = try OQSBridge.existingSigningPublicKey(
+                    peerId: mldsa87StoreIdentity,
+                    algorithm: .mldsa87,
+                    authority: .active,
+                    scopeSource: effectiveSharedIdentityScopeSource
                 )
+                guard let persistedPublicKey else { return nil }
+                if let cachedMLDSA87SigningIdentity,
+                   cachedMLDSA87SigningIdentity.publicKey != persistedPublicKey {
+                    throw DeviceIdentityKeyError.authorityConflict(
+                        "Cached ML-DSA-87 identity disagrees with its persisted authority"
+                    )
+                }
+                return persistedPublicKey
             }
-            return nil
+        }
+    }
+
+    /// Loads the complete signer from one exact committed authority slot.
+    /// Unlike `getProtocolSigningIdentity`, this never provisions a missing key.
+    public func existingProtocolSigningIdentity(
+        for algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle)? {
+        switch protection {
+        case .secureEnclaveRequired:
+            guard let record = try loadSecureEnclaveMLDSARecord(for: algorithm) else {
+                return nil
+            }
+            let material = try await restoreSecureEnclaveMLDSARecord(record)
+            cachedSecureEnclaveMLDSAIdentities[algorithm] = material
+            return (material.publicKey, .callback(material.signingCallback))
+
+        case .softwareKeychain:
+            switch algorithm {
+            case .ed25519:
+                guard let existing = try loadProtocolSigningKey() else { return nil }
+                cachedProtocolSigningKey = existing
+                return (existing.publicKey, .softwareKey(existing.privateKey))
+            case .mlDSA65:
+                guard let existing = try loadMLDSASigningKey() else { return nil }
+                cachedMLDSASigningKey = existing
+                return (existing.publicKey, .softwareKey(existing.privateKey))
+            case .mlDSA87:
+                guard let persistedPublicKey = try OQSBridge.existingSigningPublicKey(
+                    peerId: mldsa87StoreIdentity,
+                    algorithm: .mldsa87,
+                    authority: .active,
+                    scopeSource: effectiveSharedIdentityScopeSource
+                ) else {
+                    return nil
+                }
+                let resolved = try await OQSProtocolMLDSASigningCallback.resolve(
+                    algorithm: .mlDSA87,
+                    identity: mldsa87StoreIdentity,
+                    scopeSource: effectiveSharedIdentityScopeSource
+                )
+                guard resolved.publicKey == persistedPublicKey else {
+                    throw DeviceIdentityKeyError.authorityConflict(
+                        "Resolved ML-DSA-87 signer disagrees with its persisted authority"
+                    )
+                }
+                cachedMLDSA87SigningIdentity = resolved
+                return resolved
+            }
         }
     }
     
@@ -778,14 +913,29 @@ public actor DeviceIdentityKeyManager {
         pairingIdentityAdvertisedPQCSuites(
             using: provider,
             appleXWingAvailable: isAppleXWingAvailable(),
-            qPeriaptEnabled: QPeriaptPlatformPolicy.isEnabledForLocalRuntime()
+            qPeriaptEnabled: false,
+            activeProtocolSigningAlgorithm: nil
+        )
+    }
+
+    public nonisolated static func pairingIdentityAdvertisedPQCSuites(
+        using provider: any CryptoProvider,
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        qPeriaptEnabled: Bool
+    ) -> [CryptoSuite] {
+        pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: isAppleXWingAvailable(),
+            qPeriaptEnabled: qPeriaptEnabled,
+            activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
         )
     }
 
     public nonisolated static func pairingIdentityAdvertisedPQCSuites(
         using provider: any CryptoProvider,
         appleXWingAvailable: Bool,
-        qPeriaptEnabled: Bool = false
+        qPeriaptEnabled: Bool = false,
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil
     ) -> [CryptoSuite] {
         // Q-Periapt has an additional authenticated-runtime admission gate. Do
         // not let a provider's broad capability list bypass that product gate.
@@ -795,11 +945,9 @@ public actor DeviceIdentityKeyManager {
                 && $0.wireId != CryptoSuite.qperiaptABI2PolicyBound.wireId
         }
 
-        #if canImport(CQPeriapt)
-        if qPeriaptEnabled {
+        if qPeriaptEnabled, activeProtocolSigningAlgorithm == .mlDSA65 {
             suites.append(.qperiaptABI2PolicyBound)
         }
-        #endif
 
         if provider.tier == .nativePQC {
             if appleXWingAvailable {
@@ -828,7 +976,21 @@ public actor DeviceIdentityKeyManager {
         using provider: any CryptoProvider,
         limitingTo requestedSuites: [CryptoSuite]? = nil
     ) async throws -> [KEMPublicKeyInfo] {
-        var suites = Self.pairingIdentityAdvertisedPQCSuites(using: provider)
+        let activeIdentity = try await CommittedLocalProtocolIdentitySnapshot.loadActive(
+            keyManager: self
+        )
+        let frozenQPeriaptProvider: QPeriaptCryptoProvider?
+        if activeIdentity.algorithm == .mlDSA65,
+           QPeriaptPlatformPolicy.isEnabledForLocalRuntime() {
+            frozenQPeriaptProvider = QPeriaptPlatformPolicy.makeCryptoProvider()
+        } else {
+            frozenQPeriaptProvider = nil
+        }
+        var suites = Self.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            activeProtocolSigningAlgorithm: activeIdentity.algorithm,
+            qPeriaptEnabled: frozenQPeriaptProvider != nil
+        )
         if let requestedSuites {
             let requestedWireIds = Set(requestedSuites.map(\.wireId))
             suites = suites.filter { requestedWireIds.contains($0.wireId) }
@@ -840,14 +1002,21 @@ public actor DeviceIdentityKeyManager {
                 .filter { $0.isPQCGroup && $0.isNegotiable }
                 .map(\.wireId)
         )
-        if suites.contains(where: { $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId }) {
+        if frozenQPeriaptProvider != nil,
+           suites.contains(where: {
+               $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
+           }) {
             requiredWireIds.insert(CryptoSuite.qperiaptABI2PolicyBound.wireId)
         }
         var kemKeys: [KEMPublicKeyInfo] = []
         kemKeys.reserveCapacity(suites.count)
 
         for suite in suites {
-            let suiteProvider = try Self.pairingIdentityProvider(for: suite, baseProvider: provider)
+            let suiteProvider = try Self.pairingIdentityProvider(
+                for: suite,
+                baseProvider: provider,
+                qPeriaptProvider: frozenQPeriaptProvider
+            )
             do {
                 let publicKey = try await getKEMPublicKey(for: suite, provider: suiteProvider)
                 kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
@@ -866,17 +1035,15 @@ public actor DeviceIdentityKeyManager {
 
     private nonisolated static func pairingIdentityProvider(
         for suite: CryptoSuite,
-        baseProvider: any CryptoProvider
+        baseProvider: any CryptoProvider,
+        qPeriaptProvider: QPeriaptCryptoProvider?
     ) throws -> any CryptoProvider {
-        #if canImport(CQPeriapt)
         if suite == .qperiaptABI2PolicyBound {
-            guard QPeriaptPlatformPolicy.isEnabledForLocalRuntime(),
-                  let provider = QPeriaptPlatformPolicy.makeCryptoProvider() else {
+            guard let qPeriaptProvider else {
                 throw CryptoProviderError.providerNotAvailable(.qPeriapt)
             }
-            return provider
+            return qPeriaptProvider
         }
-        #endif
 
         #if HAS_APPLE_PQC_SDK
         if baseProvider.tier == .nativePQC {
@@ -1927,6 +2094,195 @@ public actor DeviceIdentityKeyManager {
         return (publicKey: publicKeyData, privateKey: privateKeyData)
     }
     
+ // MARK: - ML-DSA protocol identity protection
+
+    private func getOrCreateMLDSA87SigningIdentity() async throws -> (
+        publicKey: Data,
+        keyHandle: SigningKeyHandle
+    ) {
+        if let cachedMLDSA87SigningIdentity {
+            return cachedMLDSA87SigningIdentity
+        }
+        let resolved = try await OQSProtocolMLDSASigningCallback.resolve(
+            algorithm: .mlDSA87,
+            identity: mldsa87StoreIdentity,
+            scopeSource: effectiveSharedIdentityScopeSource
+        )
+        cachedMLDSA87SigningIdentity = resolved
+        return resolved
+    }
+
+    /// Returns the authoritative protection mode already persisted for an
+    /// algorithm. This is status, not user intent; absence means no identity
+    /// has been provisioned for that algorithm yet.
+    public func existingProtocolSigningKeyProtection(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> ProtocolSigningKeyProtection? {
+        if try loadSecureEnclaveMLDSARecord(for: algorithm) != nil {
+            return .secureEnclaveRequired
+        }
+        switch algorithm {
+        case .ed25519:
+            return try loadProtocolSigningKey() == nil ? nil : .softwareKeychain
+        case .mlDSA65:
+            return try loadMLDSASigningKey() == nil ? nil : .softwareKeychain
+        case .mlDSA87:
+            if cachedMLDSA87SigningIdentity != nil {
+                return .softwareKeychain
+            }
+            let publicKey = try OQSBridge.existingSigningPublicKey(
+                peerId: mldsa87StoreIdentity,
+                algorithm: .mldsa87,
+                authority: .active,
+                scopeSource: effectiveSharedIdentityScopeSource
+            )
+            return publicKey == nil ? nil : .softwareKeychain
+        }
+    }
+
+    private func getOrCreateSecureEnclaveMLDSAIdentity(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        guard algorithm != .ed25519 else {
+            throw SecureEnclaveMLDSAIdentityError.unsupportedAlgorithm(algorithm)
+        }
+        if let cached = cachedSecureEnclaveMLDSAIdentities[algorithm] {
+            return (cached.publicKey, .callback(cached.signingCallback))
+        }
+        if let existing = try loadSecureEnclaveMLDSARecord(for: algorithm) {
+            let material = try await restoreSecureEnclaveMLDSARecord(existing)
+            cachedSecureEnclaveMLDSAIdentities[algorithm] = material
+            return (material.publicKey, .callback(material.signingCallback))
+        }
+
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw SecureEnclaveMLDSAIdentityError.sdkUnavailable
+        }
+        let candidate = try await SecureEnclaveMLDSAIdentityFactory.create(
+            algorithm: algorithm
+        )
+        var candidateRecord = SecureEnclaveMLDSAIdentityRecord(
+            algorithm: algorithm,
+            publicKey: candidate.publicKey,
+            opaqueKeyRepresentation: candidate.opaqueKeyRepresentation
+        )
+        defer { candidateRecord.wipeOpaqueKeyRepresentation() }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var encoded = try encoder.encode(candidateRecord)
+        defer { encoded.secureErase() }
+        guard encoded.count <= SecureEnclaveMLDSAIdentityRecord.maximumEncodedSize else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Secure Enclave protocol identity record exceeds its size bound"
+            )
+        }
+
+        let scope = try resolvedSharedIdentityKeychainScope().authoritativeOnly()
+        _ = try KeychainManager.shared.insertKeyIfAbsent(
+            data: encoded,
+            service: secureEnclaveMLDSAService,
+            account: secureEnclaveMLDSAAccount(for: algorithm),
+            scope: scope
+        )
+        guard let winner = try loadSecureEnclaveMLDSARecord(for: algorithm) else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Secure Enclave protocol identity winner is missing after compare-and-set"
+            )
+        }
+        let material = try await restoreSecureEnclaveMLDSARecord(winner)
+        cachedSecureEnclaveMLDSAIdentities[algorithm] = material
+        return (material.publicKey, .callback(material.signingCallback))
+    }
+
+    private func loadSecureEnclaveMLDSARecord(
+        for algorithm: ProtocolSigningAlgorithm
+    ) throws -> SecureEnclaveMLDSAIdentityRecord? {
+        let scope = try resolvedSharedIdentityKeychainScope().authoritativeOnly()
+        let account = secureEnclaveMLDSAAccount(for: algorithm)
+        if let preferred = try loadSecureEnclaveMLDSARecord(
+            for: algorithm,
+            account: account,
+            scope: scope
+        ) {
+            return preferred
+        }
+
+        // Pre-release builds used only the algorithm as the account. Copy that
+        // immutable record into the versioned `(algorithm, protection)` slot;
+        // the old item is intentionally retained for rollback/read compatibility.
+        guard let legacy = try loadSecureEnclaveMLDSARecord(
+            for: algorithm,
+            account: algorithm.rawValue,
+            scope: scope
+        ) else {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var encoded = try encoder.encode(legacy)
+        defer { encoded.secureErase() }
+        _ = try KeychainManager.shared.insertKeyIfAbsent(
+            data: encoded,
+            service: secureEnclaveMLDSAService,
+            account: account,
+            scope: scope
+        )
+        guard let winner = try loadSecureEnclaveMLDSARecord(
+            for: algorithm,
+            account: account,
+            scope: scope
+        ), winner == legacy else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Secure Enclave protocol identity migration produced a conflicting winner"
+            )
+        }
+        return winner
+    }
+
+    private func secureEnclaveMLDSAAccount(
+        for algorithm: ProtocolSigningAlgorithm
+    ) -> String {
+        "protocol-signing|\(algorithm.rawValue)|\(ProtocolSigningKeyProtection.secureEnclaveRequired.rawValue)|v1"
+    }
+
+    private func loadSecureEnclaveMLDSARecord(
+        for algorithm: ProtocolSigningAlgorithm,
+        account: String,
+        scope: KeychainGenericPasswordScope
+    ) throws -> SecureEnclaveMLDSAIdentityRecord? {
+        guard var encoded = try KeychainManager.shared.exportKeyStrict(
+            service: secureEnclaveMLDSAService,
+            account: account,
+            scope: scope,
+            includeLegacyKeychain: false
+        ) else {
+            return nil
+        }
+        defer { encoded.secureErase() }
+        guard encoded.count <= SecureEnclaveMLDSAIdentityRecord.maximumEncodedSize else {
+            throw DeviceIdentityKeyError.corruptIdentityAuthority(
+                "Secure Enclave protocol identity record exceeds its size bound"
+            )
+        }
+        return try JSONDecoder().decode(
+            SecureEnclaveMLDSAIdentityRecord.self,
+            from: encoded
+        ).validated(for: algorithm)
+    }
+
+    private func restoreSecureEnclaveMLDSARecord(
+        _ record: SecureEnclaveMLDSAIdentityRecord
+    ) async throws -> SecureEnclaveMLDSAIdentityMaterial {
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw SecureEnclaveMLDSAIdentityError.sdkUnavailable
+        }
+        return try await SecureEnclaveMLDSAIdentityFactory.restore(
+            algorithm: record.algorithm,
+            publicKey: record.publicKey,
+            opaqueKeyRepresentation: record.opaqueKeyRepresentation
+        )
+    }
+
  // MARK: - ML-DSA-65 Protocol Signing Key Helpers ( 11.2, 11.3)
     
  /// 获取或创建 ML-DSA-65 协议签名密钥。

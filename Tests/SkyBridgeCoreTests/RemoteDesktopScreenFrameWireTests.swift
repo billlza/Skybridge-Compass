@@ -45,6 +45,37 @@ final class RemoteDesktopScreenFrameWireTests: XCTestCase {
         XCTAssertEqual(encoded.count, 36 + payload.count)
     }
 
+    func testBinaryScreenFrameWireDecodesNonZeroStartIndexSliceAndRejectsTruncation() throws {
+        let h264IDR = Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84])
+        var imageStorage = Data([0xA0, 0xA1])
+        imageStorage.append(h264IDR)
+        let imageSlice = imageStorage[2..<imageStorage.endIndex]
+        XCTAssertEqual(imageSlice.startIndex, 2)
+
+        let encoded = RemoteDesktopScreenFrameWire.encode(
+            width: 1280,
+            height: 720,
+            imageData: imageSlice,
+            timestamp: 123.5,
+            format: "h264",
+            isSyncFrame: false,
+            sequenceNumber: 77
+        )
+        var storage = Data([0xF0, 0xF1, 0xF2])
+        storage.append(encoded)
+        storage.append(0xF3)
+        let encodedSlice = storage[3..<(3 + encoded.count)]
+
+        XCTAssertEqual(encodedSlice.startIndex, 3)
+        let decoded = try XCTUnwrap(RemoteDesktopScreenFrameWire.decodeIfPresent(encodedSlice))
+        XCTAssertEqual(decoded.width, 1280)
+        XCTAssertEqual(decoded.height, 720)
+        XCTAssertEqual(decoded.imageData, h264IDR)
+        XCTAssertEqual(decoded.isSyncFrame, true)
+        XCTAssertEqual(decoded.sequenceNumber, 77)
+        XCTAssertNil(RemoteDesktopScreenFrameWire.decodeIfPresent(encodedSlice.dropLast()))
+    }
+
     func testBinaryScreenFrameWireIsSubstantiallyLeanerThanLegacyJSONEnvelope() throws {
         struct LegacyRemoteMessage: Codable {
             let type: String
@@ -109,6 +140,33 @@ final class RemoteDesktopScreenFrameWireTests: XCTestCase {
         XCTAssertEqual(decoded.totalBytes, 3_000)
         XCTAssertEqual(decoded.chunkOffset, 1_024)
         XCTAssertEqual(decoded.payload, payload)
+    }
+
+    func testScreenChunkEnvelopeDecodesNonZeroStartIndexSliceAndRejectsTruncation() throws {
+        let payload = Data([0x10, 0x20, 0x30, 0x40])
+        let encoded = try RemoteDesktopScreenFrameWire.encodeChunkEnvelope(
+            frameId: 90,
+            chunkIndex: 0,
+            chunkCount: 1,
+            totalBytes: payload.count,
+            chunkOffset: 0,
+            payload: payload
+        )
+        var storage = Data([0xA0, 0xA1])
+        storage.append(encoded)
+        storage.append(0xA2)
+        let encodedSlice = storage[2..<(2 + encoded.count)]
+
+        XCTAssertEqual(encodedSlice.startIndex, 2)
+        XCTAssertTrue(RemoteDesktopScreenFrameWire.startsWithChunkMagic(encodedSlice))
+        let decoded = try XCTUnwrap(
+            RemoteDesktopScreenFrameWire.decodeChunkEnvelopeIfPresent(encodedSlice)
+        )
+        XCTAssertEqual(decoded.frameId, 90)
+        XCTAssertEqual(decoded.payload, payload)
+        XCTAssertNil(
+            RemoteDesktopScreenFrameWire.decodeChunkEnvelopeIfPresent(encodedSlice.dropLast())
+        )
     }
 
     func testScreenChunkEnvelopeRejectsCorruptFlagMetadata() throws {
@@ -221,5 +279,31 @@ final class RemoteDesktopScreenFrameWireTests: XCTestCase {
                 advertisedSyncFrame: true
             )
         )
+    }
+
+    func testAudioChunkWireDecodesNonZeroStartIndexSliceAndRejectsTruncation() throws {
+        let payload = RemoteDesktopAudioChunkPayload(
+            encoding: .aacLC,
+            sampleRate: 48_000,
+            channelCount: 2,
+            frameCount: 1_024,
+            packetCount: 1,
+            packetDescriptions: [
+                .init(startOffset: 0, variableFramesInPacket: 1_024, dataByteSize: 4)
+            ],
+            magicCookie: Data([0x11, 0x22]),
+            sequenceNumber: 55,
+            sentAt: 123.5,
+            data: Data([0xDE, 0xAD, 0xBE, 0xEF])
+        )
+        let encoded = RemoteDesktopAudioChunkWire.encode(payload)
+        var storage = Data([0xB0, 0xB1, 0xB2, 0xB3])
+        storage.append(encoded)
+        storage.append(0xB4)
+        let encodedSlice = storage[4..<(4 + encoded.count)]
+
+        XCTAssertEqual(encodedSlice.startIndex, 4)
+        XCTAssertEqual(RemoteDesktopAudioChunkWire.decodeIfPresent(encodedSlice), payload)
+        XCTAssertNil(RemoteDesktopAudioChunkWire.decodeIfPresent(encodedSlice.dropLast()))
     }
 }

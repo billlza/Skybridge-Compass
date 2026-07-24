@@ -675,6 +675,164 @@ if app_identifier != expected_app_identifier:
 PY
 }
 
+skybridge_developer_id_distribution_profile_certificate_hashes() {
+  local profile_path="$1"
+
+  [[ -f "${profile_path}" ]] || {
+    echo "Developer ID provisioning profile does not exist: ${profile_path}" >&2
+    return 1
+  }
+
+  python3 - "${profile_path}" <<'PY'
+import datetime as dt
+import hashlib
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+
+def load_profile(path: Path):
+    payload = path.read_bytes()
+    try:
+        return plistlib.loads(payload)
+    except Exception:
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    print(f"could not decode Developer ID provisioning profile: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+profile_path = Path(sys.argv[1])
+profile = load_profile(profile_path)
+entitlements = profile.get("Entitlements") or {}
+
+if "OSX" not in (profile.get("Platform") or []):
+    print(f"profile is not a macOS profile: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+if profile.get("ProvisionsAllDevices") is not True:
+    print(f"profile is not a Developer ID direct-distribution profile: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+if "ProvisionedDevices" in profile:
+    print(f"Developer ID profile unexpectedly contains a device allow-list: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+if "get-task-allow" in entitlements:
+    print(f"Developer ID profile unexpectedly contains get-task-allow: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+
+expires = profile.get("ExpirationDate")
+if not isinstance(expires, dt.datetime):
+    print(f"Developer ID profile does not contain a valid expiration date: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+now = dt.datetime.now(tz=expires.tzinfo) if expires.tzinfo else dt.datetime.now()
+if expires <= now:
+    print(f"Developer ID profile has expired: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+
+certificates = profile.get("DeveloperCertificates") or []
+certificate_hashes = {
+    hashlib.sha1(bytes(certificate)).hexdigest().upper()
+    for certificate in certificates
+    if isinstance(certificate, (bytes, bytearray))
+}
+if not certificate_hashes:
+    print(f"Developer ID profile does not contain a usable developer certificate: {profile_path}", file=sys.stderr)
+    raise SystemExit(1)
+for certificate_hash in sorted(certificate_hashes):
+    print(certificate_hash)
+PY
+}
+
+skybridge_validate_developer_id_distribution_profile_certificate() {
+  local profile_path="$1"
+  local expected_certificate_sha1="$2"
+  local profile_certificate_hashes
+
+  [[ "${expected_certificate_sha1}" =~ ^[0-9A-Fa-f]{40}$ ]] || {
+    echo "Expected Developer ID certificate fingerprint is not a SHA-1 fingerprint." >&2
+    return 1
+  }
+  profile_certificate_hashes="$(
+    skybridge_developer_id_distribution_profile_certificate_hashes "${profile_path}"
+  )" || return 1
+  if ! printf '%s\n' "${profile_certificate_hashes}" \
+    | grep -Fxiq "${expected_certificate_sha1}"; then
+    echo "Developer ID profile does not include the selected signing certificate: ${profile_path}" >&2
+    return 1
+  fi
+}
+
+skybridge_select_unique_profile_bound_codesign_identity_hash() {
+  local authority_hashes="$1"
+  local profile_hashes="$2"
+  local matching_hashes=""
+  local match_count
+  local candidate_hash
+  local identity_hash
+
+  while IFS= read -r candidate_hash; do
+    [[ -n "${candidate_hash}" ]] || continue
+    [[ "${candidate_hash}" =~ ^[0-9A-F]{40}$ ]] || {
+      echo "Resolved code-signing identity does not have a valid SHA-1 fingerprint." >&2
+      return 1
+    }
+    if printf '%s\n' "${profile_hashes}" | grep -Fxq "${candidate_hash}"; then
+      matching_hashes+="${candidate_hash}"$'\n'
+    fi
+  done <<<"${authority_hashes}"
+
+  match_count="$(printf '%s\n' "${matching_hashes}" | awk 'NF { count += 1 } END { print count + 0 }')"
+  if [[ "${match_count}" != "1" ]]; then
+    echo "Packaged-product authority/profile certificate intersection is not unique (matches=${match_count})." >&2
+    return 1
+  fi
+  identity_hash="$(printf '%s\n' "${matching_hashes}" | sed -n '1p')"
+  printf '%s\n' "${identity_hash}"
+}
+
+skybridge_resolve_profile_bound_codesign_identity_hash() {
+  local profile_path="$1"
+  local expected_authority="$2"
+  local identities
+  local authority_hashes
+  local profile_hashes
+  local identity_hash
+
+  [[ "${expected_authority}" == Developer\ ID\ Application:* ]] || {
+    echo "Expected signing authority is not a Developer ID Application identity." >&2
+    return 1
+  }
+  if ! identities="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null)"; then
+    echo "Unable to enumerate valid local code-signing identities." >&2
+    return 1
+  fi
+
+  authority_hashes="$(printf '%s\n' "${identities}" | awk -F '"' -v identity="${expected_authority}" '
+    $2 == identity {
+      prefix = $1
+      sub(/^.*\) /, "", prefix)
+      gsub(/[[:space:]]/, "", prefix)
+      print toupper(prefix)
+    }
+  ' | awk '!seen[$0]++')"
+  profile_hashes="$(
+    skybridge_developer_id_distribution_profile_certificate_hashes "${profile_path}"
+  )" || return 1
+
+  identity_hash="$(
+    skybridge_select_unique_profile_bound_codesign_identity_hash \
+      "${authority_hashes}" \
+      "${profile_hashes}"
+  )" || return 1
+  printf '%s\n' "${identity_hash}"
+}
+
 skybridge_prepare_signing_entitlements() {
   local source_entitlements="$1"
   local output_entitlements="$2"

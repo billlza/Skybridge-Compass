@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import Dispatch
 import Security
 import CryptoKit
 
@@ -20,6 +21,9 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     case encodingError
     case decodingError
     case incompleteKeyMaterial(String)
+    case immutableStateCorrupt(String)
+    case immutableStateCycleRejected
+    case immutableStateTransitionLimitExceeded(maximum: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -29,6 +33,11 @@ public enum KeychainError: Error, LocalizedError, Sendable {
         case .encodingError: return "编码错误"
         case .decodingError: return "解码错误"
         case .incompleteKeyMaterial(let reason): return "密钥材料不完整: \(reason)"
+        case .immutableStateCorrupt(let reason): return "不可变状态损坏: \(reason)"
+        case .immutableStateCycleRejected:
+            return "不可变状态迁移会重复历史状态，已在写入前拒绝"
+        case .immutableStateTransitionLimitExceeded(let maximum):
+            return "不可变状态迁移链超过上限 \(maximum)，需要受控重新注册"
         }
     }
 }
@@ -41,18 +50,33 @@ enum IOSKeychainInsertResult: Sendable, Equatable {
 // MARK: - Keychain Manager
 
 /// 钥匙串管理器
+///
+/// Actor 隔离只保证互斥，不保证同步 Security.framework 调用离开主线程。
+/// 认证与配置 API 通过此 actor 的专用串行执行器运行；历史 nonisolated
+/// 密钥 API 继续由现有调用方负责线程边界。
 @available(iOS 17.0, *)
 public actor KeychainManager {
-    
+
     public static let shared = KeychainManager()
+    private nonisolated let keychainExecutor = IOSKeychainSerialExecutor(
+        label: "com.skybridge.compass.ios.keychain"
+    )
+
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        keychainExecutor.asUnownedSerialExecutor()
+    }
     
     private init() {}
     
     // MARK: - Test Mode Support
     
     private nonisolated static var useInMemoryKeychain: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
         if ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
         return SkyBridgeRuntimeEnvironment.isRunningUnderXCTest
+#else
+        false
+#endif
     }
 
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
@@ -67,14 +91,33 @@ public actor KeychainManager {
         account: String,
         accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     ) -> Bool {
+        do {
+            try upsertKeyStrict(
+                data: data,
+                service: service,
+                account: account,
+                accessibility: accessibility
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private nonisolated func upsertKeyStrict(
+        data: Data,
+        service: String,
+        account: String,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) throws {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
             Self.inMemoryStore[key] = data
             Self.inMemoryLock.unlock()
-            return true
+            return
         }
-        
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -87,17 +130,19 @@ public actor KeychainManager {
         ]
         let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
         if updateStatus == errSecSuccess {
-            return true
+            return
         }
         guard updateStatus == errSecItemNotFound else {
-            return false
+            throw KeychainError.unexpectedError(updateStatus)
         }
 
         var addQuery = query
         addQuery[kSecAttrAccessible as String] = accessibility
         addQuery[kSecValueData as String] = data
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        return status == errSecSuccess
+        guard status == errSecSuccess else {
+            throw KeychainError.unexpectedError(status)
+        }
     }
     
     /// 导出密钥
@@ -114,7 +159,7 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data
         }
-        
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -241,15 +286,305 @@ public actor KeychainManager {
     ) -> String {
         "scoped|\(accessGroup)|\(service)|\(account)"
     }
-    
+
+    // MARK: - Q-Periapt immutable persistence
+
+    /// Maximum number of monotonic policy transitions retained for one root.
+    /// Crossing the bound is a controlled re-enrollment condition, not a signal
+    /// to scan or mutate an unbounded Keychain history.
+    private nonisolated static let qPeriaptMaximumTrustedStateTransitions = 64
+    private nonisolated static let qPeriaptTrustedStateLength = 36
+    private nonisolated static let qPeriaptTrustedStateService =
+        "com.skybridge.compass.qperiapt.trusted-state.v1"
+    private nonisolated static let qPeriaptIdentityService =
+        "com.skybridge.compass.qperiapt.kem-identity.v1"
+
+    /// Reads the current state by following an append-only transition chain.
+    /// Each transition account is derived only from the authenticated root-key
+    /// fingerprint and SHA-256(expected state); the registry label never enters
+    /// the Keychain namespace.
+    nonisolated func loadQPeriaptTrustedState(
+        rootFingerprint: Data
+    ) throws -> Data? {
+        try qPeriaptTrustedStateSnapshot(rootFingerprint: rootFingerprint).state
+    }
+
+    private nonisolated func qPeriaptTrustedStateSnapshot(
+        rootFingerprint: Data
+    ) throws -> (state: Data?, transitionCount: Int, visitedStateDigests: Set<Data>) {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+
+        var currentState: Data?
+        var visitedStateDigests = Set<Data>()
+        for transitionIndex in 0..<Self.qPeriaptMaximumTrustedStateTransitions {
+            guard let nextState = try loadQPeriaptItem(
+                service: Self.qPeriaptTrustedStateService,
+                account: Self.qPeriaptTransitionAccount(
+                    rootFingerprint: rootFingerprint,
+                    expectedState: currentState
+                )
+            ) else {
+                return (currentState, transitionIndex, visitedStateDigests)
+            }
+            guard nextState.count == Self.qPeriaptTrustedStateLength else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt trusted-state transition has \(nextState.count) bytes"
+                )
+            }
+            let nextDigest = Data(SHA256.hash(data: nextState))
+            guard visitedStateDigests.insert(nextDigest).inserted else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt trusted-state transition chain contains a cycle"
+                )
+            }
+            currentState = nextState
+        }
+
+        let overflowTransition = try loadQPeriaptItem(
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: currentState
+            )
+        )
+        guard overflowTransition == nil else {
+            throw KeychainError.immutableStateTransitionLimitExceeded(
+                maximum: Self.qPeriaptMaximumTrustedStateTransitions
+            )
+        }
+        return (
+            currentState,
+            Self.qPeriaptMaximumTrustedStateTransitions,
+            visitedStateDigests
+        )
+    }
+
+    /// Cross-process add-only CAS for monotonic trusted state. `SecItemAdd` is
+    /// the commit point: two contenders for the same expected-state account
+    /// cannot both win. Replaying the already-current state is an idempotent
+    /// success, while attempting to return to any older state is rejected
+    /// before the append-only record is written.
+    nonisolated func compareAndSwapQPeriaptTrustedState(
+        expectedPreviousState: Data?,
+        newState: Data,
+        rootFingerprint: Data
+    ) throws -> Bool {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        if let expectedPreviousState {
+            guard expectedPreviousState.count == Self.qPeriaptTrustedStateLength else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt expected trusted state has \(expectedPreviousState.count) bytes"
+                )
+            }
+        }
+        guard newState.count == Self.qPeriaptTrustedStateLength else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt candidate trusted state has \(newState.count) bytes"
+            )
+        }
+
+        let snapshot = try qPeriaptTrustedStateSnapshot(rootFingerprint: rootFingerprint)
+        guard snapshot.state == expectedPreviousState else { return false }
+        guard snapshot.state != newState else { return true }
+        let newStateDigest = Data(SHA256.hash(data: newState))
+        guard !snapshot.visitedStateDigests.contains(newStateDigest) else {
+            throw KeychainError.immutableStateCycleRejected
+        }
+        guard snapshot.transitionCount < Self.qPeriaptMaximumTrustedStateTransitions else {
+            throw KeychainError.immutableStateTransitionLimitExceeded(
+                maximum: Self.qPeriaptMaximumTrustedStateTransitions
+            )
+        }
+
+        return try insertQPeriaptItemIfAbsent(
+            data: newState,
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: expectedPreviousState
+            )
+        ) == .inserted
+    }
+
+    /// Loads the one versioned Q-Periapt KEM identity envelope for a root-key
+    /// fingerprint. The caller validates the envelope before using any key bytes.
+    nonisolated func loadQPeriaptIdentityEnvelope(
+        rootFingerprint: Data,
+        suiteWireId: UInt16,
+        formatVersion: UInt8
+    ) throws -> Data? {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        return try loadQPeriaptItem(
+            service: Self.qPeriaptIdentityService,
+            account: Self.qPeriaptIdentityAccount(
+                rootFingerprint: rootFingerprint,
+                suiteWireId: suiteWireId,
+                formatVersion: formatVersion
+            )
+        )
+    }
+
+    /// Add-only commit for a complete public/private identity envelope.
+    nonisolated func insertQPeriaptIdentityEnvelopeIfAbsent(
+        _ envelope: Data,
+        rootFingerprint: Data,
+        suiteWireId: UInt16,
+        formatVersion: UInt8
+    ) throws -> IOSKeychainInsertResult {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        guard !envelope.isEmpty else { throw KeychainError.encodingError }
+        return try insertQPeriaptItemIfAbsent(
+            data: envelope,
+            service: Self.qPeriaptIdentityService,
+            account: Self.qPeriaptIdentityAccount(
+                rootFingerprint: rootFingerprint,
+                suiteWireId: suiteWireId,
+                formatVersion: formatVersion
+            )
+        )
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    /// Injects one append-only transition into the in-memory XCTest backend so
+    /// corruption and cycle handling can be exercised without touching a real
+    /// device Keychain. Production builds expose no mutation bypass.
+    nonisolated func insertQPeriaptTrustedStateTransitionForTesting(
+        rootFingerprint: Data,
+        expectedState: Data?,
+        storedState: Data
+    ) throws -> IOSKeychainInsertResult {
+        guard Self.useInMemoryKeychain else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt test transition injection requires the in-memory Keychain"
+            )
+        }
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        if let expectedState,
+           expectedState.count != Self.qPeriaptTrustedStateLength {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt test expected state has an invalid length"
+            )
+        }
+        return try insertQPeriaptItemIfAbsent(
+            data: storedState,
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: expectedState
+            )
+        )
+    }
+    #endif
+
+    private nonisolated func loadQPeriaptItem(
+        service: String,
+        account: String
+    ) throws -> Data? {
+        if Self.useInMemoryKeychain {
+            let key = "qperiapt|\(service)|\(account)"
+            return Self.inMemoryLock.withLock { Self.inMemoryStore[key] }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(query as CFDictionary, &item) {
+        case errSecItemNotFound:
+            return nil
+        case errSecSuccess:
+            guard let data = item as? Data else { throw KeychainError.decodingError }
+            return data
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    private nonisolated func insertQPeriaptItemIfAbsent(
+        data: Data,
+        service: String,
+        account: String
+    ) throws -> IOSKeychainInsertResult {
+        guard !data.isEmpty else { throw KeychainError.encodingError }
+        if Self.useInMemoryKeychain {
+            let key = "qperiapt|\(service)|\(account)"
+            return Self.inMemoryLock.withLock {
+                guard Self.inMemoryStore[key] == nil else { return .alreadyExists }
+                Self.inMemoryStore[key] = data
+                return .inserted
+            }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: data
+        ]
+        switch SecItemAdd(query as CFDictionary, nil) {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .alreadyExists
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    private nonisolated static func qPeriaptTransitionAccount(
+        rootFingerprint: Data,
+        expectedState: Data?
+    ) -> String {
+        let expectedDigest = Data(SHA256.hash(data: expectedState ?? Data()))
+        return "\(hex(rootFingerprint)).\(hex(expectedDigest))"
+    }
+
+    private nonisolated static func qPeriaptIdentityAccount(
+        rootFingerprint: Data,
+        suiteWireId: UInt16,
+        formatVersion: UInt8
+    ) -> String {
+        "\(hex(rootFingerprint)).\(String(format: "%04x", suiteWireId)).v\(formatVersion)"
+    }
+
+    private nonisolated static func validateQPeriaptRootFingerprint(
+        _ rootFingerprint: Data
+    ) throws {
+        guard rootFingerprint.count == SHA256.byteCount else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt root-key fingerprint has \(rootFingerprint.count) bytes"
+            )
+        }
+    }
+
+    private nonisolated static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
     /// 删除密钥
     public nonisolated func deleteKey(service: String, account: String) -> Bool {
+        do {
+            try deleteKeyStrict(service: service, account: account)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private nonisolated func deleteKeyStrict(service: String, account: String) throws {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
             Self.inMemoryStore.removeValue(forKey: key)
             Self.inMemoryLock.unlock()
-            return true
+            return
         }
         
         let query: [String: Any] = [
@@ -259,26 +594,25 @@ public actor KeychainManager {
         ]
         
         let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.unexpectedError(status)
+        }
     }
 
-    public nonisolated func storeAppleUserID(_ userID: String) throws {
+    public func storeAppleUserID(_ userID: String) throws {
         let trimmed = userID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw KeychainError.encodingError
         }
-        let ok = importKey(
+        try upsertKeyStrict(
             data: Data(trimmed.utf8),
             service: "SkyBridge.Auth",
             account: "AppleUserID"
         )
-        if !ok {
-            throw KeychainError.unexpectedError(errSecIO)
-        }
     }
 
-    public nonisolated func retrieveAppleUserID() -> String? {
-        guard let data = exportKey(service: "SkyBridge.Auth", account: "AppleUserID"),
+    public func retrieveAppleUserID() throws -> String? {
+        guard let data = try exportKeyStrict(service: "SkyBridge.Auth", account: "AppleUserID"),
               let value = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
@@ -287,8 +621,8 @@ public actor KeychainManager {
         return value
     }
 
-    public nonisolated func deleteAppleUserID() {
-        _ = deleteKey(service: "SkyBridge.Auth", account: "AppleUserID")
+    public func deleteAppleUserID() throws {
+        try deleteKeyStrict(service: "SkyBridge.Auth", account: "AppleUserID")
     }
     
     // MARK: - Symmetric Key Operations
@@ -484,6 +818,40 @@ public actor KeychainManager {
         exportKey(service: "SkyBridge.PeerSigningPub", account: peerId)
     }
     
+    // MARK: - Device Identity
+
+    /// 获取或生成设备 ID
+    public nonisolated func getOrGenerateDeviceId() -> String {
+        do {
+            return try getOrGenerateDeviceIdStrict()
+        } catch {
+            return ""
+        }
+    }
+
+    /// 获取或生成设备 ID，保留 Keychain 错误语义。
+    public nonisolated func getOrGenerateDeviceIdStrict() throws -> String {
+        let service = "SkyBridge.Identity"
+        let account = "DeviceUUID"
+
+        if let data = try exportKeyStrict(service: service, account: account) {
+            guard let uuidString = String(data: data, encoding: .utf8),
+                  !uuidString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw KeychainError.decodingError
+            }
+            return uuidString
+        }
+
+        let newUUID = UUID().uuidString
+        guard let data = newUUID.data(using: .utf8) else {
+            throw KeychainError.encodingError
+        }
+        guard importKey(data: data, service: service, account: account) else {
+            throw KeychainError.unexpectedError(errSecIO)
+        }
+        return newUUID
+    }
+
     // MARK: - Session Key Storage
     
     /// 存储会话密钥
@@ -730,6 +1098,14 @@ public extension KeychainManager {
     }
     
     private nonisolated func deleteGenericPasswordSync(account: String) {
+        do {
+            try deleteGenericPasswordSyncStrict(account: account)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ Keychain 删除失败 account=\(account): \(error.localizedDescription)")
+        }
+    }
+
+    private nonisolated func deleteGenericPasswordSyncStrict(account: String) throws {
         if Self.useInMemoryKeychain {
             let key = "GenericPassword|" + account
             Self.inMemoryLock.lock()
@@ -741,7 +1117,10 @@ public extension KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.unexpectedError(status)
+        }
     }
 }
 
@@ -759,7 +1138,7 @@ public extension KeychainManager {
         }
     }
     
-    nonisolated func storeSupabaseConfig(url: String, anonKey: String) throws {
+    func storeSupabaseConfig(url: String, anonKey: String) throws {
         let urlTrimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let anonTrimmed = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try saveGenericPasswordSync(account: "supabase.url", data: Data(urlTrimmed.utf8))
@@ -767,15 +1146,15 @@ public extension KeychainManager {
         
         // Compatibility: also store under the macOS-style service/account keys so iOS/macOS stay aligned conceptually.
         // This also helps when users switch between older/newer builds that used different key naming.
-        _ = importKey(data: Data(urlTrimmed.utf8), service: "SkyBridge.Supabase", account: "URL")
-        _ = importKey(data: Data(anonTrimmed.utf8), service: "SkyBridge.Supabase", account: "AnonKey")
+        try upsertKeyStrict(data: Data(urlTrimmed.utf8), service: "SkyBridge.Supabase", account: "URL")
+        try upsertKeyStrict(data: Data(anonTrimmed.utf8), service: "SkyBridge.Supabase", account: "AnonKey")
         
         // SECURITY: Never store a Supabase service-role key on client devices.
-        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
-        _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+        try deleteGenericPasswordSyncStrict(account: "supabase.serviceRoleKey")
+        try deleteKeyStrict(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
     
-    nonisolated func retrieveSupabaseConfig() throws -> SupabaseConfig {
+    func retrieveSupabaseConfig() throws -> SupabaseConfig {
         do {
             let urlData = try loadGenericPasswordSync(account: "supabase.url")
             let anonData = try loadGenericPasswordSync(account: "supabase.anonKey")
@@ -784,8 +1163,8 @@ public extension KeychainManager {
                 throw KeychainError.decodingError
             }
             // Best-effort: clean up any legacy stored service role key.
-            deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
-            _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+            try deleteGenericPasswordSyncStrict(account: "supabase.serviceRoleKey")
+            try deleteKeyStrict(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
             return SupabaseConfig(url: url, anonKey: anon)
         } catch KeychainError.itemNotFound {
             // Fallback: macOS-style keys (service-based)
@@ -802,13 +1181,13 @@ public extension KeychainManager {
     }
 
     /// 清除 Supabase 配置（用于从占位符/错误配置恢复）
-    nonisolated func deleteSupabaseConfig() {
-        deleteGenericPasswordSync(account: "supabase.url")
-        deleteGenericPasswordSync(account: "supabase.anonKey")
-        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
-        _ = deleteKey(service: "SkyBridge.Supabase", account: "URL")
-        _ = deleteKey(service: "SkyBridge.Supabase", account: "AnonKey")
-        _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+    func deleteSupabaseConfig() throws {
+        try deleteGenericPasswordSyncStrict(account: "supabase.url")
+        try deleteGenericPasswordSyncStrict(account: "supabase.anonKey")
+        try deleteGenericPasswordSyncStrict(account: "supabase.serviceRoleKey")
+        try deleteKeyStrict(service: "SkyBridge.Supabase", account: "URL")
+        try deleteKeyStrict(service: "SkyBridge.Supabase", account: "AnonKey")
+        try deleteKeyStrict(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
 
     struct NebulaConfig: Codable, Sendable {
@@ -858,7 +1237,13 @@ public extension KeychainManager {
         do {
             let baseURLData = try loadGenericPasswordSync(account: "nebula.baseURL")
             let clientIdData = try loadGenericPasswordSync(account: "nebula.clientId")
-            let clientSecretData = try? loadGenericPasswordSync(account: "nebula.clientSecret")
+            let clientSecretData: Data?
+            do {
+                clientSecretData = try loadGenericPasswordSync(account: "nebula.clientSecret")
+            } catch KeychainError.itemNotFound {
+                // Client secret is explicitly optional; all other Keychain failures propagate.
+                clientSecretData = nil
+            }
             guard let baseURL = String(data: baseURLData, encoding: .utf8),
                   let clientId = String(data: clientIdData, encoding: .utf8) else {
                 throw KeychainError.decodingError
@@ -888,7 +1273,7 @@ public extension KeychainManager {
         _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientSecret")
     }
     
-    nonisolated func storeAuthSession(_ session: AuthSession) throws {
+    func storeAuthSession(_ session: AuthSession) throws {
         let data = try JSONEncoder().encode(session)
         try saveGenericPasswordSync(
             account: "auth.session",
@@ -896,12 +1281,23 @@ public extension KeychainManager {
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         )
     }
+
+    /// Atomically replaces a persisted authentication session only when it is still the
+    /// exact session that initiated a token refresh. Keeping the comparison and write in
+    /// this actor prevents a late refresh from overwriting a newer login or logout state.
+    func replaceAuthSession(expected: AuthSession, with replacement: AuthSession) throws -> Bool {
+        guard try loadAuthSessionStrict() == expected else {
+            return false
+        }
+        try storeAuthSession(replacement)
+        return true
+    }
     
-    nonisolated func loadAuthSession() -> AuthSession? {
-        try? loadAuthSessionStrict()
+    func loadAuthSession() throws -> AuthSession? {
+        try loadAuthSessionStrict()
     }
 
-    nonisolated func loadAuthSessionStrict() throws -> AuthSession? {
+    func loadAuthSessionStrict() throws -> AuthSession? {
         let data: Data
         do {
             data = try loadGenericPasswordSync(account: "auth.session")
@@ -915,7 +1311,23 @@ public extension KeychainManager {
         }
     }
     
-    nonisolated func deleteAuthSession() {
-        deleteGenericPasswordSync(account: "auth.session")
+    func deleteAuthSession() throws {
+        try deleteGenericPasswordSyncStrict(account: "auth.session")
+    }
+}
+
+final class IOSKeychainSerialExecutor: SerialExecutor, @unchecked Sendable {
+    private let queue: DispatchQueue
+
+    init(label: String) {
+        queue = DispatchQueue(label: label, qos: .userInitiated)
+    }
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let unownedJob = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async {
+            unownedJob.runSynchronously(on: executor)
+        }
     }
 }

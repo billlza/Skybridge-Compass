@@ -111,7 +111,37 @@ class RegistryStore {
       throw error;
     }
     if (!Array.isArray(rows) || rows.length === 0) {
-      return null;
+      const historyParams = [
+        `tenant_id=eq.${encodeURIComponent(tenantId)}`,
+        `user_id=eq.${encodeURIComponent(userId)}`,
+        `device_id=eq.${encodeURIComponent(deviceId)}`,
+        `protocol_signing_algorithm=eq.${encodeURIComponent(protocolSigningAlgorithm)}`,
+        `protocol_public_key_fingerprint=eq.${encodeURIComponent(protocolPublicKeyFingerprint)}`,
+        'state=in.(grace,revoked)',
+        'select=*',
+        'limit=1'
+      ];
+      let historyRows;
+      try {
+        historyRows = await this.request({
+          path: `/rest/v1/device_identity_history?${historyParams.join('&')}`,
+          method: 'GET',
+          useServiceRole: true
+        });
+      } catch (error) {
+        if (String(error.message || '').includes('PGRST205')) {
+          return null;
+        }
+        throw error;
+      }
+      if (!Array.isArray(historyRows) || historyRows.length === 0) {
+        return null;
+      }
+      return {
+        ...historyRows[0],
+        status: historyRows[0].state,
+        identity_history: true
+      };
     }
     return rows[0];
   }
@@ -137,6 +167,85 @@ class RegistryStore {
   async bootstrapRegisterDevice(payload) {
     return this.request({
       path: '/rest/v1/rpc/bootstrap_register_device_v5',
+      method: 'POST',
+      useServiceRole: true,
+      body: payload
+    });
+  }
+
+  async issueIdentityRotationChallenge(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/issue_device_identity_rotation_v6',
+      method: 'POST',
+      useServiceRole: true,
+      body: payload
+    });
+  }
+
+  async getIdentityRotation({
+    tenantId,
+    userId,
+    deviceId,
+    rotationId,
+    oldProtocolSigningAlgorithm,
+    oldProtocolPublicKeyFingerprint
+  }) {
+    if (!this.canAccessRegistry) {
+      throw new Error('registry_not_configured');
+    }
+    const params = [
+      `rotation_id=eq.${encodeURIComponent(rotationId)}`,
+      `tenant_id=eq.${encodeURIComponent(tenantId)}`,
+      `user_id=eq.${encodeURIComponent(userId)}`,
+      `device_id=eq.${encodeURIComponent(deviceId)}`,
+      `old_protocol_signing_algorithm=eq.${encodeURIComponent(oldProtocolSigningAlgorithm)}`,
+      `old_protocol_public_key_fingerprint=eq.${encodeURIComponent(oldProtocolPublicKeyFingerprint)}`,
+      'select=*',
+      'limit=1'
+    ];
+    const rows = await this.request({
+      path: `/rest/v1/device_identity_rotations?${params.join('&')}`,
+      method: 'GET',
+      useServiceRole: true
+    });
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return null;
+    }
+    return rows[0];
+  }
+
+  async getIdentityRotationByRequestId({
+    tenantId,
+    userId,
+    deviceId,
+    requestId,
+    oldProtocolSigningAlgorithm,
+    oldProtocolPublicKeyFingerprint
+  }) {
+    if (!this.canAccessRegistry) {
+      throw new Error('registry_not_configured');
+    }
+    const params = [
+      `request_id=eq.${encodeURIComponent(requestId)}`,
+      `tenant_id=eq.${encodeURIComponent(tenantId)}`,
+      `user_id=eq.${encodeURIComponent(userId)}`,
+      `device_id=eq.${encodeURIComponent(deviceId)}`,
+      `old_protocol_signing_algorithm=eq.${encodeURIComponent(oldProtocolSigningAlgorithm)}`,
+      `old_protocol_public_key_fingerprint=eq.${encodeURIComponent(oldProtocolPublicKeyFingerprint)}`,
+      'select=rotation_id',
+      'limit=1'
+    ];
+    const rows = await this.request({
+      path: `/rest/v1/device_identity_rotations?${params.join('&')}`,
+      method: 'GET',
+      useServiceRole: true
+    });
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  }
+
+  async commitIdentityRotation(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/commit_device_identity_rotation_v6',
       method: 'POST',
       useServiceRole: true,
       body: payload
@@ -170,7 +279,14 @@ class RegistryStore {
       if (!response.ok) {
         const parsed = safeJsonParse(text, {});
         const detail = parsed?.message || parsed?.error_description || parsed?.error || text || 'registry_error';
-        throw new Error(`registry_http_${response.status}:${detail}`);
+        const postgrestCode = typeof parsed?.code === 'string' ? parsed.code.trim() : '';
+        const error = new Error(
+          `registry_http_${response.status}:${postgrestCode ? `${postgrestCode}:` : ''}${detail}`
+        );
+        error.registryStatus = response.status;
+        error.registryCode = typeof detail === 'string' ? detail.trim() : 'registry_error';
+        error.registryPostgrestCode = postgrestCode;
+        throw error;
       }
       if (!text) return null;
       return safeJsonParse(text, null);

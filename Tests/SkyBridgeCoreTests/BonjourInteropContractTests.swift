@@ -265,8 +265,9 @@ final class BonjourInteropContractTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer,\\(ClassicTransferCapability.classicResume)\".utf8)")
+            fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer\".utf8)")
         )
+        XCTAssertFalse(fileTransferSource.contains("ClassicTransferCapability.classicResume"))
         XCTAssertTrue(fileTransferSource.contains("\"transferPort\": Data(portString.utf8)"))
         XCTAssertTrue(fileTransferSource.contains("\"fileTransferPort\": Data(portString.utf8)"))
         XCTAssertTrue(fileTransferSource.contains("\"file_transfer_port\": Data(portString.utf8)"))

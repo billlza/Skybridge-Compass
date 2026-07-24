@@ -177,6 +177,10 @@ private final class LocalizationBundleLookupCache: @unchecked Sendable {
 public final class LocalizationManager: ObservableObject {
     public static let shared = LocalizationManager()
     private nonisolated static let lookupCache = LocalizationBundleLookupCache()
+    nonisolated static let runtimePreferenceInvalidationNotificationNames: [Notification.Name] = [
+        UserDefaults.didChangeNotification,
+        NSLocale.currentLocaleDidChangeNotification,
+    ]
     
     private let kAppLanguageKey = "AppLanguagePreference"
     
@@ -197,11 +201,10 @@ public final class LocalizationManager: ObservableObject {
         updateLocale()
         Self.lookupCache.updatePreferenceSnapshot(Self.makePreferenceSnapshot(storedValue: currentLanguage.rawValue))
 
-        Self.makeRuntimePreferenceInvalidationSubscription(for: UserDefaults.didChangeNotification)
-            .store(in: &cancellables)
-
-        Self.makeRuntimePreferenceInvalidationSubscription(for: NSLocale.currentLocaleDidChangeNotification)
-            .store(in: &cancellables)
+        for notificationName in Self.runtimePreferenceInvalidationNotificationNames {
+            Self.makeRuntimePreferenceInvalidationSubscription(for: notificationName)
+                .store(in: &cancellables)
+        }
     }
     
     public func setLanguage(_ language: AppLanguage) {
@@ -365,7 +368,10 @@ public final class LocalizationManager: ObservableObject {
             }
         }
 
-        return key
+        // A miss in the executable-relative resource roots is not authoritative.
+        // SwiftPM targets can still resolve the key from Bundle.module, so allow
+        // localizedStringUncached to continue through its existing bundle chain.
+        return nil
     }
     
  /// 发现 Bundle.main 的 Resources 目录下的 SPM 资源 bundle

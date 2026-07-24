@@ -913,6 +913,39 @@ extension ScanHistoryStoreTests {
 
 extension ScanHistoryStoreTests {
 
+    func testDetailStorageResolutionFailurePersistsExplicitSummaryWithoutTemporaryFallback() async throws {
+        let namespace = UUID().uuidString
+        let forbiddenFallbackDirectory = testRootDirectory
+            .appendingPathComponent("must-not-be-created", isDirectory: true)
+            .appendingPathComponent(namespace, isDirectory: true)
+        let testStore = ScanHistoryStore(
+            limits: .default,
+            userDefaultsSuiteName: testUserDefaultsSuiteName,
+            storageNamespace: namespace,
+            detailsDirectoryOverride: forbiddenFallbackDirectory,
+            simulateDetailsDirectoryResolutionFailure: true
+        )
+        let result = ScanHistoryTestGenerator.createRandomScanResult(
+            verdict: .unsafe,
+            scanLevel: .deep
+        )
+
+        await testStore.saveWithDetails(result)
+
+        let summaries = await testStore.getAllSummaries()
+        let summary = try XCTUnwrap(summaries.first(where: { $0.id == result.id }))
+        XCTAssertFalse(summary.hasDetails)
+        XCTAssertNil(summary.detailHash)
+        let loadedDetail = await testStore.loadDetail(for: result.id)
+        let isDetailAvailable = await testStore.isDetailAvailable(for: result.id)
+        XCTAssertNil(loadedDetail)
+        XCTAssertFalse(isDetailAvailable)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: forbiddenFallbackDirectory.path),
+            "Unavailable Application Support must not redirect details to any temporary directory"
+        )
+    }
+
  /// Property test: For any scan result with threats, the summary SHALL be stored in main store
  /// and details SHALL be written to separate file with matching id and detailHash.
  ///

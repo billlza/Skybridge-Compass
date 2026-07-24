@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 import Security
 import CryptoKit
 import LocalAuthentication
@@ -46,14 +47,20 @@ struct LegacyGenericPasswordMetadataCandidate: Equatable, Sendable {
 /// KeychainManager - 安全的密钥存储管理器
 ///
 /// ## 并发安全说明
-/// ✅ 使用 Actor 隔离，但 Keychain 操作标记为 nonisolated
-/// ✅ 移除 @MainActor - Keychain IO 不应该阻塞主线程
-/// ✅ Keychain API 本身是线程安全的（系统级同步）
-/// ✅ 仅对需要协调的操作（如 deduplicate）使用 actor 隔离
+/// Actor 隔离只保证互斥，不保证同步 Security.framework 调用离开主线程。
+/// Actor 自身因此绑定到专用串行执行器；actor-isolated 的认证会话操作会
+/// 保持顺序并在后台队列执行。历史 nonisolated API 仍由调用方负责线程边界。
 @available(macOS 14.0, *)
 public actor KeychainManager {
     public static let shared = KeychainManager()
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "KeychainManager")
+    private nonisolated let keychainExecutor = KeychainSerialExecutor(
+        label: "com.skybridge.compass.keychain"
+    )
+
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        keychainExecutor.asUnownedSerialExecutor()
+    }
 
     private var interactiveUnlockCompleted = false
     private var lastInteractiveUnlockFailureAt: Date = .distantPast
@@ -1423,7 +1430,12 @@ extension KeychainManager {
     }
 
     public func loadAuthSession() -> AuthSession? {
-        try? loadAuthSessionStrict()
+        do {
+            return try loadAuthSessionStrict()
+        } catch {
+            logger.error("Auth session Keychain load failed: \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
     }
 
     public func loadAuthSessionStrict() throws -> AuthSession? {
@@ -1444,10 +1456,40 @@ extension KeychainManager {
         }
     }
 
+    /// Atomically replaces the persisted authentication session only when the
+    /// exact source session is still authoritative. Actor isolation keeps the
+    /// read/compare/write sequence indivisible with respect to sign-out and
+    /// account-switch writes.
+    public func replaceAuthSession(
+        expected: AuthSession,
+        with replacement: AuthSession
+    ) throws -> Bool {
+        guard try loadAuthSessionStrict() == expected else { return false }
+        try storeAuthSession(replacement)
+        return true
+    }
+
     public func deleteAuthSession() throws {
         try deleteAPIKey(service: Self.authSessionService, account: Self.authSessionAccount)
     }
 }
+
+final class KeychainSerialExecutor: SerialExecutor, @unchecked Sendable {
+    private let queue: DispatchQueue
+
+    init(label: String) {
+        queue = DispatchQueue(label: label, qos: .userInitiated)
+    }
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let unownedJob = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async {
+            unownedJob.runSynchronously(on: executor)
+        }
+    }
+}
+
 @available(macOS 14.0, *)
 extension KeychainManager {
  // MARK: - 对端签名公钥持久化（P256.Signing.PublicKey 原始表示）

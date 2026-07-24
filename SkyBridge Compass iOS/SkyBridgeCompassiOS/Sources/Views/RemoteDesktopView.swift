@@ -44,15 +44,21 @@ struct RemoteDesktopView: View {
     @State private var isFullScreen = false
     @State private var lastAutoConnectedCrossNetworkSessionID: String?
     @State private var showRemoteDesktopSettings = false
+#if DEBUG || SKYBRIDGE_TESTING
     @State private var didAutoConnectUITestFixture = false
-    @State private var didAutoConnectP2PSmoke = false
     @State private var showUITestRemoteStream = false
+    @State private var didAutoConnectP2PSmoke = false
+#endif
     @State private var presentationOwnerToken = UUID()
+    @State private var showCameraConnection = false
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var shouldAutoConnectUITestFixture: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE")
     }
+#endif
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var shouldAutoConnectP2PSmoke: Bool {
         let environment = ProcessInfo.processInfo.environment
         return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-p2p-client"
@@ -60,24 +66,39 @@ struct RemoteDesktopView: View {
             && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
             && environment["SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW"] == "1"
     }
+#endif
     
     var body: some View {
-        let displayedConnection = selectedConnection ?? (
-            shouldAutoConnectUITestFixture ? connectionManager.activeConnections.first : nil
-        )
+#if DEBUG || SKYBRIDGE_TESTING
+        let displayedConnection = remoteDesktopManager.pendingCameraPresentationConnection
+            ?? remoteDesktopManager.currentConnection
+            ?? selectedConnection
+            ?? (shouldAutoConnectUITestFixture ? connectionManager.activeConnections.first : nil)
+        let shouldPresentStream = remoteDesktopManager.isStreaming
+            || remoteDesktopManager.isCameraAwaitingFirstPresentation
+            || showUITestRemoteStream
+            || shouldAutoConnectUITestFixture
+#else
+        let displayedConnection = remoteDesktopManager.pendingCameraPresentationConnection
+            ?? remoteDesktopManager.currentConnection
+            ?? selectedConnection
+        let shouldPresentStream = remoteDesktopManager.isStreaming
+            || remoteDesktopManager.isCameraAwaitingFirstPresentation
+#endif
 
         NavigationStack {
             ZStack {
                 DashboardView.QuantumGlassBackground()
 
-                if let connection = displayedConnection,
-                   (remoteDesktopManager.isStreaming || showUITestRemoteStream || shouldAutoConnectUITestFixture) {
+                if let connection = displayedConnection, shouldPresentStream {
                     // 远程桌面流
                     RemoteDesktopStreamView(
                         connection: connection,
                         isFullScreen: $isFullScreen,
                         onDisconnect: {
+#if DEBUG || SKYBRIDGE_TESTING
                             showUITestRemoteStream = false
+#endif
                             selectedConnection = nil
                         }
                     )
@@ -98,6 +119,7 @@ struct RemoteDesktopView: View {
                         } label: {
                             Image(systemName: "slider.horizontal.3")
                         }
+                        .disabled(remoteDesktopManager.isReadOnlyCameraSession)
                     }
                 }
             }
@@ -105,11 +127,33 @@ struct RemoteDesktopView: View {
         .sheet(isPresented: $showRemoteDesktopSettings) {
             RemoteDesktopStreamSettingsSheet()
         }
+        .sheet(isPresented: $showCameraConnection) {
+            CameraConnectionSheet(isPresented: $showCameraConnection)
+        }
+        .alert(
+            RuntimeLocalization.string("智能监控已断开"),
+            isPresented: Binding(
+                get: { remoteDesktopManager.terminalCameraErrorMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        remoteDesktopManager.acknowledgeTerminalCameraError()
+                    }
+                }
+            )
+        ) {
+            Button(RuntimeLocalization.string("好"), role: .cancel) {
+                remoteDesktopManager.acknowledgeTerminalCameraError()
+            }
+        } message: {
+            Text(remoteDesktopManager.terminalCameraErrorMessage ?? "")
+        }
         .onAppear {
             remoteDesktopManager.registerPresentationOwner(presentationOwnerToken)
             attemptAutoConnectCrossNetworkSession()
+#if DEBUG || SKYBRIDGE_TESTING
             attemptAutoConnectUITestFixture()
             attemptAutoConnectP2PSmoke()
+#endif
         }
         .onDisappear {
             let shouldDisconnect = remoteDesktopManager.unregisterPresentationOwner(presentationOwnerToken)
@@ -129,8 +173,10 @@ struct RemoteDesktopView: View {
             selectedConnection = activeConnection
         }
         .onChange(of: connectionManager.activeConnections.count) { _, _ in
+#if DEBUG || SKYBRIDGE_TESTING
             attemptAutoConnectUITestFixture()
             attemptAutoConnectP2PSmoke()
+#endif
         }
     }
     
@@ -181,6 +227,17 @@ struct RemoteDesktopView: View {
                     .padding()
                 }
             }
+
+            Button {
+                showCameraConnection = true
+            } label: {
+                Label(RuntimeLocalization.string("连接智能监控"), systemImage: "video.fill")
+                    .font(.headline)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("remote.camera.connect")
             
             Spacer()
         }
@@ -234,9 +291,11 @@ struct RemoteDesktopView: View {
 
     private func connectToDevice(_ connection: Connection) {
         selectedConnection = connection
+#if DEBUG || SKYBRIDGE_TESTING
         if shouldAutoConnectUITestFixture {
             showUITestRemoteStream = true
         }
+#endif
         Task {
             do {
                 try await remoteDesktopManager.startStreaming(from: connection)
@@ -247,11 +306,18 @@ struct RemoteDesktopView: View {
                 }
             } catch {
                 await MainActor.run {
+#if DEBUG || SKYBRIDGE_TESTING
                     if selectedConnection?.id == connection.id,
                        !remoteDesktopManager.isStreaming,
                        !showUITestRemoteStream {
                         selectedConnection = nil
                     }
+#else
+                    if selectedConnection?.id == connection.id,
+                       !remoteDesktopManager.isStreaming {
+                        selectedConnection = nil
+                    }
+#endif
                     if lastAutoConnectedCrossNetworkSessionID == connection.id {
                         lastAutoConnectedCrossNetworkSessionID = nil
                     }
@@ -271,6 +337,7 @@ struct RemoteDesktopView: View {
         connectToDevice(connection)
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     private func attemptAutoConnectUITestFixture() {
         guard shouldAutoConnectUITestFixture else { return }
         guard !didAutoConnectUITestFixture else { return }
@@ -281,7 +348,9 @@ struct RemoteDesktopView: View {
         didAutoConnectUITestFixture = true
         connectToDevice(firstConnection)
     }
+#endif
 
+#if DEBUG || SKYBRIDGE_TESTING
     private func attemptAutoConnectP2PSmoke() {
         guard shouldAutoConnectP2PSmoke else { return }
         guard !didAutoConnectP2PSmoke else { return }
@@ -328,9 +397,270 @@ struct RemoteDesktopView: View {
             return false
         } ?? lanRemoteConnections.first
     }
+#endif
 
     private func isRemoteDesktopEligible(_ device: DiscoveredDevice) -> Bool {
         remoteDesktopManager.canPresentRemoteDesktopOption(for: device)
+    }
+}
+
+@available(iOS 17.0, *)
+enum CameraConnectionFormPolicy {
+    static func normalizedScheme(for endpoint: String) -> String? {
+        URLComponents(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines))?
+            .scheme?
+            .lowercased()
+    }
+
+    static func credentialsAreComplete(username: String, password: String) -> Bool {
+        (username.isEmpty && password.isEmpty) || (!username.isEmpty && !password.isEmpty)
+    }
+
+    static func canConnect(
+        endpoint: String,
+        username: String,
+        password: String,
+        acknowledgesPlaintextRTSP: Bool,
+        isConnecting: Bool
+    ) -> Bool {
+        guard !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              credentialsAreComplete(username: username, password: password),
+              !isConnecting else {
+            return false
+        }
+
+        switch normalizedScheme(for: endpoint) {
+        case "rtsps":
+            return true
+        case "rtsp":
+            return acknowledgesPlaintextRTSP
+        default:
+            return false
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class CameraConnectionTaskCoordinator: ObservableObject {
+    @Published private(set) var isRunning = false
+
+    private var activeAttemptID: UUID?
+    private var activeTask: Task<Void, Never>?
+
+    @discardableResult
+    func start(_ operation: @escaping @MainActor () async -> Void) -> Bool {
+        guard activeTask == nil else { return false }
+        let attemptID = UUID()
+        activeAttemptID = attemptID
+        isRunning = true
+        activeTask = Task { @MainActor [weak self] in
+            defer { self?.finish(attemptID: attemptID) }
+            await operation()
+        }
+        return true
+    }
+
+    func cancelAndWait() async {
+        guard let activeTask else { return }
+        activeTask.cancel()
+        await activeTask.value
+    }
+
+    func cancel() {
+        activeTask?.cancel()
+    }
+
+    private func finish(attemptID: UUID) {
+        guard activeAttemptID == attemptID else { return }
+        activeAttemptID = nil
+        activeTask = nil
+        isRunning = false
+    }
+}
+
+@available(iOS 17.0, *)
+private struct CameraConnectionSheet: View {
+    @Binding var isPresented: Bool
+    @StateObject private var connectionCoordinator = CameraConnectionTaskCoordinator()
+    @State private var endpoint = "rtsp://"
+    @State private var displayName = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var acceptsPlaintextRTSP = false
+    @State private var isCancelling = false
+    @State private var didConnectSuccessfully = false
+    @State private var connectionError: String?
+
+    private var isConnecting: Bool {
+        connectionCoordinator.isRunning
+    }
+
+    private var normalizedScheme: String? {
+        CameraConnectionFormPolicy.normalizedScheme(for: endpoint)
+    }
+
+    private var credentialsAreComplete: Bool {
+        CameraConnectionFormPolicy.credentialsAreComplete(username: username, password: password)
+    }
+
+    private var canConnect: Bool {
+        CameraConnectionFormPolicy.canConnect(
+            endpoint: endpoint,
+            username: username,
+            password: password,
+            acknowledgesPlaintextRTSP: acceptsPlaintextRTSP,
+            isConnecting: isConnecting
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(RuntimeLocalization.string("摄像头流地址")) {
+                    TextField("rtsp://192.168.1.20:554/exact/path", text: $endpoint)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    TextField(RuntimeLocalization.string("显示名称（可选）"), text: $displayName)
+                    Text(
+                        RuntimeLocalization.string(
+                            "请输入摄像头提供的精确 RTSP/RTSPS 地址。首版仅允许本地私网 IP、H.264 与 RTP-over-RTSP TCP；不会猜测路径或连接厂商云服务。"
+                        )
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+
+                Section(RuntimeLocalization.string("摄像头凭据（可选）")) {
+                    TextField(RuntimeLocalization.string("用户名"), text: $username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField(RuntimeLocalization.string("密码"), text: $password)
+                    if !credentialsAreComplete {
+                        Text(RuntimeLocalization.string("用户名和密码必须同时填写。"))
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                if normalizedScheme == "rtsp" {
+                    Section(RuntimeLocalization.string("明文传输警告")) {
+                        Toggle(isOn: $acceptsPlaintextRTSP) {
+                            Text(
+                                RuntimeLocalization.string(
+                                    "我了解 RTSP 控制信令与视频未加密；仅使用 Digest 认证，绝不允许 Basic 明文认证。"
+                                )
+                            )
+                        }
+                        .tint(.orange)
+                    }
+                } else if normalizedScheme == "rtsps" {
+                    Section {
+                        Label(
+                            RuntimeLocalization.string("RTSPS 使用系统证书信任与主机身份校验；证书错误会直接失败。"),
+                            systemImage: "lock.shield.fill"
+                        )
+                        .font(.footnote)
+                    }
+                }
+            }
+            .navigationTitle(RuntimeLocalization.string("连接智能监控"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        cancelConnectionAndDismiss()
+                    } label: {
+                        if isCancelling {
+                            ProgressView()
+                        } else {
+                            Text(RuntimeLocalization.string(isConnecting ? "取消连接" : "取消"))
+                        }
+                    }
+                    .disabled(isCancelling)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        connect()
+                    } label: {
+                        if isConnecting {
+                            ProgressView()
+                        } else {
+                            Text(RuntimeLocalization.string("连接摄像头"))
+                        }
+                    }
+                    .disabled(!canConnect)
+                }
+            }
+        }
+        .interactiveDismissDisabled(isConnecting)
+        .alert(
+            RuntimeLocalization.string("摄像头连接失败"),
+            isPresented: Binding(
+                get: { connectionError != nil },
+                set: { if !$0 { connectionError = nil } }
+            )
+        ) {
+            Button(RuntimeLocalization.string("好"), role: .cancel) {}
+        } message: {
+            Text(connectionError ?? "")
+        }
+        .onDisappear {
+            if !didConnectSuccessfully {
+                connectionCoordinator.cancel()
+            }
+            password = ""
+        }
+    }
+
+    private func connect() {
+        guard canConnect else { return }
+        connectionError = nil
+        let attemptedEndpoint = endpoint
+        let attemptedUsername = username.isEmpty ? nil : username
+        let attemptedPassword = password.isEmpty ? nil : password
+        let attemptedDisplayName = displayName.isEmpty ? nil : displayName
+        let acknowledgedPlaintextRTSP = acceptsPlaintextRTSP
+        connectionCoordinator.start { @MainActor in
+            do {
+                try await RemoteDesktopManager.instance.startCameraStreaming(
+                    endpoint: attemptedEndpoint,
+                    username: attemptedUsername,
+                    password: attemptedPassword,
+                    displayName: attemptedDisplayName,
+                    acknowledgesPlaintextRTSP: acknowledgedPlaintextRTSP
+                )
+                if Task.isCancelled {
+                    await RemoteDesktopManager.instance.disconnect()
+                    return
+                }
+                didConnectSuccessfully = true
+                password = ""
+                isPresented = false
+            } catch is CancellationError {
+                if RemoteDesktopManager.instance.isReadOnlyCameraSession {
+                    await RemoteDesktopManager.instance.disconnect()
+                }
+            } catch {
+                connectionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelConnectionAndDismiss() {
+        guard !isCancelling else { return }
+        guard isConnecting else {
+            password = ""
+            isPresented = false
+            return
+        }
+        isCancelling = true
+        Task { @MainActor in
+            await connectionCoordinator.cancelAndWait()
+            password = ""
+            isCancelling = false
+            isPresented = false
+        }
     }
 }
 
@@ -360,9 +690,11 @@ struct RemoteDesktopStreamView: View {
     @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
     private var showInteractionOverlay = false
 
+#if DEBUG || SKYBRIDGE_TESTING
     private var isUITesting: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
     }
+#endif
     
     var body: some View {
         GeometryReader { geometry in
@@ -370,6 +702,7 @@ struct RemoteDesktopStreamView: View {
                 // 远程屏幕显示
                 remoteScreenView(geometry: geometry)
 
+#if DEBUG || SKYBRIDGE_TESTING
                 if isUITesting {
                     Color.clear
                         .frame(width: 1, height: 1)
@@ -377,9 +710,12 @@ struct RemoteDesktopStreamView: View {
                         .accessibilityLabel("remote.stream.ready")
                         .accessibilityIdentifier("remote.stream.ready")
                 }
+#endif
                 
                 // 触摸控制层
-                touchControlOverlay(geometry: geometry)
+                if !remoteDesktopManager.isReadOnlyCameraSession {
+                    touchControlOverlay(geometry: geometry)
+                }
                 
                 // 控制工具栏
                 if showControls {
@@ -397,6 +733,8 @@ struct RemoteDesktopStreamView: View {
             resetControlsTimer()
         }
         .onDisappear {
+            controlsTimer?.invalidate()
+            controlsTimer = nil
             releaseIdleTimer()
         }
         .onChange(of: touchMode) { _, _ in
@@ -599,16 +937,18 @@ struct RemoteDesktopStreamView: View {
 
                     Spacer(minLength: 0)
 
-                    Button {
-                        showStreamSettings = true
-                        resetControlsTimer()
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                            .padding(12)
-                            .background(.ultraThinMaterial)
-                            .cornerRadius(10)
+                    if !remoteDesktopManager.isReadOnlyCameraSession {
+                        Button {
+                            showStreamSettings = true
+                            resetControlsTimer()
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.title3)
+                                .foregroundColor(.white)
+                                .padding(12)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(10)
+                        }
                     }
 
                     Button(action: disconnect) {
@@ -622,13 +962,19 @@ struct RemoteDesktopStreamView: View {
                     .accessibilityIdentifier("remote.stream.disconnect")
                 }
 
-                Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {
-                    ForEach(TouchMode.allCases, id: \.self) { mode in
-                        Label(mode.title, systemImage: mode.icon)
-                            .tag(mode)
+                if remoteDesktopManager.isReadOnlyCameraSession {
+                    Label(RuntimeLocalization.string("智能监控为只读画面，不会发送键盘或触控输入"), systemImage: "eye.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(.white)
+                } else {
+                    Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {
+                        ForEach(TouchMode.allCases, id: \.self) { mode in
+                            Label(mode.title, systemImage: mode.icon)
+                                .tag(mode)
+                        }
                     }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
             }
             .padding()
             .background(.ultraThinMaterial)
@@ -673,7 +1019,7 @@ struct RemoteDesktopStreamView: View {
     
     private func disconnect() {
         Task {
-            if isUsingNativeCrossNetworkVideo {
+            if remoteDesktopManager.isReadOnlyCameraSession || isUsingNativeCrossNetworkVideo {
                 await remoteDesktopManager.disconnect()
             } else {
                 await remoteDesktopManager.disconnect(tearDownTransport: false)
@@ -688,10 +1034,13 @@ struct RemoteDesktopStreamView: View {
         controlsTimer?.invalidate()
         showControls = true
 
+#if DEBUG || SKYBRIDGE_TESTING
         guard !isUITesting else { return }
+#endif
         
         controlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
             Task { @MainActor in
+                controlsTimer = nil
                 withAnimation {
                     showControls = false
                 }
@@ -789,6 +1138,12 @@ private struct RemoteDesktopStreamSettingsSheet: View {
         NavigationStack {
             Form {
                 Section("策略预设") {
+                    if let persistenceError = remoteDesktopManager.viewerSettingsPersistenceError {
+                        Label(persistenceError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+
                     Picker(
                         "模式",
                         selection: Binding(
@@ -1227,7 +1582,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
-            onFramesDisplayed: { [remoteDesktopManager] presentationTimeStamp, displayedFrameCount, completedAt, frameAgeMs in
+            onFramesDisplayed: { [remoteDesktopManager] presentationTimeStamp, displayedFrameCount, completedAt, frameAgeMs, cameraPresentationContext in
                 remoteDesktopManager.recordMetalRendererDisplayedFramesForSmoke(
                     displayedFrameCount: displayedFrameCount,
                     completedAt: completedAt,
@@ -1237,7 +1592,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                     await remoteDesktopManager.handleMetalRendererDidDisplayFrames(
                         presentationTimeStamp: presentationTimeStamp,
                         displayedFrameCount: displayedFrameCount,
-                        completedAt: completedAt
+                        completedAt: completedAt,
+                        cameraPresentationContext: cameraPresentationContext
                     )
                 }
             },
@@ -1292,7 +1648,13 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     @MainActor
     final class Coordinator {
-        private let onFramesDisplayed: @Sendable (CMTime, Int, Date, Int?) -> Void
+        private let onFramesDisplayed: @Sendable (
+            CMTime,
+            Int,
+            Date,
+            Int?,
+            CameraFramePresentationContext?
+        ) -> Void
         private let onRenderOrientation: @Sendable (RemoteDesktopRenderOrientation) -> Void
         private weak var attachedView: MetalVideoContainerView?
         let renderer = MetalVideoRenderer()
@@ -1306,7 +1668,13 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         }
 
         init(
-            onFramesDisplayed: @escaping @Sendable (CMTime, Int, Date, Int?) -> Void,
+            onFramesDisplayed: @escaping @Sendable (
+                CMTime,
+                Int,
+                Date,
+                Int?,
+                CameraFramePresentationContext?
+            ) -> Void,
             onRenderOrientation: @escaping @Sendable (RemoteDesktopRenderOrientation) -> Void
         ) {
             self.onFramesDisplayed = onFramesDisplayed
@@ -1503,7 +1871,13 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var nextFrameDueAt = Date.distantPast
         private var lastNativePumpBacklogCatchUpAt = Date.distantPast
         private var lastSourceSize = CGSize.zero
-        var onFramesDisplayed: (@Sendable (CMTime, Int, Date, Int?) -> Void)?
+        var onFramesDisplayed: (@Sendable (
+            CMTime,
+            Int,
+            Date,
+            Int?,
+            CameraFramePresentationContext?
+        ) -> Void)?
         var onRenderOrientation: (@Sendable (RemoteDesktopRenderOrientation) -> Void)?
 
         override init() {
@@ -1535,7 +1909,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                   version > latestEnqueuedFrameVersion else {
                 let reason = "nonmonotonic version=\(version) latestEnqueued=\(latestEnqueuedFrameVersion) displayed=\(lastDisplayedFrameVersion) pending=\(pendingFrames.count)"
                 stateLock.unlock()
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "metal-renderer-reject reason=\"\(reason)\""
                 )
                 return .rejected(reason)
@@ -1544,7 +1918,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 let reason = "queue-full depth=\(pendingFrames.count + 1) max=\(Self.maxQueuedFrames) version=\(version) latestEnqueued=\(latestEnqueuedFrameVersion) displayed=\(lastDisplayedFrameVersion)"
                 renderQueueBackpressure += 1
                 stateLock.unlock()
-                SkyBridgeSmokeTraceWriter.appendStatus(
+                SkyBridgeDiagnosticTrace.appendStatus(
                     "metal-renderer-backpressure reason=\"\(reason)\""
                 )
                 return .rejected(reason)
@@ -1722,6 +2096,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                     to: commandBuffer,
                     frameVersion: frameVersion,
                     presentationTimeStamp: presentationTimeStamp,
+                    cameraPresentationContext: frame.cameraPresentationContext,
                     frameAgeMs: frameAgeMs,
                     renderStartedAt: renderStartedAt,
                     drawableSize: drawableSize,
@@ -1773,6 +2148,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 to: commandBuffer,
                 frameVersion: frameVersion,
                 presentationTimeStamp: presentationTimeStamp,
+                cameraPresentationContext: frame.cameraPresentationContext,
                 frameAgeMs: frameAgeMs,
                 renderStartedAt: renderStartedAt,
                 drawableSize: drawableSize,
@@ -1950,6 +2326,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             to commandBuffer: MTLCommandBuffer,
             frameVersion: UInt64,
             presentationTimeStamp: CMTime,
+            cameraPresentationContext: CameraFramePresentationContext?,
             frameAgeMs: Int?,
             renderStartedAt: UInt64,
             drawableSize: CGSize,
@@ -2002,7 +2379,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                         displayedCallbackPresentationTimeStamp,
                         displayedCallbackCount,
                         displayedCallbackCompletedAt,
-                        frameAgeMs
+                        frameAgeMs,
+                        cameraPresentationContext
                     )
                 }
             }
@@ -2198,7 +2576,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             SkyBridgeLogger.shared.debug(
                 "📈 \(telemetryLine)"
             )
-            SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)
+            SkyBridgeDiagnosticTrace.appendStatus(telemetryLine)
         }
 
         private static func frameAgeMilliseconds(for presentationTimeStamp: CMTime) -> Int? {
@@ -2236,9 +2614,17 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             },
             onFrameEnqueued: { [remoteDesktopManager] presentationTimeStamp, remainingQueueDepth in
                 Task { @MainActor in
-                    await remoteDesktopManager.handleVideoRendererDidEnqueueFrame(
+                    remoteDesktopManager.handleVideoRendererDidEnqueueFrame(
                         presentationTimeStamp: presentationTimeStamp,
                         remainingQueueDepth: remainingQueueDepth
+                    )
+                }
+            },
+            onFramePresented: { [remoteDesktopManager] cameraPresentationContext, presentedAt in
+                Task { @MainActor in
+                    await remoteDesktopManager.handleVideoRendererDidPresentFrame(
+                        cameraPresentationContext: cameraPresentationContext,
+                        presentedAt: presentedAt
                     )
                 }
             }
@@ -2276,11 +2662,14 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         private let onDecodeFailure: @Sendable (String?) -> Void
         private let onRequiresFlush: @Sendable () -> Void
         private let onFrameEnqueued: @Sendable (CMTime, Int) -> Void
+        private let onFramePresented: @Sendable (CameraFramePresentationContext?, Date) -> Void
         private weak var activeFeed: RemoteVideoFrameFeed?
         private weak var attachedView: SampleBufferDisplayView?
         private weak var attachedLayer: AVSampleBufferDisplayLayer?
         private var notificationTokens: [NSObjectProtocol] = []
         private var bufferedFrames: [DisplaySampleBufferFrame] = []
+        private var pendingCameraPresentationContext: CameraFramePresentationContext?
+        private var isAwaitingRendererPresentation = false
         private var isDrainScheduled = false
         private var framePumpTask: Task<Void, Never>?
         var lastFrameVersion: UInt64 = 0
@@ -2289,11 +2678,16 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         init(
             onDecodeFailure: @escaping @Sendable (String?) -> Void,
             onRequiresFlush: @escaping @Sendable () -> Void,
-            onFrameEnqueued: @escaping @Sendable (CMTime, Int) -> Void
+            onFrameEnqueued: @escaping @Sendable (CMTime, Int) -> Void,
+            onFramePresented: @escaping @Sendable (
+                CameraFramePresentationContext?,
+                Date
+            ) -> Void
         ) {
             self.onDecodeFailure = onDecodeFailure
             self.onRequiresFlush = onRequiresFlush
             self.onFrameEnqueued = onFrameEnqueued
+            self.onFramePresented = onFramePresented
         }
 
         @MainActor
@@ -2304,6 +2698,7 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             view.configureIfNeeded()
             let layer = view.sampleBufferDisplayLayer
             attachedLayer = layer
+            installObservers(for: layer.sampleBufferRenderer, displayLayer: layer)
         }
 
         @MainActor
@@ -2332,6 +2727,8 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             attach(to: view)
             guard let layer = attachedLayer else { return }
             bufferedFrames.removeAll(keepingCapacity: true)
+            pendingCameraPresentationContext = nil
+            isAwaitingRendererPresentation = false
             isDrainScheduled = false
             layer.stopRequestingMediaData()
             if removeDisplayedImage {
@@ -2345,11 +2742,11 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         private func ensureFramePumpRunning() {
             guard framePumpTask == nil else { return }
             framePumpTask = Task { @MainActor [weak self] in
-                guard let self else { return }
                 while !Task.isCancelled {
-                    if let feed = self.activeFeed,
-                       let view = self.attachedView {
-                        self.enqueuePendingFrames(from: feed, view: view)
+                    guard self != nil else { return }
+                    if let feed = self?.activeFeed,
+                       let view = self?.attachedView {
+                        self?.enqueuePendingFrames(from: feed, view: view)
                     }
                     do {
                         try await Task.sleep(for: .milliseconds(16))
@@ -2397,12 +2794,18 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                 }
 
                 let frame = bufferedFrames.removeFirst()
+                pendingCameraPresentationContext = frame.cameraPresentationContext
+                isAwaitingRendererPresentation = true
                 layer.enqueue(frame.sampleBuffer)
                 onFrameEnqueued(frame.presentationTimeStamp, bufferedFrames.count)
             }
         }
 
-        private func installObservers(for renderer: AVSampleBufferVideoRenderer) {
+        @MainActor
+        private func installObservers(
+            for renderer: AVSampleBufferVideoRenderer,
+            displayLayer: AVSampleBufferDisplayLayer
+        ) {
             let center = NotificationCenter.default
             notificationTokens.append(
                 center.addObserver(
@@ -2428,6 +2831,33 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                     self.onRequiresFlush()
                 }
             )
+            if #available(iOS 17.4, *) {
+                notificationTokens.append(
+                    center.addObserver(
+                        forName: .AVSampleBufferDisplayLayerReadyForDisplayDidChange,
+                        object: displayLayer,
+                        queue: .main
+                    ) { [weak self] _ in
+                        Task { @MainActor [weak self] in
+                            self?.handleReadyForDisplayDidChange()
+                        }
+                    }
+                )
+            }
+        }
+
+        @MainActor
+        private func handleReadyForDisplayDidChange() {
+            guard #available(iOS 17.4, *),
+                  let layer = attachedLayer,
+                  layer.isReadyForDisplay,
+                  isAwaitingRendererPresentation else {
+                return
+            }
+            let context = pendingCameraPresentationContext
+            pendingCameraPresentationContext = nil
+            isAwaitingRendererPresentation = false
+            onFramePresented(context, Date())
         }
 
         private func detachObservers() {

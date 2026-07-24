@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 
+skybridge_smoke_require_safe_run_id() {
+  local run_id="${1:-}"
+  local variable_name="${2:-smoke run ID}"
+
+  if [[ ! "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+    printf '%s must be 1-64 characters, start with an ASCII letter or digit, and contain only ASCII letters, digits, dot, underscore, or hyphen.\n' \
+      "$variable_name" >&2
+    return 2
+  fi
+}
+
 skybridge_smoke_hash_label() {
   local value="${1:-}"
   python3 - "${value}" <<'PY'
@@ -148,19 +159,23 @@ skybridge_smoke_public_redact_stream() {
   shift
   skybridge_smoke_redact_stream "${device_label}" "$@" | python3 -c '
 import json
+import os
 import re
 import sys
 
 text = sys.stdin.read()
+jsonl_mode = os.environ.get("SKYBRIDGE_SMOKE_REDACTION_FORMAT") == "jsonl"
 
 sensitive_key_values = {
     "accesstoken",
+    "account",
     "accountdisplayname",
     "address",
     "arguments",
     "apikey",
     "argv",
     "authsession",
+    "audittoken",
     "authorization",
     "bearertoken",
     "bonjourservicename",
@@ -171,6 +186,9 @@ sensitive_key_values = {
     "code",
     "connectioncode",
     "controlendpoint",
+    "declareddeviceid",
+    "dedupekey",
+    "device",
     "deviceidentifier",
     "deviceid",
     "devicename",
@@ -190,24 +208,46 @@ sensitive_key_values = {
     "icepwd",
     "iceufrag",
     "ip",
+    "keyid",
     "localdescription",
+    "localaccount",
+    "localaccountdisplayname",
     "localdeviceid",
     "localendpoint",
+    "localip",
     "localhostnames",
+    "localnebula",
+    "localnebulaid",
     "mlkempublickey",
     "name",
+    "nebula",
     "nebulaid",
+    "noticeaccount",
+    "noticeaccountdisplayname",
+    "noticenebula",
+    "noticenebulaid",
     "path",
     "p2pdeviceid",
+    "peer",
+    "pinnedprotocolidentity",
     "potentialhostnames",
     "privatekey",
+    "provisioningprofile",
+    "provisioningprofileuuid",
+    "publickey",
     "publickeybase64",
     "pubkeyfp",
     "relay",
     "refreshtoken",
     "remotedescription",
+    "remoteaccount",
+    "remoteaccountdisplayname",
     "remotedeviceid",
     "remoteendpoint",
+    "remoteip",
+    "remotenebula",
+    "remotenebulaid",
+    "requesterprotocolidentity",
     "reason",
     "routeidentifier",
     "serialnumber",
@@ -217,18 +257,22 @@ sensitive_key_values = {
     "sessionid",
     "sdp",
     "stablepeerid",
+    "stablepeer",
+    "signingfingerprint",
+    "signingidentity",
     "sub",
     "targetdeviceid",
+    "teamidentifier",
     "tenantid",
     "token",
     "trackid",
     "udid",
+    "uniqueidentifier",
     "url",
     "userid",
     "useridentifier",
     "xwingpublickey",
 }
-
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -249,22 +293,38 @@ def redact_text(value: str) -> str:
         value,
         flags=re.IGNORECASE,
     )
+    # Human-facing account and device labels may contain spaces. Consume the
+    # complete value through the next structured key instead of leaving a
+    # suffix behind after redacting only the first whitespace-delimited token.
     value = re.sub(
-        r"\b(identity[_-]?key|target[_-]?device[_-]?id|local[_-]?device[_-]?id|peer[_-]?id|remote[_-]?device[_-]?id|stable[_-]?peer[_-]?id|device[_-]?id|p2p[_-]?device[_-]?id|cloud[_-]?device[_-]?id|pub[_-]?key[_-]?fp|session|session[_-]?id|track[_-]?id)=\S+",
+        r"\b(account|device(?:[_-]?name)?|nebula)=.*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
+        r"\1=<redacted-public-artifact-value>",
+        value,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    value = re.sub(
+        r"\b(identity[_-]?key|declared[_-]?device[_-]?id|target[_-]?device[_-]?id|local[_-]?device[_-]?id|peer(?:[_-]?id)?|remote[_-]?device[_-]?id|stable[_-]?peer(?:[_-]?id)?|device(?:[_-]?id)?|p2p[_-]?device[_-]?id|cloud[_-]?device[_-]?id|pub[_-]?key[_-]?fp|dedupe[_-]?key|key[_-]?id|requester[_-]?protocol[_-]?identity|pinned[_-]?protocol[_-]?identity|unique[_-]?identifier|session|session[_-]?id|track[_-]?id)=\S+",
         r"\1=<redacted-identity>",
         value,
         flags=re.IGNORECASE,
     )
     value = re.sub(
-        r"\b(tenant[_-]?id|user[_-]?identifier|user[_-]?id|sub|nebula[_-]?id|display[_-]?name|account[_-]?display[_-]?name|route[_-]?identifier|bonjour[_-]?service[_-]?name|endpoint[_-]?host|control[_-]?endpoint|relay|endpoint|host|ip|address|reason|local[_-]?endpoint|remote[_-]?endpoint|selected[_-]?candidate|selected[_-]?candidate[_-]?pair|xwing[_-]?public[_-]?key|mlkem[_-]?public[_-]?key)=\S+",
+        r"\b(tenant[_-]?id|user[_-]?identifier|user[_-]?id|sub|(?:notice|remote|local)?[_-]?nebula(?:[_-]?id)?|display[_-]?name|(?:notice|remote|local)?[_-]?account(?:[_-]?display[_-]?name)?|route[_-]?identifier|bonjour[_-]?service[_-]?name|endpoint[_-]?host|control[_-]?endpoint|relay|endpoint|host|(?:remote[_-]?)?ip|address|reason|local[_-]?endpoint|remote[_-]?endpoint|selected[_-]?candidate|selected[_-]?candidate[_-]?pair)=\S+",
         r"\1=<redacted-public-artifact-value>",
         value,
         flags=re.IGNORECASE,
     )
     value = re.sub(
-        r"\b(access[_-]?token|api[_-]?key|authorization|bearer[_-]?token|client[_-]?secret|private[_-]?key|public[_-]?key[_-]?base64|refresh[_-]?token|token)="
+        r"\b(access[_-]?token|api[_-]?key|authorization|bearer[_-]?token|client[_-]?secret|private[_-]?key|(?:(?:peer|kem|pqc|xwing|mlkem|ed25519|x25519)[_-]?)?public[_-]?key(?:[_-]?base64)?|refresh[_-]?token|token)="
         r"(?!<redacted\b|<redacted>)[^\s&]+",
         r"\1=<redacted-secret>",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(signing[_-]?(?:fingerprint|identity)|provisioning[_-]?profile(?:[_-]?uuid)?|team[_-]?identifier)="
+        r"(?!<redacted\b|<redacted>)[^\s&]+",
+        r"\1=<redacted-signing-metadata>",
         value,
         flags=re.IGNORECASE,
     )
@@ -291,17 +351,27 @@ def redact_json(value, key: str = ""):
             return "<redacted-fingerprint>"
         if normalized_key in {
             "clouddeviceid",
+            "audittoken",
+            "declareddeviceid",
+            "dedupekey",
+            "device",
             "deviceid",
             "identitykey",
+            "keyid",
             "localdeviceid",
             "p2pdeviceid",
+            "peer",
+            "pinnedprotocolidentity",
             "pubkeyfp",
             "remotedeviceid",
+            "requesterprotocolidentity",
             "session",
             "sessionid",
+            "stablepeer",
             "stablepeerid",
             "targetdeviceid",
             "trackid",
+            "uniqueidentifier",
         }:
             return "<redacted-identity>"
         if normalized_key in {
@@ -317,6 +387,7 @@ def redact_json(value, key: str = ""):
             "localdescription",
             "mlkempublickey",
             "privatekey",
+            "publickey",
             "publickeybase64",
             "refreshtoken",
             "remotedescription",
@@ -326,6 +397,7 @@ def redact_json(value, key: str = ""):
         }:
             return "<redacted-secret>"
         if normalized_key in {
+            "account",
             "accountdisplayname",
             "address",
             "bonjourservicename",
@@ -336,10 +408,25 @@ def redact_json(value, key: str = ""):
             "host",
             "ip",
             "localendpoint",
+            "localaccount",
+            "localaccountdisplayname",
+            "localip",
+            "localnebula",
+            "localnebulaid",
+            "nebula",
             "nebulaid",
+            "noticeaccount",
+            "noticeaccountdisplayname",
+            "noticenebula",
+            "noticenebulaid",
             "reason",
             "relay",
             "remoteendpoint",
+            "remoteaccount",
+            "remoteaccountdisplayname",
+            "remoteip",
+            "remotenebula",
+            "remotenebulaid",
             "routeidentifier",
             "selectedcandidate",
             "selectedcandidatepair",
@@ -350,6 +437,14 @@ def redact_json(value, key: str = ""):
             "useridentifier",
         }:
             return "<redacted-public-artifact-value>"
+        if normalized_key in {
+            "provisioningprofile",
+            "provisioningprofileuuid",
+            "signingfingerprint",
+            "signingidentity",
+            "teamidentifier",
+        }:
+            return "<redacted-signing-metadata>"
         if normalized_key == "code":
             return "<redacted-sas-code>"
         if normalized_key in {"arguments", "argv", "environment", "environmentvariables"}:
@@ -370,9 +465,28 @@ def redact_json(value, key: str = ""):
 try:
     payload = json.loads(text)
 except json.JSONDecodeError:
-    sys.stdout.write(redact_text(text))
+    # Preserve newline-delimited JSON as JSONL. Falling back to text redaction
+    # for mixed-format logs remains fail-closed because the public scanner
+    # independently rejects any sensitive field that was not transformed.
+    raw_lines = [line for line in text.splitlines() if line.strip()]
+    redacted_lines = []
+    try:
+        for line in raw_lines:
+            redacted_lines.append(
+                json.dumps(redact_json(json.loads(line)), sort_keys=True, separators=(",", ":"))
+            )
+    except json.JSONDecodeError:
+        sys.stdout.write(redact_text(text))
+    else:
+        if redacted_lines:
+            sys.stdout.write("\n".join(redacted_lines) + "\n")
+        else:
+            sys.stdout.write(redact_text(text))
 else:
-    sys.stdout.write(json.dumps(redact_json(payload), indent=2, sort_keys=True))
+    if jsonl_mode:
+        sys.stdout.write(json.dumps(redact_json(payload), sort_keys=True, separators=(",", ":")))
+    else:
+        sys.stdout.write(json.dumps(redact_json(payload), indent=2, sort_keys=True))
     sys.stdout.write("\n")
 '
 }
@@ -389,6 +503,14 @@ skybridge_smoke_private_capture_artifact_file_name() {
   local name="${1:?missing artifact file name}"
   case "${name}" in
     *.[pP][nN][gG]|*.[jJ][pP][gG]|*.[jJ][pP][eE][gG]|*.[hH][eE][iI][cC]|*.[hH][eE][iI][fF]|*.[mM][oO][vV]|*.[mM][pP]4|*.[mM]4[vV]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+skybridge_smoke_private_secret_artifact_file_name() {
+  local name="${1:?missing artifact file name}"
+  case "${name}" in
+    *auth-session*.json|*auth_session*.json) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -430,10 +552,13 @@ skybridge_smoke_materialize_public_artifacts() {
   local dest_path
   while IFS= read -r -d "" source_path; do
     name="$(basename "${source_path}")"
-    rel_path="${source_path#${artifact_abs}/}"
+    rel_path="${source_path#"${artifact_abs}"/}"
     if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
       echo "refusing unsafe smoke artifact path: ${source_path}" >&2
       return 2
+    fi
+    if skybridge_smoke_private_secret_artifact_file_name "${name}"; then
+      continue
     fi
     if ! skybridge_smoke_public_artifact_file_name "${name}"; then
       if skybridge_smoke_private_capture_artifact_file_name "${name}"; then
@@ -444,7 +569,12 @@ skybridge_smoke_materialize_public_artifacts() {
     fi
     dest_path="${public_abs}/${rel_path}"
     mkdir -p "$(dirname "${dest_path}")"
-    skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+    if [[ "${name}" == *.jsonl ]]; then
+      SKYBRIDGE_SMOKE_REDACTION_FORMAT=jsonl \
+        skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+    else
+      skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+    fi
   done < <(
     find "${artifact_abs}" \
       \( -path "${public_abs}" -o -name .build -o -name .git -o -name DerivedData-ios -o -name DerivedData-mac-online \) -prune \
@@ -462,6 +592,7 @@ skybridge_smoke_check_public_artifacts() {
   fi
 
   python3 - "${public_dir}" "${ROOT_DIR:-$(pwd)}" "$@" <<'PY'
+import json
 import os
 import re
 import sys
@@ -492,10 +623,12 @@ for token in path_tokens:
 extensions = (".log", ".json", ".jsonl", ".txt", ".csv")
 sensitive_key_values = {
     "accesstoken",
+    "account",
     "accountdisplayname",
     "address",
     "apikey",
     "authsession",
+    "audittoken",
     "authorization",
     "bearertoken",
     "bonjourservicename",
@@ -506,6 +639,9 @@ sensitive_key_values = {
     "code",
     "connectioncode",
     "controlendpoint",
+    "declareddeviceid",
+    "dedupekey",
+    "device",
     "deviceidentifier",
     "deviceid",
     "devicename",
@@ -523,24 +659,46 @@ sensitive_key_values = {
     "icepwd",
     "iceufrag",
     "ip",
+    "keyid",
     "localdescription",
+    "localaccount",
+    "localaccountdisplayname",
     "localdeviceid",
     "localendpoint",
+    "localip",
     "localhostnames",
+    "localnebula",
+    "localnebulaid",
     "mlkempublickey",
     "name",
+    "nebula",
     "nebulaid",
+    "noticeaccount",
+    "noticeaccountdisplayname",
+    "noticenebula",
+    "noticenebulaid",
     "path",
     "p2pdeviceid",
+    "peer",
+    "pinnedprotocolidentity",
     "potentialhostnames",
     "privatekey",
+    "provisioningprofile",
+    "provisioningprofileuuid",
+    "publickey",
     "publickeybase64",
     "pubkeyfp",
     "relay",
     "refreshtoken",
     "remotedescription",
+    "remoteaccount",
+    "remoteaccountdisplayname",
     "remotedeviceid",
     "remoteendpoint",
+    "remoteip",
+    "remotenebula",
+    "remotenebulaid",
+    "requesterprotocolidentity",
     "reason",
     "routeidentifier",
     "serialnumber",
@@ -550,16 +708,46 @@ sensitive_key_values = {
     "sessionid",
     "sdp",
     "stablepeerid",
+    "stablepeer",
+    "signingfingerprint",
+    "signingidentity",
     "sub",
     "targetdeviceid",
+    "teamidentifier",
     "tenantid",
     "token",
     "trackid",
     "udid",
+    "uniqueidentifier",
     "url",
     "userid",
     "useridentifier",
     "xwingpublickey",
+}
+prefixed_sensitive_key_suffixes = {
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "bearertoken",
+    "clientsecret",
+    "connectioncode",
+    "connectlink",
+    "declareddeviceid",
+    "deviceid",
+    "identitykey",
+    "localdeviceid",
+    "nebulaid",
+    "p2pdeviceid",
+    "privatekey",
+    "publickey",
+    "refreshtoken",
+    "remotedeviceid",
+    "sessionid",
+    "targetdeviceid",
+    "tenantid",
+    "token",
+    "userid",
+    "useridentifier",
 }
 patterns = [
     ("raw connect link", re.compile(r"skybridge://")),
@@ -577,7 +765,7 @@ patterns = [
     (
         "raw secret JSON field",
         re.compile(
-            r'"(?:accessToken|refreshToken|apiKey|authorization|bearerToken|clientSecret|iceCandidate|icePwd|iceUfrag|localDescription|mlkemPublicKey|privateKey|publicKeyBase64|remoteDescription|sdp|token|xwingPublicKey)"\s*:\s*'
+            r'"(?:accessToken|refreshToken|apiKey|authorization|bearerToken|clientSecret|iceCandidate|icePwd|iceUfrag|localDescription|mlkemPublicKey|privateKey|publicKey|publicKeyBase64|remoteDescription|sdp|token|xwingPublicKey)"\s*:\s*'
             r'"(?!<redacted)[^"]+"',
             re.IGNORECASE,
         ),
@@ -585,7 +773,7 @@ patterns = [
     (
         "raw Apple device identifier field",
         re.compile(
-            r'"(?:identifier|udid|serialNumber|deviceIdentifier|ecid|deviceId|p2pDeviceId|cloudDeviceId|pubKeyFP|session|sessionId|trackId)"\s*:\s*'
+            r'"(?:identifier|udid|serialNumber|device|deviceName|deviceIdentifier|ecid|identityKey|deviceId|declaredDeviceId|localDeviceId|remoteDeviceId|targetDeviceId|p2pDeviceId|cloudDeviceId|dedupeKey|keyId|peer|peerId|pinnedProtocolIdentity|pubKeyFP|requesterProtocolIdentity|stablePeer|stablePeerId|uniqueIdentifier|session|sessionId|trackId)"\s*:\s*'
             r'"(?!<redacted)[^"]+"',
             re.IGNORECASE,
         ),
@@ -593,7 +781,7 @@ patterns = [
     (
         "raw public identity or route field",
         re.compile(
-            r'"(?:accountDisplayName|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|ip|nebulaId|reason|relay|routeIdentifier|sub|tenantId|url|userId|userIdentifier)"\s*:\s*'
+            r'"(?:(?:notice|remote|local)?Account(?:DisplayName)?|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|(?:remote|local)?IP|(?:notice|remote|local)?Nebula(?:Id)?|reason|relay|routeIdentifier|sub|tenantId|url|userId|userIdentifier)"\s*:\s*'
             r'"(?!<redacted)[^"]+"',
             re.IGNORECASE,
         ),
@@ -601,8 +789,32 @@ patterns = [
     (
         "raw public identity or route assignment",
         re.compile(
-            r"\b(?:accountDisplayName|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|ip|nebulaId|reason|relay|routeIdentifier|sub|tenantId|userId|userIdentifier|xwingPublicKey|mlkemPublicKey)="
+            r"\b(?:(?:notice|remote|local)?Account(?:DisplayName)?|address|bonjourServiceName|controlEndpoint|displayName|endpoint|endpointHost|host|(?:remote|local)?IP|(?:notice|remote|local)?Nebula(?:Id)?|reason|relay|routeIdentifier|sub|tenantId|userId|userIdentifier)="
             r"(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "raw device or stable identity assignment",
+        re.compile(
+            r"\b(?:identityKey|declaredDeviceId|targetDeviceId|localDeviceId|peer(?:Id)?|remoteDeviceId|stablePeer(?:Id)?|device(?:Id|Name)?|p2pDeviceId|cloudDeviceId|pubKeyFP|dedupeKey|keyId|requesterProtocolIdentity|pinnedProtocolIdentity|uniqueIdentifier)="
+            r"(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "raw public key assignment",
+        re.compile(
+            r"\b(?:(?:peer|kem|pqc|xwing|mlkem|ed25519|x25519)[_-]?)?public[_-]?key(?:[_-]?base64)?="
+            r"(?!<redacted\b|<redacted>)[^\s&]+",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "raw signing metadata assignment",
+        re.compile(
+            r"\b(?:signing[_-]?(?:fingerprint|identity)|provisioning[_-]?profile(?:[_-]?uuid)?|team[_-]?identifier)="
+            r"(?!<redacted\b|<redacted>)[^\s&]+",
             re.IGNORECASE,
         ),
     ),
@@ -625,6 +837,12 @@ patterns = [
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
+def is_sensitive_key(value: str) -> bool:
+    normalized = normalize_key(value)
+    return normalized in sensitive_key_values or any(
+        normalized.endswith(suffix) for suffix in prefixed_sensitive_key_suffixes
+    )
+
 def contains_unredacted_sensitive_value(value) -> bool:
     if value is None:
         return False
@@ -640,7 +858,7 @@ def contains_unredacted_sensitive_value(value) -> bool:
 def inspect_json_fields(value, rel_path: str, findings):
     if isinstance(value, dict):
         for key, item in value.items():
-            if normalize_key(str(key)) in sensitive_key_values and contains_unredacted_sensitive_value(item):
+            if is_sensitive_key(str(key)) and contains_unredacted_sensitive_value(item):
                 findings.append((rel_path, f"raw sensitive JSON field {key}"))
             inspect_json_fields(item, rel_path, findings)
     elif isinstance(value, list):
@@ -656,7 +874,8 @@ def inspect_structured_json(text: str, rel_path: str, findings):
     for candidate in candidates:
         try:
             payload = json.loads(candidate)
-        except Exception:
+        except json.JSONDecodeError:
+            findings.append((rel_path, "invalid structured JSON"))
             continue
         inspect_json_fields(payload, rel_path, findings)
 
@@ -667,6 +886,12 @@ for current_root, dirs, files in os.walk(public_dir):
     for name in files:
         path = os.path.join(current_root, name)
         rel_path = os.path.relpath(path, public_dir)
+        normalized_name = name.lower()
+        if normalized_name.endswith(".json") and (
+            "auth-session" in normalized_name or "auth_session" in normalized_name
+        ):
+            findings.append((rel_path, "private auth-session artifact is forbidden in public output"))
+            continue
         if not name.endswith(extensions):
             findings.append((rel_path, "unsupported public artifact file extension"))
             continue

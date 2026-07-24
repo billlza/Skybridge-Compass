@@ -19,6 +19,8 @@ Options:
   --manifest-path <path>        Signed stable update manifest to validate against the app and DMG.
                                 Explicit paths are required to exist. Without this option,
                                 dist/macos-stable.json is validated only after it has been generated.
+  --scan-release-binaries-only Validate provenance and forbidden test surfaces in every
+                                Mach-O nested anywhere under --app-path, then exit
   --package-integrity-only      Validate package identity, signing, stapling, and Gatekeeper only
   --skip-launch-smoke           Skip open/launch smoke test
   --skip-cli-quality-gates      Skip Rust CLI coverage, performance, and memory gates
@@ -26,6 +28,8 @@ Options:
   --skip-memory-check           Skip leaks scan during launch smoke
   --p2p-remote-artifact-dir <path>
                                 Real-device P2P remote smoke artifact for `skybridge check performance`
+  --webrtc-remote-artifact-dir <path>
+                                Real-device WebRTC smoke artifact with strict relay/audio/soak acceptance proof
   --file-transfer-artifact-dir <path>
                                 Real-device file-transfer smoke artifact for `skybridge check performance`
   --connectivity-artifact-dir <path>
@@ -54,7 +58,7 @@ Checks:
   - Rust CLI operator check-surface coverage is at least 88%
   - P2P and WebRTC remote-control security notice artifacts pass lifecycle and metadata gates
   - Production macOS AppKit security notice panel artifacts prove top-center placement and approval/disconnect actions
-  - real-device P2P remote and file-transfer artifacts pass CLI performance gates
+  - real-device P2P remote, WebRTC remote, and file-transfer artifacts pass release acceptance gates
   - launched app process passes a CLI memory leak scan
   - release readiness fails if smoke-only trust auto-approval is enabled
 USAGE
@@ -105,7 +109,9 @@ SKIP_CLI_QUALITY_GATES=0
 SKIP_PERFORMANCE_GATES=0
 SKIP_MEMORY_CHECK=0
 PACKAGE_INTEGRITY_ONLY=0
+SCAN_RELEASE_BINARIES_ONLY=0
 P2P_REMOTE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR:-}"
+WEBRTC_REMOTE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR:-}"
 FILE_TRANSFER_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR:-}"
 CONNECTIVITY_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR:-}"
 P2P_NOTICE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR:-}"
@@ -151,6 +157,10 @@ while [[ $# -gt 0 ]]; do
       PACKAGE_INTEGRITY_ONLY=1
       shift
       ;;
+    --scan-release-binaries-only)
+      SCAN_RELEASE_BINARIES_ONLY=1
+      shift
+      ;;
     --skip-launch-smoke)
       SKIP_LAUNCH_SMOKE=1
       shift
@@ -171,6 +181,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --p2p-remote-artifact-dir)
       P2P_REMOTE_ARTIFACT_DIR="${2:-}"
+      shift 2
+      ;;
+    --webrtc-remote-artifact-dir)
+      WEBRTC_REMOTE_ARTIFACT_DIR="${2:-}"
       shift 2
       ;;
     --file-transfer-artifact-dir)
@@ -340,8 +354,8 @@ validate_update_check_configuration() {
   signing_keys="$(plist_read_value "${info_plist}" "SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS" 2>/dev/null || true)"
 
   [[ -n "${manifest_url}" ]] || fail "app Info.plist is missing SKYBRIDGE_UPDATE_MANIFEST_URL"
-  [[ "${manifest_url}" == https://github.com/billlza/Skybridge-Compass/releases/download/* ]] \
-    || fail "release update manifest must be a GitHub Releases HTTPS asset, actual: ${manifest_url}"
+  [[ "${manifest_url}" == "https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json" ]] \
+    || fail "release update manifest must use the exact Latest immutable macOS Release asset URL, actual: ${manifest_url}"
   [[ -n "${signing_keys}" ]] || fail "app Info.plist is missing trusted update manifest Ed25519 public keys"
   [[ "${signing_keys}" == *":"* ]] \
     || fail "SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS must use key-id:base64-public-key entries"
@@ -378,10 +392,31 @@ validate_update_check_configuration() {
     || fail "GitHub update publisher must upload the stable manifest asset name expected by the app"
   grep -q 'validate_macos_update_manifest.sh' "${github_publisher}" \
     || fail "GitHub update publisher must validate generated and downloaded stable manifests against the exact app and DMG"
-  grep -q 'gh release upload' "${github_publisher}" \
-    || fail "GitHub update publisher must upload DMG and manifest assets through GitHub Releases"
+  grep -q 'gh release create' "${github_publisher}" \
+    || fail "GitHub update publisher must create one release draft with the complete staged asset set"
+  grep -Fq "\"\${STAGED_ASSET_PATHS[@]}\"" "${github_publisher}" \
+    || fail "GitHub update publisher must attach the complete staged asset set during release creation"
+  grep -q -- '--draft' "${github_publisher}" \
+    || fail "GitHub update publisher must keep the release unpublished until remote asset verification passes"
+  grep -q -- '--verify-tag' "${github_publisher}" \
+    || fail "GitHub update publisher must require a pre-existing verified remote tag"
+  grep -q 'gh release edit' "${github_publisher}" \
+    || fail "GitHub update publisher must publish only the already-verified draft"
   grep -q 'gh release download' "${github_publisher}" \
     || fail "GitHub update publisher must download uploaded release assets for post-upload verification"
+  grep -q 'gh release verify ' "${github_publisher}" \
+    || fail "GitHub update publisher must verify the immutable release attestation"
+  grep -q 'gh release verify-asset' "${github_publisher}" \
+    || fail "GitHub update publisher must verify every asset against the immutable release attestation"
+  grep -q 'isImmutable' "${github_publisher}" \
+    || fail "GitHub update publisher must prove the published release is immutable"
+  grep -q 'immutable-releases' "${github_publisher}" \
+    || fail "GitHub update publisher must prove repository release immutability is enabled before creating a draft"
+  grep -Fq "[[ \"\$TAG_NAME\" != \"stable\" ]]" "${github_publisher}" \
+    || fail "GitHub update publisher must reject the legacy mutable stable tag"
+  if grep -q 'gh release upload' "${github_publisher}" || grep -q -- '--clobber' "${github_publisher}"; then
+    fail "GitHub update publisher must not mutate or replace assets after release creation"
+  fi
   grep -q 'xcrun stapler validate' "${github_publisher}" \
     || fail "GitHub update publisher must verify notarization/stapling before advertising a DMG update"
   grep -Fq "https://github.com/\${REPOSITORY}/releases/download/\${TAG_NAME}" "${github_publisher}" \
@@ -434,10 +469,30 @@ run_cli_performance_gates() {
     || fail "missing --p2p-remote-artifact-dir for release performance gate"
   [[ -d "${P2P_REMOTE_ARTIFACT_DIR}" ]] \
     || fail "P2P remote artifact dir does not exist: ${P2P_REMOTE_ARTIFACT_DIR}"
+  [[ -n "${WEBRTC_REMOTE_ARTIFACT_DIR}" ]] \
+    || fail "missing --webrtc-remote-artifact-dir for release performance gate"
+  [[ -d "${WEBRTC_REMOTE_ARTIFACT_DIR}" ]] \
+    || fail "WebRTC remote artifact dir does not exist: ${WEBRTC_REMOTE_ARTIFACT_DIR}"
   [[ -n "${FILE_TRANSFER_ARTIFACT_DIR}" ]] \
     || fail "missing --file-transfer-artifact-dir for release performance gate"
   [[ -d "${FILE_TRANSFER_ARTIFACT_DIR}" ]] \
     || fail "file-transfer artifact dir does not exist: ${FILE_TRANSFER_ARTIFACT_DIR}"
+
+  local acceptance_validator="${PROJECT_ROOT}/Scripts/validate_real_device_release_acceptance_artifact.py"
+  [[ -f "${acceptance_validator}" ]] \
+    || fail "missing real-device release acceptance artifact validator: ${acceptance_validator}"
+
+  log_info "Validating P2P artifact uses real system trust rather than injected/in-memory lab state"
+  python3 "${acceptance_validator}" \
+    --kind p2p \
+    --artifact-dir "${P2P_REMOTE_ARTIFACT_DIR}" \
+    || fail "P2P remote artifact is diagnostic-only and cannot satisfy release acceptance"
+
+  log_info "Validating real-device WebRTC relay/audio/preflight/soak artifact"
+  python3 "${acceptance_validator}" \
+    --kind webrtc \
+    --artifact-dir "${WEBRTC_REMOTE_ARTIFACT_DIR}" \
+    || fail "WebRTC remote artifact does not satisfy release acceptance"
 
   log_info "Running Rust CLI P2P remote performance gate"
   run_skybridge_cli check performance \
@@ -475,7 +530,8 @@ run_cli_remote_control_notice_gates() {
   log_info "Running Rust CLI P2P remote-control security notice gate"
   run_skybridge_cli check remote-control-notice \
     --artifact-dir "${P2P_NOTICE_ARTIFACT_DIR}" \
-    --transport p2p
+    --transport p2p \
+    --require-panel
 
   log_info "Running Rust CLI WebRTC remote-control security notice gate"
   run_skybridge_cli check remote-control-notice \
@@ -590,51 +646,161 @@ validate_release_binary_provenance_strings() {
   fi
 }
 
+validate_release_binary_test_surface_strings() {
+  local executable_path="$1"
+  local context="${2:-release executable}"
+  local forbidden_marker=""
+  local strings_output=""
+  local tool_diagnostic=""
+
+  strings_output="$(mktemp "${TMP_DIR}/release-binary-strings.XXXXXX")"
+  tool_diagnostic="${strings_output}.stderr"
+
+  if ! /usr/bin/strings -a "${executable_path}" >"${strings_output}" 2>"${tool_diagnostic}"; then
+    fail "${context} could not be scanned with strings: $(skybridge_sanitize_log_value "$(head -n 1 "${tool_diagnostic}" 2>/dev/null || true)")"
+  fi
+
+  forbidden_marker="$(
+    first_forbidden_release_test_surface_marker <"${strings_output}" || true
+  )"
+
+  if [[ -n "${forbidden_marker}" ]]; then
+    fail "${context} contains a test/smoke activation surface in its strings: $(skybridge_sanitize_log_value "${forbidden_marker}")"
+  fi
+
+  rm -f "${strings_output}" "${tool_diagnostic}"
+}
+
+RELEASE_TEST_ENVIRONMENT_MARKER_PATTERN='(^|[^[:alnum:]_])(SKYBRIDGE_TESTING|SKYBRIDGE_SMOKE_[[:alnum:]_]*|SKYBRIDGE_KEYCHAIN_IN_MEMORY|UITEST_[[:alnum:]_]*|XCTestSessionIdentifier|XCTestConfigurationFilePath|XCTestBundlePath|XCInjectBundleInto|XCInjectBundle)([^[:alnum:]_]|$)'
+RELEASE_TEST_TYPE_MARKER_PATTERN='(^|[^[:alnum:]])([[:alnum:]_]*(SmokeHarness|SmokeStatusWriter|SmokeStatusReporter|SmokeStreamOverrides|SmokeTraceWriter|SmokeStatusFileAppender)|MacSmokeStatusFailClosedWriter|RemoteControlSmokeStatusWriter|RemoteControlNoticePanelProbeHarness)([^[:alnum:]_]|$)'
+RELEASE_NM_TOOL=""
+RELEASE_SWIFT_DEMANGLE_TOOL=""
+
+first_forbidden_release_test_surface_marker() {
+  LC_ALL=C grep -E -m1 "${RELEASE_TEST_ENVIRONMENT_MARKER_PATTERN}|${RELEASE_TEST_TYPE_MARKER_PATTERN}"
+}
+
+resolve_release_binary_surface_scan_tools() {
+  [[ -x /usr/bin/file ]] || fail "release binary surface gate requires /usr/bin/file"
+  [[ -x /usr/bin/strings ]] || fail "release binary surface gate requires /usr/bin/strings"
+  command -v xcrun >/dev/null 2>&1 || fail "release binary surface gate requires xcrun"
+
+  RELEASE_NM_TOOL="$(xcrun --find nm 2>/dev/null || true)"
+  RELEASE_SWIFT_DEMANGLE_TOOL="$(xcrun --find swift-demangle 2>/dev/null || true)"
+  [[ -x "${RELEASE_NM_TOOL}" ]] || fail "release binary surface gate could not resolve nm through xcrun"
+  [[ -x "${RELEASE_SWIFT_DEMANGLE_TOOL}" ]] \
+    || fail "release binary surface gate could not resolve swift-demangle through xcrun"
+}
+
+validate_release_binary_test_surface_symbols() {
+  local executable_path="$1"
+  local context="${2:-release executable}"
+  local nm_output=""
+  local demangled_output=""
+  local tool_diagnostic=""
+  local forbidden_marker=""
+  local unexpected_diagnostic=""
+
+  nm_output="$(mktemp "${TMP_DIR}/release-binary-nm.XXXXXX")"
+  demangled_output="$(mktemp "${TMP_DIR}/release-binary-demangled.XXXXXX")"
+  tool_diagnostic="${nm_output}.stderr"
+
+  if ! "${RELEASE_NM_TOOL}" -a "${executable_path}" >"${nm_output}" 2>"${tool_diagnostic}"; then
+    fail "${context} could not be scanned with nm: $(skybridge_sanitize_log_value "$(head -n 1 "${tool_diagnostic}" 2>/dev/null || true)")"
+  fi
+
+  unexpected_diagnostic="$(
+    LC_ALL=C grep -Ev '(^|: )no symbols$' "${tool_diagnostic}" | head -n 1 || true
+  )"
+  if [[ -n "${unexpected_diagnostic}" ]]; then
+    fail "${context} produced an unexpected nm diagnostic: $(skybridge_sanitize_log_value "${unexpected_diagnostic}")"
+  fi
+
+  forbidden_marker="$(
+    first_forbidden_release_test_surface_marker <"${nm_output}" || true
+  )"
+  if [[ -n "${forbidden_marker}" ]]; then
+    fail "${context} contains a test/smoke activation surface in its symbol table: $(skybridge_sanitize_log_value "${forbidden_marker}")"
+  fi
+
+  : >"${tool_diagnostic}"
+  if ! "${RELEASE_SWIFT_DEMANGLE_TOOL}" --compact <"${nm_output}" >"${demangled_output}" 2>"${tool_diagnostic}"; then
+    fail "${context} symbols could not be demangled: $(skybridge_sanitize_log_value "$(head -n 1 "${tool_diagnostic}" 2>/dev/null || true)")"
+  fi
+  if [[ -s "${tool_diagnostic}" ]]; then
+    fail "${context} produced an unexpected swift-demangle diagnostic: $(skybridge_sanitize_log_value "$(head -n 1 "${tool_diagnostic}")")"
+  fi
+
+  forbidden_marker="$(
+    first_forbidden_release_test_surface_marker <"${demangled_output}" || true
+  )"
+  if [[ -n "${forbidden_marker}" ]]; then
+    fail "${context} contains a test/smoke activation surface after Swift symbol demangling: $(skybridge_sanitize_log_value "${forbidden_marker}")"
+  fi
+
+  rm -f "${nm_output}" "${demangled_output}" "${tool_diagnostic}"
+}
+
+validate_release_binary_test_surface() {
+  local executable_path="$1"
+  local context="${2:-release executable}"
+
+  validate_release_binary_test_surface_strings "${executable_path}" "${context}"
+  validate_release_binary_test_surface_symbols "${executable_path}" "${context}"
+}
+
 is_macho_binary_file() {
   local file_path="$1"
   [[ -f "${file_path}" ]] || return 1
-  file -b "${file_path}" 2>/dev/null | grep -Eq 'Mach-O'
+  /usr/bin/file -b "${file_path}" 2>/dev/null | grep -Eq 'Mach-O'
 }
 
 release_app_binary_candidates() {
   local app_path="$1"
-  local root=""
-  local roots=(
-    "${app_path}/Contents/MacOS"
-    "${app_path}/Contents/Frameworks"
-    "${app_path}/Contents/PlugIns"
-    "${app_path}/Contents/Library"
-    "${app_path}/Contents/XPCServices"
-  )
-
-  for root in "${roots[@]}"; do
-    [[ -d "${root}" ]] || continue
-    find "${root}" -type f -print 2>/dev/null
-  done
+  find "${app_path}" -type f -print0
 }
 
 validate_release_app_binary_provenance_strings() {
   local app_path="$1"
   local binary_path=""
+  local candidate_manifest=""
   local relative_path=""
+  local sanitized_relative_path=""
   local scanned_count=0
 
-  while IFS= read -r binary_path; do
+  [[ -d "${app_path}" ]] || fail "release binary surface gate app path is not a directory: ${app_path}"
+  resolve_release_binary_surface_scan_tools
+  candidate_manifest="$(mktemp "${TMP_DIR}/release-binary-candidates.XXXXXX")"
+  if ! release_app_binary_candidates "${app_path}" >"${candidate_manifest}"; then
+    fail "release app bundle could not be recursively enumerated for binary surface scanning"
+  fi
+
+  while IFS= read -r -d '' binary_path; do
     [[ -n "${binary_path}" ]] || continue
     if ! is_macho_binary_file "${binary_path}"; then
       continue
     fi
     scanned_count=$((scanned_count + 1))
     relative_path="${binary_path#"${app_path}/"}"
-    validate_release_binary_provenance_strings "${binary_path}" "release app binary ${relative_path}"
-  done < <(release_app_binary_candidates "${app_path}" | sort -u)
+    sanitized_relative_path="$(skybridge_sanitize_log_value "${relative_path}")"
+    validate_release_binary_provenance_strings "${binary_path}" "release app binary ${sanitized_relative_path}"
+    validate_release_binary_test_surface "${binary_path}" "release app binary ${sanitized_relative_path}"
+  done <"${candidate_manifest}"
+
+  rm -f "${candidate_manifest}"
 
   if (( scanned_count == 0 )); then
-    fail "release app bundle contains no Mach-O binaries to scan for local path provenance"
+    fail "release app bundle contains no Mach-O binaries to scan for local path provenance or test surfaces"
   fi
 
-  log_info "Release binary provenance string gate scanned ${scanned_count} Mach-O binaries"
+  log_info "Release binary provenance and test-surface gates scanned ${scanned_count} Mach-O binaries"
 }
+
+if [[ "${SCAN_RELEASE_BINARIES_ONLY}" == "1" ]]; then
+  validate_release_app_binary_provenance_strings "${APP_PATH}"
+  log_info "Binary scan-only mode passed; all other release readiness checks were intentionally not run"
+  exit 0
+fi
 
 extract_helper_version() {
   local bin_path="$1"
@@ -1444,6 +1610,13 @@ APP_FRAMEWORKS_DIR="${APP_PATH}/Contents/Frameworks"
 
 [[ -f "${APP_INFO_PLIST}" ]] || fail "missing app Info.plist: ${APP_INFO_PLIST}"
 [[ -f "${SOURCE_INFO_PLIST}" ]] || fail "missing source Info.plist: ${SOURCE_INFO_PLIST}"
+
+APP_TESTING_BUILD_MARKER="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgeTestingBuild" 2>/dev/null || true)"
+case "$(printf '%s' "${APP_TESTING_BUILD_MARKER}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes)
+    fail "release app is marked as a SkyBridge testing/smoke build"
+    ;;
+esac
 [[ -f "${SOURCE_ENTITLEMENTS}" ]] || fail "missing source entitlements: ${SOURCE_ENTITLEMENTS}"
 
 APP_EXECUTABLE_NAME="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleExecutable" 2>/dev/null || true)"

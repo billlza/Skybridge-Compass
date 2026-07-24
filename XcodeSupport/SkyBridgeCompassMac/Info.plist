@@ -53,7 +53,7 @@
     <key>NEBULA_CLIENT_SECRET</key>
     <string></string>
     <key>SKYBRIDGE_UPDATE_MANIFEST_URL</key>
-    <string>https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json</string>
+    <string>https://github.com/billlza/Skybridge-Compass/releases/latest/download/macos-stable.json</string>
     <key>SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS</key>
     <string>skybridge-release-ed25519-2026-05:7YfzSjWPooUG0H+ZcMR1DSTub46Vgl+cIX09VsrOrGY=,skybridge-release-ed25519-2026-05-local:/qMG5MTYvBioM7VHZEfqUNt+lcPLNGNxgzZJ6M0sR+g=</string>
 

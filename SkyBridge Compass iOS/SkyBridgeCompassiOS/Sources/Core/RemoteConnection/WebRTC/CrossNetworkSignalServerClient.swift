@@ -101,14 +101,86 @@ actor SignalServerClientCompat {
         let initiatorDeviceName: String?
     }
 
+    struct IdentityRotationChallenge: Sendable, Equatable {
+        let transcript: DeviceIdentityRotationTranscriptCompat
+        let issuedAtMilliseconds: Int64
+        let clientVersion: String
+        let protocolVersion: String
+
+        init(
+            transcript: DeviceIdentityRotationTranscriptCompat,
+            issuedAtMilliseconds: Int64,
+            clientVersion: String,
+            protocolVersion: String
+        ) throws {
+            guard issuedAtMilliseconds > 0,
+                  issuedAtMilliseconds < transcript.expiresAtMilliseconds,
+                  Self.isCanonicalVersion(clientVersion),
+                  Self.isCanonicalVersion(protocolVersion) else {
+                throw ClientError.malformedResponse(
+                    "invalid identity rotation challenge metadata"
+                )
+            }
+            self.transcript = transcript
+            self.issuedAtMilliseconds = issuedAtMilliseconds
+            self.clientVersion = clientVersion
+            self.protocolVersion = protocolVersion
+        }
+
+        private static func isCanonicalVersion(_ raw: String) -> Bool {
+            raw == raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                && !raw.isEmpty
+                && raw.utf8.count <= 128
+                && !raw.unicodeScalars.contains(
+                    where: CharacterSet.controlCharacters.contains
+                )
+        }
+    }
+
+    struct IdentityRotationCommitReceipt: Sendable, Equatable {
+        let rotationID: String
+        let committedAtMilliseconds: Int64
+        let generation: UInt64
+        let oldGraceExpiresAtMilliseconds: Int64
+        let oldIdentity: ProtocolIdentityBindingCompat
+        let newIdentity: ProtocolIdentityBindingCompat
+    }
+
+    struct IdentityRotationAuthenticationScope: Sendable, Equatable {
+        let tenantID: String
+        let userID: String
+    }
+
+    struct RegisteredCurrentDevice: Sendable, Equatable {
+        let tenantID: String
+        let userID: String
+        let deviceID: String
+        let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        let protocolPublicKeyFingerprint: String
+        let deviceName: String?
+        let status: String
+        let approvalMethod: String?
+        let activated: Bool
+    }
+
     enum ClientError: LocalizedError {
         case invalidBaseURL
         case invalidResponse
         case missingAuthentication
         case missingTenantID
+        case missingTenantClaim
+        case tenantIdentityMismatch
+        case userIdentityMismatch
+        case invalidAuthenticationClaims
+        case conflictingTenantClaims
+        case authenticationSessionChanged
         case missingIdempotencyKey
+        case invalidDeviceName
         case authenticationStorageUnavailable(String)
+        case invalidRequestLimits
         case requestTimedOut(String)
+        case resourceDeadlineExceeded(String)
+        case responseTooLarge(path: String, limitBytes: Int)
         case serverRejected(Int, String)
         case malformedResponse(String)
 
@@ -122,12 +194,32 @@ actor SignalServerClientCompat {
                 return "缺少上游登录态，无法申请 admission"
             case .missingTenantID:
                 return "缺少租户标识，无法访问当前租户的公网能力"
+            case .missingTenantClaim:
+                return "认证令牌缺少可绑定的租户声明"
+            case .tenantIdentityMismatch:
+                return "认证令牌与当前租户身份不一致"
+            case .userIdentityMismatch:
+                return "认证令牌与当前用户身份不一致"
+            case .invalidAuthenticationClaims:
+                return "认证令牌包含无效的身份声明"
+            case .conflictingTenantClaims:
+                return "认证令牌包含互相冲突的租户声明"
+            case .authenticationSessionChanged:
+                return "认证会话在令牌刷新期间发生变化，请重新发起请求"
             case .missingIdempotencyKey:
                 return "缺少幂等键，无法安全执行当前跨网请求"
+            case .invalidDeviceName:
+                return "当前设备名称不是规范的可注册名称"
             case .authenticationStorageUnavailable(let reason):
                 return "认证会话存储不可用: \(reason)"
+            case .invalidRequestLimits:
+                return "当前跨网请求资源边界配置无效"
             case .requestTimedOut(let path):
                 return "当前跨网请求超时: \(path)"
+            case .resourceDeadlineExceeded(let path):
+                return "当前跨网请求超过总资源时限: \(path)"
+            case .responseTooLarge(let path, let limitBytes):
+                return "当前跨网响应超过大小上限: \(path) limit=\(limitBytes)"
             case .serverRejected(let status, _):
                 return "信令服务器拒绝请求 (\(status)): \(SignalServerClientCompat.redactedServerRejectedBodyDescription)"
             case .malformedResponse(let reason):
@@ -138,6 +230,7 @@ actor SignalServerClientCompat {
 
     nonisolated private static let sensitiveLogRedaction = "<redacted>"
     nonisolated private static let redactedServerRejectedBodyDescription = "<redacted-server-error-body>"
+    nonisolated private static let maximumAuthenticationTokenBytes = 65_536
     nonisolated private static let safeServerRejectedBodyStringKeys: Set<String> = [
         "code",
         "error",
@@ -185,6 +278,20 @@ actor SignalServerClientCompat {
             return redactedSummary
         }
         return json
+    }
+
+    nonisolated static func isUncommittedIdentityRotationExpired(
+        _ error: Error
+    ) -> Bool {
+        guard let clientError = error as? ClientError,
+              case ClientError.serverRejected(410, let summary) = clientError,
+              let data = summary.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            return false
+        }
+        return object["error"] as? String == "rotation_expired"
+            || object["code"] as? String == "rotation_expired"
     }
 
     nonisolated private static func isSafeServerRejectedBodyStringValue(key: String, value: String) -> Bool {
@@ -254,6 +361,105 @@ actor SignalServerClientCompat {
         let state: String
         let issuedAt: Int64
         let expiresAt: Int64
+    }
+
+    private struct RegisterCurrentDeviceRequestBody: Encodable {
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let clientVersion: String
+        let protocolVersion: String
+        let deviceName: String
+    }
+
+    private struct RegisteredCurrentDeviceResponseBody: Decodable {
+        struct Device: Decodable {
+            let tenantID: String
+            let userID: String
+            let deviceID: String
+            let protocolSigningAlgorithm: String
+            let protocolPublicKeyFingerprint: String
+            let deviceName: String?
+            let status: String
+            let approvalMethod: String?
+
+            enum CodingKeys: String, CodingKey {
+                case tenantID = "tenant_id"
+                case userID = "user_id"
+                case deviceID = "device_id"
+                case protocolSigningAlgorithm = "protocol_signing_algorithm"
+                case protocolPublicKeyFingerprint = "protocol_public_key_fingerprint"
+                case deviceName = "device_name"
+                case status
+                case approvalMethod = "approval_method"
+            }
+        }
+
+        let registered: Bool
+        let activated: Bool
+        let device: Device
+    }
+
+    private struct IdentityRotationChallengeRequestBody: Encodable {
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let protocolPublicKeyBytes: Data
+        let newProtocolSigningAlgorithm: String
+        let newProtocolPublicKeyFingerprint: String
+        let newProtocolPublicKeyBytes: Data
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct IdentityRotationChallengeResponseBody: Decodable {
+        let requestId: String
+        let rotationId: String
+        let nonce: String
+        let state: String
+        let issuedAt: Int64
+        let expiresAt: Int64
+        let transcriptVersion: Int
+        let transcriptHash: String
+        let transcriptBase64: String
+        let tenantId: String
+        let userId: String
+        let deviceId: String
+        let oldGeneration: UInt64
+        let oldProtocolSigningAlgorithm: String
+        let oldProtocolPublicKeyFingerprint: String
+        let newProtocolSigningAlgorithm: String
+        let newProtocolPublicKeyFingerprint: String
+    }
+
+    private struct IdentityRotationCommitRequestBody: Encodable {
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let rotationId: String
+        let transcriptHash: String
+        let oldSignature: Data
+        let newSignature: Data
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct IdentityRotationCommitResponseBody: Decodable {
+        struct Identity: Decodable {
+            let protocolSigningAlgorithm: String
+            let protocolPublicKeyFingerprint: String
+            let state: String
+            let graceExpiresAt: Int64?
+        }
+
+        let committed: Bool
+        let rotationId: String
+        let state: String
+        let committedAt: Int64
+        let generation: UInt64
+        let deviceId: String
+        let oldIdentity: Identity
+        let newIdentity: Identity
     }
 
     private struct RegisterSessionRequestBody: Encodable {
@@ -388,22 +594,187 @@ actor SignalServerClientCompat {
         let mediaTokenGeneration: String?
     }
 
-    private let urlSession: URLSession
-    private let logger = Logger(subsystem: "com.skybridge.crossnetwork", category: "SignalServerClientCompat")
-    private static let requestTimeout: Duration = .seconds(30)
-    private static let requestTimeoutSeconds: TimeInterval = 30
+    struct AuthenticationDependencies: Sendable {
+        let accessTokenOverride: @Sendable () -> String
+        let tenantIDOverride: @Sendable () -> String
+        let loadPersistedSession: @Sendable () async throws -> AuthSession?
+        let refreshSession: @Sendable (String) async throws -> AuthSession
+        let validateRefreshedAccessToken: @Sendable (String) async throws -> Void
+        let replacePersistedSession: @Sendable (AuthSession, AuthSession) async throws -> Bool
 
-    private static func defaultURLSession() -> URLSession {
+        nonisolated static func live() -> Self {
+            Self(
+                accessTokenOverride: {
+                    ProcessInfo.processInfo.environment["SKYBRIDGE_ACCESS_TOKEN"] ?? ""
+                },
+                tenantIDOverride: {
+                    ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"] ?? ""
+                },
+                loadPersistedSession: {
+                    try await KeychainManager.shared.loadAuthSessionStrict()
+                },
+                refreshSession: { refreshToken in
+                    try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
+                },
+                validateRefreshedAccessToken: { accessToken in
+                    guard await SupabaseService.shared.isSupabaseAccessToken(accessToken) else {
+                        throw ClientError.invalidAuthenticationClaims
+                    }
+                },
+                replacePersistedSession: { expected, replacement in
+                    try await KeychainManager.shared.replaceAuthSession(
+                        expected: expected,
+                        with: replacement
+                    )
+                }
+            )
+        }
+    }
+
+    private struct AuthenticatedRequestContext: Sendable, Equatable {
+        let bearerToken: String
+        let tenantID: String
+    }
+
+    private struct AccessTokenRefreshBinding: Sendable, Equatable {
+        let refreshToken: String
+        let accessToken: String
+        let userIdentifier: String
+        let tenantID: String?
+        let explicitTenantID: String?
+    }
+
+    private struct AccessTokenRefreshOperation: Sendable {
+        let binding: AccessTokenRefreshBinding
+        let task: Task<AuthSession, Error>
+    }
+
+    private let urlSession: URLSession
+    private let authenticationDependencies: AuthenticationDependencies
+    private let logger = Logger(subsystem: "com.skybridge.crossnetwork", category: "SignalServerClientCompat")
+    nonisolated private static let defaultRequestTimeoutSeconds: TimeInterval = 30
+    private static let absoluteMaximumResponseBytes = 1_024 * 1_024
+    private let requestTimeoutSeconds: TimeInterval
+    private let resourceTimeoutSeconds: TimeInterval
+    private let maximumResponseBytes: Int
+
+    private static func defaultURLSession(
+        requestTimeoutSeconds: TimeInterval,
+        resourceTimeoutSeconds: TimeInterval
+    ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = requestTimeoutSeconds
-        configuration.timeoutIntervalForResource = max(45, requestTimeoutSeconds)
+        configuration.timeoutIntervalForResource = resourceTimeoutSeconds
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: configuration)
     }
 
-    init(urlSession: URLSession? = nil) {
-        self.urlSession = urlSession ?? Self.defaultURLSession()
+    init(
+        urlSession: URLSession? = nil,
+        authenticationDependencies: AuthenticationDependencies = .live(),
+        requestTimeoutSeconds: TimeInterval = 30,
+        resourceTimeoutSeconds: TimeInterval = 45,
+        maximumResponseBytes: Int = 256 * 1_024
+    ) {
+        self.urlSession = urlSession ?? Self.defaultURLSession(
+            requestTimeoutSeconds: requestTimeoutSeconds,
+            resourceTimeoutSeconds: resourceTimeoutSeconds
+        )
+        self.authenticationDependencies = authenticationDependencies
+        self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.resourceTimeoutSeconds = resourceTimeoutSeconds
+        self.maximumResponseBytes = maximumResponseBytes
+    }
+
+    func authenticatedIdentityRotationScope() async throws
+        -> IdentityRotationAuthenticationScope {
+        let context = try await authenticatedRequestContext()
+        return try identityRotationScope(from: context)
+    }
+
+    private func identityRotationScope(
+        from context: AuthenticatedRequestContext
+    ) throws -> IdentityRotationAuthenticationScope {
+        let identity = try Self.resolveAuthenticatedJWTIdentity(
+            accessToken: context.bearerToken
+        )
+        guard identity.effectiveTenantID == context.tenantID else {
+            throw ClientError.tenantIdentityMismatch
+        }
+        return IdentityRotationAuthenticationScope(
+            tenantID: context.tenantID,
+            userID: identity.subject
+        )
+    }
+
+    private func authenticatedRequestContext(
+        matching expectedScope: IdentityRotationAuthenticationScope
+    ) async throws -> AuthenticatedRequestContext {
+        let context = try await authenticatedRequestContext()
+        guard try identityRotationScope(from: context) == expectedScope else {
+            throw ClientError.authenticationSessionChanged
+        }
+        return context
+    }
+
+    func registerCurrentDevice(
+        binding: ProtocolIdentityBindingCompat,
+        deviceName: String,
+        expectedScope: IdentityRotationAuthenticationScope
+    ) async throws -> RegisteredCurrentDevice {
+        let normalizedDeviceName = deviceName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedDeviceName.isEmpty,
+              normalizedDeviceName == deviceName,
+              normalizedDeviceName.utf8.count <= 128,
+              !normalizedDeviceName.unicodeScalars.contains(
+                  where: CharacterSet.controlCharacters.contains
+              ) else {
+            throw ClientError.invalidDeviceName
+        }
+        let authentication = try await authenticatedRequestContext(
+            matching: expectedScope
+        )
+        let body = RegisterCurrentDeviceRequestBody(
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersion(),
+            protocolVersion: protocolVersion(),
+            deviceName: normalizedDeviceName
+        )
+        let response: RegisteredCurrentDeviceResponseBody = try await performJSONRequest(
+            path: "/api/devices/register-current",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            authenticationContext: authentication
+        )
+        guard response.registered,
+              response.device.tenantID == expectedScope.tenantID,
+              response.device.userID == expectedScope.userID,
+              response.device.deviceID == binding.deviceId,
+              response.device.protocolSigningAlgorithm
+                == binding.protocolSigningAlgorithm.rawValue,
+              response.device.protocolPublicKeyFingerprint
+                == binding.protocolPublicKeyFingerprint,
+              response.device.status == "active" else {
+            throw ClientError.malformedResponse(
+                "current device registration changed the authenticated authority"
+            )
+        }
+        return RegisteredCurrentDevice(
+            tenantID: response.device.tenantID,
+            userID: response.device.userID,
+            deviceID: response.device.deviceID,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: response.device.protocolPublicKeyFingerprint,
+            deviceName: response.device.deviceName,
+            status: response.device.status,
+            approvalMethod: response.device.approvalMethod,
+            activated: response.activated
+        )
     }
 
     func requestAdmissionChallenge(binding: ProtocolIdentityBindingCompat) async throws -> AdmissionChallenge {
@@ -473,6 +844,163 @@ actor SignalServerClientCompat {
             state: response.state,
             issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
             expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    func requestIdentityRotationChallenge(
+        oldIdentity: ProtocolIdentityBindingCompat,
+        newIdentity: ProtocolIdentityBindingCompat,
+        idempotencyKey: String,
+        expectedScope: IdentityRotationAuthenticationScope
+    ) async throws -> IdentityRotationChallenge {
+        guard oldIdentity.deviceId == newIdentity.deviceId else {
+            throw ClientError.malformedResponse(
+                "identity rotation requires one stable deviceId"
+            )
+        }
+        guard let requestID = UUID(uuidString: idempotencyKey),
+              requestID.uuidString.lowercased() == idempotencyKey else {
+            throw ClientError.missingIdempotencyKey
+        }
+        let requestedClientVersion = clientVersion()
+        let requestedProtocolVersion = protocolVersion()
+        let body = IdentityRotationChallengeRequestBody(
+            deviceId: oldIdentity.deviceId,
+            protocolSigningAlgorithm: oldIdentity.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: oldIdentity.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: oldIdentity.protocolPublicKeyBytes,
+            newProtocolSigningAlgorithm: newIdentity.protocolSigningAlgorithm.rawValue,
+            newProtocolPublicKeyFingerprint: newIdentity.protocolPublicKeyFingerprint,
+            newProtocolPublicKeyBytes: newIdentity.protocolPublicKeyBytes,
+            clientVersion: requestedClientVersion,
+            protocolVersion: requestedProtocolVersion
+        )
+        let authentication = try await authenticatedRequestContext(
+            matching: expectedScope
+        )
+        let response: IdentityRotationChallengeResponseBody = try await performJSONRequest(
+            path: "/api/devices/identity-rotation/challenge",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            authenticationContext: authentication,
+            extraHeaders: ["Idempotency-Key": idempotencyKey]
+        )
+        guard response.state == "issued",
+              response.requestId == idempotencyKey,
+              response.transcriptVersion == Int(DeviceIdentityRotationTranscriptCompat.version),
+              response.issuedAt > 0,
+              response.expiresAt > response.issuedAt,
+              response.tenantId == expectedScope.tenantID,
+              response.userId == expectedScope.userID,
+              response.deviceId == oldIdentity.deviceId,
+              response.oldProtocolSigningAlgorithm
+                == oldIdentity.protocolSigningAlgorithm.rawValue,
+              response.oldProtocolPublicKeyFingerprint
+                == oldIdentity.protocolPublicKeyFingerprint,
+              response.newProtocolSigningAlgorithm
+                == newIdentity.protocolSigningAlgorithm.rawValue,
+              response.newProtocolPublicKeyFingerprint
+                == newIdentity.protocolPublicKeyFingerprint else {
+            throw ClientError.malformedResponse(
+                "identity rotation challenge changed the requested authority"
+            )
+        }
+        let transcript = try DeviceIdentityRotationTranscriptCompat(
+            rotationID: response.rotationId,
+            nonce: DeviceIdentityRotationTranscriptCompat.decodeCanonicalBase64URLNonce(
+                response.nonce
+            ),
+            expiresAtMilliseconds: response.expiresAt,
+            tenantID: response.tenantId,
+            userID: response.userId,
+            deviceID: response.deviceId,
+            oldGeneration: response.oldGeneration,
+            oldIdentity: oldIdentity,
+            newIdentity: newIdentity
+        )
+        try transcript.validateServerCommitment(
+            transcriptBase64: response.transcriptBase64,
+            transcriptHash: response.transcriptHash
+        )
+        return try IdentityRotationChallenge(
+            transcript: transcript,
+            issuedAtMilliseconds: response.issuedAt,
+            clientVersion: requestedClientVersion,
+            protocolVersion: requestedProtocolVersion
+        )
+    }
+
+    func commitIdentityRotation(
+        challenge: IdentityRotationChallenge,
+        oldSignature: Data,
+        newSignature: Data,
+        expectedScope: IdentityRotationAuthenticationScope
+    ) async throws -> IdentityRotationCommitReceipt {
+        let transcript = challenge.transcript
+        guard transcript.tenantID == expectedScope.tenantID,
+              transcript.userID == expectedScope.userID else {
+            throw ClientError.authenticationSessionChanged
+        }
+        guard oldSignature.count
+                == transcript.oldIdentity.protocolSigningAlgorithm.signatureByteCount,
+              newSignature.count
+                == transcript.newIdentity.protocolSigningAlgorithm.signatureByteCount else {
+            throw ClientError.malformedResponse(
+                "identity rotation proof has a non-canonical signature length"
+            )
+        }
+        let body = IdentityRotationCommitRequestBody(
+            deviceId: transcript.deviceID,
+            protocolSigningAlgorithm: transcript.oldIdentity.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint:
+                transcript.oldIdentity.protocolPublicKeyFingerprint,
+            rotationId: transcript.rotationID,
+            transcriptHash: transcript.sha256Hex,
+            oldSignature: oldSignature,
+            newSignature: newSignature,
+            clientVersion: challenge.clientVersion,
+            protocolVersion: challenge.protocolVersion
+        )
+        let authentication = try await authenticatedRequestContext(
+            matching: expectedScope
+        )
+        let response: IdentityRotationCommitResponseBody = try await performJSONRequest(
+            path: "/api/devices/identity-rotation/commit",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            authenticationContext: authentication
+        )
+        guard response.committed,
+              response.state == "committed",
+              response.rotationId == transcript.rotationID,
+              response.deviceId == transcript.deviceID,
+              response.committedAt > 0,
+              transcript.oldGeneration < UInt64.max,
+              response.generation == transcript.oldGeneration + 1,
+              response.oldIdentity.state == "grace",
+              response.oldIdentity.protocolSigningAlgorithm
+                == transcript.oldIdentity.protocolSigningAlgorithm.rawValue,
+              response.oldIdentity.protocolPublicKeyFingerprint
+                == transcript.oldIdentity.protocolPublicKeyFingerprint,
+              let graceExpiresAt = response.oldIdentity.graceExpiresAt,
+              graceExpiresAt > response.committedAt,
+              response.newIdentity.state == "active",
+              response.newIdentity.graceExpiresAt == nil,
+              response.newIdentity.protocolSigningAlgorithm
+                == transcript.newIdentity.protocolSigningAlgorithm.rawValue,
+              response.newIdentity.protocolPublicKeyFingerprint
+                == transcript.newIdentity.protocolPublicKeyFingerprint else {
+            throw ClientError.malformedResponse(
+                "identity rotation commit response does not match the signed transcript"
+            )
+        }
+        return IdentityRotationCommitReceipt(
+            rotationID: response.rotationId,
+            committedAtMilliseconds: response.committedAt,
+            generation: response.generation,
+            oldGraceExpiresAtMilliseconds: graceExpiresAt,
+            oldIdentity: transcript.oldIdentity,
+            newIdentity: transcript.newIdentity
         )
     }
 
@@ -663,7 +1191,7 @@ actor SignalServerClientCompat {
         )
     }
 
-    private var accessTokenRefreshTask: Task<AuthSession, Error>?
+    private var accessTokenRefreshOperation: AccessTokenRefreshOperation?
 
     private static func sessionRefreshLease(
         from response: SessionRefreshResponseBody,
@@ -696,6 +1224,7 @@ actor SignalServerClientCompat {
         )
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     static func testOnlyDecodeMediaRelayLeaseResponse(_ data: Data) throws -> MediaRelayLease {
         let response = try decodeResponseBody(MediaLeaseResponseBody.self, from: data)
         return try Self.mediaRelayLease(from: response)
@@ -728,15 +1257,18 @@ actor SignalServerClientCompat {
         let response = try decodeResponseBody(LookupCodeResponseBody.self, from: data)
         return try Self.connectionCodeLookup(from: response)
     }
+#endif
 
     private static func normalizedMediaRelayExpiresAt(_ rawValue: Int64) -> TimeInterval {
         let seconds = TimeInterval(rawValue)
         return seconds > 10_000_000_000 ? seconds / 1000 : seconds
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     nonisolated static func testOnlyRequestTimeoutSeconds() -> TimeInterval {
-        requestTimeoutSeconds
+        defaultRequestTimeoutSeconds
     }
+#endif
 
     private static func normalizedOptionalToken(_ token: String?) -> String? {
         guard let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -900,11 +1432,12 @@ actor SignalServerClientCompat {
         path: String,
         method: String = "GET",
         queryItems: [URLQueryItem] = [],
-        body: Data? = nil
-        ,
+        body: Data? = nil,
         requiresUserAuthentication: Bool = false,
+        authenticationContext: AuthenticatedRequestContext? = nil,
         extraHeaders: [String: String] = [:]
     ) async throws -> Response {
+        try validateRequestLimits()
         guard var components = URLComponents(string: CrossNetworkServerConfig.signalingServerURL) else {
             throw ClientError.invalidBaseURL
         }
@@ -918,24 +1451,24 @@ actor SignalServerClientCompat {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = requestTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let apiKey = CrossNetworkServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
-        let tenantID = try currentTenantID().trimmingCharacters(in: .whitespacesAndNewlines)
-        if requiresUserAuthentication && tenantID.isEmpty {
-            throw ClientError.missingTenantID
-        }
-        if !tenantID.isEmpty {
-            request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
-        }
-        if requiresUserAuthentication {
-            let bearerToken = try await validAccessToken().trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !bearerToken.isEmpty else {
-                throw ClientError.missingAuthentication
+        if let authentication = authenticationContext {
+            request.setValue(authentication.tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
+            request.setValue("Bearer \(authentication.bearerToken)", forHTTPHeaderField: "Authorization")
+        } else if requiresUserAuthentication {
+            let authentication = try await authenticatedRequestContext()
+            request.setValue(authentication.tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
+            request.setValue("Bearer \(authentication.bearerToken)", forHTTPHeaderField: "Authorization")
+        } else {
+            let tenantID = try await currentTenantID()
+            if !tenantID.isEmpty {
+                request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
             }
-            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -945,28 +1478,19 @@ actor SignalServerClientCompat {
             request.setValue(value, forHTTPHeaderField: field)
         }
 
+        try Task.checkCancellation()
+
         logger.debug(
-            "🌐 performJSONRequest method=\(method, privacy: .public) path=\(path, privacy: .public) auth=\(requiresUserAuthentication ? 1 : 0)"
+            "🌐 performJSONRequest method=\(method, privacy: .public) path=\(path, privacy: .public) auth=\((requiresUserAuthentication || authenticationContext != nil) ? 1 : 0)"
         )
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
-                group.addTask { [urlSession, request] in
-                    try await urlSession.data(for: request)
-                }
-                group.addTask {
-                    try await Task.sleep(for: Self.requestTimeout)
-                    throw ClientError.requestTimedOut(path)
-                }
-
-                guard let first = try await group.next() else {
-                    throw ClientError.requestTimedOut(path)
-                }
-                group.cancelAll()
-                return first
-            }
+            (data, response) = try await boundedResponse(for: request, path: path)
         } catch {
+            if error is CancellationError {
+                throw error
+            }
             logger.error(
                 "❌ current-path request failed method=\(method, privacy: .public) path=\(path, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
             )
@@ -995,37 +1519,134 @@ actor SignalServerClientCompat {
         }
     }
 
-    private func currentTenantID() throws -> String {
-        let explicitTenantID = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !explicitTenantID.isEmpty {
-            return explicitTenantID
+    private func validateRequestLimits() throws {
+        guard requestTimeoutSeconds.isFinite,
+              requestTimeoutSeconds > 0,
+              resourceTimeoutSeconds.isFinite,
+              resourceTimeoutSeconds > 0,
+              (1...Self.absoluteMaximumResponseBytes).contains(maximumResponseBytes) else {
+            throw ClientError.invalidRequestLimits
         }
-        let envAccessToken = ProcessInfo.processInfo.environment["SKYBRIDGE_ACCESS_TOKEN"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !envAccessToken.isEmpty,
-           let derived = deriveTenantIdentifier(accessToken: envAccessToken),
-           !derived.isEmpty {
-            return derived
-        }
-        if let session = try loadPersistedAuthSession() {
-            let sessionAccessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !sessionAccessToken.isEmpty,
-               let derived = deriveTenantIdentifier(accessToken: sessionAccessToken),
-               !derived.isEmpty {
-                return derived
-            }
-            let sessionUserIdentifier = session.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !sessionUserIdentifier.isEmpty {
-                return sessionUserIdentifier
-            }
-        }
-        return ""
     }
 
-    private func loadPersistedAuthSession() throws -> AuthSession? {
+    private func boundedResponse(
+        for request: URLRequest,
+        path: String
+    ) async throws -> (Data, URLResponse) {
+        let urlSession = self.urlSession
+        let maximumResponseBytes = self.maximumResponseBytes
+        let resourceTimeoutSeconds = self.resourceTimeoutSeconds
+
         do {
-            return try KeychainManager.shared.loadAuthSessionStrict()
+            return try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+                group.addTask {
+                    let (bytes, response) = try await urlSession.bytes(for: request)
+                    if response.expectedContentLength > Int64(maximumResponseBytes) {
+                        throw ClientError.responseTooLarge(
+                            path: path,
+                            limitBytes: maximumResponseBytes
+                        )
+                    }
+
+                    var data = Data()
+                    data.reserveCapacity(min(maximumResponseBytes, 4_096))
+                    for try await byte in bytes {
+                        guard data.count < maximumResponseBytes else {
+                            throw ClientError.responseTooLarge(
+                                path: path,
+                                limitBytes: maximumResponseBytes
+                            )
+                        }
+                        data.append(byte)
+                    }
+                    return (data, response)
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(resourceTimeoutSeconds))
+                    throw ClientError.resourceDeadlineExceeded(path)
+                }
+
+                guard let first = try await group.next() else {
+                    throw ClientError.resourceDeadlineExceeded(path)
+                }
+                group.cancelAll()
+                return first
+            }
+        } catch let error as ClientError {
+            throw error
+        } catch let error as URLError where error.code == .timedOut {
+            throw ClientError.requestTimedOut(path)
+        }
+    }
+
+    private func currentTenantID() async throws -> String {
+        let explicitTenantID = normalized(authenticationDependencies.tenantIDOverride())
+        let envAccessToken = normalized(authenticationDependencies.accessTokenOverride())
+        let session = try await loadPersistedAuthSession()
+        let sessionAccessToken = normalized(session?.accessToken)
+        let accessToken = envAccessToken ?? sessionAccessToken ?? ""
+
+        return try Self.resolveAuthenticatedTenantID(
+            accessToken: accessToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: session?.nebulaId,
+            legacyUserIdentifier: session?.userIdentifier
+        )
+    }
+
+    /// Captures one immutable authentication snapshot for a request. The tenant header is
+    /// resolved only after the final bearer has been selected/refreshed and is derived from
+    /// that exact bearer, so a Keychain update cannot mix identities within one request.
+    private func authenticatedRequestContext() async throws -> AuthenticatedRequestContext {
+        let explicitTenantID = normalized(authenticationDependencies.tenantIDOverride())
+        let accessTokenOverride = normalized(authenticationDependencies.accessTokenOverride())
+        let persistedSession = try await loadPersistedAuthSession()
+
+        let bearerToken: String
+        let identitySession: AuthSession?
+        if let accessTokenOverride {
+            bearerToken = accessTokenOverride
+            identitySession = persistedSession
+        } else {
+            guard let persistedSession,
+                  persistedSession.accessToken != "pending_verification",
+                  normalized(persistedSession.accessToken) != nil else {
+                throw ClientError.missingAuthentication
+            }
+            let validSession = try await validAuthSession(
+                persistedSession,
+                explicitTenantID: explicitTenantID
+            )
+            guard let normalizedToken = normalized(validSession.accessToken) else {
+                throw ClientError.missingAuthentication
+            }
+            bearerToken = normalizedToken
+            identitySession = validSession
+        }
+
+        try Self.validateAuthenticatedRequestBearerFreshness(bearerToken)
+
+        let tenantID = try Self.resolveAuthenticatedTenantID(
+            accessToken: bearerToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: identitySession?.nebulaId,
+            legacyUserIdentifier: identitySession?.userIdentifier
+        )
+        guard !tenantID.isEmpty else {
+            throw ClientError.missingTenantID
+        }
+        return AuthenticatedRequestContext(bearerToken: bearerToken, tenantID: tenantID)
+    }
+
+    private func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func loadPersistedAuthSession() async throws -> AuthSession? {
+        do {
+            return try await authenticationDependencies.loadPersistedSession()
         } catch {
             throw ClientError.authenticationStorageUnavailable(error.localizedDescription)
         }
@@ -1045,69 +1666,216 @@ actor SignalServerClientCompat {
         return value.isEmpty ? "1" : value
     }
 
-    private func validAccessToken(forceRefresh: Bool = false) async throws -> String {
-        let envAccessToken = ProcessInfo.processInfo.environment["SKYBRIDGE_ACCESS_TOKEN"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !envAccessToken.isEmpty {
-            return envAccessToken
-        }
-        guard let session = try loadPersistedAuthSession(),
-              session.accessToken != "pending_verification",
-              !session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ClientError.missingAuthentication
-        }
-
+    private func validAuthSession(
+        _ session: AuthSession,
+        explicitTenantID: String?,
+        forceRefresh: Bool = false
+    ) async throws -> AuthSession {
         guard let refreshToken = session.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !refreshToken.isEmpty else {
-            return session.accessToken
+            return session
         }
 
         if !forceRefresh && !shouldRefreshAccessToken(session.accessToken) {
-            return session.accessToken
+            return session
         }
 
-        if let existingRefreshTask = accessTokenRefreshTask {
-            let refreshed = try await existingRefreshTask.value
-            return refreshed.accessToken
+        let refreshBinding = AccessTokenRefreshBinding(
+            refreshToken: refreshToken,
+            accessToken: session.accessToken,
+            userIdentifier: session.userIdentifier,
+            tenantID: session.nebulaId,
+            explicitTenantID: explicitTenantID
+        )
+        if let existingRefreshOperation = accessTokenRefreshOperation {
+            guard existingRefreshOperation.binding == refreshBinding else {
+                throw ClientError.authenticationSessionChanged
+            }
+            return try await existingRefreshOperation.task.value
         }
 
-        let refreshTask = Task<AuthSession, Error> { @MainActor [session, refreshToken] in
-            let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
-            let merged = AuthSession(
-                accessToken: refreshed.accessToken,
-                refreshToken: refreshed.refreshToken ?? session.refreshToken,
-                userIdentifier: session.userIdentifier,
-                displayName: session.displayName,
-                email: session.email,
-                avatarURL: session.avatarURL,
-                nebulaId: session.nebulaId,
-                issuedAt: Date()
+        let dependencies = authenticationDependencies
+        // The operation is fully dependency-bound and Sendable; detaching it avoids retaining
+        // this client actor through inherited actor isolation while network refresh is in flight.
+        let refreshTask = Task.detached(priority: nil) {
+            let refreshed = try await dependencies.refreshSession(refreshToken)
+            try await dependencies.validateRefreshedAccessToken(refreshed.accessToken)
+            let merged = try Self.validatedRefreshedAuthSession(
+                refreshed,
+                replacing: session,
+                explicitTenantID: explicitTenantID
             )
-            try KeychainManager.shared.storeAuthSession(merged)
+            let replaced = try await dependencies.replacePersistedSession(session, merged)
+            guard replaced else {
+                throw ClientError.authenticationSessionChanged
+            }
             return merged
         }
 
-        accessTokenRefreshTask = refreshTask
+        accessTokenRefreshOperation = AccessTokenRefreshOperation(
+            binding: refreshBinding,
+            task: refreshTask
+        )
         defer {
-            if accessTokenRefreshTask == refreshTask {
-                accessTokenRefreshTask = nil
+            if accessTokenRefreshOperation?.task == refreshTask {
+                accessTokenRefreshOperation = nil
             }
         }
-
-        let refreshed = try await refreshTask.value
-        return refreshed.accessToken
+        return try await refreshTask.value
     }
 
     private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
-        guard let claims = decodeJWTClaims(token),
-              let exp = claims["exp"] as? TimeInterval else {
+        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else {
             return false
+        }
+        guard let claims = Self.decodeJWTClaims(token),
+              let exp = Self.numericJWTClaim(claims["exp"]) else {
+            return true
         }
         let expiryDate = Date(timeIntervalSince1970: exp)
         return expiryDate.timeIntervalSinceNow <= skewSeconds
     }
 
-    private func decodeJWTClaims(_ token: String) -> [String: Any]? {
+    /// Opaque legacy bearer values keep their existing compatibility boundary. JWT-shaped
+    /// values, however, must carry a numeric future expiration before an authenticated request.
+    nonisolated private static func validateAuthenticatedRequestBearerFreshness(
+        _ accessToken: String,
+        now: Date = Date()
+    ) throws {
+        guard !accessToken.isEmpty,
+              accessToken.utf8.count <= maximumAuthenticationTokenBytes,
+              accessToken == accessToken.trimmingCharacters(in: .whitespacesAndNewlines),
+              !accessToken.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        let segments = accessToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return }
+        guard let claims = decodeJWTClaims(accessToken),
+              let expiration = numericJWTClaim(claims["exp"]),
+              expiration > now.timeIntervalSince1970 else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+    }
+
+    /// Validates the identity continuity of a Supabase refresh response before it can replace
+    /// the persisted session. This intentionally does not accept the opaque-token compatibility
+    /// boundary: a refresh response must be a provider-classified, non-`none`, three-segment
+    /// JWT-shaped access token.
+    nonisolated static func validatedRefreshedAuthSession(
+        _ refreshed: AuthSession,
+        replacing original: AuthSession,
+        explicitTenantID: String?,
+        now: Date = Date()
+    ) throws -> AuthSession {
+        let accessToken = refreshed.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !accessToken.isEmpty,
+              accessToken == refreshed.accessToken,
+              accessToken.utf8.count <= maximumAuthenticationTokenBytes else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+
+        let segments = accessToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3,
+              segments.allSatisfy({ !$0.isEmpty }),
+              isBase64URLSegment(segments[0]),
+              isBase64URLSegment(segments[1]),
+              isBase64URLSegment(segments[2]),
+              let header = decodeJWTJSONObject(segments[0]),
+              let algorithm = try validatedIdentityClaim(header["alg"]),
+              algorithm.caseInsensitiveCompare("none") != .orderedSame,
+              let claims = decodeJWTJSONObject(segments[1]),
+              let expiration = numericJWTClaim(claims["exp"]),
+              expiration > now.timeIntervalSince1970 else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+
+        let originalUserIdentifier = try validatedIdentityClaim(original.userIdentifier)
+        guard let originalUserIdentifier else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        _ = try resolveAuthenticatedJWTIdentity(
+            accessToken: accessToken,
+            expectedUserIdentifier: originalUserIdentifier
+        )
+        guard refreshed.userIdentifier == originalUserIdentifier else {
+            throw ClientError.userIdentityMismatch
+        }
+
+        let originalTenantID = try resolveAuthenticatedTenantID(
+            accessToken: original.accessToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: original.nebulaId,
+            legacyUserIdentifier: original.userIdentifier
+        )
+        let refreshedTenantID = try resolveAuthenticatedTenantID(
+            accessToken: accessToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: original.nebulaId,
+            legacyUserIdentifier: original.userIdentifier
+        )
+        guard !originalTenantID.isEmpty, refreshedTenantID == originalTenantID else {
+            throw ClientError.tenantIdentityMismatch
+        }
+
+        let replacementRefreshToken: String?
+        if let refreshedToken = refreshed.refreshToken {
+            let normalizedRefreshToken = refreshedToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedRefreshToken.isEmpty,
+                  normalizedRefreshToken == refreshedToken,
+                  normalizedRefreshToken.utf8.count <= maximumAuthenticationTokenBytes else {
+                throw ClientError.invalidAuthenticationClaims
+            }
+            replacementRefreshToken = normalizedRefreshToken
+        } else {
+            replacementRefreshToken = original.refreshToken
+        }
+
+        return AuthSession(
+            accessToken: accessToken,
+            refreshToken: replacementRefreshToken,
+            userIdentifier: original.userIdentifier,
+            displayName: original.displayName,
+            email: original.email,
+            avatarURL: original.avatarURL,
+            nebulaId: original.nebulaId,
+            issuedAt: now
+        )
+    }
+
+    nonisolated private static func numericJWTClaim(_ rawValue: Any?) -> TimeInterval? {
+        guard let number = rawValue as? NSNumber,
+              String(cString: number.objCType) != "c" else {
+            return nil
+        }
+        let value = number.doubleValue
+        return value.isFinite ? value : nil
+    }
+
+    nonisolated private static func isBase64URLSegment(_ segment: Substring) -> Bool {
+        guard !segment.isEmpty else { return false }
+        return segment.unicodeScalars.allSatisfy { scalar in
+            scalar.isASCII && (
+                CharacterSet.alphanumerics.contains(scalar)
+                    || scalar == "-"
+                    || scalar == "_"
+            )
+        }
+    }
+
+    nonisolated private static func decodeJWTJSONObject(_ segment: Substring) -> [String: Any]? {
+        var base64 = String(segment)
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    nonisolated private static func decodeJWTClaims(_ token: String) -> [String: Any]? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else { return nil }
         var base64 = String(parts[1])
@@ -1121,29 +1889,149 @@ actor SignalServerClientCompat {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    private func deriveTenantIdentifier(accessToken: String) -> String? {
-        guard let claims = decodeJWTClaims(accessToken) else { return nil }
+    struct AuthenticatedJWTIdentity: Sendable, Equatable {
+        let explicitTenantID: String?
+        let subject: String
+
+        var effectiveTenantID: String {
+            explicitTenantID ?? subject
+        }
+    }
+
+    nonisolated private static func validatedIdentityClaim(_ rawValue: Any?) throws -> String? {
+        guard let rawValue else { return nil }
+        guard let value = rawValue as? String,
+              !value.isEmpty,
+              value.utf8.count <= 256,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        return value
+    }
+
+    /// Returns nil only for an opaque legacy token. A token with the three-segment JWT shape
+    /// must decode into a coherent subject and server-controlled tenant claim set.
+    nonisolated private static func validatedJWTIdentityClaims(
+        accessToken: String
+    ) throws -> AuthenticatedJWTIdentity? {
+        let segments = accessToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return nil }
+        guard let claims = decodeJWTClaims(accessToken) else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        if claims["app_metadata"] != nil, !(claims["app_metadata"] is [String: Any]) {
+            throw ClientError.invalidAuthenticationClaims
+        }
         let appMetadata = claims["app_metadata"] as? [String: Any]
-        let userMetadata = claims["user_metadata"] as? [String: Any]
-        let candidates: [Any?] = [
+        let tenantCandidates: [Any?] = [
             appMetadata?["tenant_id"],
             appMetadata?["tenantId"],
             appMetadata?["org_id"],
             appMetadata?["workspace_id"],
-            userMetadata?["tenant_id"],
-            userMetadata?["tenantId"],
-            userMetadata?["org_id"],
-            userMetadata?["workspace_id"],
             claims["tenant_id"],
             claims["tenantId"],
-            claims["sub"]
+            claims["org_id"],
+            claims["workspace_id"]
         ]
-        for candidate in candidates {
-            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty, value != "nil" {
-                return value
+        let tenantValues = try Set(tenantCandidates.compactMap(validatedIdentityClaim))
+        guard tenantValues.count <= 1 else {
+            throw ClientError.conflictingTenantClaims
+        }
+        guard let subject = try validatedIdentityClaim(claims["sub"]) else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        return AuthenticatedJWTIdentity(
+            explicitTenantID: tenantValues.first,
+            subject: subject
+        )
+    }
+
+    /// Resolves the server-controlled identity carried by a JWT-shaped access token.
+    /// The caller may provide an expected local user only as a binding assertion; it is
+    /// never used as an identity fallback. The signaling server remains the signature
+    /// authority for the token.
+    nonisolated static func resolveAuthenticatedJWTIdentity(
+        accessToken: String,
+        expectedUserIdentifier: String? = nil
+    ) throws -> AuthenticatedJWTIdentity {
+        let normalizedToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedToken.isEmpty,
+              normalizedToken == accessToken,
+              normalizedToken.utf8.count <= maximumAuthenticationTokenBytes,
+              let identity = try validatedJWTIdentityClaims(accessToken: normalizedToken) else {
+            throw ClientError.invalidAuthenticationClaims
+        }
+
+        if let expectedUserIdentifier {
+            let normalizedExpectedUser = expectedUserIdentifier.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !normalizedExpectedUser.isEmpty,
+                  normalizedExpectedUser == expectedUserIdentifier,
+                  normalizedExpectedUser.utf8.count <= 256,
+                  !normalizedExpectedUser.unicodeScalars.contains(
+                    where: CharacterSet.controlCharacters.contains
+                  ) else {
+                throw ClientError.invalidAuthenticationClaims
+            }
+            guard normalizedExpectedUser == identity.subject else {
+                throw ClientError.userIdentityMismatch
             }
         }
-        return nil
+        return identity
+    }
+
+    /// Resolves the tenant used for authenticated signaling and binds every local tenant identity
+    /// to the tenant carried by the bearer token. The server remains responsible for validating
+    /// the JWT signature; this client-side check prevents a valid token from being sent alongside
+    /// a stale or attacker-controlled tenant header.
+    nonisolated static func resolveAuthenticatedTenantID(
+        accessToken: String,
+        explicitTenantID: String?,
+        sessionTenantID: String?,
+        legacyUserIdentifier: String?
+    ) throws -> String {
+        func normalized(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        let explicit = normalized(explicitTenantID)
+        let sessionTenant = normalized(sessionTenantID)
+        if let explicit, let sessionTenant, explicit != sessionTenant {
+            throw ClientError.tenantIdentityMismatch
+        }
+
+        let token = normalized(accessToken)
+        if let token, token.utf8.count > maximumAuthenticationTokenBytes {
+            throw ClientError.invalidAuthenticationClaims
+        }
+        let jwtIdentity: AuthenticatedJWTIdentity?
+        if let token {
+            jwtIdentity = try validatedJWTIdentityClaims(accessToken: token)
+        } else {
+            jwtIdentity = nil
+        }
+        let legacyIdentity = normalized(legacyUserIdentifier)
+        if let jwtIdentity, let legacyIdentity, legacyIdentity != jwtIdentity.subject {
+            throw ClientError.userIdentityMismatch
+        }
+        let declaredTenant = explicit ?? sessionTenant
+        if let declaredTenant {
+            guard let tokenTenant = jwtIdentity?.explicitTenantID else {
+                throw ClientError.missingTenantClaim
+            }
+            guard tokenTenant == declaredTenant else {
+                throw ClientError.tenantIdentityMismatch
+            }
+            return tokenTenant
+        }
+
+        if let jwtIdentity {
+            return jwtIdentity.effectiveTenantID
+        }
+        return legacyIdentity ?? ""
     }
 }

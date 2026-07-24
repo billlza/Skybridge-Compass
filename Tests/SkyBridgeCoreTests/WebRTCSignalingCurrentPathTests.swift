@@ -112,7 +112,7 @@ struct WebRTCSignalingCurrentPathTests {
             from: try JSONSerialization.data(
                 withJSONObject: [
                     "found": true,
-                    "sessionId": "ABCDEFGH",
+                    "sessionId": "OPAQUE-SESSION-123",
                     "responderToken": "resp-token",
                     "turnAdmissionToken": "turn-token",
                     "expiresIn": 540,
@@ -126,7 +126,7 @@ struct WebRTCSignalingCurrentPathTests {
                 options: [.sortedKeys]
             )
         )
-        #expect(lookup.sessionID == "ABCDEFGH")
+        #expect(lookup.sessionID == "OPAQUE-SESSION-123")
         #expect(lookup.responderToken == "resp-token")
         #expect(lookup.wsPath == "/tenant/ws")
         #expect(lookup.initiatorDeviceId == binding.deviceId)
@@ -163,6 +163,398 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(sessionLease.qrBootstrapToken == "bootstrap-token")
         #expect(sessionLease.signalingServerOrigin == "https://api.example.com")
         #expect(sessionLease.wsPath == "/tenant/ws")
+    }
+
+    @Test("authenticated requests use one immutable bearer and tenant snapshot across a tenant switch")
+    func authenticatedRequestUsesOneSnapshotAcrossTenantSwitch() async throws {
+        let provider = SignalAuthenticationContextProbe(
+            context: SignalServerClient.AuthenticatedRequestContext(
+                bearerToken: "token-tenant-a",
+                tenantID: "tenant-a",
+                userID: "user-a"
+            )
+        )
+        defer { Task { await provider.release() } }
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClient(
+            urlSession: urlSession,
+            baseURLProvider: { "https://signal-boundary.invalid" },
+            apiKeyProvider: { "snapshot" },
+            authenticatedRequestContextProvider: {
+                await provider.capturedContext()
+            },
+            tenantIDProvider: { "must-not-be-used-for-authenticated-request" }
+        )
+        let binding = try ProtocolIdentityBinding(
+            deviceId: "12345678-1234-1234-1234-1234567890ab",
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyBytes: Data(repeating: 0x11, count: 32)
+        )
+
+        let requestTask = Task {
+            try await client.requestAdmissionChallenge(binding: binding)
+        }
+        try await waitForSignalAuthenticationCapture(provider)
+        await provider.update(
+            SignalServerClient.AuthenticatedRequestContext(
+                bearerToken: "token-tenant-b",
+                tenantID: "tenant-b",
+                userID: "user-b"
+            )
+        )
+        await provider.release()
+
+        let challenge = try await requestTask.value
+        let request = try #require(SignalBoundaryURLProtocol.request(for: "snapshot"))
+        #expect(await provider.captureCount() == 1)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-tenant-a")
+        #expect(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id") == "tenant-a")
+        #expect(challenge.tenantID == "tenant-a")
+    }
+
+    @Test("Current-device registration rejects an auth-scope switch before network I/O")
+    func currentDeviceRegistrationRejectsScopeSwitchBeforeNetwork() async throws {
+        let mode = "register-scope-mismatch-\(UUID().uuidString)"
+        let provider = SignalAuthenticationContextProbe(
+            context: SignalServerClient.AuthenticatedRequestContext(
+                bearerToken: "token-tenant-a",
+                tenantID: "tenant-a",
+                userID: "user-a"
+            )
+        )
+        defer { Task { await provider.release() } }
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClient(
+            urlSession: urlSession,
+            baseURLProvider: { "https://signal-boundary.invalid" },
+            apiKeyProvider: { mode },
+            authenticatedRequestContextProvider: {
+                await provider.capturedContext()
+            }
+        )
+        let binding = try makeSignalBoundaryBinding()
+        let task = Task {
+            try await client.registerCurrentDevice(
+                binding: binding,
+                deviceName: "Mac",
+                expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                    tenantID: "tenant-b",
+                    userID: "user-b"
+                )
+            )
+        }
+        try await waitForSignalAuthenticationCapture(provider)
+        await provider.release()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected authenticationSessionChanged")
+        } catch SignalServerClient.ClientError.authenticationSessionChanged {
+            // Exact fail-closed result.
+        } catch {
+            Issue.record("Expected authenticationSessionChanged, got \(error)")
+        }
+        #expect(await provider.captureCount() == 1)
+        #expect(SignalBoundaryURLProtocol.request(for: mode) == nil)
+    }
+
+    @Test("Rotation challenge rejects an auth-scope switch before network I/O")
+    func rotationChallengeRejectsScopeSwitchBeforeNetwork() async throws {
+        let mode = "rotation-challenge-scope-mismatch-\(UUID().uuidString)"
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: mode, urlSession: urlSession)
+        let oldIdentity = try makeSignalBoundaryBinding()
+        let newIdentity = try ProtocolIdentityBinding(
+            deviceId: oldIdentity.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyBytes: Data(repeating: 0x22, count: 32)
+        )
+
+        do {
+            _ = try await client.requestIdentityRotationChallenge(
+                oldIdentity: oldIdentity,
+                newIdentity: newIdentity,
+                idempotencyKey: UUID().uuidString.lowercased(),
+                expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                    tenantID: "other-tenant",
+                    userID: "other-user"
+                )
+            )
+            Issue.record("Expected authenticationSessionChanged")
+        } catch SignalServerClient.ClientError.authenticationSessionChanged {
+            // Exact fail-closed result.
+        } catch {
+            Issue.record("Expected authenticationSessionChanged, got \(error)")
+        }
+        #expect(SignalBoundaryURLProtocol.request(for: mode) == nil)
+    }
+
+    @Test("Rotation commit rejects a transcript from another auth scope before network I/O")
+    func rotationCommitRejectsTranscriptScopeBeforeNetwork() async throws {
+        let mode = "rotation-commit-scope-mismatch-\(UUID().uuidString)"
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: mode, urlSession: urlSession)
+        let oldIdentity = try makeSignalBoundaryBinding()
+        let newIdentity = try ProtocolIdentityBinding(
+            deviceId: oldIdentity.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyBytes: Data(repeating: 0x22, count: 32)
+        )
+        let transcript = try DeviceIdentityRotationTranscript(
+            rotationID: "11111111-2222-4333-8444-555555555555",
+            nonce: Data(0..<32),
+            expiresAtMilliseconds: 2_000_000_060_000,
+            tenantID: "transcript-tenant",
+            userID: "transcript-user",
+            deviceID: oldIdentity.deviceId,
+            oldGeneration: 4,
+            oldIdentity: oldIdentity,
+            newIdentity: newIdentity
+        )
+        let challenge = try SignalServerClient.IdentityRotationChallenge(
+            transcript: transcript,
+            issuedAtMilliseconds: 2_000_000_000_000,
+            clientVersion: "1.0.0",
+            protocolVersion: "1"
+        )
+
+        do {
+            _ = try await client.commitIdentityRotation(
+                challenge: challenge,
+                oldSignature: Data(repeating: 0x31, count: 64),
+                newSignature: Data(repeating: 0x32, count: 64),
+                expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                    tenantID: "boundary-tenant",
+                    userID: "boundary-user"
+                )
+            )
+            Issue.record("Expected authenticationSessionChanged")
+        } catch SignalServerClient.ClientError.authenticationSessionChanged {
+            // Exact fail-closed result.
+        } catch {
+            Issue.record("Expected authenticationSessionChanged, got \(error)")
+        }
+        #expect(SignalBoundaryURLProtocol.request(for: mode) == nil)
+    }
+
+    @Test("Existing active-device registration remains a successful idempotent renewal")
+    func existingCurrentDeviceRegistrationRemainsSuccessful() async throws {
+        let mode = "register-existing-\(UUID().uuidString)"
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: mode, urlSession: urlSession)
+        let binding = try makeSignalBoundaryBinding()
+        let registered = try await client.registerCurrentDevice(
+            binding: binding,
+            deviceName: "Mac",
+            expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                tenantID: "boundary-tenant",
+                userID: "boundary-user"
+            )
+        )
+
+        #expect(registered.status == "active")
+        #expect(registered.deviceId == binding.deviceId)
+        #expect(registered.protocolPublicKeyFingerprint
+            == binding.protocolPublicKeyFingerprint)
+        #expect(SignalBoundaryURLProtocol.request(for: mode) != nil)
+    }
+
+    @Test("Current-device registration rejects a substituted response authority")
+    func currentDeviceRegistrationRejectsResponseAuthoritySubstitution() async throws {
+        let mode = "register-substitution-\(UUID().uuidString)"
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: mode, urlSession: urlSession)
+        let binding = try makeSignalBoundaryBinding()
+
+        do {
+            _ = try await client.registerCurrentDevice(
+                binding: binding,
+                deviceName: "Mac",
+                expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                    tenantID: "boundary-tenant",
+                    userID: "boundary-user"
+                )
+            )
+            Issue.record("Expected malformedResponse for substituted authority")
+        } catch SignalServerClient.ClientError.malformedResponse {
+            // Exact fail-closed result.
+        } catch {
+            Issue.record("Expected malformedResponse, got \(error)")
+        }
+        #expect(SignalBoundaryURLProtocol.request(for: mode) != nil)
+    }
+
+    @Test("Rotation commit rejects a non-contiguous server generation")
+    func rotationCommitRejectsGenerationJump() async throws {
+        let mode = "rotation-generation-jump-\(UUID().uuidString)"
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: mode, urlSession: urlSession)
+        let oldIdentity = try makeSignalBoundaryBinding()
+        let newIdentity = try ProtocolIdentityBinding(
+            deviceId: oldIdentity.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyBytes: Data(repeating: 0x22, count: 32)
+        )
+        let transcript = try DeviceIdentityRotationTranscript(
+            rotationID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            nonce: Data(0..<32),
+            expiresAtMilliseconds: 2_000_000_060_000,
+            tenantID: "boundary-tenant",
+            userID: "boundary-user",
+            deviceID: oldIdentity.deviceId,
+            oldGeneration: 4,
+            oldIdentity: oldIdentity,
+            newIdentity: newIdentity
+        )
+        let challenge = try SignalServerClient.IdentityRotationChallenge(
+            transcript: transcript,
+            issuedAtMilliseconds: 2_000_000_000_000,
+            clientVersion: "1.0.0",
+            protocolVersion: "1"
+        )
+
+        do {
+            _ = try await client.commitIdentityRotation(
+                challenge: challenge,
+                oldSignature: Data(repeating: 0x41, count: 64),
+                newSignature: Data(repeating: 0x42, count: 64),
+                expectedScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                    tenantID: "boundary-tenant",
+                    userID: "boundary-user"
+                )
+            )
+            Issue.record("Expected malformedResponse for a generation jump")
+        } catch SignalServerClient.ClientError.malformedResponse {
+            // Exact fail-closed result.
+        } catch {
+            Issue.record("Expected malformedResponse, got \(error)")
+        }
+        #expect(SignalBoundaryURLProtocol.request(for: mode) != nil)
+    }
+
+    @Test("CrossNetworkConnectionManager wires authenticated signaling through one authority snapshot")
+    func crossNetworkManagerUsesOneAuthenticatedSignalingSnapshot() throws {
+        let source = try String(
+            contentsOfFile: "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift",
+            encoding: .utf8
+        )
+        let factory = try #require(
+            sourceSection(
+                in: source,
+                from: "static func makeAuthenticatedSignalServerClient()",
+                to: "public init() {"
+            )
+        )
+        let initializer = try #require(
+            sourceSection(
+                in: source,
+                from: "public init() {",
+                to: "public var isTransportReady"
+            )
+        )
+        let contextHelper = try #require(
+            sourceSection(
+                in: source,
+                from: "private static func currentAuthenticatedSignalServerRequestContext()",
+                to: "static func currentAuthenticatedIdentityRotationScope()"
+            )
+        )
+        #expect(factory.contains("authenticatedRequestContextProvider: { @MainActor in"))
+        #expect(factory.contains("currentAuthenticatedSignalServerRequestContext()"))
+        #expect(factory.contains("makeAuthenticatedSignalServerClientSnapshot()"))
+        #expect(contextHelper.contains("_ = try await AuthenticationService.shared.validAccessToken()"))
+        #expect(contextHelper.contains("let snapshot = currentSignalServerAuthoritySnapshot()"))
+        #expect(contextHelper.contains("SignalServerClient.AuthenticatedRequestContext("))
+        #expect(contextHelper.contains("userID: identity.userID"))
+        #expect(!factory.contains("bearerTokenProvider:"))
+        #expect(initializer.contains("self.signalServer = Self.makeAuthenticatedSignalServerClient()"))
+        #expect(!initializer.contains("authenticatedRequestContextProvider:"))
+    }
+
+    @Test("SignalServerClient rejects an oversized response before decoding")
+    func signalServerClientRejectsOversizedResponse() async throws {
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(
+            mode: "oversized",
+            urlSession: urlSession,
+            maximumResponseBytes: 128
+        )
+
+        do {
+            _ = try await client.requestAdmissionChallenge(binding: makeSignalBoundaryBinding())
+            Issue.record("Expected an oversized signaling response to fail closed")
+        } catch SignalServerClient.ClientError.responseTooLarge(let path, let limitBytes) {
+            #expect(path == SignalServerClient.admissionChallengePath)
+            #expect(limitBytes == 128)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("SignalServerClient rejects invalid response limits before network I/O")
+    func signalServerClientRejectsInvalidResponseLimits() async throws {
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(
+            mode: "invalid-limits",
+            urlSession: urlSession,
+            maximumResponseBytes: 0
+        )
+
+        do {
+            _ = try await client.requestAdmissionChallenge(binding: makeSignalBoundaryBinding())
+            Issue.record("Expected invalid signaling limits to fail closed")
+        } catch SignalServerClient.ClientError.invalidRequestLimits {
+            #expect(SignalBoundaryURLProtocol.request(for: "invalid-limits") == nil)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("SignalServerClient maps URL request timeout explicitly")
+    func signalServerClientMapsRequestTimeout() async throws {
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(mode: "request-timeout", urlSession: urlSession)
+
+        do {
+            _ = try await client.requestAdmissionChallenge(binding: makeSignalBoundaryBinding())
+            Issue.record("Expected a timed-out signaling request to fail closed")
+        } catch SignalServerClient.ClientError.requestTimedOut(let path) {
+            #expect(path == SignalServerClient.admissionChallengePath)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("SignalServerClient enforces a hard total resource deadline")
+    func signalServerClientEnforcesResourceDeadline() async throws {
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = makeSignalBoundaryClient(
+            mode: "resource-timeout",
+            urlSession: urlSession,
+            requestTimeoutSeconds: 2,
+            resourceTimeoutSeconds: 0.05
+        )
+
+        do {
+            _ = try await client.requestAdmissionChallenge(binding: makeSignalBoundaryBinding())
+            Issue.record("Expected a signaling resource deadline to fail closed")
+        } catch SignalServerClient.ClientError.resourceDeadlineExceeded(let path) {
+            #expect(path == SignalServerClient.admissionChallengePath)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        try await waitForSignalBoundaryCancellation(mode: "resource-timeout")
     }
 
     @Test("SignalServerClient legacy response decoders fail closed on missing fields")
@@ -519,6 +911,56 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(!localCompatServerSource.contains("path: '/ws'"))
     }
 
+    @Test("Current-path identity authority waits for committed configuration and signs the advertised slot")
+    func currentPathIdentityAuthorityUsesOneCommittedSnapshot() throws {
+        let settingsSource = try String(
+            contentsOfFile: "Sources/SkyBridgeCore/Settings/SettingsManager.swift",
+            encoding: .utf8
+        )
+        #expect(settingsSource.contains("protocolIdentityRestorationTask"))
+        #expect(settingsSource.contains("committedProtocolIdentityConfiguration()"))
+        #expect(settingsSource.contains("await protocolIdentityRestorationTask?.value"))
+
+        let snapshotSource = try String(
+            contentsOfFile: "Sources/SkyBridgeCore/P2P/CommittedLocalProtocolIdentitySnapshot.swift",
+            encoding: .utf8
+        )
+        #expect(snapshotSource.contains(".committedProtocolIdentityConfiguration()"))
+        #expect(!snapshotSource.contains("SettingsManager.shared.activeProtocolSigningAlgorithm"))
+        #expect(!snapshotSource.contains("SettingsManager.shared.activeProtocolSigningKeyProtection"))
+
+        let activationSource = try String(
+            contentsOfFile: "Sources/SkyBridgeCompassApp/Services/CurrentPathDeviceActivationCoordinator.swift",
+            encoding: .utf8
+        )
+        #expect(activationSource.contains("CommittedLocalProtocolIdentitySnapshot.loadActive()"))
+        #expect(activationSource.contains("protocolSigningAlgorithm: identity.algorithm"))
+        #expect(activationSource.contains("protocolPublicKeyBytes: identity.publicKey"))
+        #expect(!activationSource.contains("let algorithm: ProtocolSigningAlgorithm = .ed25519"))
+
+        let probeSource = try String(
+            contentsOfFile: "Sources/CurrentPathProbe/main.swift",
+            encoding: .utf8
+        )
+        #expect(probeSource.contains("CommittedLocalProtocolIdentitySnapshot.loadActive()"))
+        #expect(probeSource.contains("signingKeyHandle: identity.keyHandle"))
+        #expect(probeSource.contains("key: signingKeyHandle"))
+        #expect(!probeSource.contains("getProtocolSigningKeyHandle(for: binding.protocolSigningAlgorithm)"))
+
+        let securitySourcePaths = [
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift",
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift",
+            "Sources/SkyBridgeCore/P2P/P2PModels.swift",
+            "Sources/SkyBridgeCore/P2P/InboundProtocolIdentitySelection.swift",
+            "Sources/SkyBridgeCore/QuantumSecure/EnhancedPostQuantumCrypto.swift"
+        ]
+        for path in securitySourcePaths {
+            let source = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(!source.contains("SettingsManager.shared.activeProtocolSigningAlgorithm"))
+            #expect(!source.contains("SettingsManager.shared.activeProtocolSigningKeyProtection"))
+        }
+    }
+
     @Test("iOS QR redeem uses a stable idempotency key")
     func iOSQRCodeRedeemUsesStableIdempotencyKey() throws {
         let clientSource = try String(contentsOfFile: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift")
@@ -579,6 +1021,24 @@ struct WebRTCSignalingCurrentPathTests {
         )
     }
 
+    @Test("Connection-code lookup uses the server session identifier as authority")
+    func connectionCodeLookupUsesAuthoritativeServerSessionID() throws {
+        let managerSource = try String(
+            contentsOfFile: "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift",
+            encoding: .utf8
+        )
+        let section = try #require(sourceSection(
+            in: managerSource,
+            from: "public func connectWithCode",
+            to: "private func scheduleConnectionCodeLeaseInvalidation"
+        ))
+
+        #expect(section.contains("let sessionID = lookup.sessionID"))
+        #expect(!section.contains("let sessionID = normalized"))
+        #expect(section.contains("ensureSignalingConnected(shardKey: sessionID)"))
+        #expect(section.contains("WebRTCSession(sessionId: sessionID"))
+    }
+
     @Test("WebRTC signaling envelope 保留 authToken 字段")
     func signalingEnvelopePreservesAuthToken() throws {
         let envelope = WebRTCSignalingEnvelope(
@@ -636,6 +1096,18 @@ private func assertEndpointValidationPrecedesTokenCaching(
     #expect(endpointRange.lowerBound < tokenRange.lowerBound, sourceLocation: sourceLocation)
 }
 
+private func sourceSection(
+    in source: String,
+    from startMarker: String,
+    to endMarker: String
+) -> Substring? {
+    guard let start = source.range(of: startMarker),
+          let end = source.range(of: endMarker, range: start.upperBound..<source.endIndex) else {
+        return nil
+    }
+    return source[start.lowerBound..<end.lowerBound]
+}
+
 private func expectSignalServerMalformedResponse(
     _ label: String,
     sourceLocation: SourceLocation = #_sourceLocation,
@@ -658,5 +1130,246 @@ private enum XCTJSON {
             throw URLError(.cannotDecodeContentData)
         }
         return object
+    }
+}
+
+private func makeSignalBoundaryBinding() throws -> ProtocolIdentityBinding {
+    try ProtocolIdentityBinding(
+        deviceId: "12345678-1234-1234-1234-1234567890ab",
+        protocolSigningAlgorithm: .ed25519,
+        protocolPublicKeyBytes: Data(repeating: 0x11, count: 32)
+    )
+}
+
+private func makeSignalBoundaryURLSession() -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [SignalBoundaryURLProtocol.self]
+    return URLSession(configuration: configuration)
+}
+
+private func makeSignalBoundaryClient(
+    mode: String,
+    urlSession: URLSession,
+    requestTimeoutSeconds: TimeInterval = 2,
+    resourceTimeoutSeconds: TimeInterval = 2,
+    maximumResponseBytes: Int = 256 * 1_024
+) -> SignalServerClient {
+    SignalServerClient(
+        urlSession: urlSession,
+        baseURLProvider: { "https://signal-boundary.invalid" },
+        apiKeyProvider: { mode },
+        authenticatedRequestContextProvider: {
+            SignalServerClient.AuthenticatedRequestContext(
+                bearerToken: "boundary-token",
+                tenantID: "boundary-tenant",
+                userID: "boundary-user"
+            )
+        },
+        tenantIDProvider: { "boundary-tenant" },
+        requestTimeoutSeconds: requestTimeoutSeconds,
+        resourceTimeoutSeconds: resourceTimeoutSeconds,
+        maximumResponseBytes: maximumResponseBytes
+    )
+}
+
+private func waitForSignalAuthenticationCapture(
+    _ provider: SignalAuthenticationContextProbe
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while await provider.captureCount() == 0 {
+        guard clock.now < deadline else {
+            throw SignalBoundaryTestError.timedOutWaitingForAuthenticationCapture
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+private func waitForSignalBoundaryCancellation(mode: String) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while !SignalBoundaryURLProtocol.wasStopped(mode: mode) {
+        guard clock.now < deadline else {
+            throw SignalBoundaryTestError.timedOutWaitingForRequestCancellation
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+private actor SignalAuthenticationContextProbe {
+    private var context: SignalServerClient.AuthenticatedRequestContext
+    private var captures = 0
+    private var isReleased = false
+
+    init(context: SignalServerClient.AuthenticatedRequestContext) {
+        self.context = context
+    }
+
+    func capturedContext() async -> SignalServerClient.AuthenticatedRequestContext {
+        let captured = context
+        captures += 1
+        while !isReleased {
+            await Task.yield()
+        }
+        return captured
+    }
+
+    func update(_ context: SignalServerClient.AuthenticatedRequestContext) {
+        self.context = context
+    }
+
+    func release() {
+        isReleased = true
+    }
+
+    func captureCount() -> Int {
+        captures
+    }
+}
+
+private enum SignalBoundaryTestError: Error {
+    case timedOutWaitingForAuthenticationCapture
+    case timedOutWaitingForRequestCancellation
+}
+
+private final class SignalBoundaryURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var requestsByMode: [String: URLRequest] = [:]
+    nonisolated(unsafe) private static var stoppedModes: Set<String> = []
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let mode = request.value(forHTTPHeaderField: "X-API-Key") ?? "success"
+        Self.lock.lock()
+        Self.requestsByMode[mode] = request
+        Self.lock.unlock()
+
+        if mode == "request-timeout" {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
+
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let headers = ["Content-Type": "application/json"]
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+
+        if mode == "resource-timeout" {
+            return
+        }
+        if mode == "oversized" {
+            client?.urlProtocol(self, didLoad: Data(repeating: 0x41, count: 1_024))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+
+        let tenantID = request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id") ?? "missing"
+        let body: [String: Any]
+        if mode.hasPrefix("register-existing-")
+            || mode.hasPrefix("register-substitution-") {
+            let binding = try? makeSignalBoundaryBinding()
+            let registeredUserID = mode.hasPrefix("register-substitution-")
+                ? "substituted-user"
+                : "boundary-user"
+            body = [
+                "registered": true,
+                "activated": false,
+                "device": [
+                    "tenant_id": tenantID,
+                    "user_id": registeredUserID,
+                    "device_id": binding?.deviceId ?? "missing",
+                    "protocol_signing_algorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                    "protocol_public_key_fingerprint":
+                        binding?.protocolPublicKeyFingerprint ?? "missing",
+                    "device_name": "Mac",
+                    "status": "active",
+                    "approval_method": "existing"
+                ]
+            ]
+        } else if mode.hasPrefix("rotation-generation-jump-") {
+            let oldIdentity = try? makeSignalBoundaryBinding()
+            let newIdentity = try? ProtocolIdentityBinding(
+                deviceId: oldIdentity?.deviceId ?? "missing",
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyBytes: Data(repeating: 0x22, count: 32)
+            )
+            body = [
+                "committed": true,
+                "rotationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "state": "committed",
+                "committedAt": 2_000_000_001_000 as Int64,
+                "generation": 6,
+                "deviceId": oldIdentity?.deviceId ?? "missing",
+                "oldIdentity": [
+                    "protocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                    "protocolPublicKeyFingerprint":
+                        oldIdentity?.protocolPublicKeyFingerprint ?? "missing",
+                    "state": "grace",
+                    "graceExpiresAt": 2_000_000_061_000 as Int64
+                ],
+                "newIdentity": [
+                    "protocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                    "protocolPublicKeyFingerprint":
+                        newIdentity?.protocolPublicKeyFingerprint ?? "missing",
+                    "state": "active"
+                ]
+            ]
+        } else {
+            body = [
+                "challengeId": "challenge-123",
+                "nonce": "nonce-123",
+                "tenantId": tenantID,
+                "userId": "user-123",
+                "deviceId": "12345678-1234-1234-1234-1234567890ab",
+                "clientIpHash": "client-ip-hash",
+                "clientVersion": "1.0.0",
+                "protocolVersion": "1",
+                "state": "pending",
+                "issuedAt": 2_000_000_000_000 as Int64,
+                "expiresAt": 2_000_000_060_000 as Int64
+            ]
+        }
+        do {
+            client?.urlProtocol(
+                self,
+                didLoad: try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            )
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {
+        let mode = request.value(forHTTPHeaderField: "X-API-Key") ?? "success"
+        Self.lock.lock()
+        Self.stoppedModes.insert(mode)
+        Self.lock.unlock()
+    }
+
+    static func request(for mode: String) -> URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestsByMode[mode]
+    }
+
+    static func wasStopped(mode: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stoppedModes.contains(mode)
     }
 }

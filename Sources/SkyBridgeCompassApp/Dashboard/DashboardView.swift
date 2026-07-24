@@ -14,6 +14,15 @@ import QuartzCore
 
 private let dashboardLogger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "Dashboard")
 
+private enum DashboardPresentationPhase {
+    case shell
+    case animatedBackground
+    case fullContent
+
+    var enablesAnimatedBackground: Bool { self != .shell }
+    var enablesDeferredContent: Bool { self == .fullContent }
+}
+
 /// 主仪表盘界面，展示来自真实环境的遥测信息与操作入口。
 /// 重构后的精简版本，主要负责布局和协调子视图
 @available(macOS 14.0, *)
@@ -77,6 +86,7 @@ public struct DashboardView: View {
     @State private var wasPausedByOcclusion: Bool = false
     @State private var didSetupLifecycle = false
     @State private var weatherStartupTask: Task<Void, Never>?
+    @State private var presentationPhase: DashboardPresentationPhase = .shell
 
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "Dashboard")
 
@@ -86,8 +96,15 @@ public struct DashboardView: View {
 
     public var body: some View {
         ZStack {
- // 背景视图（主题 + 天气效果）
-            DashboardBackgroundView(hazeClearManager: hazeClearManager)
+            if presentationPhase.enablesAnimatedBackground {
+                DashboardBackgroundView(
+                    hazeClearManager: hazeClearManager,
+                    enableWeatherEffects: presentationPhase.enablesDeferredContent
+                )
+            } else {
+                LaunchTransitionBackground()
+                    .ignoresSafeArea(.all)
+            }
 
             NavigationSplitView {
  // 侧边栏
@@ -202,6 +219,9 @@ public struct DashboardView: View {
         .onAppear {
             setupOnAppear()
         }
+        .task {
+            await activateDeferredPresentation()
+        }
         .onChange(of: weatherLocationService.authorizationStatus) { _, _ in
             if weatherLocationService.isLocationAuthorized {
                 weatherLocationService.startLocationUpdates()
@@ -251,18 +271,17 @@ public struct DashboardView: View {
             switch selectedNavigation {
             case .dashboard:
                 ScrollView {
-                    LazyVStack(spacing: 24) {
-                        DashboardContentView(
-                            selectedNavigation: $selectedNavigation,
-                            selectedSession: $selectedSession,
-                            deviceSearchText: $deviceSearchText,
-                            filteredDevices: $filteredDevices,
-                            isSearching: $isSearching,
-                            showManualConnectSheet: $showManualConnectSheet,
-                            extendedSearchCountdown: $extendedSearchCountdown,
-                            systemPerformanceMonitor: $systemPerformanceMonitor
-                        )
-                    }
+                    DashboardContentView(
+                        selectedNavigation: $selectedNavigation,
+                        selectedSession: $selectedSession,
+                        deviceSearchText: $deviceSearchText,
+                        filteredDevices: $filteredDevices,
+                        isSearching: $isSearching,
+                        showManualConnectSheet: $showManualConnectSheet,
+                        extendedSearchCountdown: $extendedSearchCountdown,
+                        systemPerformanceMonitor: $systemPerformanceMonitor,
+                        showDeferredContent: presentationPhase.enablesDeferredContent
+                    )
                     .padding(.bottom, 32)
                 }
                 .scrollIndicators(.hidden)
@@ -293,6 +312,34 @@ public struct DashboardView: View {
     }
 
  // MARK: - Private Methods
+
+    private func activateDeferredPresentation() async {
+        if presentationPhase == .shell {
+            do {
+                try await Task.sleep(for: .milliseconds(80))
+            } catch is CancellationError {
+                return
+            } catch {
+                logger.error("Dashboard background activation delay failed: \(error.localizedDescription, privacy: .private)")
+                return
+            }
+            guard !Task.isCancelled else { return }
+            presentationPhase = .animatedBackground
+        }
+
+        guard presentationPhase == .animatedBackground else { return }
+
+        do {
+            try await Task.sleep(for: .milliseconds(80))
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.error("Dashboard content activation delay failed: \(error.localizedDescription, privacy: .private)")
+            return
+        }
+        guard !Task.isCancelled else { return }
+        presentationPhase = .fullContent
+    }
 
     private func initializePerformanceMonitoring() async {
         let manager = PerformanceModeManager.shared

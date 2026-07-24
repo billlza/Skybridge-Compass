@@ -4,21 +4,14 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class KEMTrustStoreTests: XCTestCase {
-    private func makeIsolatedStore(
-        storageKey: String,
-        suiteName: String
-    ) throws -> KEMTrustStore {
-        let storeDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        return KEMTrustStore(storageKey: storageKey, userDefaults: storeDefaults)
-    }
-
     func testDefaultPQCSuitesExcludeQPeriaptBeta() {
-        XCTAssertEqual(CryptoSuite.explicitBetaPQCSuites, [.qperiaptABI2PolicyBound])
+        XCTAssertEqual(CryptoSuite.explicitBetaPQCSuites, [])
         XCTAssertFalse(CryptoSuite.allPQCSuites.contains(.qperiaptContextBound))
         XCTAssertFalse(CryptoSuite.allPQCSuites.contains(.qperiaptABI2PolicyBound))
         XCTAssertTrue(CryptoSuite.qperiaptContextBound.isLegacyOnly)
         XCTAssertFalse(CryptoSuite.qperiaptContextBound.isNegotiable)
         XCTAssertTrue(CryptoSuite.qperiaptABI2PolicyBound.isNegotiable)
+        XCTAssertFalse(CryptoSuite.qperiaptABI2PolicyBound.isDecodeOnly)
         XCTAssertTrue(CryptoSuite.allPQCSuites.contains(.xwing))
     }
 
@@ -50,191 +43,18 @@ final class KEMTrustStoreTests: XCTestCase {
         )
         XCTAssertEqual(oldAndroidApi.map(\.suiteWireId), [CryptoSuite.xwing.wireId])
 
-        let eligibleIOS = KEMPublicKeyInfo.normalizedValidKeys(
+        let currentIOS = KEMPublicKeyInfo.normalizedValidKeys(
             [qPeriaptKey, legacyQPeriaptKey, xWingKey],
             platform: "iOS",
             osVersion: "iOS 26.0"
         )
         XCTAssertEqual(
-            eligibleIOS.map(\.suiteWireId),
-            [CryptoSuite.xwing.wireId, CryptoSuite.qperiaptABI2PolicyBound.wireId]
-        )
-    }
-
-    func testQPeriaptStoreRejectsMissingMetadataWithoutDroppingOtherPQC() async throws {
-        let suiteName = "KEMTrustStoreQMissingMetadataTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let store = try makeIsolatedStore(
-            storageKey: "kem_trust_store.q-missing-metadata.tests.v1",
-            suiteName: suiteName
-        )
-        let deviceId = "id:\(UUID().uuidString.lowercased())"
-        let qKey = Data(repeating: 0x31, count: 1_216)
-        let xWingKey = Data(repeating: 0x32, count: 1_216)
-        await store.upsert(
-            deviceId: deviceId,
-            kemPublicKeys: [
-                .init(
-                    suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
-                    publicKey: qKey
-                ),
-                .init(suiteWireId: CryptoSuite.xwing.wireId, publicKey: xWingKey)
+            currentIOS.map(\.suiteWireId),
+            [
+                CryptoSuite.xwing.wireId,
+                CryptoSuite.qperiaptABI2PolicyBound.wireId
             ]
         )
-
-        let stored = await store.kemPublicKeys(for: deviceId)
-        XCTAssertNil(stored[.qperiaptABI2PolicyBound])
-        XCTAssertEqual(stored[.xwing], xWingKey)
-    }
-
-    func testQPeriaptStorePersistsEligibleMetadataAcrossReload() async throws {
-        let suiteName = "KEMTrustStoreQMetadataReloadTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let storageKey = "kem_trust_store.q-metadata-reload.tests.v1"
-        let deviceId = "id:\(UUID().uuidString.lowercased())"
-        let qKey = Data(repeating: 0x41, count: 1_216)
-        let writer = try makeIsolatedStore(storageKey: storageKey, suiteName: suiteName)
-        await writer.upsert(
-            deviceId: deviceId,
-            kemPublicKeys: [
-                .init(
-                    suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
-                    publicKey: qKey
-                )
-            ],
-            platform: "iOS",
-            osVersion: "iOS 26.0"
-        )
-
-        let reader = try makeIsolatedStore(storageKey: storageKey, suiteName: suiteName)
-        let restored = await reader.kemPublicKeys(for: deviceId)
-        XCTAssertEqual(restored[.qperiaptABI2PolicyBound], qKey)
-    }
-
-    func testLegacySnapshotPurgesABI1AndMetadataFreeABI2ButKeepsMLKEM() async throws {
-        let suiteName = "KEMTrustStoreQMigrationTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let storageKey = "kem_trust_store.q-migration.tests.v1"
-        let deviceId = "id:\(UUID().uuidString.lowercased())"
-        let mlkemKey = Data(repeating: 0x51, count: 1_184)
-        let snapshot = [
-            deviceId: LegacyStoredPeer(
-                keys: [
-                    CryptoSuite.qperiaptContextBound.wireId: Data(
-                        repeating: 0x52,
-                        count: 1_216
-                    ),
-                    CryptoSuite.qperiaptABI2PolicyBound.wireId: Data(
-                        repeating: 0x53,
-                        count: 1_216
-                    ),
-                    CryptoSuite.mlkem768.wireId: mlkemKey
-                ],
-                updatedAt: Date()
-            )
-        ]
-        defaults.set(try JSONEncoder().encode(snapshot), forKey: storageKey)
-
-        let store = try makeIsolatedStore(storageKey: storageKey, suiteName: suiteName)
-        let loaded = await store.kemPublicKeys(for: deviceId)
-        XCTAssertEqual(loaded, [.mlkem768: mlkemKey])
-
-        let inspectionDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        let persistedData = try XCTUnwrap(inspectionDefaults.data(forKey: storageKey))
-        let persisted = try JSONDecoder().decode(
-            [String: LegacyStoredPeer].self,
-            from: persistedData
-        )
-        XCTAssertEqual(persisted[deviceId]?.keys, [
-            CryptoSuite.mlkem768.wireId: mlkemKey
-        ])
-    }
-
-    func testCanonicalRebindPreservesQMetadataFromSelectedKeyAcrossReload() async throws {
-        let suiteName = "KEMTrustStoreQRebindTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let storageKey = "kem_trust_store.q-rebind.tests.v1"
-        let canonicalId = "id:\(UUID().uuidString.lowercased())"
-        let legacyId = "id:\(UUID().uuidString.lowercased())"
-        let qKey = Data(repeating: 0x61, count: 1_216)
-        let mlkemKey = Data(repeating: 0x62, count: 1_184)
-        let writer = try makeIsolatedStore(storageKey: storageKey, suiteName: suiteName)
-        await writer.upsert(
-            deviceId: legacyId,
-            kemPublicKeys: [
-                .init(
-                    suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
-                    publicKey: qKey
-                )
-            ],
-            platform: "Android",
-            osVersion: "Android 16 (API 36)"
-        )
-        await writer.upsert(
-            deviceId: canonicalId,
-            kemPublicKeys: [
-                .init(suiteWireId: CryptoSuite.mlkem768.wireId, publicKey: mlkemKey)
-            ]
-        )
-        await writer.rebindCanonicalDeviceId(
-            canonicalId,
-            legacyIdentifiers: [legacyId]
-        )
-
-        let reader = try makeIsolatedStore(storageKey: storageKey, suiteName: suiteName)
-        let restored = await reader.kemPublicKeys(for: canonicalId)
-        XCTAssertEqual(restored[.qperiaptABI2PolicyBound], qKey)
-        XCTAssertEqual(restored[.mlkem768], mlkemKey)
-    }
-
-    func testSignedRefreshRejectsQPeriaptWithoutSignedPlatformMetadata() async throws {
-        let suiteName = "KEMTrustStoreQSignedRefreshTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let deviceId = "id:\(UUID().uuidString.lowercased())"
-        let exchange = try makeSignedKEMRefreshExchange(
-            deviceId: deviceId,
-            kemPublicKey: Data(repeating: 0x71, count: 1_216),
-            kemSuite: .qperiaptABI2PolicyBound,
-            generation: 1
-        )
-        let store = try makeIsolatedStore(
-            storageKey: "kem_trust_store.q-signed-refresh.tests.v1",
-            suiteName: suiteName
-        )
-
-        await XCTAssertThrowsErrorAsync(
-            try await store.upsertSignedKEMRefresh(
-                deviceIds: [deviceId],
-                payload: exchange.payload,
-                request: exchange.request,
-                pinnedProtocolFingerprints: [
-                    exchange.payload.protocolIdentityFingerprint
-                ],
-                minimumGeneration: nil
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? AppMessage.KEMRefreshValidationError,
-                .qPeriaptPlatformMetadataUnavailable(
-                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId
-                )
-            )
-        }
     }
 
     func testPersistAndRestoreKEMTrustStore() async throws {
@@ -271,6 +91,50 @@ final class KEMTrustStoreTests: XCTestCase {
         await readerStore.clear(deviceId: deviceId)
         let cleared = await readerStore.kemPublicKeys(for: deviceId)
         XCTAssertTrue(cleared.isEmpty)
+    }
+
+    func testAuthorityBoundJoinBootstrapRequiresExactProtocolPin() async throws {
+        let suiteName = "KEMTrustStoreAuthorityBoundJoinTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = KEMTrustStore(
+            storageKey: "kem_trust_store.authority.join.tests.v1",
+            userDefaults: defaults
+        )
+        let deviceId = "device-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+        let publicKey = Data(repeating: 0x51, count: 1_216)
+        try await store.upsertAuthorityBoundBootstrap(
+            deviceIds: [deviceId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwing.wireId,
+                    publicKey: publicKey
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint
+        )
+
+        let unbound = await store.signedRefreshKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        let wrongPin = await store.authorityBoundBootstrapKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [String(repeating: "b", count: 64)]
+        )
+        let exactPin = await store.authorityBoundBootstrapKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint.uppercased()]
+        )
+
+        XCTAssertTrue(unbound.isEmpty)
+        XCTAssertTrue(wrongPin.isEmpty)
+        XCTAssertEqual(exactPin[.xwing], publicKey)
     }
 
     func testLookupSupportsDiscoveryAndDeclaredIdentityAliases() async throws {

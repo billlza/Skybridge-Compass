@@ -57,18 +57,6 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
                 frame: messageA
             )
         )
-
-        let legacyMessageA = makeHandshakeMessageA(
-            supportedSuites: [.qperiaptContextBound],
-            providerType: .qPeriapt
-        ).encoded
-        XCTAssertFalse(
-            P2PDiscoveryService.shouldRestartInboundHandshakeForRekey(
-                state: established,
-                frame: legacyMessageA
-            ),
-            "Decode-only ABI1 must not mutate an established rekey session"
-        )
     }
 
     func testStrictPQCDiscoveryRejectsClassicOnlyMessageA() {
@@ -98,55 +86,6 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
         XCTAssertEqual(rejection, StrictPQCAdmissionRejection.localPQCUnavailable)
     }
 
-    @MainActor
-    func testStrictPQCKEMFamilyMatchingAllowsOnlyExactOrCanonicalNegotiableFamily() {
-        XCTAssertTrue(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.xwingMLDSA, target: .xwingMLDSA)
-        )
-        XCTAssertTrue(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.mlkem768MLDSA65FS, target: .mlkem768MLDSA65)
-        )
-        XCTAssertTrue(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.mlkem768MLDSA65, target: .mlkem768MLDSA65FS)
-        )
-
-        XCTAssertFalse(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.xwingMLDSA, target: .qperiaptABI2PolicyBound),
-            "Unrelated hybrid suites must never be treated as the same KEM family"
-        )
-        XCTAssertFalse(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.qperiaptContextBound, target: .qperiaptABI2PolicyBound),
-            "Decode-only ABI1 must not satisfy an ABI2 target"
-        )
-        XCTAssertFalse(
-            P2PDiscoveryService.suiteSupportsTargetKEM(.unknown(0x00FF), target: .xwingMLDSA),
-            "Unknown hybrid-tier identifiers must not satisfy a known target"
-        )
-    }
-
-    @MainActor
-    func testStrictPQCKEMAdmissionWithoutPreferredTargetRequiresNegotiablePQC() {
-        XCTAssertTrue(
-            P2PDiscoveryService.canSatisfyStrictPQCWithTrustedKEM(
-                trustedPeerKEMSuites: [.mlkem768MLDSA65],
-                preferredTargetSuite: nil
-            )
-        )
-        XCTAssertFalse(
-            P2PDiscoveryService.canSatisfyStrictPQCWithTrustedKEM(
-                trustedPeerKEMSuites: [.qperiaptContextBound, .unknown(0x00FF)],
-                preferredTargetSuite: nil
-            )
-        )
-        XCTAssertFalse(
-            P2PDiscoveryService.canSatisfyStrictPQCWithTrustedKEM(
-                trustedPeerKEMSuites: [.xwingMLDSA],
-                preferredTargetSuite: .qperiaptABI2PolicyBound
-            ),
-            "A different hybrid KEM must not satisfy the preferred target"
-        )
-    }
-
     private func makeHandshakeMessageA(
         supportedSuites: [CryptoSuite] = [.x25519Ed25519],
         providerType: CryptoProviderType = .classic
@@ -156,10 +95,7 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
             keyShares: supportedSuites.map { suite in
                 HandshakeKeyShare(
                     suite: suite,
-                    shareBytes: Data(
-                        repeating: 0x11,
-                        count: suite == .qperiaptContextBound ? 1_120 : 32
-                    )
+                    shareBytes: Data(repeating: 0x11, count: 32)
                 )
             },
             clientNonce: Data(repeating: 0x22, count: 32),

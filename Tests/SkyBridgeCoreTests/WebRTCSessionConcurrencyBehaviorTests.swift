@@ -33,9 +33,17 @@ struct WebRTCSessionConcurrencyBehaviorTests {
 
         #expect(macSource.contains("private let callbackQueue = DispatchQueue"))
         #expect(macSource.contains("callbackQueue.async(execute: DispatchWorkItem(block: operation))"))
+        #expect(macSource.contains("private func dispatchActiveLifecycleCallback"))
+        #expect(macSource.contains("guard remainsActive else { return }"))
+        #expect(macSource.contains("dataChannel?.delegate = nil"))
+        #expect(macSource.contains("peerConnection?.delegate = nil"))
         #expect(!macSource.contains("DispatchQueue.global(qos: .userInitiated).async"))
         #expect(iosSource.contains("private let callbackQueue = DispatchQueue"))
         #expect(iosSource.contains("callbackQueue.async(execute: DispatchWorkItem(block: operation))"))
+        #expect(iosSource.contains("private func dispatchActiveLifecycleCallback"))
+        #expect(iosSource.contains("guard remainsActive else { return }"))
+        #expect(iosSource.contains("dataChannel?.delegate = nil"))
+        #expect(iosSource.contains("peerConnection?.delegate = nil"))
         #expect(!iosSource.contains("DispatchQueue.global(qos: .userInitiated).async"))
     }
 
@@ -174,6 +182,13 @@ struct WebRTCSessionConcurrencyBehaviorTests {
                 hasRemoteDescription: true,
                 pendingCount: 1
             ) == .applyImmediately
+        )
+        #expect(
+            WebRTCSession.pendingRemoteICEPlan(
+                isDuplicate: false,
+                hasRemoteDescription: false,
+                pendingCount: 256
+            ) == .overflow
         )
     }
 }

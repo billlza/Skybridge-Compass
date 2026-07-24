@@ -11,10 +11,11 @@ rust-version.workspace = true
 # See src/platform.rs and ROADMAP.md.
 apple-platform-ffi = []
 
-# Reserved and intentionally disabled: wire_id 0x0011 is decode-only and the
-# historical ABI1 execution path has been removed. Enabling this feature is a
-# compile-time error until Rust implements the authenticated ABI2 policy contract.
-q-periapt = []
+# EXPERIMENTAL, DEFAULT-OFF: enables the Q-Periapt ContextBound PQ/T hybrid KEM
+# suite (wire_id 0x0011) alongside the shipping X-Wing / ML-KEM-768 suites. Pulls
+# in the three `q-periapt-*` crates by path. The production handshake path is
+# unchanged when this feature is off (`cargo build` with no features). See pqc.rs.
+q-periapt = ["dep:q-periapt-kem", "dep:q-periapt-backends", "dep:q-periapt-core"]
 
 [dependencies]
 anyhow.workspace = true
@@ -28,9 +29,8 @@ getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 hpke.workspace = true
-pqcrypto-mldsa.workspace = true
-pqcrypto-mlkem.workspace = true
-pqcrypto-traits.workspace = true
+fips203.workspace = true
+fips204.workspace = true
 rand_core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -47,3 +47,11 @@ uuid.workspace = true
 webrtc.workspace = true
 webbrowser.workspace = true
 x25519-dalek.workspace = true
+
+# EXPERIMENTAL, DEFAULT-OFF (gated by the `q-periapt` feature): the Q-Periapt PQ/T
+# hybrid KEM crates, depended on by path. CI prepares this sibling from a pinned
+# checkout; local builds may use the same sibling or set up External/pqt_hybrid_suite
+# through the vendor build scripts.
+q-periapt-core = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-core", optional = true }
+q-periapt-kem = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-kem", optional = true }
+q-periapt-backends = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-backends", optional = true }

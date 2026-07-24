@@ -45,7 +45,7 @@ public final class SupabaseService: BaseManager {
             }
 
             if scheme != "https" {
- #if DEBUG
+ #if DEBUG || SKYBRIDGE_TESTING
                 let isLocalHost = host == "localhost" || host == "127.0.0.1"
                 guard scheme == "http", isLocalHost else {
                     return nil
@@ -79,17 +79,10 @@ public final class SupabaseService: BaseManager {
             return nil
         }
 
- /// 从环境变量、Info.plist 或资源文件加载配置。启动热路径禁止同步读取 Keychain。
-        public static func fromEnvironment() -> Configuration? {
- // 首先检查环境变量
-            if let environmentConfiguration = candidateConfiguration(
-                urlString: ProcessInfo.processInfo.environment["SUPABASE_URL"],
-                anonKey: ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
-            ) {
-                return environmentConfiguration
-            }
-
- // 发布包默认读取 Info.plist / SupabaseConfig.plist，避免首次安装误落到 legacy auth 链
+        /// Loads the backend configuration used by a signed product bundle. Environment values
+        /// are intentionally excluded so an injected launch environment cannot redirect product
+        /// credentials to an attacker-controlled origin.
+        public static func fromProductBundle() -> Configuration? {
             if let bundleConfiguration = configurationFromBundle(.main) {
                 return bundleConfiguration
             }
@@ -101,6 +94,22 @@ public final class SupabaseService: BaseManager {
  #endif
 
             return nil
+        }
+
+ /// 从环境变量、Info.plist 或资源文件加载配置。启动热路径禁止同步读取 Keychain。
+        public static func fromEnvironment() -> Configuration? {
+ // Release 产品不得通过启动环境重定向认证后端；环境覆盖仅保留给 Debug 诊断。
+ #if DEBUG || SKYBRIDGE_TESTING
+            if let environmentConfiguration = candidateConfiguration(
+                urlString: ProcessInfo.processInfo.environment["SUPABASE_URL"],
+                anonKey: ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
+            ) {
+                return environmentConfiguration
+            }
+ #endif
+
+ // 发布包默认读取 Info.plist / SupabaseConfig.plist，避免首次安装误落到 legacy auth 链
+            return fromProductBundle()
         }
 
  /// 从 Keychain 加载配置。调用方必须放到后台线程，不能用于 App/SwiftUI 初始化热路径。
@@ -303,8 +312,18 @@ public final class SupabaseService: BaseManager {
         
         super.init(category: "SupabaseService")
 
-        let useInMemoryKeychain = ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
-        self.configuration = useInMemoryKeychain ? nil : Configuration.fromEnvironment()
+        self.configuration = Self.usesTestOnlyInMemoryKeychain ? nil : Configuration.fromEnvironment()
+    }
+
+    private static var usesTestOnlyInMemoryKeychain: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+        #else
+        return false
+        #endif
     }
 
     private func resolvedConfiguration() throws -> Configuration {

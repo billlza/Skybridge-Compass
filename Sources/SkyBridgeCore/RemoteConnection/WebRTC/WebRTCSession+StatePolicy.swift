@@ -30,6 +30,7 @@ extension WebRTCSession {
         case ignoreDuplicate
         case queueCandidate(nextPendingCount: Int)
         case applyImmediately
+        case overflow
     }
 
     nonisolated static func stateAccessPlan(isOnStateQueue: Bool) -> StateAccessPlan {
@@ -96,13 +97,17 @@ extension WebRTCSession {
     nonisolated static func pendingRemoteICEPlan(
         isDuplicate: Bool,
         hasRemoteDescription: Bool,
-        pendingCount: Int
+        pendingCount: Int,
+        maxPendingCount: Int = 256
     ) -> PendingRemoteICEPlan {
         if isDuplicate {
             return .ignoreDuplicate
         }
         if hasRemoteDescription {
             return .applyImmediately
+        }
+        guard pendingCount < maxPendingCount else {
+            return .overflow
         }
         return .queueCandidate(nextPendingCount: pendingCount + 1)
     }

@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - File transfer wire payloads
 
-struct FileMetadata: Codable {
+struct FileMetadata: Codable, Sendable {
     let transferId: String
     let fileName: String
     let fileSize: Int64
@@ -21,7 +21,7 @@ struct FileMetadata: Codable {
     let senderChip: String?
 }
 
-struct FileChunk: Codable {
+struct FileChunk: Codable, Sendable {
     let index: Int
     let data: Data
     let size: Int
@@ -29,7 +29,7 @@ struct FileChunk: Codable {
     let authenticationTag: Data?
 }
 
-struct FileTransferReceipt: Codable {
+struct FileTransferReceipt: Codable, Sendable {
     let transferId: String
     let success: Bool
     let receivedBytes: Int64
@@ -39,7 +39,7 @@ struct FileTransferReceipt: Codable {
     let authTag: Data?
 }
 
-struct ResumeRequestPayload: Codable {
+struct ResumeRequestPayload: Codable, Sendable {
     let transferId: String
     let senderDeviceId: String
     let resumeOffset: Int64
@@ -47,7 +47,7 @@ struct ResumeRequestPayload: Codable {
     let authTag: Data
 }
 
-struct ResumeAckPayload: Codable {
+struct ResumeAckPayload: Codable, Sendable {
     let transferId: String
     let accepted: Bool
     let resumeOffset: Int64

@@ -567,6 +567,7 @@ public actor BonjourDiscoveryTransport: DiscoveryTransport {
 
 // MARK: - In-Memory Transport (for testing)
 
+#if DEBUG || SKYBRIDGE_TESTING
 /// 内存传输实现（用于测试）
 @available(macOS 14.0, iOS 17.0, *)
 public actor InMemoryDiscoveryTransport: DiscoveryTransport {
@@ -622,3 +623,4 @@ public actor InMemoryDiscoveryTransport: DiscoveryTransport {
         sentMessages.count
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import SwiftUI
 import os.log
 
@@ -341,3 +342,4 @@ struct PerformanceTestView_Previews: PreviewProvider {
         }
     }
 }
+#endif

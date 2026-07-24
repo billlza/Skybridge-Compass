@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import SkyBridgeCompass_iOS
 
@@ -85,6 +86,173 @@ final class PQCSignatureProviderFallbackSemanticsTests: XCTestCase {
                 ),
                 "签名 \(mismatch.signature)/公钥 \(mismatch.publicKey) 字节不得进入 liboqs 回退路径"
             )
+        }
+    }
+
+    func testMLDSA87NeverEntersTheMLDSA65OQSFallback() throws {
+        try requireLiboqsBackend()
+
+        XCTAssertFalse(
+            PQCSignatureProvider.shouldRetrySignWithLiboqs(
+                algorithm: .mlDSA87,
+                key: .softwareKey(Data(count: 4_896))
+            )
+        )
+        XCTAssertFalse(
+            PQCSignatureProvider.shouldRetryVerifyWithLiboqs(
+                algorithm: .mlDSA87,
+                signature: Data(count: 4_627),
+                publicKey: Data(count: 2_592)
+            )
+        )
+    }
+
+    func testSelectorPreservesExactMLDSA87Algorithm() {
+        let provider = ProtocolSignatureProviderSelector.select(for: .mlDSA87)
+        XCTAssertEqual(provider.signatureAlgorithm, .mlDSA87)
+    }
+
+    func testAppleMLDSA87SoftwareKeyRoundTrip() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Apple CryptoKit ML-DSA requires iOS 26 or newer")
+        }
+
+        let privateKey = try MLDSA87.PrivateKey()
+        let provider = PQCSignatureProvider(algorithm: .mlDSA87, backend: .applePQC)
+        let message = Data("ios-provider-mldsa87-roundtrip".utf8)
+        let signature = try await provider.sign(
+            message,
+            key: .softwareKey(privateKey.integrityCheckedRepresentation)
+        )
+        let isValid = try await provider.verify(
+            message,
+            signature: signature,
+            publicKey: privateKey.publicKey.rawRepresentation
+        )
+
+        XCTAssertEqual(signature.count, 4_627)
+        XCTAssertEqual(privateKey.publicKey.rawRepresentation.count, 2_592)
+        XCTAssertTrue(isValid)
+    }
+
+    func testAppleMLDSA65SoftwareKeyRoundTrip() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Apple CryptoKit ML-DSA requires iOS 26 or newer")
+        }
+
+        let privateKey = try MLDSA65.PrivateKey()
+        let provider = PQCSignatureProvider(algorithm: .mlDSA65, backend: .applePQC)
+        let message = Data("ios-provider-mldsa65-roundtrip".utf8)
+        let signature = try await provider.sign(
+            message,
+            key: .softwareKey(privateKey.integrityCheckedRepresentation)
+        )
+        let isValid = try await provider.verify(
+            message,
+            signature: signature,
+            publicKey: privateKey.publicKey.rawRepresentation
+        )
+
+        XCTAssertEqual(signature.count, 3_309)
+        XCTAssertEqual(privateKey.publicKey.rawRepresentation.count, 1_952)
+        XCTAssertTrue(isValid)
+    }
+
+    func testMLDSA87CallbackOutputIsExactLengthCheckedWithoutFallback() async throws {
+        struct FixedSignatureCallback: SigningCallback {
+            let signature: Data
+
+            func sign(data: Data) async throws -> Data {
+                signature
+            }
+        }
+
+        let provider = PQCSignatureProvider(algorithm: .mlDSA87, backend: .auto)
+        let message = Data("ios-provider-mldsa87-callback".utf8)
+        let signature = try await provider.sign(
+            message,
+            key: .callback(FixedSignatureCallback(signature: Data(count: 4_627)))
+        )
+        XCTAssertEqual(signature.count, 4_627)
+
+        do {
+            _ = try await provider.sign(
+                message,
+                key: .callback(FixedSignatureCallback(signature: Data(count: 4_626)))
+            )
+            XCTFail("A callback with a non-canonical ML-DSA-87 signature length must fail")
+        } catch is SignatureProviderError {
+            // Expected fail-closed result.
+        } catch {
+            XCTFail("Expected SignatureProviderError, got \(error)")
+        }
+    }
+
+    func testMLDSA87CallbackFailureIsNotRetried() async {
+        struct CallbackFailure: Error {}
+        struct FailingCallback: SigningCallback {
+            func sign(data: Data) async throws -> Data {
+                throw CallbackFailure()
+            }
+        }
+
+        let provider = PQCSignatureProvider(algorithm: .mlDSA87, backend: .auto)
+        do {
+            _ = try await provider.sign(
+                Data("ios-provider-mldsa87-callback-failure".utf8),
+                key: .callback(FailingCallback())
+            )
+            XCTFail("A callback failure must not retry with another backend")
+        } catch is CallbackFailure {
+            // Exact callback error proves the provider did not wrap or retry it.
+        } catch {
+            XCTFail("Expected CallbackFailure, got \(error)")
+        }
+    }
+
+    func testMLDSA87OQSRawPrivateKeyIsExplicitlyUnavailable() async {
+        let provider = PQCSignatureProvider(algorithm: .mlDSA87, backend: .oqs)
+        do {
+            _ = try await provider.sign(
+                Data("ios-provider-mldsa87-oqs".utf8),
+                key: .softwareKey(Data(count: 4_896))
+            )
+            XCTFail("ML-DSA-87 must not guess an unsupported OQS raw-key adapter")
+        } catch let error as SignatureProviderError {
+            guard case .pqcBackendUnavailable = error else {
+                return XCTFail("Expected pqcBackendUnavailable, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected SignatureProviderError, got \(error)")
+        }
+    }
+
+    func testMLDSA87VerifyRejectsNonExactLengths() async {
+        let provider = PQCSignatureProvider(algorithm: .mlDSA87, backend: .applePQC)
+        do {
+            _ = try await provider.verify(
+                Data("ios-provider-mldsa87-length".utf8),
+                signature: Data(count: 4_627),
+                publicKey: Data(count: 2_591)
+            )
+            XCTFail("A non-canonical ML-DSA-87 public key length must fail")
+        } catch is SignatureProviderError {
+            // Expected fail-closed result.
+        } catch {
+            XCTFail("Expected SignatureProviderError, got \(error)")
+        }
+
+        do {
+            _ = try await provider.verify(
+                Data("ios-provider-mldsa87-length".utf8),
+                signature: Data(count: 4_626),
+                publicKey: Data(count: 2_592)
+            )
+            XCTFail("A non-canonical ML-DSA-87 signature length must fail")
+        } catch is SignatureProviderError {
+            // Expected fail-closed result.
+        } catch {
+            XCTFail("Expected SignatureProviderError, got \(error)")
         }
     }
     #endif

@@ -239,10 +239,12 @@ public actor PAKERateLimiterMemory {
         records.count
     }
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 获取当前写入计数 (用于测试)
     public var currentWritesCount: Int {
         writesCount
     }
+#endif
     
  /// 获取指定标识符的记录 (用于测试)
     public func getRecord(for identifier: String) -> PAKERecord? {

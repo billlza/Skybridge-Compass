@@ -36,14 +36,46 @@ enum FileTransferClassicPeerResolutionPolicy {
             PeerIdentityAliasResolver.lookupCandidates(for: peerContext.endpointHostOrIP)
         )
 
+        func uniqueResolvedMatch(
+            _ matches: [ClassicTransferAuthenticatedPeerCandidate],
+            preferredExactIdentifier: String? = nil
+        ) -> ClassicTransferAuthenticatedPeerCandidate? {
+            let resolvedPeerIDs = Set(matches.map {
+                $0.resolvedPeerDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            })
+            guard resolvedPeerIDs.count == 1 else { return nil }
+            let preferredExact = preferredExactIdentifier?.lowercased()
+            return matches.sorted { lhs, rhs in
+                func rank(_ candidate: ClassicTransferAuthenticatedPeerCandidate) -> Int {
+                    guard let preferredExact else { return 0 }
+                    if candidate.matchDeviceId.lowercased() == preferredExact { return 0 }
+                    if candidate.resolvedPeerDeviceId.lowercased() == preferredExact { return 1 }
+                    return 2
+                }
+                let lhsRank = rank(lhs)
+                let rhsRank = rank(rhs)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                let lhsMatch = lhs.matchDeviceId.lowercased()
+                let rhsMatch = rhs.matchDeviceId.lowercased()
+                if lhsMatch != rhsMatch { return lhsMatch < rhsMatch }
+                return (lhs.endpointHostOrIP ?? "").lowercased()
+                    < (rhs.endpointHostOrIP ?? "").lowercased()
+            }.first
+        }
+
         func exactDeclaredMatch() -> ClassicTransferAuthenticatedPeerCandidate? {
             guard let exactDeclared, !exactDeclared.isEmpty else { return nil }
             let exactLower = exactDeclared.lowercased()
-            return authenticatedPeers.first { candidate in
+            let directMatches = authenticatedPeers.filter { candidate in
                 candidate.matchDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
                     || candidate.resolvedPeerDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
-                    || candidate.aliases.contains(where: { $0.lowercased() == exactLower })
             }
+            let matches = directMatches.isEmpty
+                ? authenticatedPeers.filter { candidate in
+                    candidate.aliases.contains(where: { $0.lowercased() == exactLower })
+                }
+                : directMatches
+            return uniqueResolvedMatch(matches, preferredExactIdentifier: exactDeclared)
         }
 
         func candidateMatch(for requestedCandidates: [String]) -> ClassicTransferAuthenticatedPeerCandidate? {
@@ -52,8 +84,7 @@ enum FileTransferClassicPeerResolutionPolicy {
             let matches = authenticatedPeers.filter { candidate in
                 !requestedLower.isDisjoint(with: candidate.aliases.map { $0.lowercased() })
             }
-            guard matches.count == 1 else { return nil }
-            return matches.first
+            return uniqueResolvedMatch(matches)
         }
 
         if let exactMatch = exactDeclaredMatch() {
@@ -87,6 +118,18 @@ enum FileTransferClassicPeerResolutionPolicy {
         }
 
         return nil
+    }
+
+    nonisolated static func preferredSenderDeviceId(
+        stableDeviceId: String,
+        vendorDeviceId: String?
+    ) -> String {
+        let normalizedStable = stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedStable.isEmpty {
+            return normalizedStable
+        }
+
+        return vendorDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     nonisolated static func normalizedTransferSecurityCandidates(

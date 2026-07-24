@@ -5,10 +5,40 @@ import XCTest
 @available(macOS 14.0, iOS 17.0, *)
 final class LocalizationManagerNotificationIsolationTests: XCTestCase {
     @MainActor
-    func testRuntimePreferenceInvalidationNotificationsMayArriveFromBackgroundQueue() async {
+    func testDefaultLookupFallsThroughToSwiftPMModuleResources() {
+        let key = "remoteControl.securityNotice.windowTitle"
+        let value = LocalizationManager.shared.localizedString(key)
+
+        XCTAssertNotEqual(
+            value,
+            key,
+            "An executable-relative resource miss must continue to Bundle.module instead of exposing the localization key."
+        )
+        XCTAssertTrue(
+            Set([
+                "Remote Control Security Notice",
+                "リモート制御セキュリティ通知",
+                "远程控制安全提示",
+            ]).contains(value),
+            "The resolved value must come from the checked-in SkyBridgeCore localization resources."
+        )
+    }
+
+    func testRuntimePreferenceInvalidationRegistersDefaultsAndLocaleNotifications() {
+        XCTAssertEqual(
+            Set(LocalizationManager.runtimePreferenceInvalidationNotificationNames),
+            Set([
+                UserDefaults.didChangeNotification,
+                NSLocale.currentLocaleDidChangeNotification,
+            ])
+        )
+    }
+
+    @MainActor
+    func testRuntimePreferenceInvalidationNotificationMayArriveFromBackgroundQueue() async {
         _ = LocalizationManager.shared
 
-        await Self.postRuntimePreferenceInvalidationNotificationsFromBackgroundQueue()
+        await Self.postRuntimePreferenceInvalidationNotificationFromBackgroundQueue()
 
         let missingKey = "__skybridge_missing_localization_key__\(UUID().uuidString)"
         XCTAssertEqual(LocalizationManager.shared.localizedString(missingKey), missingKey)
@@ -58,16 +88,16 @@ final class LocalizationManagerNotificationIsolationTests: XCTestCase {
         XCTAssertNotNil(UserDefaults.standard.data(forKey: defaultsKey))
     }
 
-    private static func postRuntimePreferenceInvalidationNotificationsFromBackgroundQueue() async {
+    private static func postRuntimePreferenceInvalidationNotificationFromBackgroundQueue() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .utility).async {
+                // Both production invalidation subscriptions share the same
+                // nonisolated sink. Use the app-owned defaults notification here;
+                // broadcasting the process-wide locale notification would also
+                // wake unrelated system-framework observers in the XCTest host.
                 NotificationCenter.default.post(
                     name: UserDefaults.didChangeNotification,
                     object: UserDefaults.standard
-                )
-                NotificationCenter.default.post(
-                    name: NSLocale.currentLocaleDidChangeNotification,
-                    object: nil
                 )
                 continuation.resume()
             }

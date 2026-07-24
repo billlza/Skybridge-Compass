@@ -140,6 +140,65 @@ final class TwoAttemptHandshakeManagerPolicyTests: XCTestCase {
         XCTAssertEqual(strategies, [.pqcOnly])
     }
 
+    func testMLDSA87NeverFallsBackToClassicAfterPQCFailure() async {
+        let tracker = AttemptTracker()
+        let strategyTracker = StrategyTracker()
+
+        do {
+            _ = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: "mldsa87-no-downgrade-device",
+                preferPQC: true,
+                policy: .default,
+                cryptoProvider: MockCryptoProvider(),
+                executor: { preparation in
+                    await strategyTracker.record(preparation.strategy)
+                    _ = await tracker.increment()
+                    throw HandshakeError.failed(.suiteNegotiationFailed)
+                },
+                enforceFallbackRateLimit: false,
+                enablePQCBridgeRetry: false,
+                pqcSignatureAlgorithm: .mlDSA87
+            )
+            XCTFail("Expected ML-DSA-87 failure to remain fail-closed")
+        } catch let HandshakeError.failed(reason) {
+            XCTAssertEqual(reason, .suiteNegotiationFailed)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let attempts = await tracker.count
+        let strategies = await strategyTracker.strategies()
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(strategies, [.pqcOnly])
+    }
+
+    func testMLDSA87RejectsClassicOnlyRequestBeforeExecutingHandshake() async {
+        let tracker = AttemptTracker()
+
+        do {
+            _ = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: "mldsa87-classic-rejected-device",
+                preferPQC: false,
+                policy: .default,
+                cryptoProvider: MockCryptoProvider(),
+                executor: { _ in
+                    _ = await tracker.increment()
+                    return Self.makeSessionKeys()
+                },
+                enforceFallbackRateLimit: false,
+                pqcSignatureAlgorithm: .mlDSA87
+            )
+            XCTFail("Expected ML-DSA-87 classic-only request to be rejected")
+        } catch let HandshakeError.failed(reason) {
+            XCTAssertEqual(reason, .pqcProviderUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let attempts = await tracker.count
+        XCTAssertEqual(attempts, 0)
+    }
+
     func testRequirePQCOverridesAllowClassicFallback() {
         let policy = HandshakePolicy(requirePQC: true, allowClassicFallback: true, minimumTier: .classic)
         XCTAssertTrue(policy.requirePQC)

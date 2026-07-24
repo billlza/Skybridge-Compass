@@ -22,12 +22,14 @@ final class SelfIdentityProviderTests: XCTestCase {
     
  // MARK: - 基础功能测试
     
- /// 测试：首次启动生成并持久化 deviceId
+    /// 测试：首次启动生成并持久化 deviceId
     func testDeviceIdGenerationAndPersistence() async throws {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let snapshot = await provider.presentationSnapshot()
+        let snapshot = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         
  // 断言 deviceId 不为空且符合 UUID 格式
         XCTAssertFalse(snapshot.deviceId.isEmpty, "deviceId 不应为空")
@@ -36,7 +38,9 @@ final class SelfIdentityProviderTests: XCTestCase {
  // 重新加载，验证持久化
         let provider2 = SelfIdentityProvider.shared
         try await provider2.loadOrCreate()
-        let snapshot2 = await provider2.presentationSnapshot()
+        let snapshot2 = try await provider2.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         
         XCTAssertEqual(snapshot.deviceId, snapshot2.deviceId, "deviceId 应保持一致")
     }
@@ -46,15 +50,19 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
 
-        let snapshot = await provider.presentationSnapshot()
+        let snapshot = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
+        let protocolIdentityDeviceID = try await DeviceIdentityKeyManager.shared.getDeviceId()
         let protocolIdentity = try await DeviceIdentityKeyManager.shared
             .getOrCreateIdentityKey()
 
         XCTAssertEqual(
             snapshot.deviceId,
-            protocolIdentity.deviceId,
+            protocolIdentityDeviceID,
             "SelfIdentityProvider 应与 DeviceIdentityKeyManager 使用同一份稳定 deviceId"
         )
+        XCTAssertEqual(protocolIdentityDeviceID, protocolIdentity.deviceId)
         XCTAssertEqual(
             snapshot.pubKeyFP,
             protocolIdentity.pubKeyFP,
@@ -67,14 +75,17 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let snapshot = await provider.presentationSnapshot()
+        let snapshot = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         
+ // 权威身份必须始终发布非空、规范化的 SHA256 公钥指纹。
         let identity = try await DeviceIdentityKeyManager.shared
             .getOrCreateIdentityKey()
         XCTAssertEqual(snapshot.pubKeyFP, identity.pubKeyFP)
         XCTAssertEqual(snapshot.pubKeyFP.count, 64, "SHA256 指纹应为 64 字符")
         XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { $0.isHexDigit }, "指纹应为 hex 字符")
-        XCTAssertTrue(snapshot.pubKeyFP.allSatisfy { !$0.isUppercase || !$0.isLetter }, "指纹应为小写")
+        XCTAssertEqual(snapshot.pubKeyFP, snapshot.pubKeyFP.lowercased(), "指纹应为小写")
     }
     
  /// 测试：MAC 地址获取
@@ -89,7 +100,10 @@ final class SelfIdentityProviderTests: XCTestCase {
         
  // 如果有 MAC 地址，验证格式
         for mac in snapshot.macSet {
-            XCTAssertTrue(mac.matches(regex: "^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"), "MAC 地址格式应为 xx:xx:xx:xx:xx:xx (小写)")
+            XCTAssertTrue(
+                try mac.matches(regex: "^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"),
+                "MAC 地址格式应为 xx:xx:xx:xx:xx:xx (小写)"
+            )
         }
     }
 
@@ -99,16 +113,15 @@ final class SelfIdentityProviderTests: XCTestCase {
         )
         let expectedMACs: Set<String> = ["02:aa:bb:cc:dd:ee"]
         let provider = SelfIdentityProvider(
-            identityLoader: { allowCreate in
-                XCTAssertTrue(allowCreate)
-                return identity
-            },
+            identityLoader: { _ in identity },
             deviceIDMirror: { _ in false },
             macAddressLoader: { expectedMACs }
         )
 
         try await provider.loadOrCreate()
-        let snapshot = await provider.presentationSnapshot()
+        let snapshot = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
 
         XCTAssertEqual(snapshot.deviceId, identity.deviceId)
         XCTAssertEqual(snapshot.pubKeyFP, identity.pubKeyFP)
@@ -242,7 +255,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
  // 构造与本机 deviceId 相同的设备
@@ -372,7 +387,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
  // 构造同名但强身份不匹配的设备
@@ -401,7 +418,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
  // 构造缺少所有强身份字段的设备
@@ -433,7 +452,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
  // 构造一台设备：IP 与本机相同，但强身份不匹配
@@ -463,7 +484,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
  // 构造一台设备：与本机同网段（192.168.1.x），但强身份不匹配
@@ -493,7 +516,9 @@ final class SelfIdentityProviderTests: XCTestCase {
         let provider = SelfIdentityProvider.shared
         try await provider.loadOrCreate()
         
-        let selfId = await provider.presentationSnapshot()
+        let selfId = try await provider.snapshotEnsuringProtocolDeviceId(
+            allowCreate: false
+        )
         let resolver = IdentityResolver()
         
         let deviceName = Self.localNameCollisionProbe
@@ -523,8 +548,8 @@ final class SelfIdentityProviderTests: XCTestCase {
 // MARK: - 辅助扩展
 
 extension String {
-    func matches(regex pattern: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+    func matches(regex pattern: String) throws -> Bool {
+        let regex = try NSRegularExpression(pattern: pattern)
         let range = NSRange(location: 0, length: self.utf16.count)
         return regex.firstMatch(in: self, options: [], range: range) != nil
     }

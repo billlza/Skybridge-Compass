@@ -78,6 +78,15 @@ struct KeychainGenericPasswordScope: Sendable {
         usesDataProtectionKeychain: true,
         synchronizable: false
     )
+
+    /// Exact shared-identity authority used only by the process-local test
+    /// Keychain backend. A concrete synthetic group keeps the same
+    /// authoritative-only invariants as production without requiring a test
+    /// runner to carry the shipping app's signed entitlement.
+    static let inMemorySharedIdentityForTesting = KeychainGenericPasswordScope
+        .skyBridgeSharedIdentity(
+            accessGroup: "__skybridge_test_shared_identity__"
+        )
     #endif
 
     fileprivate static func skyBridgeSharedIdentity(

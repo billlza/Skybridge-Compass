@@ -320,7 +320,7 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     /// 建立会话密钥（Legacy / pre-paper）
     ///
     /// 仅保留给单元测试/调试辅助使用，Release 构建中不编译进产物，避免误用偏离论文协议栈。
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
     @available(*, deprecated, message: "Legacy pre-paper handshake API. Use `HandshakeDriver` / `TwoAttemptHandshakeManager` to establish `SessionKeys` instead.")
     public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
         // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF

@@ -202,6 +202,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         "_printer._tcp",
         "_ipp._tcp",
         "_http._tcp",
+        "_rtsp._tcp",
         "_googlecast._tcp",
         "_hap._tcp",     // HomeKit
         "_matter._tcp",  // Matter
@@ -2718,8 +2719,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         // 触发 iOS 端 fallback（再叠加 fallbackRateLimited 就会出现你截图里的循环失败）。
         var driver: HandshakeDriver? = nil
         var sessionKeys: SessionKeys? = nil
-        var previousSessionKeysBeforeRekey: SessionKeys? = nil
-        var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority? = nil
         var declaredDeviceIdForVerification: String? = nil
         var lastPairingIdentityExchangeReplyAt: Date? = nil
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority? = nil
@@ -2865,6 +2864,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             appendKnownDeviceId(peer.deviceId)
             appendKnownDeviceId(peerIdForPresence)
 
+            let authenticatedProtocolPublicKey = AuthenticatedProtocolIdentityBinding.matchingPublicKey(
+                in: payload,
+                authority: authority
+            ) ?? authority.protocolPublicKey
+
             do {
                 let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
                     deviceId: payload.deviceId,
@@ -2872,7 +2876,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     preferredCurrentDeviceId: payload.deviceId,
                     knownDeviceIds: knownDeviceIds,
                     protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
-                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint,
+                    authenticatedProtocolPublicKey: authenticatedProtocolPublicKey
                 )
                 guard persisted else {
                     logger.warning(
@@ -3022,14 +3027,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 // Phase C1: handshake padding (SBP1) used by iOS for MessageA/MessageB framing
                 let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
 
-                if let messageA = try? HandshakeMessageA.decode(from: frame),
-                   !messageA.hasNegotiableOfferShape {
-                    logger.error(
-                        "⛔️ Rejected non-negotiable inbound MessageA before rekey state mutation. peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public)"
-                    )
-                    continue
-                }
-
                 // Rekey / renegotiation support:
                 // Once a transport is already established, a fresh inbound MessageA can start a new handshake
                 // on that same channel. If we keep the old driver, it treats the new MessageA as "unexpected"
@@ -3039,14 +3036,30 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     let st = await currentDriver.getCurrentState()
                     switch st {
                     case .waitingFinished, .established:
+                        if let inboundPairKey {
+                            logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peerIdForPresence, privacy: .public)")
+                            await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                            await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+                        }
                         let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
                         let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
                         let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
                         let toKind = messageA.supportedSuites.first.map { cryptoKind(for: $0) } ?? "?"
-                        logger.info("🔁 入站 transactional rekey candidate：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public)")
-                        previousSessionKeysBeforeRekey = sessionKeys
-                        previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
+                        Task { @MainActor in
+                            ConnectionPresenceService.shared.markRekeying(.init(
+                                peerId: peerIdForPresence,
+                                fromKind: fromKind,
+                                fromSuite: fromSuite,
+                                toKind: toKind,
+                                toSuite: toSuite
+                            ))
+                        }
+                        hbState.withLock { $0.pausedForRekey = true }
+                        logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
+                        authenticatedRemoteAuthority = nil
                         driver = nil
+                        sessionKeys = nil
+                        await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
                     default:
                         break
                     }
@@ -3059,7 +3072,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                             switch msg {
                             case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
-                                 .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
+                                 .protocolIdentityBindingRequest, .signedProtocolIdentityBinding,
+                                 .protocolIdentityBindingConfirm, .signedProtocolIdentityBindingFinalAck:
                                 break
                             case .heartbeat(let hb):
                                 // Best-effort: use heartbeat metadata to resolve the real device name/id.
@@ -3340,9 +3354,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 }
                                 let localPresentation = LocalDevicePresentation.current()
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                                let protocolIdentityPublicKeys = try await LocalProtocolIdentityAdvertisement.load()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
                                     kemPublicKeys: kemKeys,
+                                    protocolIdentityPublicKeys: protocolIdentityPublicKeys,
                                     deviceName: localPresentation.deviceName,
                                     modelName: localPresentation.modelName,
                                     platform: localPresentation.platformName,
@@ -3390,8 +3406,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         if soaBinding.usedAuthenticatedInitiator {
                             logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
                         }
-                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup && $0.isNegotiable }
-                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup && $0.isNegotiable }
+                        let inboundProtocolIdentity: InboundProtocolIdentitySelection
+                        do {
+                            inboundProtocolIdentity = try await InboundProtocolIdentitySelectionPolicy.resolve(
+                                messageA: messageA,
+                                candidateDeviceIds: [peer.deviceId, endpointDescriptionForPresence]
+                            )
+                        } catch {
+                            logger.error(
+                                "❌ 入站协议身份选择失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            return
+                        }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
                         // This pre-selection gate only evaluates the peer offer shape.
@@ -3413,9 +3439,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
                         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
-                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
 
-                        if peerHasPQCGroup {
+                        if inboundProtocolIdentity.algorithm != .ed25519 {
                             selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
                             cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
                                 policy: selection,
@@ -3434,63 +3460,46 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 return
                             }
 
-                            if localPQCSuites.isEmpty {
-                                if peerHasClassicGroup {
-                                    selection = .classicOnly
-                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                                    sigAAlgorithm = .ed25519
-                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
-                                    SecurityEventEmitter.emitDetached(SecurityEvent(
-                                        type: .cryptoDowngrade,
-                                        severity: .warning,
-                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
-                                        context: [
-                                            "reason": "pqcProviderUnavailable",
-                                            "direction": "responder_inbound",
-                                            "deviceId": peer.deviceId,
-                                            "policyInTranscript": "1",
-                                            "transcriptBinding": "1",
-                                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
-                                            "policyRequirePQC": effectivePolicy.requirePQC ? "1" : "0",
-                                            "policyAllowClassicFallback": effectivePolicy.allowClassicFallback ? "1" : "0",
-                                            "policyMinimumTier": effectivePolicy.minimumTier.rawValue,
-                                            "policyRequireSecureEnclavePoP": effectivePolicy.requireSecureEnclavePoP ? "1" : "0",
-                                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
-                                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
-                                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
-                                        ]
-                                    ))
-                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
-                                } else {
-                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
-                                    return
-                                }
-                            } else {
-                                sigAAlgorithm = .mlDSA65
-                                offeredSuites = localPQCSuites
+                            let compatibleSuites = InboundProtocolIdentitySelectionPolicy
+                                .compatibleResponderPQCSuites(
+                                    localPQCSuites,
+                                    algorithm: inboundProtocolIdentity.algorithm
+                                )
+                            guard !compatibleSuites.isEmpty else {
+                                logger.error(
+                                    "❌ \(InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(inboundProtocolIdentity.algorithm).localizedDescription, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                return
                             }
+                            sigAAlgorithm = inboundProtocolIdentity.algorithm
+                            offeredSuites = compatibleSuites
                         } else {
                             selection = .classicOnly
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
                             sigAAlgorithm = .ed25519
-                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
+                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
                         }
 
                         let identityProvider = DeviceIdentityHandshakeProvider(
                             sigAAlgorithm: sigAAlgorithm,
+                            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
                             includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
                         )
 
         do {
             let trustProvider: (any HandshakeTrustProvider)?
-            let messageAFingerprint = try? messageA
-                .decodedIdentityPublicKeys()
+            let decodedMessageAIdentity = try? messageA.decodedIdentityPublicKeys()
+            let messageAFingerprint = try? decodedMessageAIdentity?
                 .authoritativeProtocolFingerprint()
                 .lowercased()
             if let messageAFingerprint,
                await PeerProtocolIdentityBootstrapStore.shared.containsTrustedFingerprint(messageAFingerprint),
                let bootstrapProvider = BootstrapProtocolIdentityTrustProvider(
-                    protocolIdentityFingerprint: messageAFingerprint
+                    protocolIdentityFingerprint: messageAFingerprint,
+                    protocolSigningAlgorithm: decodedMessageAIdentity.flatMap {
+                        ProtocolSigningAlgorithm(from: $0.protocolAlgorithm)
+                    },
+                    protocolPublicKey: decodedMessageAIdentity?.protocolPublicKey
                ) {
                 trustProvider = bootstrapProvider
                 RemoteControlSmokeStatusWriter.append(
@@ -3514,20 +3523,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 cryptoPolicy: cryptoPolicy,
                                 trustProvider: trustProvider,
                                 localSOAPeerId: localSOAPeerId,
-                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
-                                authenticatedIncomingEstablishedPolicy: previousSessionKeysBeforeRekey == nil
-                                    ? .rejectDuplicate
-                                    : .replaceAuthenticated
+                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
         } catch {
                             logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
-            if previousSessionKeysBeforeRekey != nil {
-                previousSessionKeysBeforeRekey = nil
-                previousAuthenticatedRemoteAuthorityBeforeRekey = nil
-                driver = nil
-                continue
-            }
             return
         }
 
@@ -3538,9 +3538,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     }
                 }
 
-                if let activeDriver = driver {
-                    await activeDriver.handleMessage(frame, from: peer)
-                    let st = await activeDriver.getCurrentState()
+                if let driver {
+                    await driver.handleMessage(frame, from: peer)
+                    let st = await driver.getCurrentState()
                     logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
                     switch st {
@@ -3554,10 +3554,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             }
                         }
                     case .established(let keys):
-                        authenticatedRemoteAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
+                        authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
                         sessionKeys = keys
-                        previousSessionKeysBeforeRekey = nil
-                        previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                         await publishClassicTransferSessionSnapshot(keys: keys)
                         postConnectedUX(keys: keys)
                         if let declaredDeviceIdForVerification {
@@ -3571,28 +3569,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         hbState.withLock {
                             $0.sessionKeys = keys
                             $0.pausedForRekey = false
-                        }
-                    case .failed(let reason):
-                        if let previousKeys = previousSessionKeysBeforeRekey {
-                            sessionKeys = previousKeys
-                            authenticatedRemoteAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
-                            previousSessionKeysBeforeRekey = nil
-                            previousAuthenticatedRemoteAuthorityBeforeRekey = nil
-                            driver = nil
-                            hbState.withLock {
-                                $0.sessionKeys = previousKeys
-                                $0.pausedForRekey = false
-                            }
-                            if let inboundPairKey {
-                                await PeerSessionArbiter.shared.markEstablished(pairKey: inboundPairKey)
-                            }
-                            await publishClassicTransferSessionSnapshot(keys: previousKeys)
-                            await MainActor.run {
-                                ConnectionPresenceService.shared.clearRekeying(peerId: peerIdForPresence)
-                            }
-                            logger.warning(
-                                "⚠️ inbound rekey failed; restored previous authenticated session. peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerIdForPresence), privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
-                            )
                         }
                     default:
                         break

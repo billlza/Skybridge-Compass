@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import OSLog
 
 @available(iOS 17.0, *)
@@ -66,18 +67,23 @@ enum CrossNetworkServerConfig {
         return false
     }
 
-    static func dynamicICEConfig(turnAdmissionToken: String?) async -> WebRTCSession.ICEConfig {
-        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials(turnAdmissionToken: turnAdmissionToken)
+    static func dynamicICEConfig(turnAdmissionToken: String?) async throws -> WebRTCSession.ICEConfig {
+        let creds = try await CrossNetworkTURNCredentialService.shared.getCredentials(
+            turnAdmissionToken: turnAdmissionToken
+        )
         let turnUsername = normalizedValue(creds.username)
         let turnPassword = normalizedValue(creds.password)
         let turnURIs = preferredTurnURIs(from: creds.uris, fallback: turnURLs)
         let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty && !turnURIs.isEmpty
+        guard shouldUseTURN else {
+            throw CrossNetworkTURNCredentialService.CredentialError.invalidCredentials
+        }
 
         return WebRTCSession.ICEConfig(
             stunURL: stunURL,
-            turnURLs: shouldUseTURN ? turnURIs : [],
-            turnUsername: shouldUseTURN ? turnUsername : "",
-            turnPassword: shouldUseTURN ? turnPassword : ""
+            turnURLs: turnURIs,
+            turnUsername: turnUsername,
+            turnPassword: turnPassword
         )
     }
 
@@ -129,8 +135,40 @@ private actor CrossNetworkTURNCredentialService {
     static let shared = CrossNetworkTURNCredentialService()
 
     private let logger = Logger(subsystem: "com.skybridge.turn", category: "CrossNetwork-iOS")
-    private var cachedByTokenKey: [String: TURNCredentials] = [:]
+    private struct CachedEntry: Sendable {
+        let credentials: TURNCredentials
+        let accessSequence: UInt64
+    }
+
+    fileprivate enum CredentialError: LocalizedError {
+        case missingAdmissionLease
+        case consumedAdmissionLeaseExpired
+        case invalidCredentials
+        case invalidResponse
+        case serverRejected(statusCode: Int, responseBytes: Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingAdmissionLease:
+                return "TURN admission lease is required."
+            case .consumedAdmissionLeaseExpired:
+                return "TURN admission lease has already been consumed and its credentials expired."
+            case .invalidCredentials:
+                return "TURN credential response does not contain usable URIs and credentials."
+            case .invalidResponse:
+                return "TURN credential response is invalid, expired, or oversized."
+            case .serverRejected(let statusCode, let responseBytes):
+                return "TURN credential server returned HTTP \(statusCode) (\(responseBytes) response bytes)."
+            }
+        }
+    }
+
+    private var cachedByTokenKey: [String: CachedEntry] = [:]
+    private var accessSequence: UInt64 = 0
+    private let maximumCachedEntries = 64
     private let minimumRefreshBuffer: TimeInterval = 10
+    private let minimumUsableLifetime: TimeInterval = 10
+    private let maximumResponseBytes = 64 * 1024
 
     struct TURNCredentials: Sendable, Codable {
         let username: String
@@ -153,10 +191,21 @@ private actor CrossNetworkTURNCredentialService {
         let mode: String?
     }
 
-    func getCredentials(turnAdmissionToken: String?) async -> TURNCredentials {
+    func getCredentials(turnAdmissionToken: String?) async throws -> TURNCredentials {
         let normalizedToken = normalizedTurnAdmissionToken(turnAdmissionToken)
+        if normalizedToken == nil {
+            guard CrossNetworkServerConfig.allowStaticTurnFallback else {
+                throw CredentialError.missingAdmissionLease
+            }
+            let staticCredentials = fallback(allowStaticTURN: true)
+            guard Self.hasUsableCredentials(staticCredentials) else {
+                throw CredentialError.invalidCredentials
+            }
+            logger.warning("⚠️ TURN admission lease missing; using explicitly enabled validated static TURN configuration.")
+            return staticCredentials
+        }
         let tokenKey = cacheKey(for: normalizedToken)
-        if let cached = cachedByTokenKey[tokenKey] {
+        if let cached = cachedCredentials(forKey: tokenKey) {
             if cached.isValid(buffer: refreshBuffer(for: cached)) {
                 return cached
             }
@@ -165,25 +214,21 @@ private actor CrossNetworkTURNCredentialService {
                 if cached.isValid(buffer: 0) {
                     return cached
                 }
-                logger.warning("⚠️ TURN admission token already consumed and cached credentials expired; falling back to STUN-only.")
-                return fallback(allowStaticTURN: false)
+                throw CredentialError.consumedAdmissionLeaseExpired
             }
         }
         do {
             let fresh = try await fetchFromServer(turnAdmissionToken: normalizedToken)
-            cachedByTokenKey[tokenKey] = fresh
+            store(fresh, forKey: tokenKey)
             return fresh
         } catch {
-            if let cached = cachedByTokenKey[tokenKey],
+            if let cached = cachedCredentials(forKey: tokenKey),
                cached.isValid(buffer: 0) {
                 logger.info("ℹ️ TURN credentials fetch failed; reusing cached credentials. err=\(error.localizedDescription, privacy: .public)")
                 return cached
             }
-            let allowStaticTURN = normalizedToken == nil && CrossNetworkServerConfig.allowStaticTurnFallback
-            logger.warning(
-                "⚠️ TURN credentials fetch failed; falling back to \(allowStaticTURN ? "static-or-empty TURN" : "STUN-only"). err=\(error.localizedDescription, privacy: .public)"
-            )
-            return fallback(allowStaticTURN: allowStaticTURN)
+            logger.error("❌ TURN credentials fetch failed and no valid cache exists: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
     }
 
@@ -193,7 +238,34 @@ private actor CrossNetworkTURNCredentialService {
     }
 
     private func cacheKey(for turnAdmissionToken: String?) -> String {
-        turnAdmissionToken ?? "__anonymous__"
+        guard let turnAdmissionToken else { return "__anonymous__" }
+        let digest = SHA256.hash(data: Data(turnAdmissionToken.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func cachedCredentials(forKey key: String) -> TURNCredentials? {
+        guard let entry = cachedByTokenKey[key] else { return nil }
+        accessSequence &+= 1
+        cachedByTokenKey[key] = CachedEntry(
+            credentials: entry.credentials,
+            accessSequence: accessSequence
+        )
+        return entry.credentials
+    }
+
+    private func store(_ credentials: TURNCredentials, forKey key: String) {
+        if cachedByTokenKey[key] == nil,
+           cachedByTokenKey.count >= maximumCachedEntries,
+           let evictionKey = cachedByTokenKey.min(by: {
+               $0.value.accessSequence < $1.value.accessSequence
+           })?.key {
+            cachedByTokenKey.removeValue(forKey: evictionKey)
+        }
+        accessSequence &+= 1
+        cachedByTokenKey[key] = CachedEntry(
+            credentials: credentials,
+            accessSequence: accessSequence
+        )
     }
 
     private func refreshBuffer(for credentials: TURNCredentials) -> TimeInterval {
@@ -216,35 +288,62 @@ private actor CrossNetworkTURNCredentialService {
         req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         req.timeoutInterval = 10
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        var data = Data()
+        data.reserveCapacity(min(maximumResponseBytes, 4_096))
+        for try await byte in bytes {
+            guard data.count < maximumResponseBytes else {
+                throw CredentialError.invalidResponse
+            }
+            data.append(byte)
+        }
         guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        let instance = http.value(forHTTPHeaderField: "X-SkyBridge-Instance") ?? "unknown"
-        let backend = http.value(forHTTPHeaderField: "X-SkyBridge-State-Backend") ?? "unknown"
-        let prefixes = http.value(forHTTPHeaderField: "X-SkyBridge-Code-Prefixes") ?? "-"
-        logger.info("🌐 TURN credentials served by instance=\(instance, privacy: .public) backend=\(backend, privacy: .public) prefixes=\(prefixes, privacy: .public)")
+        let metadataHeaderCount = [
+            "X-SkyBridge-Instance",
+            "X-SkyBridge-State-Backend",
+            "X-SkyBridge-Code-Prefixes"
+        ].reduce(into: 0) { count, name in
+            if http.value(forHTTPHeaderField: name) != nil { count += 1 }
+        }
+        logger.info("🌐 TURN credential response status=\(http.statusCode) metadataHeaders=\(metadataHeaderCount)")
         guard (200...299).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])
+            throw CredentialError.serverRejected(
+                statusCode: http.statusCode,
+                responseBytes: data.count
+            )
         }
         let decoded = try JSONDecoder().decode(ServerResponse.self, from: data)
-        let ttl = max(60, decoded.ttl)
-        let expiresAt: Date
+        guard decoded.ttl > 0 else {
+            throw CredentialError.invalidResponse
+        }
+        let ttl = decoded.ttl
+        let now = Date()
+        let ttlExpiresAt = now.addingTimeInterval(TimeInterval(ttl))
+        let serverExpiresAt: Date
         if let expiresAtEpoch = decoded.expiresAt, expiresAtEpoch > 0 {
-            expiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
+            serverExpiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
         } else {
-            expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+            serverExpiresAt = ttlExpiresAt
+        }
+        let expiresAt = min(serverExpiresAt, ttlExpiresAt)
+        guard expiresAt.timeIntervalSince(now) >= minimumUsableLifetime else {
+            throw CredentialError.invalidResponse
         }
         let uris = CrossNetworkServerConfig.preferredTurnURIs(
             from: decoded.uris ?? [],
             fallback: CrossNetworkServerConfig.turnURLs
         )
-        return TURNCredentials(
+        let credentials = TURNCredentials(
             username: decoded.username,
             password: decoded.password,
             ttl: ttl,
             uris: uris,
             expiresAt: expiresAt
         )
+        guard Self.hasUsableCredentials(credentials) else {
+            throw CredentialError.invalidCredentials
+        }
+        return credentials
     }
 
     private func fallback(allowStaticTURN: Bool = true) -> TURNCredentials {
@@ -286,5 +385,12 @@ private actor CrossNetworkTURNCredentialService {
 
     private func resolvedDeviceIdentifier() async throws -> String {
         try await SkyBridgeiOSCore.shared.currentProtocolIdentitySnapshot().deviceId
+    }
+
+    nonisolated private static func hasUsableCredentials(_ credentials: TURNCredentials) -> Bool {
+        credentials.isValid(buffer: 0)
+            && !credentials.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !credentials.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !CrossNetworkServerConfig.normalizedTurnURIs(credentials.uris).isEmpty
     }
 }

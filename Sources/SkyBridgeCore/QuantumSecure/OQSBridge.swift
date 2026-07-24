@@ -224,14 +224,15 @@ public final class OQSBridge {
         _ data: Data,
         peerId: String,
         algorithm: OQSAlgorithm
-    ) async throws -> OQSSignatureResult {
-        try await sign(
+    ) async throws -> Data {
+        let result = try await sign(
             data,
             peerId: peerId,
             algorithm: algorithm,
             authority: .active,
             scopeSource: .requiredEntitlement
         )
+        return result.signature
     }
 
     static func sign(
@@ -338,6 +339,53 @@ public final class OQSBridge {
         return OQSSignatureResult(signature: sigData, publicKey: keyPair.publicKey)
     }
 
+    /// Loads and validates an existing canonical signing identity without
+    /// generating one. Identity-policy code uses this to prevent a software
+    /// key from being silently replaced by a Secure Enclave key for the same
+    /// protocol algorithm.
+    static func existingSigningPublicKey(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) throws -> Data? {
+        let parameters = try signingParameters(for: algorithm)
+        guard let sig = OQS_SIG_new(parameters.name) else {
+            throw pqcError(
+                code: -301,
+                description: "OQS_SIG_new failed: \(parameters.name)"
+            )
+        }
+        defer { OQS_SIG_free(sig) }
+        let privateKeyLength = Int(sig.pointee.length_secret_key)
+        let publicKeyLength = Int(sig.pointee.length_public_key)
+        let descriptor = descriptor(
+            peerId: peerId,
+            algorithm: parameters.name,
+            purpose: .signature,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        guard var record = try PQCKeyPairStore.loadOrMigrateLegacy(
+            descriptor: descriptor,
+            publicKeyLength: publicKeyLength,
+            privateKeyLength: privateKeyLength,
+            legacyPublicService: PQCKeyTags.service(
+                "MLDSA", parameters.keyVariant, "Pub"
+            ),
+            legacyPrivateService: PQCKeyTags.service(
+                "MLDSA", parameters.keyVariant, "Priv"
+            ),
+            validatePair: { record in
+                try validateSignatureKeyPair(record, signatureAlgorithm: sig)
+            }
+        ) else {
+            return nil
+        }
+        defer { PQCKeyPairRecordCodec.wipe(&record.privateKey) }
+        return record.publicKey
+    }
+
     public static func verify(
         _ data: Data,
         signature: Data,
@@ -372,7 +420,9 @@ public final class OQSBridge {
         return ok == OQS_SUCCESS
     }
 
-    @available(*, deprecated, message: "Pass an authenticated public key explicitly.")
+    /// Legacy peer-id-only verification is retained solely as a fail-closed
+    /// source-compatibility shim. Remote trust requires the explicit-public-key
+    /// overload above.
     public static func verify(
         _ data: Data,
         signature: Data,
@@ -587,7 +637,7 @@ public final class OQSBridge {
         _ data: Data,
         peerId: String,
         algorithm: OQSAlgorithm
-    ) async throws -> OQSSignatureResult {
+    ) async throws -> Data {
         throw NSError(domain: "PQC", code: -201, userInfo: [NSLocalizedDescriptionKey: "liboqs 未接入"])
     }
     static func sign(
@@ -599,7 +649,23 @@ public final class OQSBridge {
     ) async throws -> OQSSignatureResult {
         _ = authority
         _ = scopeSource
-        return try await sign(data, peerId: peerId, algorithm: algorithm)
+        throw NSError(
+            domain: "PQC",
+            code: -201,
+            userInfo: [NSLocalizedDescriptionKey: "liboqs 未接入"]
+        )
+    }
+    static func existingSigningPublicKey(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) throws -> Data? {
+        _ = peerId
+        _ = algorithm
+        _ = authority
+        _ = scopeSource
+        return nil
     }
     public static func verify(
         _ data: Data,
@@ -609,7 +675,8 @@ public final class OQSBridge {
     ) async -> Bool {
         false
     }
-    @available(*, deprecated, message: "Pass an authenticated public key explicitly.")
+    /// Legacy peer-id-only verification remains fail-closed when liboqs is not
+    /// linked as well.
     public static func verify(
         _ data: Data,
         signature: Data,

@@ -44,11 +44,22 @@ public struct AuthSession: Codable, Hashable, Sendable {
     }
 }
 
+/// 远程可视会话的交互边界。
+public enum RemoteSessionKind: String, Codable, Hashable, Sendable {
+    case interactiveDesktop
+    case readOnlyCamera
+
+    public var supportsRemoteInput: Bool {
+        self == .interactiveDesktop
+    }
+}
+
 /// 概括远程桌面会话的状态与性能指标。
 public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let targetName: String
     public let protocolDescription: String
+    public let kind: RemoteSessionKind
     public let bandwidthMbps: Double
     public let frameLatencyMilliseconds: Double
  /// 会话连接状态（统一来源于管理器）
@@ -58,6 +69,7 @@ public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
         id: UUID,
         targetName: String,
         protocolDescription: String,
+        kind: RemoteSessionKind = .interactiveDesktop,
         bandwidthMbps: Double,
         frameLatencyMilliseconds: Double,
         status: SessionStatus
@@ -65,6 +77,7 @@ public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
         self.id = id
         self.targetName = targetName
         self.protocolDescription = protocolDescription
+        self.kind = kind
         self.bandwidthMbps = bandwidthMbps
         self.frameLatencyMilliseconds = frameLatencyMilliseconds
         self.status = status
@@ -380,6 +393,15 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
 
     public mutating func mergeRouteIdentifiers(_ identifiers: [String]) {
         routeIdentifiers = Self.mergedRouteIdentifiers(routeIdentifiers, identifiers)
+    }
+
+    /// Strong identity and real dial-route aliases used to resolve an authenticated peer.
+    /// The local discovery record UUID is intentionally excluded because it is not a peer identity.
+    public var connectionRouteCandidates: [String] {
+        Self.mergedRouteIdentifiers(
+            [deviceId, uniqueIdentifier].compactMap { $0 },
+            routeIdentifiers + [ipv4, ipv6].compactMap { $0 }
+        )
     }
 
     public static func mergedRouteIdentifiers(_ lhs: [String], _ rhs: [String]) -> [String] {

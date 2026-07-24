@@ -1,6 +1,21 @@
 import SwiftUI
 import SkyBridgeCore
 
+/// Lightweight first-frame background shared by the launch screen and Dashboard shell.
+struct LaunchTransitionBackground: View {
+    var body: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.01, green: 0.01, blue: 0.08),
+                Color(red: 0.03, green: 0.04, blue: 0.15),
+                Color(red: 0.07, green: 0.08, blue: 0.22)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
 /// 仪表盘背景视图 - 包含主题壁纸和天气效果
 @available(macOS 14.0, *)
 public struct DashboardBackgroundView: View {
@@ -9,9 +24,14 @@ public struct DashboardBackgroundView: View {
     @EnvironmentObject var weatherSettings: WeatherEffectsSettings
 
     @ObservedObject var hazeClearManager: InteractiveClearManager
+    private let enableWeatherEffects: Bool
 
-    public init(hazeClearManager: InteractiveClearManager) {
+    public init(
+        hazeClearManager: InteractiveClearManager,
+        enableWeatherEffects: Bool = true
+    ) {
         self._hazeClearManager = ObservedObject(wrappedValue: hazeClearManager)
+        self.enableWeatherEffects = enableWeatherEffects
     }
 
     public var body: some View {
@@ -31,7 +51,9 @@ public struct DashboardBackgroundView: View {
 
  // 🌦️ 天气效果覆盖层（根据实时天气动态切换）
             ZStack {
-                if weatherSettings.isEnabled {
+                if enableWeatherEffects,
+                   weatherSettings.isEnabled,
+                   weatherManager.currentWeather != nil {
                     dynamicWeatherEffectView(for: weatherManager.currentTheme.condition)
                         .ignoresSafeArea(.all)
                         .id(weatherManager.currentTheme.condition) // 🔥 强制视图重建以切换效果
@@ -68,4 +90,3 @@ public struct DashboardBackgroundView: View {
         WeatherEffectView(theme: weatherManager.currentTheme)
     }
 }
-

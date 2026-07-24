@@ -8,17 +8,20 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::policy::{DowngradePolicy, encode_policy_wire_byte};
+use crate::{
+    ClassicHandleResult, ClassicSessionKeys, CryptoSuite, ProtocolIdentityBinding,
+    ProtocolSigningAlgorithm, RustPqcIdentityMaterial, mldsa_secret_key_bytes, mldsa_sign_detached,
+    mldsa_verify_detached, mlkem768_decapsulate, mlkem768_encapsulate, xwing_decapsulate,
+    xwing_encapsulate,
+};
+#[cfg(feature = "q-periapt")]
+use crate::{qperiapt_contextbound_decapsulate, qperiapt_contextbound_encapsulate};
+
 use crate::handshake_app_frame;
 pub use crate::handshake_app_frame::HeartbeatPayload;
 use crate::handshake_wire::{
     append_u16_le, encode_string, encode_string_array, unwrap_handshake_padding,
-};
-use crate::policy::{DowngradePolicy, encode_policy_wire_byte};
-use crate::{
-    ClassicHandleResult, ClassicSessionKeys, CryptoSuite, ProtocolIdentityBinding,
-    ProtocolSigningAlgorithm, RustPqcIdentityMaterial, mldsa65_sign_detached,
-    mldsa65_verify_detached, mlkem768_decapsulate, mlkem768_encapsulate, xwing_decapsulate,
-    xwing_encapsulate,
 };
 use wire::{
     DecodedMessageA, DecodedMessageB, decode_identity_public_key, decode_message_a,
@@ -116,11 +119,17 @@ enum FinishedDirection {
 
 impl PqcInitiatorHandshake {
     pub fn new(config: PqcInitiatorConfig) -> Result<Self> {
-        if config.local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-            bail!("pqc initiator handshake requires an ML-DSA-65 protocol identity");
+        let signing_algorithm = config.local_binding.protocol_signing_algorithm;
+        if !signing_algorithm.is_ml_dsa() {
+            bail!("pqc initiator handshake requires an ML-DSA protocol identity");
         }
-        if config.signing_secret_key.is_empty() {
-            bail!("missing ML-DSA-65 signing secret key");
+        let expected_secret_key_bytes = mldsa_secret_key_bytes(signing_algorithm)
+            .ok_or_else(|| anyhow!("unsupported PQC signing algorithm {signing_algorithm}"))?;
+        if config.signing_secret_key.len() != expected_secret_key_bytes {
+            bail!(
+                "invalid {signing_algorithm} signing secret key length: expected {expected_secret_key_bytes} bytes, got {}",
+                config.signing_secret_key.len()
+            );
         }
         if config.preferred_suites.is_empty() {
             bail!("missing preferred PQC suites");
@@ -159,6 +168,8 @@ impl PqcInitiatorHandshake {
             let (key_share, shared_secret) = match suite.wire_id {
                 0x0101 => mlkem768_encapsulate(peer_public_key)?,
                 0x0001 => xwing_encapsulate(peer_public_key)?,
+                #[cfg(feature = "q-periapt")]
+                0x0011 => qperiapt_contextbound_encapsulate(peer_public_key)?,
                 _ => bail!("unsupported PQC initiator suite {}", suite),
             };
             key_shares.push((*suite, key_share));
@@ -168,7 +179,8 @@ impl PqcInitiatorHandshake {
         let mut client_nonce = [0u8; 32];
         fill_random(&mut client_nonce)?;
 
-        let capabilities = pqc_capabilities_bytes(&offered_suites);
+        let signing_algorithm = self.config.local_binding.protocol_signing_algorithm;
+        let capabilities = pqc_capabilities_bytes(&offered_suites, signing_algorithm);
         let policy = pqc_policy_bytes(self.config.policy);
         let identity_public_key = encode_identity_public_key(
             self.config.local_binding.protocol_signing_algorithm,
@@ -197,7 +209,11 @@ impl PqcInitiatorHandshake {
 
         let mut preimage = Vec::from(HANDSHAKE_A_DOMAIN);
         preimage.extend_from_slice(&unsigned);
-        let signature = mldsa65_sign_detached(&preimage, &self.config.signing_secret_key)?;
+        let signature = mldsa_sign_detached(
+            signing_algorithm,
+            &preimage,
+            &self.config.signing_secret_key,
+        )?;
         let transcript_hash_a = Sha256::digest(&unsigned);
 
         let mut message = unsigned;
@@ -380,14 +396,23 @@ impl PqcInitiatorHandshake {
 
 impl PqcResponderHandshake {
     pub fn new(config: PqcResponderConfig) -> Result<Self> {
-        if config.local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-            bail!("pqc responder handshake requires an ML-DSA-65 protocol identity");
+        let signing_algorithm = config.local_binding.protocol_signing_algorithm;
+        if !signing_algorithm.is_ml_dsa() {
+            bail!("pqc responder handshake requires an ML-DSA protocol identity");
         }
-        if config.identity.signing_algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-            bail!("pqc responder identity bundle must use ML-DSA-65");
+        if config.identity.signing_algorithm != signing_algorithm {
+            bail!(
+                "pqc responder identity algorithm {} does not match local binding {signing_algorithm}",
+                config.identity.signing_algorithm
+            );
         }
-        if config.identity.signing_secret_key.is_empty() {
-            bail!("missing ML-DSA-65 responder signing secret key");
+        let expected_secret_key_bytes = mldsa_secret_key_bytes(signing_algorithm)
+            .ok_or_else(|| anyhow!("unsupported PQC signing algorithm {signing_algorithm}"))?;
+        if config.identity.signing_secret_key.len() != expected_secret_key_bytes {
+            bail!(
+                "invalid {signing_algorithm} responder signing secret key length: expected {expected_secret_key_bytes} bytes, got {}",
+                config.identity.signing_secret_key.len()
+            );
         }
         if config.identity.signing_public_key != config.local_binding.protocol_public_key_bytes {
             bail!("pqc responder identity bundle does not match the local protocol binding");
@@ -521,10 +546,6 @@ fn process_message_b(
     }
 
     let identity = decode_identity_public_key(&message_b.identity_public_key)?;
-    if identity.algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-        bail!("unsupported responder identity algorithm for PQC MessageB");
-    }
-
     let payload_hash = Sha256::digest(&message_b.encrypted_payload_combined);
     let mut signature_preimage = Vec::from(HANDSHAKE_B_DOMAIN);
     signature_preimage.extend_from_slice(&waiting.transcript_hash_a);
@@ -541,7 +562,8 @@ fn process_message_b(
         message_b.identity_public_key.len() as u16,
     );
     signature_preimage.extend_from_slice(&message_b.identity_public_key);
-    mldsa65_verify_detached(
+    mldsa_verify_detached(
+        identity.algorithm,
         &signature_preimage,
         &message_b.signature,
         &identity.public_key,
@@ -612,12 +634,18 @@ fn build_responder_message_b_and_keys(
     let shared_secret = match selected_suite.wire_id {
         0x0101 => mlkem768_decapsulate(selected_key_share, &config.identity.mlkem768_secret_key)?,
         0x0001 => xwing_decapsulate(selected_key_share, &config.identity.xwing_secret_key)?,
+        #[cfg(feature = "q-periapt")]
+        0x0011 => qperiapt_contextbound_decapsulate(
+            selected_key_share,
+            &config.identity.qperiapt_secret_key,
+        )?,
         _ => bail!("unsupported PQC responder suite {}", selected_suite),
     };
 
     let mut server_nonce = [0u8; 32];
     fill_random(&mut server_nonce)?;
-    let payload_plaintext = pqc_capabilities_bytes(&[selected_suite]);
+    let signing_algorithm = config.identity.signing_algorithm;
+    let payload_plaintext = pqc_capabilities_bytes(&[selected_suite], signing_algorithm);
     let (payload_nonce, payload_ciphertext, payload_tag) = seal_payload_with_shared_secret(
         &payload_plaintext,
         &shared_secret,
@@ -631,10 +659,8 @@ fn build_responder_message_b_and_keys(
         &payload_ciphertext,
         &payload_tag,
     );
-    let responder_identity_public_key = encode_identity_public_key(
-        ProtocolSigningAlgorithm::MlDsa65,
-        &config.identity.signing_public_key,
-    )?;
+    let responder_identity_public_key =
+        encode_identity_public_key(signing_algorithm, &config.identity.signing_public_key)?;
     let mut message_b_unsigned = Vec::new();
     message_b_unsigned.push(HANDSHAKE_VERSION);
     append_u16_le(&mut message_b_unsigned, selected_suite.wire_id);
@@ -660,8 +686,11 @@ fn build_responder_message_b_and_keys(
         responder_identity_public_key.len() as u16,
     );
     message_b_preimage.extend_from_slice(&responder_identity_public_key);
-    let signature =
-        mldsa65_sign_detached(&message_b_preimage, &config.identity.signing_secret_key)?;
+    let signature = mldsa_sign_detached(
+        signing_algorithm,
+        &message_b_preimage,
+        &config.identity.signing_secret_key,
+    )?;
 
     let mut message_b = message_b_unsigned.clone();
     append_u16_le(&mut message_b, signature.len() as u16);
@@ -680,10 +709,17 @@ fn build_responder_message_b_and_keys(
     Ok((message_b, responder_session_keys))
 }
 
-fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
+fn pqc_capabilities_bytes(
+    offered_suites: &[CryptoSuite],
+    signing_algorithm: ProtocolSigningAlgorithm,
+) -> Vec<u8> {
     let mut kem_algorithms = Vec::new();
     if offered_suites.iter().any(|suite| suite.wire_id == 0x0001) {
         kem_algorithms.push("X-Wing");
+    }
+    #[cfg(feature = "q-periapt")]
+    if offered_suites.iter().any(|suite| suite.wire_id == 0x0011) {
+        kem_algorithms.push("Q-Periapt-ContextBound");
     }
     if offered_suites
         .iter()
@@ -694,14 +730,15 @@ fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
 
     let mut encoded = Vec::new();
     encode_string_array(&mut encoded, &kem_algorithms);
-    encode_string_array(&mut encoded, &["ML-DSA-65"]);
+    encode_string_array(&mut encoded, &[signing_algorithm.as_str()]);
     encode_string_array(&mut encoded, &["PQC"]);
     encode_string_array(&mut encoded, &["AES-256-GCM", "ChaCha20-Poly1305"]);
     encoded.push(0x01);
     encode_string(&mut encoded, handshake_app_frame::HEARTBEAT_PLATFORM);
     // Cross-platform provider-token: kept as the fixed wire string "liboqs" for
     // interop with existing Swift/Apple peers that match on this token. The actual
-    // Rust PQC backend is pqcrypto/PQClean (see PQC_PROVIDER_BACKEND below), NOT
+    // Rust PQC backend is the pure-Rust FIPS 203/204 provider (see
+    // PQC_PROVIDER_BACKEND below), NOT
     // liboqs; the on-wire token is a compatibility tag, not a truthful claim about
     // this implementation.
     encode_string(&mut encoded, PQC_PROVIDER_WIRE_TOKEN);
@@ -714,9 +751,9 @@ fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
 const PQC_PROVIDER_WIRE_TOKEN: &str = "liboqs";
 /// On-wire policy provider compatibility token (see [`PQC_PROVIDER_WIRE_TOKEN`]).
 const PQC_POLICY_PROVIDER_WIRE_TOKEN: &str = "liboqsPQC";
-/// The accurate, honest name of the Rust PQC backend (pqcrypto crates wrapping
-/// PQClean). Surfaced for diagnostics; not sent on the wire to preserve interop.
-pub const PQC_PROVIDER_BACKEND: &str = "pqcrypto/PQClean";
+/// The accurate, honest name of the pure-Rust FIPS 203/204 backend.
+/// Surfaced for diagnostics; not sent on the wire to preserve interop.
+pub const PQC_PROVIDER_BACKEND: &str = "fips203/fips204";
 
 /// Encode the MessageA policy block.
 ///
@@ -1111,6 +1148,266 @@ mod tests {
         assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
         assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
         assert_eq!(responder_keys.negotiated_suite, "ML-KEM-768");
+        Ok(())
+    }
+
+    #[test]
+    fn mldsa87_identity_round_trips_full_pqc_handshake_without_fallback() -> Result<()> {
+        let initiator_identity =
+            RustPqcIdentityMaterial::generate_for_algorithm(ProtocolSigningAlgorithm::MlDsa87)?;
+        let responder_identity =
+            RustPqcIdentityMaterial::generate_for_algorithm(ProtocolSigningAlgorithm::MlDsa87)?;
+        let mut initiator = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-mldsa87-init",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: Some("Rust ML-DSA-87 Initiator".to_owned()),
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::StrictPqcCompliance,
+        })?;
+        let mut responder = PqcResponderHandshake::new(PqcResponderConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-mldsa87-resp",
+                responder_identity.signing_algorithm,
+                responder_identity.signing_public_key.clone(),
+                None,
+            )?,
+            local_device_name: Some("Rust ML-DSA-87 Responder".to_owned()),
+            identity: responder_identity,
+            supported_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            policy: DowngradePolicy::StrictPqcCompliance,
+        })?;
+
+        let message_a = initiator.start()?;
+        assert!(message_a.len() > 8 * 1_024);
+
+        let responder_actions = responder.handle_frame(&message_a)?;
+        assert_eq!(responder_actions.outbound_frames.len(), 2);
+        let message_b = &responder_actions.outbound_frames[0];
+        assert!(message_b.len() > 7 * 1_024);
+        let message_b_identity =
+            decode_identity_public_key(&decode_message_b(message_b)?.identity_public_key)?;
+        assert_eq!(
+            message_b_identity.algorithm,
+            ProtocolSigningAlgorithm::MlDsa87
+        );
+
+        let _ = initiator.handle_frame(message_b)?;
+        let initiator_actions = initiator.handle_frame(&responder_actions.outbound_frames[1])?;
+        assert!(initiator_actions.established.is_some());
+        let responder_finish = responder.handle_frame(&initiator_actions.outbound_frames[0])?;
+        assert!(responder_finish.established.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn rust_pqc_rejects_unverifiable_secure_enclave_proof_instead_of_ignoring_it() -> Result<()> {
+        let initiator_identity =
+            RustPqcIdentityMaterial::generate_for_algorithm(ProtocolSigningAlgorithm::MlDsa87)?;
+        let responder_identity =
+            RustPqcIdentityMaterial::generate_for_algorithm(ProtocolSigningAlgorithm::MlDsa87)?;
+        let mut initiator = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-se-proof-init",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key,
+            local_device_name: None,
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key,
+            )]),
+            policy: DowngradePolicy::StrictPqcCompliance,
+        })?;
+        let mut message_a = initiator.start()?;
+        let se_length_offset = message_a
+            .len()
+            .checked_sub(2)
+            .ok_or_else(|| anyhow!("MessageA missing SE signature length"))?;
+        message_a[se_length_offset..].copy_from_slice(&1_u16.to_le_bytes());
+        message_a.push(0x01);
+
+        let error = decode_message_a(&message_a)
+            .expect_err("unverifiable Secure Enclave proof must fail closed")
+            .to_string();
+        assert!(error.contains("Secure Enclave proof signatures are not supported"));
+        Ok(())
+    }
+
+    #[test]
+    fn mldsa87_identity_wire_rejects_trailing_bytes() -> Result<()> {
+        let identity =
+            RustPqcIdentityMaterial::generate_for_algorithm(ProtocolSigningAlgorithm::MlDsa87)?;
+        let mut encoded =
+            encode_identity_public_key(identity.signing_algorithm, &identity.signing_public_key)?;
+        encoded.push(0x00);
+        assert!(decode_identity_public_key(&encoded).is_err());
+        Ok(())
+    }
+
+    /// EXPERIMENTAL, DEFAULT-OFF (`q-periapt` feature): drive the REAL initiator
+    /// and responder state machines end-to-end with the Q-Periapt ContextBound
+    /// suite (0x0011). Assert both sides derive identical, mirrored session keys
+    /// and that a real AES-256-GCM application message (a ping) round-trips
+    /// through the established channel.
+    #[cfg(feature = "q-periapt")]
+    #[test]
+    fn qperiapt_contextbound_real_handshake_round_trips_and_aead_round_trips() -> Result<()> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+
+        let mut initiator = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-qperiapt-inittr",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: Some("Rust Q-Periapt Initiator".to_owned()),
+            preferred_suites: vec![CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65,
+                responder_identity.qperiapt_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        let mut responder = PqcResponderHandshake::new(PqcResponderConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-qperiapt-respnd",
+                responder_identity.signing_algorithm,
+                responder_identity.signing_public_key.clone(),
+                None,
+            )?,
+            local_device_name: Some("Rust Q-Periapt Responder".to_owned()),
+            identity: responder_identity,
+            supported_suites: vec![CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65],
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+
+        // Real MessageA -> (MessageB + responder Finished) -> initiator Finished.
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        assert_eq!(responder_actions.outbound_frames.len(), 2);
+
+        let _ = initiator.handle_frame(&responder_actions.outbound_frames[0])?;
+        let initiator_actions = initiator.handle_frame(&responder_actions.outbound_frames[1])?;
+        assert!(initiator_actions.established.is_some());
+        assert_eq!(initiator_actions.outbound_frames.len(), 1);
+
+        let responder_finish = responder.handle_frame(&initiator_actions.outbound_frames[0])?;
+        assert!(responder_finish.established.is_some());
+
+        // Both sides derived identical, mirrored directional keys over the
+        // Q-Periapt ContextBound shared secret.
+        let initiator_keys = initiator
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("expected initiator keys"))?;
+        let responder_keys = responder
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("expected responder keys"))?;
+        assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
+        assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
+        assert_eq!(responder_keys.negotiated_suite, "Q-Periapt-ContextBound");
+
+        // Real AEAD round-trip through the established channel: the initiator
+        // encrypts a ping with its real session send key; the responder's real
+        // state machine decrypts it (receive key) and surfaces the ping id.
+        let ping = initiator.build_ping_frame(0x5159_4250_4552_4901)?;
+        let observed = responder.handle_frame(&ping)?;
+        assert_eq!(
+            observed.pong_id,
+            Some(0x5159_4250_4552_4901),
+            "responder must AEAD-decrypt the initiator's ping over the Q-Periapt session"
+        );
+
+        // And the reverse direction round-trips too (responder -> initiator).
+        let pong = responder.build_pong_frame(0x0102_0304_0506_0708)?;
+        let observed_back = initiator.handle_frame(&pong)?;
+        assert_eq!(
+            observed_back.observed_pong_id,
+            Some(0x0102_0304_0506_0708),
+            "initiator must AEAD-decrypt the responder's pong over the Q-Periapt session"
+        );
+        Ok(())
+    }
+
+    /// Realistic multi-suite negotiation: the responder advertises the agent's real suite set
+    /// (X-Wing, ML-KEM-768, AND Q-Periapt ContextBound). When the initiator prefers Q-Periapt,
+    /// the real handshake must negotiate it and complete — proving the agent's `supported_suites`
+    /// reaches Q-Periapt end to end, not just a forced single-suite pairing.
+    #[cfg(feature = "q-periapt")]
+    #[test]
+    fn qperiapt_negotiated_from_realistic_multi_suite_responder() -> Result<()> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+
+        let mut initiator = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-qperiapt-neg-init",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key.clone(),
+            local_device_name: Some("Rust Q-Periapt Initiator (neg)".to_owned()),
+            preferred_suites: vec![CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65,
+                responder_identity.qperiapt_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        // The responder advertises the agent's real suite set, Q-Periapt included.
+        let mut responder = PqcResponderHandshake::new(PqcResponderConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-qperiapt-neg-resp",
+                responder_identity.signing_algorithm,
+                responder_identity.signing_public_key.clone(),
+                None,
+            )?,
+            local_device_name: Some("Rust Q-Periapt Responder (neg)".to_owned()),
+            identity: responder_identity,
+            supported_suites: vec![
+                CryptoSuite::XWING_MLDSA,
+                CryptoSuite::MLKEM768_MLDSA65,
+                CryptoSuite::QPERIAPT_CONTEXTBOUND_MLDSA65,
+            ],
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        assert_eq!(responder_actions.outbound_frames.len(), 2);
+        let _ = initiator.handle_frame(&responder_actions.outbound_frames[0])?;
+        let initiator_actions = initiator.handle_frame(&responder_actions.outbound_frames[1])?;
+        assert!(initiator_actions.established.is_some());
+        let responder_finish = responder.handle_frame(&initiator_actions.outbound_frames[0])?;
+        assert!(responder_finish.established.is_some());
+
+        let initiator_keys = initiator
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("expected initiator keys"))?;
+        let responder_keys = responder
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("expected responder keys"))?;
+        assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
+        assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
+        assert_eq!(
+            responder_keys.negotiated_suite, "Q-Periapt-ContextBound",
+            "a responder advertising X-Wing/ML-KEM/Q-Periapt must negotiate Q-Periapt when the initiator prefers it"
+        );
         Ok(())
     }
 

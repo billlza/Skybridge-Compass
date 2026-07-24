@@ -37,6 +37,7 @@ import Combine
         case configurationMissing
         case invalidResponse
         case invalidAppleIdentityToken
+        case sessionChangedDuringRefresh
         case nebulaMFARequired(String)
         case server(String)
         case storage(OSStatus)
@@ -49,6 +50,8 @@ import Combine
                 return "服务器返回的数据格式无效"
             case .invalidAppleIdentityToken:
                 return "Apple 身份令牌无效"
+            case .sessionChangedDuringRefresh:
+                return "认证会话在令牌刷新期间发生变化，请重新发起"
             case .nebulaMFARequired:
                 return "需要多因素认证验证"
             case .server(let message):
@@ -78,6 +81,12 @@ import Combine
         sessionSubject.value?.accessToken
     }
 
+    /// Immutable actor-isolated snapshot used when a caller must bind the access token, tenant,
+    /// and user identity as one authentication authority.
+    public func currentSessionSnapshot() -> AuthSession? {
+        sessionSubject.value
+    }
+
     public func hasAuthenticatedSessionForProtectedServices() -> Bool {
         sessionSubject.value?.isAuthenticatedForProtectedServices == true
     }
@@ -86,6 +95,7 @@ import Combine
         guard let currentSession = sessionSubject.value else {
             return nil
         }
+        let sourceRevision = sessionRevision
 #if DEBUG || SKYBRIDGE_TESTING
         if Self.shouldSkipAuthRefreshForSmoke(),
            !currentSession.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -104,19 +114,32 @@ import Combine
             return currentSession.accessToken
         }
 
-        if let existingRefreshTask = accessTokenRefreshTask {
-            let refreshedSession = try await existingRefreshTask.value
+        if let existingRefresh = accessTokenRefreshOperation,
+           existingRefresh.sourceSession == currentSession,
+           existingRefresh.sourceRevision == sourceRevision {
+            let refreshedSession = try await existingRefresh.task.value
             return refreshedSession.accessToken
         }
 
+        cancelAccessTokenRefresh()
+
+        let refreshID = UUID()
+        let requiresProviderJWTContinuity = isSupabaseMode
+            || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken)
         let refreshTask = Task<AuthSession, Error> { @MainActor [self, currentSession, refreshToken] in
             let refreshedSession: AuthSession
-            if isSupabaseMode || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken) {
+            if requiresProviderJWTContinuity {
                 refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
             } else {
                 let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
                 refreshedSession = try self.session(fromNebulaResult: nebulaResult)
             }
+
+            try Self.validateRefreshedIdentity(
+                refreshedSession,
+                sourceSession: currentSession,
+                requiresProviderJWTContinuity: requiresProviderJWTContinuity
+            )
 
             let mergedSession = AuthSession(
                 accessToken: refreshedSession.accessToken,
@@ -124,23 +147,42 @@ import Combine
                     refreshedSession.refreshToken,
                     fallback: currentSession.refreshToken
                 ),
-                userIdentifier: refreshedSession.userIdentifier,
-                nebulaId: refreshedSession.nebulaId,
+                userIdentifier: currentSession.userIdentifier,
+                nebulaId: refreshedSession.nebulaId ?? currentSession.nebulaId,
                 displayName: refreshedSession.displayName,
                 avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
                 issuedAt: refreshedSession.issuedAt
             )
 
-            try await store(session: mergedSession)
+            try Task.checkCancellation()
+            try await persistRefreshedSession(
+                mergedSession,
+                refreshID: refreshID,
+                sourceSession: currentSession,
+                sourceRevision: sourceRevision
+            )
+            try Task.checkCancellation()
+            guard accessTokenRefreshOperation?.id == refreshID,
+                  sessionRevision == sourceRevision,
+                  sessionSubject.value == currentSession else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            sessionRevision = UUID()
+            accessTokenRefreshOperation = nil
             sessionSubject.send(mergedSession)
             await TenantAccessController.shared.bindAuthentication(session: mergedSession)
             return mergedSession
         }
 
-        accessTokenRefreshTask = refreshTask
+        accessTokenRefreshOperation = AccessTokenRefreshOperation(
+            id: refreshID,
+            sourceSession: currentSession,
+            sourceRevision: sourceRevision,
+            task: refreshTask
+        )
         defer {
-            if accessTokenRefreshTask == refreshTask {
-                accessTokenRefreshTask = nil
+            if accessTokenRefreshOperation?.id == refreshID {
+                accessTokenRefreshOperation = nil
             }
         }
 
@@ -152,7 +194,15 @@ import Combine
     private let urlSession: URLSession
     private var configuration: Configuration?
     private var isSupabaseMode: Bool = false
-    private var accessTokenRefreshTask: Task<AuthSession, Error>?
+    private struct AccessTokenRefreshOperation {
+        let id: UUID
+        let sourceSession: AuthSession
+        let sourceRevision: UUID
+        let task: Task<AuthSession, Error>
+    }
+
+    private var accessTokenRefreshOperation: AccessTokenRefreshOperation?
+    private var sessionRevision = UUID()
     private var persistedSessionLoadTask: Task<Void, Never>?
 
     private init() {
@@ -213,8 +263,7 @@ import Combine
                     SupabaseService.userMessage(for: error) ?? error.localizedDescription
                 )
             }
-            try await store(session: session)
-            sessionSubject.send(session)
+            try await persistAndPublishSession(session)
             return session
         }
 
@@ -246,8 +295,7 @@ import Combine
         }
 
         let session = try session(fromNebulaResult: result)
-        try await store(session: session)
-        sessionSubject.send(session)
+        try await persistAndPublishSession(session)
         return session
     }
 
@@ -259,8 +307,7 @@ import Combine
     public func verifyNebulaMFA(mfaToken: String, code: String) async throws -> AuthSession {
         let result = try await NebulaService.shared.verifyMFA(mfaToken: mfaToken, code: code)
         let session = try session(fromNebulaResult: result)
-        try await store(session: session)
-        sessionSubject.send(session)
+        try await persistAndPublishSession(session)
         return session
     }
 
@@ -320,8 +367,7 @@ import Combine
                     SupabaseService.userMessage(for: error) ?? error.localizedDescription
                 )
             }
-            try await store(session: session)
-            sessionSubject.send(session)
+            try await persistAndPublishSession(session)
             return session
         }
 
@@ -350,8 +396,7 @@ import Combine
                 )
             }
  // 确保会话被正确存储和发布
-            try await store(session: session)
-            sessionSubject.send(session)
+            try await persistAndPublishSession(session)
             return session
         }
 
@@ -376,9 +421,7 @@ import Combine
         Task { @MainActor in
             let outcome = await self.signOutAndWait()
             if case .localCleanupFailed(let message) = outcome {
-                self.logger.error(
-                    "AuthenticationService local sign-out cleanup failed: \(message, privacy: .private)"
-                )
+                self.logger.error("AuthenticationService local sign-out cleanup failed: \(message, privacy: .private)")
             }
         }
     }
@@ -389,9 +432,7 @@ import Combine
         do {
             try await clearLocalSessionState()
         } catch {
-            logger.error(
-                "AuthenticationService Keychain session cleanup failed: \(error.localizedDescription, privacy: .private)"
-            )
+            logger.error("AuthenticationService Keychain session cleanup failed: \(error.localizedDescription, privacy: .private)")
             return .localCleanupFailed(error.localizedDescription)
         }
 
@@ -411,8 +452,7 @@ import Combine
 
     /// 持久化并广播新的会话（例如刷新访问令牌后）。
     public func updateSession(_ session: AuthSession) async throws {
-        try await store(session: session)
-        sessionSubject.send(session)
+        try await persistAndPublishSession(session)
     }
 
     /// 进入游客模式时，仅广播内存态 session，不写入钥匙串，避免根认证状态与局部 UI 分叉。
@@ -425,8 +465,7 @@ import Combine
             issuedAt: Date()
         )
 
-        try await clearLocalSessionState()
-        sessionSubject.send(guestSession)
+        try await replaceWithGuestSession(guestSession)
     }
 
     /// 在启动阶段交互式解锁 Keychain 后补读一次持久化 session，避免首次静默读取失败后永久丢失登录态。
@@ -508,12 +547,55 @@ import Combine
         decoder.dateDecodingStrategy = .iso8601
         let authResponse = try decoder.decode(AuthResponse.self, from: data)
         let session = authResponse.session
-        try await store(session: session)
-        sessionSubject.send(session)
+        try await persistAndPublishSession(session)
         return session
     }
 
-    private func store(session: AuthSession) async throws {
+    private func persistAndPublishSession(_ session: AuthSession) async throws {
+        let revision = beginSessionMutation()
+        try await persist(session: session)
+        guard sessionRevision == revision else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        sessionSubject.send(session)
+        await TenantAccessController.shared.bindAuthentication(session: session)
+    }
+
+    private func persistRefreshedSession(
+        _ session: AuthSession,
+        refreshID: UUID,
+        sourceSession: AuthSession,
+        sourceRevision: UUID
+    ) async throws {
+        guard accessTokenRefreshOperation?.id == refreshID,
+              accessTokenRefreshOperation?.sourceSession == sourceSession,
+              accessTokenRefreshOperation?.sourceRevision == sourceRevision,
+              sessionRevision == sourceRevision,
+              sessionSubject.value == sourceSession else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        let replaced: Bool
+        do {
+            replaced = try await KeychainManager.shared.replaceAuthSession(
+                expected: sourceSession,
+                with: session
+            )
+        } catch let error as NSError {
+            throw AuthenticationError.storage(OSStatus(error.code))
+        }
+        guard replaced else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        guard accessTokenRefreshOperation?.id == refreshID,
+              accessTokenRefreshOperation?.sourceSession == sourceSession,
+              accessTokenRefreshOperation?.sourceRevision == sourceRevision,
+              sessionRevision == sourceRevision,
+              sessionSubject.value == sourceSession else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+    }
+
+    private func persist(session: AuthSession) async throws {
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
         do {
@@ -521,6 +603,198 @@ import Combine
         } catch let error as NSError {
             throw AuthenticationError.storage(OSStatus(error.code))
         }
+    }
+
+    @discardableResult
+    private func beginSessionMutation() -> UUID {
+        sessionRevision = UUID()
+        cancelAccessTokenRefresh()
+        persistedSessionLoadTask?.cancel()
+        persistedSessionLoadTask = nil
+        return sessionRevision
+    }
+
+    private func cancelAccessTokenRefresh() {
+        guard let operation = accessTokenRefreshOperation else { return }
+        accessTokenRefreshOperation = nil
+        operation.task.cancel()
+    }
+
+    private func replaceWithGuestSession(_ session: AuthSession) async throws {
+        let revision = beginSessionMutation()
+        try await KeychainManager.shared.deleteAuthSession()
+        guard sessionRevision == revision else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        sessionSubject.send(session)
+        await TenantAccessController.shared.clearAuthentication()
+    }
+
+    nonisolated static func validateRefreshedIdentity(
+        _ refreshedSession: AuthSession,
+        sourceSession: AuthSession,
+        requiresProviderJWTContinuity: Bool,
+        now: Date = Date()
+    ) throws {
+        guard refreshedSession.userIdentifier == sourceSession.userIdentifier else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        if let sourceTenant = sourceSession.nebulaId,
+           let refreshedTenant = refreshedSession.nebulaId,
+           sourceTenant != refreshedTenant {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+
+        let sourceHasJWTShape = hasJWTShape(sourceSession.accessToken)
+        let refreshedHasJWTShape = hasJWTShape(refreshedSession.accessToken)
+        guard !requiresProviderJWTContinuity || (sourceHasJWTShape && refreshedHasJWTShape) else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        guard sourceHasJWTShape || refreshedHasJWTShape else { return }
+        guard sourceHasJWTShape && refreshedHasJWTShape else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+
+        do {
+            let sourceAuthority = try validatedJWTAuthority(
+                sourceSession.accessToken,
+                declaredTenantID: sourceSession.nebulaId,
+                requireFutureExpiration: false,
+                now: now
+            )
+            let refreshedAuthority = try validatedJWTAuthority(
+                refreshedSession.accessToken,
+                declaredTenantID: refreshedSession.nebulaId ?? sourceSession.nebulaId,
+                requireFutureExpiration: true,
+                now: now
+            )
+            guard sourceAuthority.subject == sourceSession.userIdentifier,
+                  refreshedAuthority.subject == sourceSession.userIdentifier,
+                  refreshedAuthority.subject == sourceAuthority.subject,
+                  refreshedAuthority.tenantID == sourceAuthority.tenantID else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+        } catch AuthenticationError.sessionChangedDuringRefresh {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        } catch {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+    }
+
+    private nonisolated struct RefreshJWTAuthority {
+        let subject: String
+        let tenantID: String
+    }
+
+    private nonisolated static func hasJWTShape(_ token: String) -> Bool {
+        token.split(separator: ".", omittingEmptySubsequences: false).count == 3
+    }
+
+    private nonisolated static func validatedJWTAuthority(
+        _ token: String,
+        declaredTenantID: String?,
+        requireFutureExpiration: Bool,
+        now: Date
+    ) throws -> RefreshJWTAuthority {
+        let normalizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedToken.isEmpty,
+              normalizedToken == token,
+              normalizedToken.utf8.count <= 16_384 else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        let segments = normalizedToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3,
+              segments.allSatisfy({ !$0.isEmpty && isBase64URLSegment($0) }),
+              let header = decodeJWTJSONObject(segments[0]),
+              let claims = decodeJWTJSONObject(segments[1]),
+              let algorithm = validatedIdentityClaim(header["alg"]),
+              algorithm.caseInsensitiveCompare("none") != .orderedSame,
+              let subject = validatedIdentityClaim(claims["sub"]),
+              let expiration = numericJWTClaim(claims["exp"]),
+              !requireFutureExpiration || expiration > now.timeIntervalSince1970 else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+
+        guard claims["app_metadata"] == nil || claims["app_metadata"] is [String: Any] else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        let appMetadata = claims["app_metadata"] as? [String: Any]
+        let tenantCandidates: [Any?] = [
+            appMetadata?["tenant_id"],
+            appMetadata?["tenantId"],
+            appMetadata?["org_id"],
+            appMetadata?["workspace_id"],
+            claims["tenant_id"],
+            claims["tenantId"],
+            claims["org_id"],
+            claims["workspace_id"]
+        ]
+        var tenantValues = Set<String>()
+        for candidate in tenantCandidates {
+            guard let candidate else { continue }
+            guard let value = validatedIdentityClaim(candidate) else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            tenantValues.insert(value)
+        }
+        guard tenantValues.count <= 1 else {
+            throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        let tokenTenantID = tenantValues.first
+        if let rawDeclaredTenantID = declaredTenantID {
+            guard let declaredTenantID = validatedIdentityClaim(rawDeclaredTenantID) else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            guard tokenTenantID == declaredTenantID else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            return RefreshJWTAuthority(subject: subject, tenantID: declaredTenantID)
+        }
+        return RefreshJWTAuthority(subject: subject, tenantID: tokenTenantID ?? subject)
+    }
+
+    private nonisolated static func validatedIdentityClaim(_ value: Any?) -> String? {
+        guard let value = value as? String,
+              !value.isEmpty,
+              value.utf8.count <= 256,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return nil
+        }
+        return value
+    }
+
+    private nonisolated static func numericJWTClaim(_ value: Any?) -> TimeInterval? {
+        guard let number = value as? NSNumber,
+              String(cString: number.objCType) != "c" else {
+            return nil
+        }
+        let numericValue = number.doubleValue
+        return numericValue.isFinite ? numericValue : nil
+    }
+
+    private nonisolated static func isBase64URLSegment(_ segment: Substring) -> Bool {
+        segment.unicodeScalars.allSatisfy { scalar in
+            scalar.isASCII && (
+                CharacterSet.alphanumerics.contains(scalar)
+                    || scalar == "-"
+                    || scalar == "_"
+            )
+        }
+    }
+
+    private nonisolated static func decodeJWTJSONObject(
+        _ segment: Substring
+    ) -> [String: Any]? {
+        var base64 = String(segment)
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     nonisolated static func mergedRefreshToken(_ candidate: String?, fallback: String?) -> String? {
@@ -677,9 +951,9 @@ import Combine
     }
 
     private func clearLocalSessionState() async throws {
-        persistedSessionLoadTask?.cancel()
-        persistedSessionLoadTask = nil
+        let revision = beginSessionMutation()
         try await KeychainManager.shared.deleteAuthSession()
+        guard sessionRevision == revision else { return }
         sessionSubject.send(nil)
         await TenantAccessController.shared.clearAuthentication()
     }

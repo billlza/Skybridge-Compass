@@ -65,32 +65,13 @@ public final class SupabaseService: ObservableObject {
             return true
         }
 
-        private static func logResolvedConfiguration(source: String) {
+        fileprivate static func logResolvedConfiguration(source: String) {
             SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=\(source) urlValidated=1 anonKeyPresent=1")
         }
 
-        /// iOS 端优先 Keychain，其次 Info.plist
+        /// 返回不涉及 Keychain I/O 的 Bundle 配置。
         public static func fromEnvironment(logIfMissing: Bool = true) -> Configuration? {
-            // 1) Keychain
-            if let keychainConfig = try? KeychainManager.shared.retrieveSupabaseConfig() {
-                // If Keychain contains a placeholder config from earlier dev runs, delete it so it won't override bundle config.
-                if isPlaceholderConfig(urlString: keychainConfig.url, anonKey: keychainConfig.anonKey) {
-                    SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置为占位符，已自动清理（将回退到 Bundle 配置/Info.plist）。")
-                    KeychainManager.shared.deleteSupabaseConfig()
-                } else if let url = URL(string: keychainConfig.url) {
-                    if isValidSupabaseURL(url), !keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        logResolvedConfiguration(source: "Keychain")
-                        return Configuration(url: url, anonKey: keychainConfig.anonKey)
-                    } else {
-                        let anonEmpty = keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "1" : "0"
-                        SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（urlParsed=1, anonKeyEmpty=\(anonEmpty)），将回退到 Info.plist/Bundle。")
-                    }
-                } else {
-                    SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（URL 无法解析），将回退到 Info.plist/Bundle。")
-                }
-            }
-
-            // 2) Info.plist（Xcode 工程 / App target）
+            // 1) Info.plist（Xcode 工程 / App target）
             let dict = Bundle.main.infoDictionary ?? [:]
             if let urlString = dict["SUPABASE_URL"] as? String,
                let url = URL(string: urlString),
@@ -102,7 +83,7 @@ public final class SupabaseService: ObservableObject {
                 return Configuration(url: url, anonKey: anonKey)
             }
 
-            // 3) App Bundle Resources：SupabaseConfig.plist（与 macOS 端一致的资源配置方式）
+            // 2) App Bundle Resources：SupabaseConfig.plist（与 macOS 端一致的资源配置方式）
             if let url = Bundle.main.url(forResource: "SupabaseConfig", withExtension: "plist"),
                let dict = NSDictionary(contentsOf: url) as? [String: Any],
                let urlString = dict["SUPABASE_URL"] as? String,
@@ -131,7 +112,7 @@ public final class SupabaseService: ObservableObject {
 #endif
 
             if logIfMissing {
-                SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（Keychain/Info.plist/Bundle 都未找到有效配置）")
+                SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（Info.plist/Bundle 未找到有效配置）")
             }
             return nil
         }
@@ -139,6 +120,8 @@ public final class SupabaseService: ObservableObject {
 
     public enum SupabaseError: LocalizedError {
         case configurationMissing
+        case configurationStorageUnavailable(String)
+        case invalidStoredConfiguration
         case invalidResponse
         case httpStatus(code: Int, message: String?)
         case schemaMismatch(String)
@@ -147,6 +130,8 @@ public final class SupabaseService: ObservableObject {
         public var errorDescription: String? {
             switch self {
             case .configurationMissing: return "Supabase 配置缺失（SUPABASE_URL / SUPABASE_ANON_KEY）"
+            case .configurationStorageUnavailable(let message): return "Supabase Keychain 配置读取失败：\(message)"
+            case .invalidStoredConfiguration: return "Supabase Keychain 配置无效"
             case .invalidResponse: return "服务器返回无效响应"
             case .httpStatus(let code, let message): return "HTTP \(code) \(message ?? "")"
             case .schemaMismatch(let message): return "Supabase 认证风控或数据结构未就绪：\(message)"
@@ -160,6 +145,10 @@ public final class SupabaseService: ObservableObject {
         switch supabaseError {
         case .configurationMissing:
             return "Supabase 配置缺失，请先在设置中完成配置"
+        case .configurationStorageUnavailable:
+            return "无法读取 Supabase 安全配置，请检查设备 Keychain 状态"
+        case .invalidStoredConfiguration:
+            return "Supabase 安全配置无效，请在设置中重新保存"
         case .invalidResponse:
             return "服务器返回无效响应"
         case .httpStatus(let code, let message):
@@ -187,6 +176,7 @@ public final class SupabaseService: ObservableObject {
 
     private let urlSession: URLSession
     private var configuration: Configuration?
+    private var configurationResolutionCompleted = false
     private var inFlightRefreshSession: (token: String, id: UUID, task: Task<AuthSession, Error>)?
 
     private init() {
@@ -194,30 +184,64 @@ public final class SupabaseService: ObservableObject {
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 60
         self.urlSession = URLSession(configuration: cfg)
-        self.configuration = Configuration.fromEnvironment(logIfMissing: false)
+        self.configuration = nil
     }
 
-    private func requireConfiguration() throws -> Configuration {
-        // If we have a cached config, validate it; otherwise re-load.
+    private func requireConfiguration(logIfMissing: Bool = true) async throws -> Configuration {
         if let cfg = configuration {
             let host = (cfg.url.host ?? "").lowercased()
             if host == "your-project.supabase.co" || Configuration.isPlaceholderConfig(urlString: cfg.url.absoluteString, anonKey: cfg.anonKey) {
-                // Extra-hardening: if an old build ever persisted a placeholder in Keychain, wipe it and reload.
                 SkyBridgeLogger.shared.warning("⚠️ Supabase 当前配置为占位符(host=\(host))，将清理并重新加载。")
-                KeychainManager.shared.deleteSupabaseConfig()
+                try await KeychainManager.shared.deleteSupabaseConfig()
                 configuration = nil
+                configurationResolutionCompleted = false
             } else if Configuration.isValidSupabaseURL(cfg.url), !cfg.anonKey.isEmpty {
                 return cfg
             }
         }
-        configuration = Configuration.fromEnvironment()
+
+        if !configurationResolutionCompleted {
+            configuration = try await loadPersistedConfiguration()
+                ?? Configuration.fromEnvironment(logIfMissing: logIfMissing)
+            configurationResolutionCompleted = true
+        }
+
         guard let cfg = configuration else { throw SupabaseError.configurationMissing }
-        // Final safety: never allow placeholder host to leak into requests.
         if (cfg.url.host ?? "").lowercased() == "your-project.supabase.co" {
             SkyBridgeLogger.shared.error("❌ Supabase 仍为占位符(host=your-project.supabase.co)，已拒绝发起请求。请在设置页填写或提供 SupabaseConfig.plist。")
             throw SupabaseError.configurationMissing
         }
         return cfg
+    }
+
+    private func loadPersistedConfiguration() async throws -> Configuration? {
+        let stored: KeychainManager.SupabaseConfig
+        do {
+            stored = try await KeychainManager.shared.retrieveSupabaseConfig()
+        } catch KeychainError.itemNotFound {
+            return nil
+        } catch {
+            throw SupabaseError.configurationStorageUnavailable(error.localizedDescription)
+        }
+
+        if Configuration.isPlaceholderConfig(urlString: stored.url, anonKey: stored.anonKey) {
+            SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置为历史占位符，正在清理并迁移到 Bundle 配置。")
+            do {
+                try await KeychainManager.shared.deleteSupabaseConfig()
+            } catch {
+                throw SupabaseError.configurationStorageUnavailable(error.localizedDescription)
+            }
+            return nil
+        }
+
+        guard let url = URL(string: stored.url),
+              Configuration.isValidSupabaseURL(url),
+              !stored.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SupabaseError.invalidStoredConfiguration
+        }
+
+        Configuration.logResolvedConfiguration(source: "Keychain")
+        return Configuration(url: url, anonKey: stored.anonKey)
     }
 
     private func makeAnonymousJSONRequest(url: URL, method: String, configuration: Configuration) -> URLRequest {
@@ -263,6 +287,15 @@ public final class SupabaseService: ObservableObject {
 
     public func updateConfiguration(_ configuration: Configuration) {
         self.configuration = configuration
+        configurationResolutionCompleted = true
+    }
+
+    public func availableConfiguration(logIfMissing: Bool = false) async throws -> Configuration? {
+        do {
+            return try await requireConfiguration(logIfMissing: logIfMissing)
+        } catch SupabaseError.configurationMissing {
+            return nil
+        }
     }
 
     public var isConfigured: Bool {
@@ -271,12 +304,56 @@ public final class SupabaseService: ObservableObject {
 
     public func isSupabaseAccessToken(_ token: String) -> Bool {
         guard let config = configuration else { return false }
-        guard let claims = decodeJWTClaims(token),
-              let issuer = claims["iss"] as? String else {
+        let expectedIssuer = config.url.appendingPathComponent("auth/v1").absoluteString
+        return Self.isAuthenticatedAccessToken(token, expectedIssuer: expectedIssuer)
+    }
+
+    /// Classifies only authenticated user JWTs issued by the configured Supabase project.
+    /// Exact issuer matching prevents a prefix-confusion value from being treated as local,
+    /// while audience and role checks exclude anon/service-role tokens from user-session paths.
+    nonisolated static func isAuthenticatedAccessToken(
+        _ token: String,
+        expectedIssuer: String
+    ) -> Bool {
+        guard !token.isEmpty,
+              token.utf8.count <= 65_536,
+              token == token.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             return false
         }
-        let expectedIssuer = config.url.appendingPathComponent("auth/v1").absoluteString
-        return issuer == expectedIssuer || issuer.hasPrefix(expectedIssuer)
+        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3,
+              segments.allSatisfy({ !$0.isEmpty }),
+              let claims = decodeJWTClaims(token),
+              let issuer = claims["iss"] as? String,
+              let issuer = normalizedIssuer(issuer),
+              let expectedIssuer = normalizedIssuer(expectedIssuer),
+              issuer == expectedIssuer,
+              claims["role"] as? String == "authenticated" else {
+            return false
+        }
+
+        if let audience = claims["aud"] as? String {
+            return audience == "authenticated"
+        }
+        if let audiences = claims["aud"] as? [String] {
+            return audiences.contains("authenticated")
+        }
+        return false
+    }
+
+    nonisolated private static func normalizedIssuer(_ rawValue: String) -> String? {
+        guard !rawValue.isEmpty,
+              rawValue.utf8.count <= 2_048,
+              rawValue == rawValue.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return nil
+        }
+        var value = rawValue
+        while value.hasSuffix("/") {
+            value.removeLast()
+        }
+        return value.isEmpty ? nil : value
     }
 
     // MARK: - Auth
@@ -286,7 +363,7 @@ public final class SupabaseService: ObservableObject {
         nonce: String? = nil,
         captchaToken: String? = nil
     ) async throws -> AuthSession {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/token")
         var request = URLRequest(url: endpoint)
@@ -310,7 +387,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func signInWithEmail(email: String, password: String, captchaToken: String? = nil) async throws -> AuthSession {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         guard var comps = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
             throw SupabaseError.invalidResponse
@@ -331,7 +408,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func sendPhoneOTP(phone: String, captchaToken: String? = nil) async throws {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/otp")
         var request = URLRequest(url: endpoint)
@@ -352,7 +429,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func signInWithPhone(phone: String, token: String) async throws -> AuthSession {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/token")
         var request = URLRequest(url: endpoint)
@@ -384,7 +461,7 @@ public final class SupabaseService: ObservableObject {
             return try await current.task.value
         }
 
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         let refreshID = UUID()
         let task = Task<AuthSession, Error> { [self] in
             try await performRefreshSessionRequest(
@@ -411,7 +488,7 @@ public final class SupabaseService: ObservableObject {
         metadata: [String: Any]? = nil,
         captchaToken: String? = nil
     ) async throws -> AuthSession {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/signup")
         var request = URLRequest(url: endpoint)
@@ -459,7 +536,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func resetPassword(email: String, captchaToken: String? = nil) async throws {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         let endpoint = config.url.appendingPathComponent("auth/v1/recover")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -486,7 +563,7 @@ public final class SupabaseService: ObservableObject {
         attemptType: RegistrationAttemptType = .register,
         configName: String? = nil
     ) async throws -> RegistrationGuardDecision {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         let endpoint = config.url.appendingPathComponent("rest/v1/rpc/guard_registration_attempt_v1")
         let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
         let identifierHash = Self.normalizedRegistrationIdentifierHash(identifier, type: identifierType)
@@ -592,7 +669,13 @@ public final class SupabaseService: ObservableObject {
         auditTicket: String? = nil,
         metadata: [String: String] = [:]
     ) async {
-        guard let config = try? requireConfiguration() else { return }
+        let config: Configuration
+        do {
+            config = try await requireConfiguration(logIfMissing: false)
+        } catch {
+            SkyBridgeLogger.shared.warning("⚠️ 注册审计配置不可用: \(error.localizedDescription)")
+            return
+        }
 
         let endpoint = config.url.appendingPathComponent("rest/v1/rpc/record_registration_attempt_v1")
         let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
@@ -610,10 +693,23 @@ public final class SupabaseService: ObservableObject {
             "audit_ticket": auditTicket ?? NSNull(),
             "metadata": metadata
         ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 注册审计请求编码失败: \(error.localizedDescription)")
+            return
+        }
 
-        guard let (data, response) = try? await urlSession.data(for: request),
-              let http = response as? HTTPURLResponse else {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            SkyBridgeLogger.shared.warning("⚠️ 注册审计网络请求失败: \(error.localizedDescription)")
+            return
+        }
+        guard let http = response as? HTTPURLResponse else {
+            SkyBridgeLogger.shared.error("❌ 注册审计返回了非 HTTP 响应")
             return
         }
 
@@ -640,7 +736,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func revokeCurrentSession(accessToken: String, scope: String = "local") async throws {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         guard var components = URLComponents(
             url: config.url.appendingPathComponent("auth/v1/logout"),
             resolvingAgainstBaseURL: false
@@ -700,7 +796,7 @@ public final class SupabaseService: ObservableObject {
     // MARK: - Database (Nebula ID)
 
     public func saveNebulaIdToDatabase(userId: String, nebulaId: String, accessToken: String?) async throws -> Bool {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("rest/v1/users")
         var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
@@ -851,7 +947,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 获取当前用户资料（优先走 Auth API，结构与 metadata 最一致）
     public func fetchCurrentUserProfile(accessToken: String) async throws -> RemoteUserProfile {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/user")
         var request = URLRequest(url: endpoint)
@@ -901,7 +997,7 @@ public final class SupabaseService: ObservableObject {
     public func updateCurrentUserMetadata(accessToken: String, metadata: [String: Any]) async throws {
         guard !metadata.isEmpty else { return }
 
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         let endpoint = config.url.appendingPathComponent("auth/v1/user")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "PUT"
@@ -920,7 +1016,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 用于设置页的“连接测试”：验证 URL/Key 是否可用（不依赖已登录）
     public func testConnection() async throws {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
 
         // Supabase GoTrue 健康检查端点
         let endpoint = config.url.appendingPathComponent("auth/v1/health")
@@ -940,7 +1036,7 @@ public final class SupabaseService: ObservableObject {
     // MARK: - Helpers
 
     private func performAuthRequest(_ request: URLRequest) async throws -> AuthSession {
-        let config = try requireConfiguration()
+        let config = try await requireConfiguration()
         do {
             let (data, response) = try await urlSession.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }

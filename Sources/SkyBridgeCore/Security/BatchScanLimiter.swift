@@ -105,6 +105,7 @@ public actor BatchScanLimiter {
         self.symlinkResolver = SymlinkResolver(limits: limits)
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
     // MARK: - Test Helpers
 
     /// Create a limiter instance for unit tests with configurable (usually higher) limits.
@@ -159,6 +160,7 @@ public actor BatchScanLimiter {
         )
         return BatchScanLimiter(limits: limits)
     }
+#endif
     
  /// Pre-check batch scan request.
  ///
@@ -478,12 +480,3 @@ public enum BatchScanError: Error, Sendable {
     case limitExceeded(PreCheckResult.LimitExceeded)
     case cancelled
 }
-
-// MARK: - Testing Support
-
-#if DEBUG
-extension BatchScanLimiter {
-    // Intentionally empty: `createForTesting` is provided as `internal` on the main type
-    // and accessed from tests via `@testable import SkyBridgeCore`.
-}
-#endif

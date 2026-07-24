@@ -1,6 +1,14 @@
 import Combine
 import Foundation
 
+/// Delivery state of the signed terminal receipt for an inbound durable file.
+/// `unknown` means the file is safely committed locally, but the sender may not
+/// have observed that fact and must not automatically retransmit it.
+public enum FileTransferReceiptDeliveryStatus: String, Codable, Sendable {
+  case delivered
+  case unknown
+}
+
 /// 文件传输对象
 public class FileTransfer: ObservableObject, Identifiable {
   public let id: String
@@ -25,8 +33,12 @@ public class FileTransfer: ObservableObject, Identifiable {
   public var error: String?
   public var fileHash: String?
   public var localPath: URL?
+  public var receiptDeliveryStatus: FileTransferReceiptDeliveryStatus?
   /// 压缩算法：nil/"" 表示不压缩；当前支持 "zlib"
   public var compression: String?
+  /// Immutable classic-transfer chunk size negotiated when the send starts.
+  /// Runtime settings updates must never alter an in-flight wire contract.
+  var negotiatedClassicChunkSize: Int?
 
   // 扫描结果 - 用于 UI 显示扫描状态
   @Published public var scanResult: FileScanResult?
@@ -37,6 +49,16 @@ public class FileTransfer: ObservableObject, Identifiable {
   public var deviceName: String?  // 设备名称
   public var resumeOffset: Int64 = 0  // 断点续传偏移量（已传输字节数）
   public var resumeDataPath: URL?  // 断点续传数据保存路径
+  /// Isolated partial/source path used only to persist classic-transfer resume state.
+  /// Kept internal so active inbound staging paths are never exposed as completed files.
+  var classicResumeSourcePath: URL?
+  /// Exact on-disk resume record owned by this transfer. Cleanup compares this
+  /// value before unlinking so a delayed operation cannot delete a newer record
+  /// that happens to reuse the same peer-controlled transfer identifier.
+  var classicResumeRecord: ClassicTransferResumeRecord?
+  /// Typed terminal control failure set when a pause request cannot be persisted.
+  /// The active I/O loop uses this to fail with the original control-plane meaning.
+  var classicControlFailure: FileTransferError?
 
   // 内部统计数据
   private var lastUpdateTime: Date = Date()

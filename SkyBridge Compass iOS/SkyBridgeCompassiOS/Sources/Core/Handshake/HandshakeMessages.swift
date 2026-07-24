@@ -26,6 +26,16 @@ public enum SignatureAlgorithm: String, Sendable, Codable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
     case p256ECDSA = "P-256-ECDSA"
+    case mlDSA87 = "ML-DSA-87"
+
+    public var wireCode: UInt16 {
+        switch self {
+        case .ed25519: return 0x0001
+        case .mlDSA65: return 0x0002
+        case .p256ECDSA: return 0x0003
+        case .mlDSA87: return 0x0004
+        }
+    }
 }
 
 // MARK: - ProtocolSigningAlgorithm
@@ -33,17 +43,19 @@ public enum SignatureAlgorithm: String, Sendable, Codable {
 /// 协议签名算法（类型层面排除 P-256）
 ///
 /// `Codable` 与 macOS `SkyBridgeProtocolCore.ProtocolSigningAlgorithm` 一致：
-/// `String` 原始值（"Ed25519" / "ML-DSA-65"）按默认 JSON 编解码，wire 字节相同，
+/// `String` 原始值（"Ed25519" / "ML-DSA-65" / "ML-DSA-87"）按默认 JSON 编解码，wire 字节相同，
 /// 使 `WebRTCSignalingEnvelope.Payload` 能继续合成 `Codable` 并承载 join 引导身份。
 public enum ProtocolSigningAlgorithm: String, Sendable, Codable, Hashable {
     case ed25519 = "Ed25519"
     case mlDSA65 = "ML-DSA-65"
+    case mlDSA87 = "ML-DSA-87"
     
     /// 从 SignatureAlgorithm 转换（排除 P-256）
     public init?(from algorithm: SignatureAlgorithm) {
         switch algorithm {
         case .ed25519: self = .ed25519
         case .mlDSA65: self = .mlDSA65
+        case .mlDSA87: self = .mlDSA87
         case .p256ECDSA: return nil
         }
     }
@@ -53,8 +65,18 @@ public enum ProtocolSigningAlgorithm: String, Sendable, Codable, Hashable {
         switch self {
         case .ed25519: return .ed25519
         case .mlDSA65: return .mlDSA65
+        case .mlDSA87: return .mlDSA87
         }
     }
+
+    public var wireCode: UInt16 {
+        switch self {
+        case .ed25519: return 0x0001
+        case .mlDSA65: return 0x0002
+        case .mlDSA87: return 0x0004
+        }
+    }
+
 }
 
 // MARK: - SignatureAlignmentError
@@ -68,7 +90,12 @@ public enum SignatureAlignmentError: Error, Sendable {
 
 /// 身份公钥结构（与 macOS Wire 格式兼容）
 public struct IdentityPublicKeys: Sendable, Equatable, Codable {
-    /// 协议签名公钥 (Ed25519 或 ML-DSA-65)
+    private static let ed25519PublicKeyLength = 32
+    private static let mlDSA65PublicKeyLength = 1_952
+    private static let mlDSA87PublicKeyLength = 2_592
+    private static let p256PublicKeyLength = 65
+
+    /// 协议签名公钥 (Ed25519、ML-DSA-65 或 ML-DSA-87)
     public let protocolPublicKey: Data
     
     /// 协议签名算法
@@ -106,6 +133,7 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
         case .ed25519: algorithmByte = 0x01
         case .mlDSA65: algorithmByte = 0x02
         case .p256ECDSA: algorithmByte = 0x03
+        case .mlDSA87: algorithmByte = 0x04
         }
         data.append(algorithmByte)
         
@@ -129,6 +157,7 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
     
     /// 从二进制格式解码
     public static func decode(from data: Data) throws -> IdentityPublicKeys {
+        let data = Data(data)
         guard data.count >= 4 else {
             throw HandshakeError.failed(.invalidMessageFormat("IdentityPublicKeys too short"))
         }
@@ -144,6 +173,7 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
         case 0x01: protocolAlgorithm = .ed25519
         case 0x02: protocolAlgorithm = .mlDSA65
         case 0x03: protocolAlgorithm = .p256ECDSA
+        case 0x04: protocolAlgorithm = .mlDSA87
         default:
             throw HandshakeError.failed(.invalidMessageFormat("Unknown signature algorithm: \(algorithmByte)"))
         }
@@ -154,6 +184,8 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
         }
         let keyLen = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
         offset += 2
+
+        try validateProtocolPublicKeyLength(Int(keyLen), algorithm: protocolAlgorithm)
         
         // Protocol public key
         guard offset + Int(keyLen) <= data.count else {
@@ -162,24 +194,35 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
         let protocolPublicKey = data[offset..<(offset + Int(keyLen))]
         offset += Int(keyLen)
         
-        // Secure Enclave public key (optional)
-        var secureEnclavePublicKey: Data?
-        if offset < data.count {
-            let hasSEKey = data[offset]
-            offset += 1
-            
-            if hasSEKey == 0x01 {
-                guard offset + 2 <= data.count else {
-                    throw HandshakeError.failed(.invalidMessageFormat("SE key length truncated"))
-                }
-                let seKeyLen = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
-                offset += 2
-                
-                guard offset + Int(seKeyLen) <= data.count else {
-                    throw HandshakeError.failed(.invalidMessageFormat("SE public key truncated"))
-                }
-                secureEnclavePublicKey = Data(data[offset..<(offset + Int(seKeyLen))])
+        // Secure Enclave public key (optional, but the presence marker is mandatory)
+        guard offset < data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("SE key presence marker missing"))
+        }
+        let hasSEKey = data[offset]
+        offset += 1
+
+        let secureEnclavePublicKey: Data?
+        switch hasSEKey {
+        case 0x00:
+            secureEnclavePublicKey = nil
+        case 0x01:
+            guard offset + 2 <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("SE key length truncated"))
             }
+            let seKeyLen = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+            offset += 2
+
+            guard offset + Int(seKeyLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("SE public key truncated"))
+            }
+            secureEnclavePublicKey = Data(data[offset..<(offset + Int(seKeyLen))])
+            offset += Int(seKeyLen)
+        default:
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid SE key presence marker: \(hasSEKey)"))
+        }
+
+        guard offset == data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("IdentityPublicKeys trailing bytes"))
         }
         
         return IdentityPublicKeys(
@@ -191,10 +234,11 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
     
     /// 尝试从 legacy 格式解码（向后兼容）
     public static func decodeWithLegacyFallback(from data: Data) throws -> IdentityPublicKeys {
+        let data = Data(data)
         // 尝试新格式
         if data.count >= 4 {
             let algorithmByte = data[0]
-            if algorithmByte >= 0x01 && algorithmByte <= 0x03 {
+            if algorithmByte >= 0x01 && algorithmByte <= 0x04 {
                 if let result = try? decode(from: data) {
                     return result
                 }
@@ -218,6 +262,10 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
                 algorithm: protocolAlgorithm
             )
         }
+        try Self.validateProtocolPublicKeyLength(
+            protocolPublicKey.count,
+            algorithm: protocolAlgorithm
+        )
         return ProtocolIdentityPublicKeys(
             protocolPublicKey: protocolPublicKey,
             protocolAlgorithm: protocolAlg,
@@ -228,6 +276,28 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
     /// Returns the canonical fingerprint for protocol identity pinning.
     public func authoritativeProtocolFingerprint() throws -> String {
         try asProtocolIdentityKeys().authoritativeFingerprint
+    }
+
+    private static func validateProtocolPublicKeyLength(
+        _ actualLength: Int,
+        algorithm: SignatureAlgorithm
+    ) throws {
+        let expectedLength: Int
+        switch algorithm {
+        case .ed25519:
+            expectedLength = Self.ed25519PublicKeyLength
+        case .mlDSA65:
+            expectedLength = Self.mlDSA65PublicKeyLength
+        case .p256ECDSA:
+            expectedLength = Self.p256PublicKeyLength
+        case .mlDSA87:
+            expectedLength = Self.mlDSA87PublicKeyLength
+        }
+        guard actualLength == expectedLength else {
+            throw HandshakeError.failed(.invalidMessageFormat(
+                "Invalid \(algorithm.rawValue) public key length: expected \(expectedLength), got \(actualLength)"
+            ))
+        }
     }
 }
 
@@ -240,7 +310,7 @@ public typealias IdentityPublicKeysWire = IdentityPublicKeys
 
 /// 内部已验证身份公钥（类型层面排除 P-256）
 public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
-    /// 协议签名公钥 (Ed25519 或 ML-DSA-65)
+    /// 协议签名公钥 (Ed25519、ML-DSA-65 或 ML-DSA-87)
     public let protocolPublicKey: Data
     
     /// 协议签名算法（类型层面排除 P-256）
@@ -279,6 +349,23 @@ public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
         withUnsafeBytes(of: &keyLength) { payload.append(contentsOf: $0) }
         payload.append(protocolPublicKey)
         return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private let mlDSA87ProtocolSignatureLength = 4_627
+
+private func validateMLDSA87SignatureLength(
+    _ signature: Data,
+    identityPublicKey: Data
+) throws {
+    guard let identity = try? IdentityPublicKeys.decode(from: identityPublicKey),
+          identity.protocolAlgorithm == .mlDSA87 else {
+        return
+    }
+    guard signature.count == mlDSA87ProtocolSignatureLength else {
+        throw HandshakeError.failed(.invalidMessageFormat(
+            "ML-DSA-87 signature must be exactly \(mlDSA87ProtocolSignatureLength) bytes, got \(signature.count)"
+        ))
     }
 }
 
@@ -336,6 +423,7 @@ public struct HandshakeSOAExtension: Sendable, Equatable {
     }
 
     public static func decodeValue(_ value: Data) throws -> HandshakeSOAExtension {
+        let value = Data(value)
         guard value.count == Self.valueLength else {
             throw HandshakeError.failed(.invalidMessageFormat("SOA TLV value length mismatch"))
         }
@@ -357,6 +445,12 @@ public struct HandshakeSOAExtension: Sendable, Equatable {
 /// 握手消息 A（发起方 -> 响应方）
 public struct HandshakeMessageA: Sendable {
     private static let extensionContainerMagic = Data([0x53, 0x4F, 0x41, 0x31]) // "SOA1"
+
+    // Preserve the exact, explicitly-admitted capabilities/policy bytes. A
+    // legacy policy may omit the final field; signature verification must bind
+    // that original wire form rather than silently normalizing it.
+    private var acceptedCapabilitiesWireEncoding: Data?
+    private var acceptedPolicyWireEncoding: Data?
 
     /// 协议版本
     public let version: UInt8
@@ -430,6 +524,8 @@ public struct HandshakeMessageA: Sendable {
         self.extensionsRaw = extensionsRaw
         self.initiatorContribution = initiatorContribution
         self.secureEnclaveSignature = secureEnclaveSignature
+        self.acceptedCapabilitiesWireEncoding = nil
+        self.acceptedPolicyWireEncoding = nil
     }
 
     /// Structural admission check for a newly negotiated handshake. Legacy
@@ -486,6 +582,8 @@ public struct HandshakeMessageA: Sendable {
         self.extensionsRaw = extensionsRaw
         self.initiatorContribution = initiatorContribution
         self.secureEnclaveSignature = secureEnclaveSignature
+        self.acceptedCapabilitiesWireEncoding = nil
+        self.acceptedPolicyWireEncoding = nil
     }
     
     // MARK: - Encoding
@@ -513,6 +611,9 @@ public struct HandshakeMessageA: Sendable {
         let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageA.decode")
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageA too short"))
+        }
+        guard data.count <= HandshakeConstants.maxMessageALength else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageA exceeds maximum length"))
         }
         
         var offset = 0
@@ -603,24 +704,24 @@ public struct HandshakeMessageA: Sendable {
         guard offset + Int(capLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Capabilities truncated"))
         }
-        let capabilitiesData = data[offset..<(offset + Int(capLen))]
+        let capabilitiesData = Data(data[offset..<(offset + Int(capLen))])
         offset += Int(capLen)
         
-        let capabilities = try decodeCapabilities(from: Data(capabilitiesData))
+        let capabilities = try decodeCapabilities(from: capabilitiesData)
         
         // policy
         let policyLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(policyLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Policy truncated"))
         }
-        let policyData = data[offset..<(offset + Int(policyLen))]
+        let policyData = Data(data[offset..<(offset + Int(policyLen))])
         offset += Int(policyLen)
         
         let policy: HandshakePolicy
         if policyData.isEmpty {
             policy = .default
         } else {
-            policy = try decodePolicy(from: Data(policyData))
+            policy = try decodePolicy(from: policyData)
         }
         
         // identityPublicKey
@@ -657,7 +758,9 @@ public struct HandshakeMessageA: Sendable {
                     throw HandshakeError.failed(.invalidMessageFormat("Extensions truncated"))
                 }
                 if extLen > 0 {
-                    extensionsRaw = Data(data[offset..<(offset + Int(extLen))])
+                    let raw = Data(data[offset..<(offset + Int(extLen))])
+                    try validateTLVContainer(raw)
+                    extensionsRaw = raw
                 }
                 offset += Int(extLen)
             }
@@ -679,12 +782,21 @@ public struct HandshakeMessageA: Sendable {
                 throw HandshakeError.failed(.invalidMessageFormat("Secure Enclave signature truncated"))
             }
             let seSig = data[offset..<(offset + Int(seSigLen))]
+            offset += Int(seSigLen)
             if !seSig.isEmpty {
                 secureEnclaveSignature = Data(seSig)
             }
         }
+        guard offset == data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageA trailing bytes"))
+        }
+
+        try validateMLDSA87SignatureLength(
+            Data(signature),
+            identityPublicKey: Data(identityPublicKey)
+        )
         
-        return HandshakeMessageA(
+        var message = HandshakeMessageA(
             version: version,
             supportedSuites: supportedSuites,
             keyShares: keyShares,
@@ -697,6 +809,9 @@ public struct HandshakeMessageA: Sendable {
             initiatorContribution: initiatorContribution,
             secureEnclaveSignature: secureEnclaveSignature
         )
+        message.acceptedCapabilitiesWireEncoding = capabilitiesData
+        message.acceptedPolicyWireEncoding = policyData
+        return message
     }
     
     /// 获取待签名数据（包含域分离前缀）
@@ -724,10 +839,12 @@ public struct HandshakeMessageA: Sendable {
         data.append(HandshakeEncoding.encodeSuites(supportedSuites))
         data.append(HandshakeEncoding.encodeKeyShares(keyShares))
         data.append(clientNonce)
-        let capabilitiesData = (try? capabilities.deterministicEncode()) ?? Data()
+        let capabilitiesData = acceptedCapabilitiesWireEncoding
+            ?? (try? capabilities.deterministicEncode())
+            ?? Data()
         HandshakeEncoding.appendUInt16LE(UInt16(capabilitiesData.count), to: &data)
         data.append(capabilitiesData)
-        let policyData = policy.deterministicEncode()
+        let policyData = acceptedPolicyWireEncoding ?? policy.deterministicEncode()
         HandshakeEncoding.appendUInt16LE(UInt16(policyData.count), to: &data)
         data.append(policyData)
         HandshakeEncoding.appendUInt16LE(UInt16(identityPublicKey.count), to: &data)
@@ -747,19 +864,43 @@ public struct HandshakeMessageA: Sendable {
 
     private func decodeSOAExtension(from raw: Data) -> HandshakeSOAExtension? {
         guard !raw.isEmpty else { return nil }
-        var offset = 0
-        while offset + 4 <= raw.count {
-            let type = UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
-            let len = UInt16(raw[offset + 2]) | (UInt16(raw[offset + 3]) << 8)
-            offset += 4
-            guard offset + Int(len) <= raw.count else { return nil }
-            let value = Data(raw[offset..<(offset + Int(len))])
-            offset += Int(len)
+        guard let tlvs = try? Self.parseTLVContainer(raw) else { return nil }
+        for (type, value) in tlvs {
             if type == HandshakeSOAExtension.tlvType {
                 return try? HandshakeSOAExtension.decodeValue(value)
             }
         }
         return nil
+    }
+
+    private static func validateTLVContainer(_ raw: Data) throws {
+        _ = try parseTLVContainer(raw)
+    }
+
+    private static func parseTLVContainer(_ raw: Data) throws -> [(UInt16, Data)] {
+        var result: [(UInt16, Data)] = []
+        result.reserveCapacity(4)
+
+        var offset = 0
+        while offset < raw.count {
+            guard offset + 4 <= raw.count else {
+                throw HandshakeError.failed(
+                    .invalidMessageFormat("Extensions TLV header truncated")
+                )
+            }
+            let type = UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
+            let len = UInt16(raw[offset + 2]) | (UInt16(raw[offset + 3]) << 8)
+            offset += 4
+            guard offset + Int(len) <= raw.count else {
+                throw HandshakeError.failed(
+                    .invalidMessageFormat("Extensions TLV value truncated")
+                )
+            }
+            let value = Data(raw[offset..<(offset + Int(len))])
+            offset += Int(len)
+            result.append((type, value))
+        }
+        return result
     }
 }
 
@@ -867,6 +1008,9 @@ public struct HandshakeMessageB: Sendable {
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageB too short"))
         }
+        guard data.count <= HandshakeConstants.maxMessageBLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageB exceeds maximum length"))
+        }
         
         var offset = 0
         
@@ -909,11 +1053,16 @@ public struct HandshakeMessageB: Sendable {
         guard offset + Int(payloadLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Payload truncated"))
         }
-        let payloadData = data[offset..<(offset + Int(payloadLen))]
+        let payloadData = Data(data[offset..<(offset + Int(payloadLen))])
         offset += Int(payloadLen)
         
         // 解析 HPKESealedBox（握手阶段）
-        let encryptedPayload = try HPKESealedBox(combined: Data(payloadData), isHandshake: true)
+        let encryptedPayload = try HPKESealedBox(combined: payloadData, isHandshake: true)
+        guard encryptedPayload.combinedWithHeader(suite: selectedSuite) == payloadData else {
+            throw HandshakeError.failed(.invalidMessageFormat(
+                "MessageB encrypted payload is not canonically encoded for selected suite"
+            ))
+        }
         
         // identityPublicKey
         let idKeyLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
@@ -947,6 +1096,10 @@ public struct HandshakeMessageB: Sendable {
         guard offset == data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageB trailing bytes"))
         }
+        try validateMLDSA87SignatureLength(
+            Data(signature),
+            identityPublicKey: Data(identityPublicKey)
+        )
         
         return HandshakeMessageB(
             version: version,
@@ -1088,21 +1241,47 @@ extension HandshakeMessageB: TranscriptEncodable {
 /// 解码 CryptoCapabilities（确定性编码）
 private func decodeCapabilities(from data: Data) throws -> CryptoCapabilities {
     do {
+        guard data.count <= MessageAWireLimits.maximumCapabilitiesPayloadLength else {
+            throw TranscriptError.decodingError("CryptoCapabilities payload exceeds limit")
+        }
         var decoder = DeterministicDecoder(data: data)
-        let supportedKEM = try decoder.decodeStringArray()
-        let supportedSignature = try decoder.decodeStringArray()
-        let supportedAuthProfiles = try decoder.decodeStringArray()
-        let supportedAEAD = try decoder.decodeStringArray()
+        var remainingStringBytes = MessageAWireLimits.maximumTotalStringBytes
+        let supportedKEM = try decoder.decodeStringArray(
+            maximumCount: MessageAWireLimits.maximumCollectionCount,
+            maximumStringByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
+        let supportedSignature = try decoder.decodeStringArray(
+            maximumCount: MessageAWireLimits.maximumCollectionCount,
+            maximumStringByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
+        let supportedAuthProfiles = try decoder.decodeStringArray(
+            maximumCount: MessageAWireLimits.maximumCollectionCount,
+            maximumStringByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
+        let supportedAEAD = try decoder.decodeStringArray(
+            maximumCount: MessageAWireLimits.maximumCollectionCount,
+            maximumStringByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
         let pqcAvailable = try decoder.decodeBool()
-        let platformVersion = try decoder.decodeString()
-        let providerTypeRaw = try decoder.decodeString()
+        let platformVersion = try decoder.decodeString(
+            maximumByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
+        let providerTypeRaw = try decoder.decodeString(
+            maximumByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
         guard let providerType = CryptoProviderType(rawValue: providerTypeRaw) else {
             throw TranscriptError.decodingError("Unknown providerType: \(providerTypeRaw)")
         }
         guard decoder.isAtEnd else {
             throw TranscriptError.decodingError("Trailing bytes in CryptoCapabilities")
         }
-        return CryptoCapabilities(
+        let capabilities = CryptoCapabilities(
             supportedKEM: supportedKEM,
             supportedSignature: supportedSignature,
             supportedAuthProfiles: supportedAuthProfiles,
@@ -1111,6 +1290,10 @@ private func decodeCapabilities(from data: Data) throws -> CryptoCapabilities {
             platformVersion: platformVersion,
             providerType: providerType
         )
+        guard try capabilities.deterministicEncode() == data else {
+            throw TranscriptError.decodingError("Non-canonical CryptoCapabilities encoding")
+        }
+        return capabilities
     } catch {
         throw HandshakeError.failed(.invalidMessageFormat("Capabilities decode failed: \(error.localizedDescription)"))
     }
@@ -1119,31 +1302,57 @@ private func decodeCapabilities(from data: Data) throws -> CryptoCapabilities {
 /// 解码 HandshakePolicy（确定性编码）
 private func decodePolicy(from data: Data) throws -> HandshakePolicy {
     do {
+        guard data.count <= MessageAWireLimits.maximumPolicyPayloadLength else {
+            throw TranscriptError.decodingError("HandshakePolicy payload exceeds limit")
+        }
         var decoder = DeterministicDecoder(data: data)
         let requirePQC = try decoder.decodeBool()
         let allowClassicFallback = try decoder.decodeBool()
-        let minimumTierRaw = try decoder.decodeString()
+        var remainingStringBytes = MessageAWireLimits.maximumStringByteLength
+        let minimumTierRaw = try decoder.decodeString(
+            maximumByteLength: MessageAWireLimits.maximumStringByteLength,
+            remainingTotalStringBytes: &remainingStringBytes
+        )
         guard let minimumTier = CryptoTier(rawValue: minimumTierRaw) else {
             throw TranscriptError.decodingError("Unknown CryptoTier: \(minimumTierRaw)")
         }
         let requireSecureEnclavePoP: Bool
+        let isLegacyEncoding: Bool
         if decoder.isAtEnd {
             requireSecureEnclavePoP = false
+            isLegacyEncoding = true
         } else {
             requireSecureEnclavePoP = try decoder.decodeBool()
+            isLegacyEncoding = false
         }
         guard decoder.isAtEnd else {
             throw TranscriptError.decodingError("Trailing bytes in HandshakePolicy")
         }
-        return HandshakePolicy(
+        let policy = HandshakePolicy(
             requirePQC: requirePQC,
             allowClassicFallback: allowClassicFallback,
             minimumTier: minimumTier,
             requireSecureEnclavePoP: requireSecureEnclavePoP
         )
+        var canonicalEncoding = policy.deterministicEncode()
+        if isLegacyEncoding {
+            canonicalEncoding.removeLast()
+        }
+        guard canonicalEncoding == data else {
+            throw TranscriptError.decodingError("Non-canonical HandshakePolicy encoding")
+        }
+        return policy
     } catch {
         throw HandshakeError.failed(.invalidMessageFormat("Policy decode failed: \(error.localizedDescription)"))
     }
+}
+
+private enum MessageAWireLimits {
+    static let maximumCapabilitiesPayloadLength = 4_096
+    static let maximumPolicyPayloadLength = 512
+    static let maximumCollectionCount = 32
+    static let maximumStringByteLength = 512
+    static let maximumTotalStringBytes = 4_096
 }
 
 private func makeSecureEnclavePreimage(domain: String, signaturePreimage: Data) -> Data {
@@ -1238,6 +1447,8 @@ enum HandshakeEncoding {
     
     static func expectedKeyShareLength(for suite: CryptoSuite) -> Int? {
         switch suite.wireId {
+        case 0x0011: return 1120   // Legacy ABI 1 Q-Periapt ciphertext (decode-only)
+        case 0x0012: return 1120   // Q-Periapt ABI 2 PolicyBound ciphertext: ML-KEM-768(1088) + X25519(32)
         case 0x0001: return 1120   // X-Wing ciphertext: X25519(32) + ML-KEM-768(1088)
         case 0x0101: return 1088   // ML-KEM-768
         case 0x0102: return 1088   // ML-KEM-768-FS（KEM 密文长度与 v1 相同）
@@ -1251,7 +1462,7 @@ enum HandshakeEncoding {
         switch suite.wireId {
         case 0x0102:
             return 32 // v2: responder ephemeral contribution is mandatory
-        case 0x0001, 0x0101:
+        case 0x0011, 0x0012, 0x0001, 0x0101:
             return 0
         default:
             return expectedKeyShareLength(for: suite)

@@ -86,6 +86,14 @@ assert_log_contains() {
   fi
 }
 
+assert_log_not_contains() {
+  local needle="$1"
+  if grep -F -- "${needle}" "${FAKE_LOG}" >/dev/null; then
+    sed -n '1,120p' "${FAKE_LOG}" >&2 || true
+    fail "expected fake xcrun log not to contain: ${needle}"
+  fi
+}
+
 host_arch="$(uname -m)"
 
 sanitized_probe_error="$(skybridge_sanitize_pqc_probe_log_value "${TMP_DIR}/probe.swift:1:1: error: private path leaked")"
@@ -115,12 +123,10 @@ assert_log_contains "-D SKYBRIDGE_PQC_PROBE_SECURE_ENCLAVE"
 skybridge_detect_apple_pqc_sdk iphoneos
 assert_eq "${SKYBRIDGE_PQC_SDK_AVAILABLE}" "1" "iPhoneOS availability"
 assert_eq "${SKYBRIDGE_PQC_SWIFT_TARGET}" "arm64-apple-ios26.0" "iPhoneOS target"
-assert_eq "${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE}" "0" "iPhoneOS Secure Enclave probe flag"
+assert_eq "${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE}" "1" "iPhoneOS Secure Enclave probe flag"
 assert_log_contains "sdk=iphoneos"
 assert_log_contains "-target arm64-apple-ios26.0"
-if grep -F -- "-D SKYBRIDGE_PQC_PROBE_SECURE_ENCLAVE" "${FAKE_LOG}" >/dev/null; then
-  fail "iPhoneOS probe must not require the macOS Secure Enclave symbol layer"
-fi
+assert_log_contains "-D SKYBRIDGE_PQC_PROBE_SECURE_ENCLAVE"
 
 : > "${FAKE_LOG}"
 skybridge_detect_apple_pqc_sdk iphonesimulator
@@ -129,6 +135,7 @@ assert_eq "${SKYBRIDGE_PQC_SWIFT_TARGET}" "${host_arch}-apple-ios26.0-simulator"
 assert_eq "${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE}" "0" "iPhoneSimulator Secure Enclave probe flag"
 assert_log_contains "sdk=iphonesimulator"
 assert_log_contains "-target ${host_arch}-apple-ios26.0-simulator"
+assert_log_not_contains "-D SKYBRIDGE_PQC_PROBE_SECURE_ENCLAVE"
 
 export SKYBRIDGE_FAKE_SWIFTC_FAIL=iphoneos
 skybridge_detect_apple_pqc_sdk iphoneos
@@ -177,9 +184,13 @@ probe_source="$(cat "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh")"
 [[ "${probe_source}" == *".x25519MLKEM768"* ]] \
   || fail "Network TLS PQC probe should require the hybrid X25519+ML-KEM-768 key exchange group"
 [[ "${probe_source}" == *"SecureEnclave.MLKEM1024.PrivateKey.self"* ]] \
-  || fail "CryptoKit PQC probe should require the macOS 27 Secure Enclave ML-KEM-1024 symbol"
+  || fail "CryptoKit PQC probe should require the physical-device Secure Enclave ML-KEM-1024 symbol"
+[[ "${probe_source}" == *"SecureEnclave.MLDSA65.PrivateKey.self"* ]] \
+  || fail "CryptoKit PQC probe should require the physical-device Secure Enclave ML-DSA-65 symbol"
 [[ "${probe_source}" == *"SecureEnclave.MLDSA87.PrivateKey.self"* ]] \
-  || fail "CryptoKit PQC probe should require the macOS 27 Secure Enclave ML-DSA-87 symbol"
+  || fail "CryptoKit PQC probe should require the physical-device Secure Enclave ML-DSA-87 symbol"
+[[ "${probe_source}" == *"func probeSecureEnclavePQCSymbols()"* ]] \
+  || fail "Secure Enclave PQC symbol probe should be platform-neutral for macOS and iPhoneOS"
 
 : > "${FAKE_LOG}"
 export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=preserve

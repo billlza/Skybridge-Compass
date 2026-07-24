@@ -509,7 +509,16 @@ struct AuthenticationView: View {
     }
 
     private func refreshSupabaseConfigurationStatus() {
-        isSupabaseConfigured = SupabaseService.Configuration.fromEnvironment(logIfMissing: false) != nil
+        Task { @MainActor in
+            do {
+                isSupabaseConfigured = try await SupabaseService.shared
+                    .availableConfiguration(logIfMissing: false) != nil
+            } catch {
+                isSupabaseConfigured = false
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+        }
     }
     
     private var isFormValid: Bool {
@@ -629,8 +638,13 @@ struct AuthenticationView: View {
     }
     
     private func loginAsGuest() {
-        Task {
-            await authManager.signInAsGuest()
+        Task { @MainActor in
+            do {
+                try await authManager.signInAsGuest()
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
         }
     }
 
@@ -700,81 +714,77 @@ struct AuthenticationView: View {
 
     private func beginSupabaseTurnstileAction(_ action: SupabaseTurnstileAction) {
         pendingAppleAuthorization = nil
+        Task { @MainActor in
+            do {
+                guard let originURL = try await SupabaseService.shared
+                    .availableConfiguration(logIfMissing: false)?.url else {
+                    runSupabaseTurnstileAction(action, token: nil)
+                    return
+                }
 
-        guard let originURL = SupabaseService.Configuration.fromEnvironment(logIfMissing: false)?.url else {
-            runSupabaseTurnstileAction(action, token: nil)
-            return
-        }
+                guard let baseContext = IOSSupabaseTurnstileConfig.current(originURL: originURL) else {
+                    if IOSSupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                        errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                        showError = true
+                        return
+                    }
 
-        guard let baseContext = IOSSupabaseTurnstileConfig.current(originURL: originURL) else {
-            if IOSSupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
-                errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                    runSupabaseTurnstileAction(action, token: nil)
+                    return
+                }
+
+                pendingSupabaseTurnstileAction = action
+                pendingSupabaseTurnstileContext = IOSSupabaseTurnstileChallengeContext(
+                    siteKey: baseContext.siteKey,
+                    originURL: baseContext.originURL,
+                    action: action.actionName
+                )
+            } catch {
+                errorMessage = error.localizedDescription
                 showError = true
-                return
             }
-
-            runSupabaseTurnstileAction(action, token: nil)
-            return
         }
-
-        pendingSupabaseTurnstileAction = action
-        pendingSupabaseTurnstileContext = IOSSupabaseTurnstileChallengeContext(
-            siteKey: baseContext.siteKey,
-            originURL: baseContext.originURL,
-            action: action.actionName
-        )
     }
 
     private func beginAppleSignInFlow(with authorization: ASAuthorization) {
-        guard let originURL = SupabaseService.Configuration.fromEnvironment(logIfMissing: false)?.url else {
-            isLoading = true
-            Task {
-                do {
-                    try await authManager.handleAppleAuthorization(authorization)
-                } catch {
-                    await MainActor.run {
-                        errorMessage = error.localizedDescription
-                        showError = true
-                        isLoading = false
-                    }
+        Task { @MainActor in
+            do {
+                guard let originURL = try await SupabaseService.shared
+                    .availableConfiguration(logIfMissing: false)?.url else {
+                    try await performAppleSignInWithoutTurnstile(authorization)
+                    return
                 }
-            }
-            return
-        }
 
-        guard let baseContext = IOSSupabaseTurnstileConfig.current(originURL: originURL) else {
-            if IOSSupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
-                errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                guard let baseContext = IOSSupabaseTurnstileConfig.current(originURL: originURL) else {
+                    if IOSSupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                        errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                        showError = true
+                        return
+                    }
+
+                    try await performAppleSignInWithoutTurnstile(authorization)
+                    return
+                }
+
+                pendingAppleAuthorization = authorization
+                pendingSupabaseTurnstileAction = .signInWithApple
+                pendingSupabaseTurnstileContext = IOSSupabaseTurnstileChallengeContext(
+                    siteKey: baseContext.siteKey,
+                    originURL: baseContext.originURL,
+                    action: SupabaseTurnstileAction.signInWithApple.actionName
+                )
+            } catch {
+                errorMessage = error.localizedDescription
                 showError = true
                 isLoading = false
-                return
             }
-
-            isLoading = true
-            Task {
-                do {
-                    try await authManager.handleAppleAuthorization(authorization)
-                } catch {
-                    await MainActor.run {
-                        errorMessage = error.localizedDescription
-                        showError = true
-                    }
-                }
-
-                await MainActor.run {
-                    isLoading = false
-                }
-            }
-            return
         }
+    }
 
-        pendingAppleAuthorization = authorization
-        pendingSupabaseTurnstileAction = .signInWithApple
-        pendingSupabaseTurnstileContext = IOSSupabaseTurnstileChallengeContext(
-            siteKey: baseContext.siteKey,
-            originURL: baseContext.originURL,
-            action: SupabaseTurnstileAction.signInWithApple.actionName
-        )
+    private func performAppleSignInWithoutTurnstile(_ authorization: ASAuthorization) async throws {
+        isLoading = true
+        defer { isLoading = false }
+        try await authManager.handleAppleAuthorization(authorization)
     }
 
     private func runSupabaseTurnstileAction(_ action: SupabaseTurnstileAction, token: String?) {

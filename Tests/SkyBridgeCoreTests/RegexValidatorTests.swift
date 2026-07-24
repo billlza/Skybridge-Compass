@@ -1380,12 +1380,14 @@ final class RegexPatternCounterTests: XCTestCase {
     }
     
     func testResetCounter() async {
+#if DEBUG || SKYBRIDGE_TESTING
         let counter = RegexPatternCounter(maxCount: 2)
         await counter.incrementCount()
         await counter.incrementCount()
         await counter.reset()
         let canValidate = await counter.canValidateMore()
         XCTAssertTrue(canValidate)
+#endif
     }
     
     func testCurrentCount() async {

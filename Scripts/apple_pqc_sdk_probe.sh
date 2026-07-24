@@ -137,6 +137,7 @@ skybridge_detect_apple_pqc_sdk() {
             ;;
         iphoneos)
             SKYBRIDGE_PQC_SWIFT_TARGET="${SKYBRIDGE_PQC_IPHONEOS_TARGET:-arm64-apple-ios26.0}"
+            include_secure_enclave=1
             ;;
         iphonesimulator)
             SKYBRIDGE_PQC_SWIFT_TARGET="${SKYBRIDGE_PQC_IPHONESIMULATOR_TARGET:-$(uname -m)-apple-ios26.0-simulator}"
@@ -211,14 +212,12 @@ func probe() throws {
     }
 }
 
-func probeMacSecureEnclavePQCSymbols() {
+func probeSecureEnclavePQCSymbols() {
     #if SKYBRIDGE_PQC_PROBE_SECURE_ENCLAVE
-    if #available(macOS 26.0, *) {
+    if #available(macOS 26.0, iOS 26.0, *) {
         _ = SecureEnclave.MLKEM768.PrivateKey.self
-        _ = SecureEnclave.MLDSA65.PrivateKey.self
-    }
-    if #available(macOS 27.0, *) {
         _ = SecureEnclave.MLKEM1024.PrivateKey.self
+        _ = SecureEnclave.MLDSA65.PrivateKey.self
         _ = SecureEnclave.MLDSA87.PrivateKey.self
     }
     #endif

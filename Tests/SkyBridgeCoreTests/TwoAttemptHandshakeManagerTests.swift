@@ -83,6 +83,37 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
             throw CryptoProviderError.notImplemented("Mock")
         }
     }
+
+    private final class MockQPeriaptOnlyProvider: CryptoProvider, @unchecked Sendable {
+        let providerName = "MockQPeriaptOnlyProvider"
+        let tier: CryptoTier = .qperiaptPQC
+        let activeSuite: CryptoSuite = .qperiaptABI2PolicyBound
+        let supportedSuites: [CryptoSuite] = [.qperiaptABI2PolicyBound]
+
+        func supportsSuite(_ suite: CryptoSuite) -> Bool {
+            supportedSuites.contains { $0.wireId == suite.wireId }
+        }
+
+        func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func hpkeOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+    }
     
  // MARK: - Test Data
     
@@ -162,6 +193,36 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
                 return
             }
         }
+    }
+
+    func testPrepareAttemptMLDSA87RejectsQPeriaptABI2OnlyProvider() {
+        XCTAssertThrowsError(
+            try TwoAttemptHandshakeManager.prepareAttempt(
+                strategy: .pqcOnly,
+                cryptoProvider: MockQPeriaptOnlyProvider(),
+                pqcSignatureAlgorithm: .mlDSA87
+            )
+        ) { error in
+            guard case AttemptPreparationError.pqcProviderUnavailable = error else {
+                XCTFail("Expected pqcProviderUnavailable, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testPrepareAttemptMLDSA87KeepsNonQPeriaptPQCSuites() throws {
+        let provider = MockCryptoProvider(
+            supportedSuites: [.qperiaptABI2PolicyBound, .mlkem768MLDSA65]
+        )
+
+        let preparation = try TwoAttemptHandshakeManager.prepareAttempt(
+            strategy: .pqcOnly,
+            cryptoProvider: provider,
+            pqcSignatureAlgorithm: .mlDSA87
+        )
+
+        XCTAssertEqual(preparation.sigAAlgorithm, .mlDSA87)
+        XCTAssertEqual(preparation.offeredSuites, [.mlkem768MLDSA65])
     }
     
     /// Test classicOnly with no classic suites in the selected cryptoProvider

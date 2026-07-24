@@ -19,6 +19,12 @@ public enum HandshakeConstants {
     public static let maxSupportedSuites: UInt16 = 8
     public static let maxKeyShareCount: UInt16 = 2
     public static let nonceSize = 32
+    /// 16 KiB admits a bounded ML-DSA-87 MessageA while keeping the network
+    /// decoder's allocation surface explicitly capped.
+    public static let maxMessageALength = 16 * 1024
+    /// MessageB carries the same ML-DSA-87 identity and signature material as
+    /// MessageA, so it uses the same explicit decoder allocation bound.
+    public static let maxMessageBLength = 16 * 1024
 }
 
 // MARK: - HandshakeState
@@ -418,16 +424,71 @@ public struct CryptoCapabilities: Sendable, Codable {
     }
     
     @available(iOS 17.0, *)
-    public static func fromProvider(_ provider: any CryptoProvider) -> CryptoCapabilities {
+    public static func fromProvider(
+        _ provider: any CryptoProvider,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil
+    ) -> CryptoCapabilities {
+        if let qPeriaptProvider = provider as? any QPeriaptRuntimeBoundCryptoProvider {
+            let version = ProcessInfo.processInfo.operatingSystemVersion
+            let platformVersion = "iOS \(version.majorVersion).\(version.minorVersion)"
+            guard protocolSigningAlgorithm == .mlDSA65 else {
+                return CryptoCapabilities(
+                    supportedKEM: [],
+                    supportedSignature: [],
+                    supportedAuthProfiles: [],
+                    supportedAEAD: [],
+                    pqcAvailable: false,
+                    platformVersion: platformVersion,
+                    providerType: .qPeriapt
+                )
+            }
+            return CryptoCapabilities(
+                supportedKEM: [CryptoSuite.qperiaptABI2PolicyBound.rawValue],
+                supportedSignature: [ProtocolSigningAlgorithm.mlDSA65.rawValue],
+                supportedAuthProfiles: [qPeriaptProvider.qPeriaptAuthProfile],
+                supportedAEAD: ["AES-256-GCM"],
+                pqcAvailable: true,
+                platformVersion: platformVersion,
+                providerType: .qPeriapt
+            )
+        }
+
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        let capability = CryptoProviderFactory.detectCapability()
+        let supportedKEM: [String]
+        let supportedAuthProfiles: [String]
+        let supportedSignature: [String]
+
+        if provider.activeSuite.isHybrid {
+            supportedKEM = ["X-Wing", "ML-KEM-768", "X25519"]
+            supportedAuthProfiles = ["Hybrid", "PQC", "Classic"]
+        } else if provider.activeSuite.isPQC {
+            supportedKEM = ["ML-KEM-768", "X25519"]
+            supportedAuthProfiles = ["PQC", "Classic"]
+        } else if provider.activeSuite.wireId == CryptoSuite.p256.wireId {
+            supportedKEM = ["P-256"]
+            supportedAuthProfiles = ["Classic"]
+        } else {
+            supportedKEM = ["X25519"]
+            supportedAuthProfiles = ["Classic"]
+        }
+
+        if provider.activeSuite.isPQC {
+            var seen = Set<ProtocolSigningAlgorithm>()
+            supportedSignature = [
+                protocolSigningAlgorithm ?? .mlDSA65,
+                .mlDSA65,
+                .ed25519
+            ].filter { seen.insert($0).inserted }.map(\.rawValue)
+        } else {
+            supportedSignature = [ProtocolSigningAlgorithm.ed25519.rawValue]
+        }
         
         return CryptoCapabilities(
-            supportedKEM: provider.activeSuite.isPQC ? ["ML-KEM-768", "X25519"] : ["X25519"],
-            supportedSignature: provider.activeSuite.isPQC ? ["ML-DSA-65", "Ed25519"] : ["Ed25519"],
-            supportedAuthProfiles: provider.activeSuite.isPQC ? ["pqc", "classic"] : ["classic"],
+            supportedKEM: supportedKEM,
+            supportedSignature: supportedSignature,
+            supportedAuthProfiles: supportedAuthProfiles,
             supportedAEAD: ["AES-256-GCM", "ChaCha20-Poly1305"],
-            pqcAvailable: capability.hasApplePQC || capability.hasLiboqs,
+            pqcAvailable: provider.tier != .classic,
             platformVersion: osVersion,
             providerType: CryptoProviderType(from: provider.tier)
         )
@@ -439,6 +500,7 @@ public struct CryptoCapabilities: Sendable, Codable {
 /// Provider 类型标识
 public enum CryptoProviderType: String, Sendable, Codable {
     // 与 macOS SkyBridgeCore 对齐（Sources/SkyBridgeCore/P2P/CryptoProviderSelector.swift）
+    case qPeriapt = "Q-Periapt-ContextBound"
     case cryptoKitPQC = "CryptoKit-PQC"
     case liboqs = "liboqs"
     case swiftCrypto = "SwiftCrypto"
@@ -446,6 +508,7 @@ public enum CryptoProviderType: String, Sendable, Codable {
     
     public init(from tier: CryptoTier) {
         switch tier {
+        case .qperiaptPQC: self = .qPeriapt
         case .nativePQC: self = .cryptoKitPQC
         case .liboqsPQC: self = .liboqs
         case .classic: self = .classic
@@ -490,7 +553,9 @@ public struct DeterministicDecoder {
     private var offset: Int = 0
     
     public init(data: Data) {
-        self.data = data
+        // Data.SubSequence keeps a non-zero startIndex. This decoder uses
+        // protocol-relative offsets, so rebase the bounded handshake payload.
+        self.data = Data(data)
     }
     
     public var isAtEnd: Bool {
@@ -510,11 +575,43 @@ public struct DeterministicDecoder {
     
     public mutating func decodeStringArray() throws -> [String] {
         let count = try decodeUInt32()
-        
+        // Each string requires at least a four-byte length prefix. Reject an
+        // impossible attacker-controlled count before reserving capacity.
+        guard Int(count) <= (data.count - offset) / 4 else {
+            throw TranscriptError.decodingError("String array count exceeds remaining payload")
+        }
         var result: [String] = []
         result.reserveCapacity(Int(count))
         for _ in 0..<count {
             result.append(try decodeString())
+        }
+        return result
+    }
+
+    public mutating func decodeStringArray(
+        maximumCount: Int,
+        maximumStringByteLength: Int,
+        remainingTotalStringBytes: inout Int
+    ) throws -> [String] {
+        guard maximumCount >= 0,
+              maximumStringByteLength >= 0,
+              remainingTotalStringBytes >= 0 else {
+            throw TranscriptError.decodingError("Invalid string decoding limits")
+        }
+
+        let count = try decodeUInt32()
+        guard Int(count) <= maximumCount,
+              Int(count) <= (data.count - offset) / 4 else {
+            throw TranscriptError.decodingError("String array count exceeds limit")
+        }
+
+        var result: [String] = []
+        result.reserveCapacity(Int(count))
+        for _ in 0..<count {
+            result.append(try decodeString(
+                maximumByteLength: maximumStringByteLength,
+                remainingTotalStringBytes: &remainingTotalStringBytes
+            ))
         }
         return result
     }
@@ -533,6 +630,30 @@ public struct DeterministicDecoder {
         }
         return string
     }
+
+    public mutating func decodeString(
+        maximumByteLength: Int,
+        remainingTotalStringBytes: inout Int
+    ) throws -> String {
+        guard maximumByteLength >= 0, remainingTotalStringBytes >= 0 else {
+            throw TranscriptError.decodingError("Invalid string decoding limits")
+        }
+        let length = try decodeUInt32()
+        guard Int(length) <= maximumByteLength,
+              Int(length) <= remainingTotalStringBytes else {
+            throw TranscriptError.decodingError("String length exceeds limit")
+        }
+        guard offset + Int(length) <= data.count else {
+            throw TranscriptError.decodingError("Unexpected end of data")
+        }
+        let bytes = data[offset..<(offset + Int(length))]
+        offset += Int(length)
+        guard let string = String(data: bytes, encoding: .utf8) else {
+            throw TranscriptError.decodingError("Invalid UTF-8 string")
+        }
+        remainingTotalStringBytes -= Int(length)
+        return string
+    }
     
     public mutating func decodeBool() throws -> Bool {
         guard offset < data.count else {
@@ -540,7 +661,14 @@ public struct DeterministicDecoder {
         }
         let value = data[offset]
         offset += 1
-        return value != 0
+        switch value {
+        case 0:
+            return false
+        case 1:
+            return true
+        default:
+            throw TranscriptError.decodingError("Non-canonical Bool value: \(value)")
+        }
     }
 }
 

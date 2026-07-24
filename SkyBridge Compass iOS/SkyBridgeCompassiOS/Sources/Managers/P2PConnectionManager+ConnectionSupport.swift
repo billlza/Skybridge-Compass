@@ -32,13 +32,21 @@ extension P2PConnectionManager {
         }
 
         func waitReady(timeoutSeconds: Double) async throws {
+            try Task.checkCancellation()
             let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                guard !Task.isCancelled else { return }
+                do {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                } catch {
+                    return
+                }
                 self?.finish(.failure(P2PError.connectionFailed))
             }
             defer { timeoutTask.cancel() }
-            try await awaitReadyOrFail()
+            try await withTaskCancellationHandler {
+                try await awaitReadyOrFail()
+            } onCancel: { [weak self] in
+                self?.finish(.failure(CancellationError()))
+            }
         }
 
         private func finish(_ result: Result<Void, Error>) {
@@ -106,13 +114,21 @@ extension P2PConnectionManager {
         }
 
         func wait(timeoutSeconds: Double) async throws -> Data {
+            try Task.checkCancellation()
             let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                guard !Task.isCancelled else { return }
+                do {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                } catch {
+                    return
+                }
                 self?.finish(.failure(P2PConnectionManager.signedLANRefreshFailure("receive timeout")))
             }
             defer { timeoutTask.cancel() }
-            return try await awaitResult()
+            return try await withTaskCancellationHandler {
+                try await awaitResult()
+            } onCancel: { [weak self] in
+                self?.finish(.failure(CancellationError()))
+            }
         }
 
         private func awaitResult() async throws -> Data {
@@ -137,29 +153,6 @@ extension P2PConnectionManager {
 
 enum SignedKEMRefreshSmokeStatusWriter {
     static func append(_ line: String) {
-        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
-        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let fileName, !fileName.isEmpty else { return }
-        guard let statusURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent(fileName) else {
-            return
-        }
-
-        let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
-        guard let data = formatted.data(using: .utf8) else { return }
-        try? FileManager.default.createDirectory(
-            at: statusURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        if FileManager.default.fileExists(atPath: statusURL.path),
-           let handle = try? FileHandle(forWritingTo: statusURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: statusURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        }
+        SkyBridgeDiagnosticTrace.appendStatus(line)
     }
 }

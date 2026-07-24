@@ -50,8 +50,10 @@ public final class RemoteControlServer: ObservableObject {
         "SKYBRIDGE_REMOTE_ROUTE_PROBE_V1\n".utf8
     )
     nonisolated private static func emitSmokeLog(_ message: String) {
+#if DEBUG || SKYBRIDGE_TESTING
         guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
         smokeLog.info("\(message, privacy: .public)")
+#endif
     }
     private var netService: NetService?
     public private(set) var activePort: UInt16?
