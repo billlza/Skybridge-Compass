@@ -205,18 +205,18 @@ script_has_literal 'skybridge_write_ios_distribution_product_proof' \
   || fail "Debug aps-environment must remain development"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$IOS_RELEASE_ENTITLEMENTS")" == "production" ]] \
   || fail "Release aps-environment must be production"
-grep -Fq 'CODE_SIGN_IDENTITY: Apple Distribution' "$IOS_PROJECT_YAML" \
-  || fail "XcodeGen Release configuration must use Apple Distribution"
+grep -Fq 'CODE_SIGN_STYLE: Automatic' "$IOS_PROJECT_YAML" \
+  || fail "XcodeGen Release configuration must use Xcode-managed (Automatic) signing"
 grep -Fq 'PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER)"' "$IOS_PROJECT_YAML" \
-  || fail "XcodeGen app Release configuration must require a caller-resolved profile"
+  || fail "XcodeGen app Release configuration must retain the caller-resolved profile specifier indirection"
 grep -Fq 'PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER)"' "$IOS_PROJECT_YAML" \
-  || fail "XcodeGen Widget Release configuration must require a caller-resolved profile"
-grep -Fq 'CODE_SIGN_IDENTITY = "Apple Distribution";' "$IOS_PROJECT_FILE" \
-  || fail "generated Xcode Release configurations must use Apple Distribution"
+  || fail "XcodeGen Widget Release configuration must retain the caller-resolved profile specifier indirection"
+grep -Fq 'CODE_SIGN_STYLE = Automatic;' "$IOS_PROJECT_FILE" \
+  || fail "generated Xcode Release configurations must use Xcode-managed (Automatic) signing"
 grep -Fq 'PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER)";' "$IOS_PROJECT_FILE" \
-  || fail "generated app Release configuration must consume the resolved profile"
+  || fail "generated app Release configuration must retain the resolved profile specifier indirection"
 grep -Fq 'PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER)";' "$IOS_PROJECT_FILE" \
-  || fail "generated Widget Release configuration must consume the resolved profile"
+  || fail "generated Widget Release configuration must retain the resolved profile specifier indirection"
 contains_literal "$distribution_profile_resolver_body" 'Library/MobileDevice/Provisioning Profiles' \
   || fail "Release signing must resolve only already-installed provisioning profiles"
 contains_literal "$distribution_profile_resolver_body" 'Formal physical iOS acceptance requires exactly one installed matching' \
@@ -229,6 +229,8 @@ contains_literal "$distribution_profile_resolver_body" 'app_profile["certificate
   || fail "app and Widget profiles must share a profile-bound distribution identity"
 contains_literal "$distribution_profile_resolver_body" 'security", "find-identity", "-v", "-p", "codesigning"' \
   || fail "the profile-bound distribution certificate must have a local private-key identity"
+script_has_literal '"CODE_SIGN_STYLE=Manual"' \
+  || fail "the testing-surface device build must force Manual signing to bind the resolved distribution profile under the Automatic project default"
 script_has_literal '"CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"' \
   || fail "xcodebuild must use the uniquely profile-bound distribution identity"
 script_has_literal '"SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"' \

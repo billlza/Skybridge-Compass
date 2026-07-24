@@ -119,8 +119,14 @@ targets:
           "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
         Release:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSRelease.entitlements
-          CODE_SIGN_STYLE: Manual
-          CODE_SIGN_IDENTITY: Apple Distribution
+          # Xcode-managed (Automatic) signing: the production archive/export and the
+          # on-device test lane let Xcode manage the distribution/development profile.
+          # Direct testing-surface device builds (real-device smoke lanes) override
+          # CODE_SIGN_STYLE=Manual on the xcodebuild command line and feed the
+          # SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER env build setting below to
+          # force the resolver-selected distribution profile for their measured proof.
+          # The specifier expands to empty under Automatic paths, which Xcode ignores.
+          CODE_SIGN_STYLE: Automatic
           "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
           PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER)"
 
@@ -154,8 +160,9 @@ targets:
           "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
         Release:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-WidgetsRelease.entitlements
-          CODE_SIGN_STYLE: Manual
-          CODE_SIGN_IDENTITY: Apple Distribution
+          # See the app target note: Automatic by default; smoke lanes force Manual
+          # and feed the widget specifier env build setting below.
+          CODE_SIGN_STYLE: Automatic
           "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
           PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER)"
 

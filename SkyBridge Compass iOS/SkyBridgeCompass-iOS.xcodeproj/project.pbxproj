@@ -1689,9 +1689,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = "SkyBridgeCompass-WidgetsRelease.entitlements";
-				CODE_SIGN_IDENTITY = "Apple Distribution";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = YKUPL7Z869;
 				INFOPLIST_FILE = Widgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1739,9 +1738,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "SkyBridgeCompass-iOSRelease.entitlements";
-				CODE_SIGN_IDENTITY = "Apple Distribution";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = YKUPL7Z869;
 				INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (

@@ -2554,7 +2554,13 @@ fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
 IOS_XCODE_SIGNING_SETTINGS=()
 if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  # The project default is Automatic (Xcode-managed) signing. This direct
+  # testing-surface device build forces Manual signing on the command line so it is
+  # signed by the resolver-selected installed distribution profile (per-target
+  # profiles come from the project's PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_*_...)"
+  # indirection, fed by the two environment build settings below).
   IOS_XCODE_SIGNING_SETTINGS=(
+    "CODE_SIGN_STYLE=Manual"
     "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
     "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
     "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
