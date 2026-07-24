@@ -499,8 +499,15 @@ run_xcodebuild_step() {
 
   if [[ "${SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS:-0}" == "1" ]]; then
     local matches
+    # The device-specific DeviceSupport symbols are verified up front by
+    # require_device_support_symbols_for_clean_log. Xcode still emits a benign
+    # arch-fallback diagnostic ("DVTDevice: Error locating DeviceSupport directory
+    # using Optional(\"arm64\")/Optional(\"arm64e\"): nilError") even when those
+    # symbols are present, so that specific line is filtered out here. Any other
+    # DeviceSupport error, or any real warning:/error:, still fails the gate.
     matches="$(
-      { rg -n '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}" 2>/dev/null || true; }
+      { rg -n '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}" 2>/dev/null || true; } \
+        | { rg -v 'DVTDevice: Error locating DeviceSupport directory using Optional\(.*\): nilError' || true; }
     )"
     if [[ -n "${matches}" ]]; then
       echo "[iOS device lane] ERROR: ${label} emitted warnings/errors under clean-log gate" >&2

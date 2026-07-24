@@ -132,6 +132,13 @@ case "${STUB_XCODEBUILD_MODE:-success}" in
     echo "warning: destination SECRET-UDID-123 Sensitive iPad SECRET-SERIAL-456 secret-ipad.local secret-ipad-alt.local SECRET-HW-UDID-789 ${SKYBRIDGE_IOS_DEVICE_ID:-} /Applications/Xcode-beta.app/Contents/Developer"
     exit 0
     ;;
+  benign_device_support)
+    # Emits only the benign Xcode arch-fallback DeviceSupport diagnostic, which
+    # must NOT trip the clean-log gate when device symbols are present.
+    echo "2026-07-24 19:31:55.356 xcodebuild[52499:25123985] [MT] DVTDevice: Error locating DeviceSupport directory using Optional(\"arm64\") or Optional(\"arm64e\"): nilError"
+    echo "Test Suite 'All tests' passed for SECRET-UDID-123 Sensitive iPad SECRET-SERIAL-456 secret-ipad.local secret-ipad-alt.local SECRET-HW-UDID-789 ${SKYBRIDGE_IOS_DEVICE_ID:-}"
+    exit 0
+    ;;
   *)
     echo "unknown STUB_XCODEBUILD_MODE=${STUB_XCODEBUILD_MODE}" >&2
     exit 64
@@ -663,6 +670,30 @@ fi
 assert_contains "emitted warnings/errors under clean-log gate" "${CLEAN_LOG_OUTPUT}"
 assert_contains "<ios-device-sha256:" "${CLEAN_LOG_OUTPUT}"
 assert_no_secret_output "${CLEAN_LOG_OUTPUT}"
+assert_no_redaction_token_files
+assert_no_device_metadata_files
+
+# The benign Xcode arch-fallback DeviceSupport diagnostic must NOT trip the
+# clean-log gate when device-specific symbols are present.
+BENIGN_DEVICE_SUPPORT_OUTPUT="${TMP_DIR}/benign-device-support.out"
+set +e
+run_lane "${BENIGN_DEVICE_SUPPORT_OUTPUT}" env \
+  SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_RELEASE_TYPE=Beta \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
+  SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS=1 \
+  STUB_XCODEBUILD_MODE=benign_device_support
+benign_device_support_status=$?
+set -e
+if [[ "${benign_device_support_status}" -ne 0 ]]; then
+  echo "Expected clean-log lane to pass when only the benign DeviceSupport arch-fallback line is present" >&2
+  cat "${BENIGN_DEVICE_SUPPORT_OUTPUT}" >&2
+  exit 1
+fi
+assert_not_contains "emitted warnings/errors under clean-log gate" "${BENIGN_DEVICE_SUPPORT_OUTPUT}"
+assert_contains "full suite passed on device" "${BENIGN_DEVICE_SUPPORT_OUTPUT}"
+assert_no_secret_output "${BENIGN_DEVICE_SUPPORT_OUTPUT}"
 assert_no_redaction_token_files
 assert_no_device_metadata_files
 
