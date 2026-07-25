@@ -475,14 +475,18 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
         let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let stacks = conditionalStacks(for: lines)
 
+        // Stored properties leak a forbidden symbol just as readily as functions
+        // do, so the scan covers nested types and static storage, not only `func`.
+        let memberDeclarationMarkers = ["func ", "static let ", "static var ", "class ", "struct ", "enum "]
+
         for lineIndex in lines.indices {
             let trimmed = lines[lineIndex].trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("func "), !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///") else {
-                continue
-            }
-            if trimmed.hasPrefix("static func append(") {
-                continue
-            }
+            guard !trimmed.hasPrefix("//") else { continue }
+            guard memberDeclarationMarkers.contains(where: { trimmed.contains($0) }) else { continue }
+            // The type declaration itself must stay ungated so the 148 ungated
+            // call sites across SkyBridgeCore keep compiling in Release.
+            if trimmed.hasPrefix("enum RemoteControlSmokeStatusWriter") { continue }
+            if trimmed.hasPrefix("static func append(") { continue }
             XCTAssertTrue(
                 hasExplicitTestGate(stacks[lineIndex]),
                 "\(relativePath):\(lineIndex + 1) declares a member outside "
@@ -505,16 +509,21 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
     func testDiagnosticFieldSanitizerIsUngatedProductionCode() throws {
         let relativePath = "Sources/SkyBridgeCore/Diagnostics/DiagnosticFieldSanitizer.swift"
         let source = try repositorySource(relativePath)
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let stacks = conditionalStacks(for: lines)
 
         XCTAssertTrue(source.contains("enum DiagnosticFieldSanitizer"))
         XCTAssertTrue(source.contains("static func fieldValue(_ raw: String?) -> String"))
-        XCTAssertFalse(
-            source.contains("#if DEBUG"),
-            "\(relativePath) must not be gated; release code paths emit structured diagnostics."
+
+        let declarationIndex = try XCTUnwrap(
+            lines.firstIndex { $0.contains("static func fieldValue(") },
+            "\(relativePath) must declare fieldValue(_:)"
         )
-        XCTAssertFalse(
-            source.contains("enum DiagnosticFieldSanitizer {\n#if"),
-            "\(relativePath) must expose its sanitizer unconditionally."
+        XCTAssertTrue(
+            stacks[declarationIndex].isEmpty,
+            "\(relativePath):\(declarationIndex + 1) must not sit inside any conditional "
+                + "compilation block. Release builds have to keep the sanitizer, because the "
+                + "ungated call sites that interpolate it still compile."
         )
     }
 

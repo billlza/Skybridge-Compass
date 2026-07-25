@@ -6,15 +6,21 @@ import Foundation
 /// Diagnostic records are whitespace-delimited `key=value` pairs. A raw value
 /// carrying whitespace, newlines or delimiter characters would let remote- or
 /// user-controlled input forge additional fields inside a record, so every
-/// interpolated value has to pass through this sanitizer first. Characters
-/// outside the `[A-Za-z0-9.:-_]` allowlist collapse into `_`, and absent or
-/// fully-collapsed input reports a stable placeholder so a record always
+/// interpolated value has to pass through this sanitizer first. Any scalar
+/// outside `CharacterSet.alphanumerics` plus `.`, `:`, `-` and `_` collapses
+/// into `_`. Note that `alphanumerics` is Unicode-wide, so letters and digits
+/// from any script survive unchanged; the guarantee is that no whitespace,
+/// newline or `=` can reach a record, not that the output is ASCII. Absent or
+/// fully-collapsed input reports ``missingValuePlaceholder`` so a record always
 /// carries exactly the fields its emitter declared.
 ///
-/// This is production log hygiene rather than a test hook: it stays compiled
-/// into release builds because release code paths emit structured diagnostics.
-/// It deliberately lives outside any smoke/test-only type so that the release
-/// binary carries no test-activation surface in its symbol table.
+/// This is a general-purpose sanitizer, not a test hook, so it is deliberately
+/// not compiled out of Release builds. Its current callers are diagnostic
+/// evidence emitters whose sink, `RemoteControlSmokeStatusWriter.append(_:)`,
+/// is itself gated to test builds. Keeping the sanitizer outside that
+/// smoke-named type is what matters for shipping: the macOS release binary
+/// surface gate rejects any `*SmokeStatusWriter` symbol in the shipped binary,
+/// and a pure string sanitizer is not a test-activation surface.
 enum DiagnosticFieldSanitizer {
     /// Reported when the input is `nil`, empty, or collapses to nothing.
     static let missingValuePlaceholder = "missing"
