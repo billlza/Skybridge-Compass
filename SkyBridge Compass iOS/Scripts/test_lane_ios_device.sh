@@ -499,15 +499,31 @@ run_xcodebuild_step() {
 
   if [[ "${SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS:-0}" == "1" ]]; then
     local matches
+    local raw_matches=""
+    local scan_status=0
     # The device-specific DeviceSupport symbols are verified up front by
     # require_device_support_symbols_for_clean_log. Xcode still emits a benign
     # arch-fallback diagnostic ("DVTDevice: Error locating DeviceSupport directory
     # using Optional(\"arm64\")/Optional(\"arm64e\"): nilError") even when those
     # symbols are present, so that specific line is filtered out here. Any other
     # DeviceSupport error, or any real warning:/error:, still fails the gate.
+    #
+    # Uses POSIX grep, not ripgrep: `rg` is absent on the GitHub macOS runners, and
+    # swallowing that absence would make this gate fail open and silently accept a
+    # log full of warnings.
+    raw_matches="$(
+      LC_ALL=C grep -nE '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}"
+    )" || scan_status=$?
+    # grep exits 1 for "no match", which is the clean case. Anything higher is a
+    # real tool or I/O failure and must never be read as a clean log.
+    if [[ "${scan_status}" -gt 1 ]]; then
+      echo "[iOS device lane] ERROR: clean-log scan failed for ${label} (grep status ${scan_status}); refusing to report a clean log" >&2
+      return 1
+    fi
     matches="$(
-      { rg -n '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}" 2>/dev/null || true; } \
-        | { rg -v 'DVTDevice: Error locating DeviceSupport directory using Optional\(.*\): nilError' || true; }
+      printf '%s' "${raw_matches}" \
+        | LC_ALL=C grep -vE 'DVTDevice: Error locating DeviceSupport directory using Optional\(.*\): nilError' \
+        || true
     )"
     if [[ -n "${matches}" ]]; then
       echo "[iOS device lane] ERROR: ${label} emitted warnings/errors under clean-log gate" >&2

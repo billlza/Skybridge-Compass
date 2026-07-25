@@ -210,13 +210,28 @@ python3 - "${forbidden_pqc_pbxproj_root}/SkyBridge Compass iOS/SkyBridgeCompass-
 from pathlib import Path
 import sys
 
+import re
+
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-needle = '\t\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";\n'
-if needle not in text:
+# Match the condition line by content and capture its actual indentation. Xcode
+# rewrites pbxproj indentation when the project is edited, so pinning an exact
+# tab count made this fixture break on an unrelated reformat instead of on a
+# real policy regression.
+pattern = re.compile(
+    r'^([ \t]*)SWIFT_ACTIVE_COMPILATION_CONDITIONS = '
+    r'"\$\(inherited\) \$\(SKYBRIDGE_APPLE_PQC_SDK_CONDITION\)";\n',
+    re.MULTILINE,
+)
+match = pattern.search(text)
+if match is None:
     raise SystemExit("missing Swift compilation condition line in project.pbxproj fixture")
-replacement = needle + '\t\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator27*]" = "$(inherited) HAS_APPLE_PQC_SDK";\n'
-path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+indent = match.group(1)
+replacement = match.group(0) + (
+    f'{indent}"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator27*]" = '
+    '"$(inherited) HAS_APPLE_PQC_SDK";\n'
+)
+path.write_text(text[: match.start()] + replacement + text[match.end() :], encoding="utf-8")
 PY
 expect_failure_contains \
   "project.pbxproj rejects SDK-selector Apple PQC gate" \
