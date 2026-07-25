@@ -43,9 +43,41 @@ fn crossnet_subcommands_parse_app_bound_surface() {
     let Commands::Crossnet(command) = settings.command else {
         panic!("expected crossnet command");
     };
-    let CrossnetSubcommand::Settings(output) = command.command else {
+    let CrossnetSubcommand::Settings(args) = command.command else {
         panic!("expected settings subcommand");
     };
-    assert!(output.json);
+    assert!(args.output.json);
+    assert!(
+        args.command.is_none(),
+        "bare `crossnet settings` must stay the read-only projection"
+    );
     assert!(Cli::try_parse_from(["skybridge", "settings", "--json"]).is_err());
+
+    let set = Cli::try_parse_from([
+        "skybridge",
+        "crossnet",
+        "settings",
+        "set",
+        "logging.level",
+        "Debug",
+        "--json",
+    ])
+    .expect("crossnet settings set should parse");
+    let Commands::Crossnet(command) = set.command else {
+        panic!("expected crossnet command");
+    };
+    let CrossnetSubcommand::Settings(args) = command.command else {
+        panic!("expected settings subcommand");
+    };
+    let Some(crate::CrossnetSettingsSubcommand::Set(set_args)) = args.command else {
+        panic!("expected settings set subcommand");
+    };
+    assert_eq!(set_args.id, "logging.level");
+    assert_eq!(set_args.value, "Debug");
+    assert!(set_args.output.json);
+
+    // Both operands are required: a bare id must not silently mean "unset".
+    assert!(
+        Cli::try_parse_from(["skybridge", "crossnet", "settings", "set", "logging.level"]).is_err()
+    );
 }

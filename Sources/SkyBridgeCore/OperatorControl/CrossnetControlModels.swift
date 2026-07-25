@@ -201,6 +201,18 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
     case authRequired
     case tenantRequired
     case requestTooLarge
+    /// The requested setting id is not part of the operator-visible allowlist.
+    case settingNotFound
+    /// The setting is readable but deliberately not mutable over this channel.
+    ///
+    /// Carries the reason so an operator learns *why* a readable setting refuses
+    /// mutation instead of seeing an indistinguishable "not allowlisted".
+    case settingImmutable(String)
+    /// The supplied value is outside the setting's declared type or domain.
+    case settingInvalidValue
+    /// The write was accepted but the runtime did not read back the requested
+    /// value, so no apply is claimed.
+    case settingRuntimeApplyFailed
     case internalError(String)
 
     public var code: String {
@@ -225,6 +237,14 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "tenant_required"
         case .requestTooLarge:
             return "request_too_large"
+        case .settingNotFound:
+            return "setting_not_found"
+        case .settingImmutable:
+            return "setting_immutable"
+        case .settingInvalidValue:
+            return "setting_invalid_value"
+        case .settingRuntimeApplyFailed:
+            return "setting_runtime_apply_failed"
         case .internalError:
             return "internal"
         }
@@ -252,6 +272,14 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "Mac app tenant binding is unavailable"
         case .requestTooLarge:
             return "crossnet-control request line is too large"
+        case .settingNotFound:
+            return "unknown crossnet-control setting id"
+        case .settingImmutable(let reason):
+            return "crossnet-control setting is not mutable: \(Self.sanitized(reason))"
+        case .settingInvalidValue:
+            return "crossnet-control setting value is outside its declared domain"
+        case .settingRuntimeApplyFailed:
+            return "crossnet-control setting write did not read back from the Mac app runtime"
         case .internalError(let detail):
             return "crossnet-control internal error: \(Self.sanitized(detail))"
         }
@@ -557,6 +585,189 @@ enum CrossnetControlSettingsProjectionPolicy {
     }
 }
 
+/// Result of a `crossnet.settings.set` mutation.
+///
+/// This is deliberately a distinct type from ``CrossnetControlSettingsSnapshotResult``
+/// rather than a relaxation of it: the read projection stays pinned to
+/// `control_effect == "read_only"` with every entry `mutable == false`, on both
+/// the Swift and Rust sides, so adding mutation cannot loosen the read contract.
+///
+/// `observedValue` is re-read from the live runtime *after* the write, and
+/// `runtimeApplied` records whether the runtime apply hook ran. A mutation is
+/// only reported when the observed value equals the requested value; otherwise
+/// the router fails closed with `setting_runtime_apply_failed`.
+public struct CrossnetControlSettingsMutationResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let id: String
+    public let valueType: String
+    public let requestedValue: CrossnetControlJSONValue
+    public let observedValue: CrossnetControlJSONValue
+    public let runtimeApplied: Bool
+    public let note: String?
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "mac_runtime_mutation",
+        id: String,
+        valueType: String,
+        requestedValue: CrossnetControlJSONValue,
+        observedValue: CrossnetControlJSONValue,
+        runtimeApplied: Bool,
+        note: String? = nil
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.id = id
+        self.valueType = valueType
+        self.requestedValue = requestedValue
+        self.observedValue = observedValue
+        self.runtimeApplied = runtimeApplied
+        self.note = note
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case id
+        case valueType = "value_type"
+        case requestedValue = "requested_value"
+        case observedValue = "observed_value"
+        case runtimeApplied = "runtime_applied"
+        case note
+    }
+}
+
+/// A validated `crossnet.settings.set` request.
+public struct CrossnetControlSettingsMutationRequest: Equatable, Sendable {
+    public let id: String
+    public let value: CrossnetControlJSONValue
+
+    public init(id: String, value: CrossnetControlJSONValue) {
+        self.id = id
+        self.value = value
+    }
+}
+
+enum CrossnetControlSettingsMutationPolicy {
+    /// Settings an operator may change over this channel.
+    ///
+    /// This is a strict subset of ``CrossnetControlSettingsProjectionPolicy/allowedSettingIDs``:
+    /// readability does not imply mutability.
+    static let mutableSettingIDs: Set<String> = [
+        "logging.verbose",
+        "logging.level",
+        "ui.show_realtime_fps",
+        "ui.top_bar_ip_location",
+        "ui.top_bar_network_speed",
+        "ui.top_bar_network_latency"
+    ]
+
+    /// Readable settings whose real authority is the versioned protocol identity
+    /// configuration, not a UserDefaults toggle.
+    ///
+    /// `pqc.signature_algorithm` is committed through a prepare/commit request
+    /// generation that can require peer re-pinning, and `pqc.prefer_xwing_hybrid`
+    /// is a policy preference rather than runtime proof. Flipping either from a
+    /// one-shot control call would report a change the handshake has not made, so
+    /// both are refused with an explicit reason instead of being silently absent.
+    static let protocolIdentityBoundSettingIDs: Set<String> = [
+        "pqc.prefer_xwing_hybrid",
+        "pqc.signature_algorithm"
+    ]
+
+    static let protocolIdentityRejectionReason =
+        "protocol identity settings must be committed through the Mac app's prepare/commit "
+        + "protocol identity configuration flow, which can require peer re-pinning; "
+        + "a one-shot control write cannot prove the handshake adopted it"
+
+    /// Parses and validates the mutation request, failing closed on unknown ids,
+    /// immutable ids, and out-of-domain values.
+    static func parse(params: CrossnetControlParams) throws -> CrossnetControlSettingsMutationRequest {
+        guard let id = params.string("id")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !id.isEmpty else {
+            throw CrossnetControlFailure.malformedRequest("missing setting id")
+        }
+        if protocolIdentityBoundSettingIDs.contains(id) {
+            throw CrossnetControlFailure.settingImmutable(protocolIdentityRejectionReason)
+        }
+        guard mutableSettingIDs.contains(id) else {
+            throw CrossnetControlFailure.settingNotFound
+        }
+
+        let value = try mutableValue(for: id, params: params)
+        return CrossnetControlSettingsMutationRequest(id: id, value: value)
+    }
+
+    private static func mutableValue(
+        for id: String,
+        params: CrossnetControlParams
+    ) throws -> CrossnetControlJSONValue {
+        switch id {
+        case "logging.verbose",
+             "ui.show_realtime_fps",
+             "ui.top_bar_ip_location",
+             "ui.top_bar_network_speed",
+             "ui.top_bar_network_latency":
+            guard let value = params.bool("value") else {
+                throw CrossnetControlFailure.settingInvalidValue
+            }
+            return .bool(value)
+        case "logging.level":
+            guard let raw = params.string("value") else {
+                throw CrossnetControlFailure.settingInvalidValue
+            }
+            guard let canonical = canonicalLoggingLevel(raw) else {
+                throw CrossnetControlFailure.settingInvalidValue
+            }
+            return .string(canonical)
+        default:
+            throw CrossnetControlFailure.settingNotFound
+        }
+    }
+
+    /// Normalizes an operator-supplied level to the exact casing the runtime
+    /// stores, so the post-write read-back comparison is meaningful.
+    static func canonicalLoggingLevel(_ raw: String) -> String? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "trace": return "Trace"
+        case "debug": return "Debug"
+        case "info": return "Info"
+        case "warning", "warn": return "Warning"
+        case "error": return "Error"
+        case "critical": return "Critical"
+        case "fault": return "Fault"
+        default: return nil
+        }
+    }
+
+    /// Fails closed unless the runtime read-back matches the requested value.
+    static func validate(
+        _ result: CrossnetControlSettingsMutationResult,
+        request: CrossnetControlSettingsMutationRequest
+    ) throws -> CrossnetControlSettingsMutationResult {
+        guard result.runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("settings_mutation_invalid_runtime")
+        }
+        guard result.controlEffect == "mac_runtime_mutation" else {
+            throw CrossnetControlFailure.internalError("settings_mutation_invalid_effect")
+        }
+        guard result.id == request.id else {
+            throw CrossnetControlFailure.internalError("settings_mutation_id_mismatch")
+        }
+        guard result.requestedValue == request.value else {
+            throw CrossnetControlFailure.internalError("settings_mutation_request_mismatch")
+        }
+        guard result.valueType == request.value.valueType else {
+            throw CrossnetControlFailure.internalError("settings_mutation_value_type_mismatch")
+        }
+        guard result.runtimeApplied, result.observedValue == request.value else {
+            throw CrossnetControlFailure.settingRuntimeApplyFailed
+        }
+        return result
+    }
+}
+
 public enum CrossnetControlSessionRef {
     public static func redacted(_ sessionID: String) -> String {
         let digest = SHA256.hash(data: Data(sessionID.utf8))
@@ -565,7 +776,14 @@ public enum CrossnetControlSessionRef {
 }
 
 extension CrossnetControlJSONValue {
-    var valueType: String {
+    /// Canonical wire name for the payload's value type.
+    ///
+    /// `CrossnetControlSettingSnapshot.valueType` and
+    /// `CrossnetControlSettingsMutationResult.valueType` are already public and must be
+    /// filled from this single source of truth, including by the app-layer runtime
+    /// factory. Keeping it internal forced either a duplicate mapping outside the module
+    /// or an unbuildable app target.
+    public var valueType: String {
         switch self {
         case .string:
             return "string"

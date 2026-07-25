@@ -244,6 +244,47 @@ pub struct SettingsSnapshotResult {
     pub settings: Vec<SettingSnapshot>,
 }
 
+/// Result of `crossnet.settings.set`.
+///
+/// Deliberately a distinct type from [`SettingsSnapshotResult`]: the read
+/// projection stays pinned to `control_effect == "read_only"` with every entry
+/// immutable, so gaining a write verb cannot loosen the read contract.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SettingsMutationResult {
+    /// Runtime authority that applied the change.
+    pub runtime_target: String,
+    /// Effect of this request. The only accepted value is `mac_runtime_mutation`.
+    pub control_effect: String,
+    /// Settings projection id that was changed.
+    pub id: String,
+    /// Wire-level value kind of the change.
+    pub value_type: String,
+    /// The value the operator asked for.
+    pub requested_value: Value,
+    /// The value the Mac app read back from its runtime after applying.
+    pub observed_value: Value,
+    /// Whether the Mac app ran its runtime apply hook.
+    pub runtime_applied: bool,
+    /// Optional caveat reported by the Mac app.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Settings ids this CLI is willing to mutate.
+///
+/// A strict subset of [`PUBLIC_SETTINGS_ALLOWLIST`]: `pqc.*` entries are readable
+/// but their authority is the versioned protocol identity configuration, which is
+/// committed through a prepare/commit flow that can require peer re-pinning, so a
+/// one-shot control write must not claim to change them.
+const MUTABLE_SETTINGS_ALLOWLIST: &[&str] = &[
+    "logging.verbose",
+    "logging.level",
+    "ui.show_realtime_fps",
+    "ui.top_bar_ip_location",
+    "ui.top_bar_network_speed",
+    "ui.top_bar_network_latency",
+];
+
 /// Queries the app-owned control surface and auth state (`crossnet.hello`).
 #[cfg(target_os = "macos")]
 pub async fn hello() -> Result<HelloResult> {
@@ -352,6 +393,93 @@ async fn settings_snapshot_at_path(path: &PathBuf) -> Result<SettingsSnapshotRes
     let result = call_at_path(path, "crossnet.settings.snapshot", json!({})).await?;
     let snapshot = parse_result("crossnet.settings.snapshot", result)?;
     validate_settings_snapshot_projection(snapshot)
+}
+
+/// Applies one allowlisted Mac app setting (`crossnet.settings.set`).
+///
+/// `value` must already be a `bool` or `string` matching the setting's declared
+/// domain; the Mac app re-validates and fails closed.
+#[cfg(target_os = "macos")]
+pub async fn settings_set(id: &str, value: Value) -> Result<SettingsMutationResult> {
+    let path = default_socket_path()?;
+    settings_set_at_path(&path, id, value).await
+}
+
+#[cfg(target_os = "macos")]
+async fn settings_set_at_path(
+    path: &PathBuf,
+    id: &str,
+    value: Value,
+) -> Result<SettingsMutationResult> {
+    preflight_mutable_setting(id)?;
+    preflight_app_session_at_path(path).await?;
+    let result = call_at_path(
+        path,
+        "crossnet.settings.set",
+        json!({ "id": id, "value": value }),
+    )
+    .await?;
+    validate_settings_mutation_projection(
+        parse_result("crossnet.settings.set", result)?,
+        id,
+        &value,
+    )
+}
+
+/// Refuses ids this CLI must not mutate before any socket traffic happens.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn preflight_mutable_setting(id: &str) -> Result<()> {
+    if MUTABLE_SETTINGS_ALLOWLIST.contains(&id) {
+        return Ok(());
+    }
+    if PUBLIC_SETTINGS_ALLOWLIST.contains(&id) {
+        bail!(
+            "setting `{id}` is readable but not mutable through crossnet-control; protocol identity settings are committed through the Mac app's prepare/commit flow, which can require peer re-pinning (code: setting_immutable)"
+        );
+    }
+    bail!("unknown crossnet-control setting `{id}` (code: setting_not_found)")
+}
+
+/// Fails closed unless the Mac app reported a real runtime read-back of the
+/// requested value.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn validate_settings_mutation_projection(
+    result: SettingsMutationResult,
+    id: &str,
+    requested: &Value,
+) -> Result<SettingsMutationResult> {
+    if result.runtime_target != "mac_app_runtime" {
+        bail!(
+            "crossnet.settings.set reported an unexpected runtime target `{}`",
+            result.runtime_target
+        );
+    }
+    if result.control_effect != "mac_runtime_mutation" {
+        bail!(
+            "crossnet.settings.set reported an unexpected control effect `{}`",
+            result.control_effect
+        );
+    }
+    if result.id != id {
+        bail!(
+            "crossnet.settings.set reported setting `{}` but `{id}` was requested",
+            result.id
+        );
+    }
+    if &result.requested_value != requested {
+        bail!("crossnet.settings.set echoed a different requested value than was sent");
+    }
+    if !result.runtime_applied {
+        bail!(
+            "crossnet.settings.set did not apply `{id}` to the Mac app runtime (code: setting_runtime_apply_failed)"
+        );
+    }
+    if &result.observed_value != requested {
+        bail!(
+            "crossnet.settings.set applied `{id}` but the Mac app runtime read back a different value (code: setting_runtime_apply_failed)"
+        );
+    }
+    Ok(result)
 }
 
 #[cfg(target_os = "macos")]
@@ -938,6 +1066,102 @@ mod tests {
         );
         validate_settings_snapshot_projection(parsed)
             .expect("allowlisted read-only settings should pass");
+    }
+
+    #[test]
+    fn mutable_setting_preflight_separates_unknown_from_immutable() {
+        assert!(preflight_mutable_setting("logging.level").is_ok());
+        assert!(preflight_mutable_setting("ui.top_bar_ip_location").is_ok());
+
+        // A readable-but-immutable id must not be reported as unknown: the
+        // operator needs to learn that the value exists and why it is refused.
+        let immutable = preflight_mutable_setting("pqc.signature_algorithm")
+            .expect_err("pqc settings must not be mutable");
+        assert!(
+            immutable.to_string().contains("setting_immutable"),
+            "{immutable}"
+        );
+        assert!(
+            immutable.to_string().contains("peer re-pinning"),
+            "{immutable}"
+        );
+
+        let unknown =
+            preflight_mutable_setting("logging.nope").expect_err("unknown ids must fail closed");
+        assert!(
+            unknown.to_string().contains("setting_not_found"),
+            "{unknown}"
+        );
+
+        // Every mutable id must also be readable, otherwise the CLI could write a
+        // key the snapshot never surfaces.
+        for id in MUTABLE_SETTINGS_ALLOWLIST {
+            assert!(
+                PUBLIC_SETTINGS_ALLOWLIST.contains(id),
+                "{id} is mutable but not readable"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_mutation_projection_requires_a_real_runtime_read_back() {
+        let requested = Value::Bool(true);
+        let ok = SettingsMutationResult {
+            runtime_target: "mac_app_runtime".to_owned(),
+            control_effect: "mac_runtime_mutation".to_owned(),
+            id: "logging.verbose".to_owned(),
+            value_type: "bool".to_owned(),
+            requested_value: requested.clone(),
+            observed_value: requested.clone(),
+            runtime_applied: true,
+            note: None,
+        };
+        assert!(
+            validate_settings_mutation_projection(ok.clone(), "logging.verbose", &requested).is_ok()
+        );
+
+        // Read-back disagreement must fail closed rather than report success.
+        let drifted = SettingsMutationResult {
+            observed_value: Value::Bool(false),
+            ..ok.clone()
+        };
+        let drifted_error =
+            validate_settings_mutation_projection(drifted, "logging.verbose", &requested)
+                .expect_err("a differing read-back must fail closed");
+        assert!(
+            drifted_error
+                .to_string()
+                .contains("setting_runtime_apply_failed"),
+            "{drifted_error}"
+        );
+
+        // Claiming a value without running the apply hook must fail closed.
+        let unapplied = SettingsMutationResult {
+            runtime_applied: false,
+            ..ok.clone()
+        };
+        assert!(
+            validate_settings_mutation_projection(unapplied, "logging.verbose", &requested)
+                .is_err()
+        );
+
+        // A read-only effect must never be accepted on the mutation path.
+        let read_only = SettingsMutationResult {
+            control_effect: "read_only".to_owned(),
+            ..ok.clone()
+        };
+        assert!(
+            validate_settings_mutation_projection(read_only, "logging.verbose", &requested).is_err()
+        );
+
+        // The server must not answer about a different setting than was asked.
+        let swapped = SettingsMutationResult {
+            id: "logging.level".to_owned(),
+            ..ok
+        };
+        assert!(
+            validate_settings_mutation_projection(swapped, "logging.verbose", &requested).is_err()
+        );
     }
 
     #[test]

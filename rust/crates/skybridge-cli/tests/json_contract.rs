@@ -213,9 +213,12 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
             && settings_snapshot_boundary.contains("iOS runtime"),
         "crossnet.settings.snapshot must stay read-only, allowlisted, and Mac-only"
     );
+    // The mutation handler is implemented and enabled in the app runtime, so
+    // `planned` would deny a live code path. No live signed-app socket smoke has
+    // been captured, so `available` would claim proof nobody produced.
     assert_eq!(
         capability_status(capabilities, "crossnet.settings.set")?,
-        "planned"
+        "pending_live_proof"
     );
     assert_eq!(
         capability_runtime_target(capabilities, "crossnet.settings.set")?,
@@ -223,15 +226,17 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     );
     assert_eq!(
         capability_control_effect(capabilities, "crossnet.settings.set")?,
-        "mac_mutation_not_enabled"
+        "mac_runtime_mutation"
     );
     let settings_set_boundary =
         capability_authority_boundary(capabilities, "crossnet.settings.set")?;
     assert!(
         settings_set_boundary.contains("typed allowlist")
-            && settings_set_boundary.contains("runtime observation proof")
-            && settings_set_boundary.contains("fail closed"),
-        "crossnet.settings.set must remain planned until runtime mutation is proven"
+            && settings_set_boundary.contains("setting_runtime_apply_failed")
+            && settings_set_boundary.contains("fails closed")
+            && settings_set_boundary.contains("pqc.*")
+            && settings_set_boundary.contains("live signed-app socket smoke"),
+        "crossnet.settings.set must declare its allowlist, read-back failure mode, pqc exclusion, and missing live proof"
     );
     assert_eq!(
         capability_status(capabilities, "crossnet.status.watch")?,

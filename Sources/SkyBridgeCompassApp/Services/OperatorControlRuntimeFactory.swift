@@ -29,6 +29,14 @@ public extension CrossnetControlRuntime {
                 await MainActor.run {
                     OperatorControlRuntimeFactory.settingsSnapshot(settingsManager: .shared)
                 }
+            },
+            applySetting: { request in
+                try await MainActor.run {
+                    try OperatorControlRuntimeFactory.applySetting(
+                        request,
+                        settingsManager: .shared
+                    )
+                }
             }
         )
     }
@@ -78,6 +86,70 @@ enum OperatorControlRuntimeFactory {
             preferXWingHybrid: settingsManager.preferXWingHybrid,
             pqcSignatureAlgorithm: settingsManager.pqcSignatureAlgorithm
         ))
+    }
+
+    /// Writes one allowlisted setting to the live `SettingsManager`, runs the
+    /// runtime apply hook, then re-reads the property so the reported
+    /// `observed_value` is the runtime's own state rather than the request echo.
+    ///
+    /// The router rejects the result when the read-back does not match, so a
+    /// property whose `didSet` clamps or refuses the value cannot be reported as
+    /// applied.
+    @MainActor
+    static func applySetting(
+        _ request: CrossnetControlSettingsMutationRequest,
+        settingsManager: SettingsManager
+    ) throws -> CrossnetControlSettingsMutationResult {
+        switch (request.id, request.value) {
+        case ("logging.verbose", .bool(let value)):
+            settingsManager.enableVerboseLogging = value
+        case ("ui.show_realtime_fps", .bool(let value)):
+            settingsManager.showRealtimeFPS = value
+        case ("ui.top_bar_ip_location", .bool(let value)):
+            settingsManager.showTopBarIPLocation = value
+        case ("ui.top_bar_network_speed", .bool(let value)):
+            settingsManager.showTopBarNetworkSpeed = value
+        case ("ui.top_bar_network_latency", .bool(let value)):
+            settingsManager.showTopBarNetworkLatency = value
+        case ("logging.level", .string(let value)):
+            settingsManager.logLevel = value
+        default:
+            throw CrossnetControlFailure.settingInvalidValue
+        }
+
+        settingsManager.applyRuntimeSettingsSnapshot()
+
+        let observed = try observedSettingValue(request.id, settingsManager: settingsManager)
+        return CrossnetControlSettingsMutationResult(
+            id: request.id,
+            valueType: request.value.valueType,
+            requestedValue: request.value,
+            observedValue: observed,
+            runtimeApplied: true
+        )
+    }
+
+    @MainActor
+    private static func observedSettingValue(
+        _ id: String,
+        settingsManager: SettingsManager
+    ) throws -> CrossnetControlJSONValue {
+        switch id {
+        case "logging.verbose":
+            return .bool(settingsManager.enableVerboseLogging)
+        case "logging.level":
+            return .string(settingsManager.logLevel)
+        case "ui.show_realtime_fps":
+            return .bool(settingsManager.showRealtimeFPS)
+        case "ui.top_bar_ip_location":
+            return .bool(settingsManager.showTopBarIPLocation)
+        case "ui.top_bar_network_speed":
+            return .bool(settingsManager.showTopBarNetworkSpeed)
+        case "ui.top_bar_network_latency":
+            return .bool(settingsManager.showTopBarNetworkLatency)
+        default:
+            throw CrossnetControlFailure.settingNotFound
+        }
     }
 
     @MainActor

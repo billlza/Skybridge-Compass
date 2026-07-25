@@ -8,6 +8,13 @@ enum OperatorCapabilityStatus {
     Available,
     ReadOnly,
     RequestOnly,
+    /// The handler is implemented and enabled in the build, but the evidence its
+    /// `verification_gate` demands has not been captured yet.
+    ///
+    /// This exists so a verb that genuinely mutates the runtime cannot be
+    /// mislabelled `planned` (which would deny an enabled code path) or
+    /// `available` (which would claim proof nobody produced).
+    PendingLiveProof,
     Planned,
 }
 
@@ -17,6 +24,7 @@ impl OperatorCapabilityStatus {
             Self::Available => "available",
             Self::ReadOnly => "read_only",
             Self::RequestOnly => "request_only",
+            Self::PendingLiveProof => "pending_live_proof",
             Self::Planned => "planned",
         }
     }
@@ -48,6 +56,9 @@ enum OperatorControlEffect {
     ReadOnly,
     RequestOnly,
     NativeMutation,
+    /// The Mac app applies the change to its live runtime and reports the value
+    /// it reads back afterwards.
+    MacRuntimeMutation,
     MacMutationNotEnabled,
     ContractOnly,
     PlannedFailClosed,
@@ -60,6 +71,7 @@ impl OperatorControlEffect {
             Self::ReadOnly => "read_only",
             Self::RequestOnly => "request_only",
             Self::NativeMutation => "native_mutation",
+            Self::MacRuntimeMutation => "mac_runtime_mutation",
             Self::MacMutationNotEnabled => "mac_mutation_not_enabled",
             Self::ContractOnly => "contract_only",
             Self::PlannedFailClosed => "planned_fail_closed",
@@ -146,12 +158,12 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
         },
         OperatorCapability {
             id: "crossnet.settings.set",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::MacMutationNotEnabled,
-            command: "planned/app-bound: skybridge crossnet settings set <id> <value> [--json]",
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "app-bound: skybridge crossnet settings set <id> <value> [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Settings mutation must remain Mac-app-bound and fail closed until a typed allowlist, auth_loaded=true, tenant_bound=true, explicit downgrade rejection, runtime apply proof, runtime observation proof, and signed Mac app socket smoke exist; Rust state_dir/UserDefaults direct writes are not valid GUI control",
+            authority_boundary: "Mac-app-bound settings mutation is implemented and enabled: the app applies one entry from a typed allowlist that is a strict subset of the readable projection, requires auth_loaded=true and tenant_bound=true, re-reads the property from its runtime after the apply hook, and fails closed with setting_runtime_apply_failed when the read-back differs; pqc.* ids stay immutable here because their authority is the versioned protocol identity prepare/commit flow, which can require peer re-pinning; Rust state_dir/UserDefaults direct writes are not valid GUI control and status stays pending_live_proof until live signed-app socket smoke is captured",
             verification_gate: "Mac OperatorControlServer auth/tenant and settings allowlist tests + runtime observation tests + live signed-app socket smoke",
         },
         OperatorCapability {
@@ -510,22 +522,36 @@ mod tests {
             .iter()
             .find(|capability| capability.id == "crossnet.settings.set")
             .expect("crossnet settings set capability must be declared");
-        assert_eq!(settings_set.status, OperatorCapabilityStatus::Planned);
+        // The handler is implemented and enabled, so `planned` would deny a live
+        // code path; but no live signed-app socket smoke has been captured, so
+        // `available` would claim absent proof. Both directions stay guarded.
+        assert_eq!(
+            settings_set.status,
+            OperatorCapabilityStatus::PendingLiveProof
+        );
         assert_eq!(
             settings_set.runtime_target,
             OperatorRuntimeTarget::MacAppRuntime
         );
         assert_eq!(
             settings_set.control_effect,
-            OperatorControlEffect::MacMutationNotEnabled
+            OperatorControlEffect::MacRuntimeMutation
         );
         assert!(
             settings_set.authority_boundary.contains("typed allowlist")
                 && settings_set
                     .authority_boundary
-                    .contains("runtime observation proof")
-                && settings_set.authority_boundary.contains("fail closed"),
-            "crossnet.settings.set must not claim writable GUI settings yet"
+                    .contains("setting_runtime_apply_failed")
+                && settings_set.authority_boundary.contains("fails closed")
+                && settings_set.authority_boundary.contains("pqc.*")
+                && settings_set
+                    .authority_boundary
+                    .contains("live signed-app socket smoke"),
+            "crossnet.settings.set must declare its allowlist, read-back failure mode, pqc exclusion, and missing live proof"
+        );
+        assert!(
+            !settings_set.command.contains("planned/"),
+            "crossnet.settings.set is implemented, so its command must not be labelled planned"
         );
 
         let status_watch = capabilities
@@ -694,6 +720,39 @@ mod tests {
                     capability.status,
                     OperatorCapabilityStatus::Planned,
                     "{} must not claim an enabled Mac GUI mutation before signed-app runtime proof",
+                    capability.id
+                );
+            }
+
+            // A verb that really mutates the Mac runtime may only be reported as
+            // proven (`available`) or explicitly unproven (`pending_live_proof`).
+            if capability.control_effect == OperatorControlEffect::MacRuntimeMutation {
+                assert!(
+                    matches!(
+                        capability.status,
+                        OperatorCapabilityStatus::Available
+                            | OperatorCapabilityStatus::PendingLiveProof
+                    ),
+                    "{} performs a live Mac runtime mutation, so it must be available or pending_live_proof",
+                    capability.id
+                );
+                assert!(
+                    capability
+                        .verification_gate
+                        .contains("live signed-app socket smoke"),
+                    "{} must keep a live signed-app socket smoke gate",
+                    capability.id
+                );
+            }
+
+            // `pending_live_proof` is only honest while the proof is genuinely
+            // outstanding, so it must name the evidence it still needs.
+            if capability.status == OperatorCapabilityStatus::PendingLiveProof {
+                assert!(
+                    capability
+                        .authority_boundary
+                        .contains("live signed-app socket smoke"),
+                    "{} must state which live evidence is still missing",
                     capability.id
                 );
             }

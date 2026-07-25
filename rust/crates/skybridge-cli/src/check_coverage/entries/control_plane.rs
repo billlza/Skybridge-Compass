@@ -23,6 +23,26 @@ pub(super) fn append_entries(
                 .to_owned(),
     });
     entries.push(CheckCoverageEntry {
+        id: "crossnet_settings_mutation_read_back_gate",
+        domain: "control-plane",
+        command: "skybridge crossnet settings set <id> <value> --json",
+        covered: source_has_all(
+            source,
+            &[
+                "CrossnetSettingsSubcommand::Set(set_args)",
+                "crossnet_commands::settings_set",
+                "SettingsMutationResult",
+                "parse_setting_value",
+                "settings_mutation_payload",
+                "mac_runtime_mutation",
+                "setting_runtime_apply_failed",
+            ],
+        ),
+        evidence:
+            "settings mutation is restricted to a typed allowlist that is a strict subset of the readable projection, refuses readable-but-immutable pqc ids with a distinct reason, and fails closed unless the Mac app reports a post-apply runtime read-back equal to the requested value"
+                .to_owned(),
+    });
+    entries.push(CheckCoverageEntry {
         id: "media_lease_doctor_gate",
         domain: "control-plane",
         command: "skybridge doctor media-lease",

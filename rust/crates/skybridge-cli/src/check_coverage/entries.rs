@@ -9,7 +9,7 @@ mod performance;
 mod release;
 mod smoke;
 
-const CHECK_COVERAGE_ENTRY_COUNT: usize = 43;
+const CHECK_COVERAGE_ENTRY_COUNT: usize = 44;
 
 pub(super) fn quality_check_coverage_entries(
     source: &SearchableCheckSource,

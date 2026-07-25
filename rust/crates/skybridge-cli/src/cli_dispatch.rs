@@ -64,9 +64,12 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 crate::crossnet_commands::disconnect(output.json).await
             }
             CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
-            CrossnetSubcommand::Settings(output) => {
-                crate::crossnet_commands::settings(output.json).await
-            }
+            CrossnetSubcommand::Settings(args) => match args.command {
+                None => crate::crossnet_commands::settings(args.output.json).await,
+                Some(crate::CrossnetSettingsSubcommand::Set(set_args)) => {
+                    crate::crossnet_commands::settings_set(set_args).await
+                }
+            },
         },
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,

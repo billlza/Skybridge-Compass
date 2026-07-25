@@ -4,16 +4,35 @@ public struct CrossnetControlRuntime: Sendable {
     public let hello: @Sendable () async -> CrossnetControlHelloResult
     public let status: @Sendable () async -> CrossnetControlStatusResult
     public let settingsSnapshot: @Sendable () async -> CrossnetControlSettingsSnapshotResult
+    /// Applies one allowlisted setting to the live Mac app runtime and reports the
+    /// value read back afterwards.
+    ///
+    /// Defaults to ``unavailableSettingsMutation``, so a runtime that does not
+    /// explicitly wire mutation up keeps the previous `method_not_enabled`
+    /// behaviour instead of silently gaining write authority.
+    public let applySetting: @Sendable (CrossnetControlSettingsMutationRequest) async throws
+        -> CrossnetControlSettingsMutationResult
 
     public init(
         hello: @escaping @Sendable () async -> CrossnetControlHelloResult,
         status: @escaping @Sendable () async -> CrossnetControlStatusResult,
-        settingsSnapshot: @escaping @Sendable () async -> CrossnetControlSettingsSnapshotResult
+        settingsSnapshot: @escaping @Sendable () async -> CrossnetControlSettingsSnapshotResult,
+        applySetting: @escaping @Sendable (CrossnetControlSettingsMutationRequest) async throws
+            -> CrossnetControlSettingsMutationResult = CrossnetControlRuntime
+            .unavailableSettingsMutation
     ) {
         self.hello = hello
         self.status = status
         self.settingsSnapshot = settingsSnapshot
+        self.applySetting = applySetting
     }
+
+    /// Fail-closed default mutation handler.
+    public static let unavailableSettingsMutation:
+        @Sendable (CrossnetControlSettingsMutationRequest) async throws
+        -> CrossnetControlSettingsMutationResult = { _ in
+            throw CrossnetControlFailure.methodNotEnabled
+        }
 }
 
 public struct CrossnetControlRouter: Sendable {
@@ -61,7 +80,17 @@ public struct CrossnetControlRouter: Sendable {
                 )
             case "crossnet.settings.set":
                 try Self.requireAuthenticatedOperatorContext(await runtime.hello())
-                throw CrossnetControlFailure.methodNotEnabled
+                let mutation = try CrossnetControlSettingsMutationPolicy.parse(
+                    params: request.params
+                )
+                let applied = try CrossnetControlSettingsMutationPolicy.validate(
+                    try await runtime.applySetting(mutation),
+                    request: mutation
+                )
+                return try CrossnetControlWire.successData(
+                    id: request.id,
+                    result: applied
+                )
             case "crossnet.connect":
                 _ = try CrossnetControlWire.strictConnectionCode(request.params.string("code"))
                 try Self.requireAuthenticatedOperatorContext(await runtime.hello())

@@ -267,6 +267,124 @@ final class OperatorControlRouterTests: XCTestCase {
         XCTAssertEqual(disabledResponse.error?.code, "method_not_enabled")
     }
 
+    func testSettingsMutationAppliesAllowlistedSettingAndReportsRuntimeReadBack() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            applySetting: operatorControlEchoingSettingsMutation()
+        ))
+
+        let boolResponse: WireResponse<CrossnetControlSettingsMutationResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-bool","method":"crossnet.settings.set","params":{"id":"logging.verbose","value":true}}"#
+        )
+        XCTAssertEqual(boolResponse.ok, true)
+        XCTAssertEqual(boolResponse.error?.code, nil)
+        XCTAssertEqual(boolResponse.result?.id, "logging.verbose")
+        XCTAssertEqual(boolResponse.result?.runtimeTarget, "mac_app_runtime")
+        XCTAssertEqual(boolResponse.result?.controlEffect, "mac_runtime_mutation")
+        XCTAssertEqual(boolResponse.result?.valueType, "bool")
+        XCTAssertEqual(boolResponse.result?.observedValue, .bool(true))
+        XCTAssertEqual(boolResponse.result?.runtimeApplied, true)
+
+        // Operator-supplied casing is normalized so the read-back comparison is
+        // meaningful rather than a string-equality accident.
+        let levelResponse: WireResponse<CrossnetControlSettingsMutationResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-level","method":"crossnet.settings.set","params":{"id":"logging.level","value":"warn"}}"#
+        )
+        XCTAssertEqual(levelResponse.ok, true)
+        XCTAssertEqual(levelResponse.result?.observedValue, .string("Warning"))
+    }
+
+    func testSettingsMutationFailsClosedWhenRuntimeReadBackDiverges() async throws {
+        let divergentRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            applySetting: operatorControlEchoingSettingsMutation(observedOverride: .bool(false))
+        ))
+        let divergentResponse: WireResponse<NoResult> = try await route(
+            divergentRouter,
+            #"{"v":1,"id":"set-drift","method":"crossnet.settings.set","params":{"id":"logging.verbose","value":true}}"#
+        )
+        XCTAssertEqual(divergentResponse.ok, false)
+        XCTAssertEqual(divergentResponse.error?.code, "setting_runtime_apply_failed")
+
+        let unappliedRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            applySetting: operatorControlEchoingSettingsMutation(runtimeApplied: false)
+        ))
+        let unappliedResponse: WireResponse<NoResult> = try await route(
+            unappliedRouter,
+            #"{"v":1,"id":"set-unapplied","method":"crossnet.settings.set","params":{"id":"logging.verbose","value":true}}"#
+        )
+        XCTAssertEqual(unappliedResponse.ok, false)
+        XCTAssertEqual(unappliedResponse.error?.code, "setting_runtime_apply_failed")
+    }
+
+    func testSettingsMutationRefusesImmutableUnknownAndOutOfDomainValues() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            applySetting: operatorControlEchoingSettingsMutation()
+        ))
+
+        // Readable-but-immutable must be distinguishable from unknown, and must
+        // not echo the attempted value.
+        let immutableData = try await routeData(
+            router,
+            #"{"v":1,"id":"set-pqc","method":"crossnet.settings.set","params":{"id":"pqc.signature_algorithm","value":"ML-DSA-87"}}"#
+        )
+        let immutable = try JSONDecoder().decode(WireResponse<NoResult>.self, from: immutableData)
+        XCTAssertEqual(immutable.error?.code, "setting_immutable")
+        let immutableText = String(decoding: immutableData, as: UTF8.self)
+        XCTAssertTrue(immutableText.contains("peer re-pinning"), immutableText)
+        XCTAssertFalse(immutableText.contains("ML-DSA-87"), immutableText)
+
+        let unknown: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-unknown","method":"crossnet.settings.set","params":{"id":"logging.nope","value":true}}"#
+        )
+        XCTAssertEqual(unknown.error?.code, "setting_not_found")
+
+        // Wrong value kind for a bool setting.
+        let wrongType: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-wrong-type","method":"crossnet.settings.set","params":{"id":"logging.verbose","value":"yes"}}"#
+        )
+        XCTAssertEqual(wrongType.error?.code, "setting_invalid_value")
+
+        // Out-of-domain logging level.
+        let badLevel: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-bad-level","method":"crossnet.settings.set","params":{"id":"logging.level","value":"loud"}}"#
+        )
+        XCTAssertEqual(badLevel.error?.code, "setting_invalid_value")
+
+        // Auth is still checked before any of the above.
+        let unauthenticated = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            authLoaded: false,
+            applySetting: operatorControlEchoingSettingsMutation()
+        ))
+        let unauthenticatedResponse: WireResponse<NoResult> = try await route(
+            unauthenticated,
+            #"{"v":1,"id":"set-noauth","method":"crossnet.settings.set","params":{"id":"logging.verbose","value":true}}"#
+        )
+        XCTAssertEqual(unauthenticatedResponse.error?.code, "auth_required")
+    }
+
+    func testSettingsMutableAllowlistIsAStrictSubsetOfTheReadableProjection() {
+        XCTAssertTrue(
+            CrossnetControlSettingsMutationPolicy.mutableSettingIDs
+                .isStrictSubset(of: CrossnetControlSettingsProjectionPolicy.allowedSettingIDs),
+            "a writable id that is not readable would be an unobservable mutation"
+        )
+        XCTAssertTrue(
+            CrossnetControlSettingsMutationPolicy.mutableSettingIDs
+                .isDisjoint(with: CrossnetControlSettingsMutationPolicy.protocolIdentityBoundSettingIDs),
+            "protocol identity settings must never be directly writable"
+        )
+        XCTAssertEqual(
+            CrossnetControlSettingsMutationPolicy.mutableSettingIDs
+                .union(CrossnetControlSettingsMutationPolicy.protocolIdentityBoundSettingIDs),
+            CrossnetControlSettingsProjectionPolicy.allowedSettingIDs,
+            "every readable id must be explicitly classified as mutable or protocol-identity bound"
+        )
+    }
+
     func testStatusWatchFailsClosedUntilStreamingIsImplemented() async throws {
         let router = CrossnetControlRouter(runtime: operatorControlTestRuntime())
 
@@ -450,7 +568,11 @@ final class OperatorControlRouterTests: XCTestCase {
         let settingsMutationRawResponse = String(decoding: settingsMutationData, as: UTF8.self)
 
         XCTAssertEqual(settingsMutationResponse.ok, false)
-        XCTAssertEqual(settingsMutationResponse.error?.code, "method_not_enabled")
+        // A path-shaped id is simply not an allowlisted setting. The mutation
+        // handler is enabled now, so the honest rejection is setting_not_found
+        // rather than method_not_enabled — and it must still not echo the id or
+        // the attempted value.
+        XCTAssertEqual(settingsMutationResponse.error?.code, "setting_not_found")
         XCTAssertFalse(settingsMutationRawResponse.contains(sensitivePath))
         XCTAssertFalse(settingsMutationRawResponse.contains(sensitiveValue))
     }
@@ -459,8 +581,17 @@ final class OperatorControlRouterTests: XCTestCase {
         _ router: CrossnetControlRouter,
         _ request: String
     ) async throws -> WireResponse<Result> {
-        let data = await router.handleLine(Data(request.utf8))
+        let data = try await routeData(router, request)
         return try JSONDecoder().decode(WireResponse<Result>.self, from: data)
+    }
+
+    /// Returns the raw response bytes, for assertions about what the wire must
+    /// *not* contain.
+    private func routeData(
+        _ router: CrossnetControlRouter,
+        _ request: String
+    ) async throws -> Data {
+        await router.handleLine(Data(request.utf8))
     }
 
     private func assertSettingsProjectionFailure(
@@ -1075,7 +1206,11 @@ final class OperatorControlSocketPathPolicyTests: XCTestCase {
 private func operatorControlTestRuntime(
     authLoaded: Bool = true,
     tenantBound: Bool = true,
-    settingsSnapshot: CrossnetControlSettingsSnapshotResult? = nil
+    settingsSnapshot: CrossnetControlSettingsSnapshotResult? = nil,
+    applySetting: (
+        @Sendable (CrossnetControlSettingsMutationRequest) async throws
+            -> CrossnetControlSettingsMutationResult
+    )? = nil
 ) -> CrossnetControlRuntime {
     CrossnetControlRuntime(
         hello: {
@@ -1105,8 +1240,27 @@ private func operatorControlTestRuntime(
         },
         settingsSnapshot: {
             settingsSnapshot ?? operatorControlDefaultSettingsSnapshot()
-        }
+        },
+        applySetting: applySetting ?? CrossnetControlRuntime.unavailableSettingsMutation
     )
+}
+
+/// Simulates a Mac runtime that stores whatever it is given and reads the same
+/// value back, unless `observedOverride` forces a divergent read-back.
+private func operatorControlEchoingSettingsMutation(
+    observedOverride: CrossnetControlJSONValue? = nil,
+    runtimeApplied: Bool = true
+) -> @Sendable (CrossnetControlSettingsMutationRequest) async throws
+    -> CrossnetControlSettingsMutationResult {
+    { request in
+        CrossnetControlSettingsMutationResult(
+            id: request.id,
+            valueType: request.value.valueType,
+            requestedValue: request.value,
+            observedValue: observedOverride ?? request.value,
+            runtimeApplied: runtimeApplied
+        )
+    }
 }
 
 private func operatorControlDefaultSettingsSnapshot() -> CrossnetControlSettingsSnapshotResult {

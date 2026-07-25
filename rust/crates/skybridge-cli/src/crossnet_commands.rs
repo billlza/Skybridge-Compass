@@ -3,10 +3,13 @@ use serde_json::Value;
 use serde_json::json;
 use skybridge_crossnet_client::{
     CONTROL_PROTOCOL_VERSION, ConnectResult, DisconnectResult, HelloResult, HostResult, LeaseMode,
-    SettingsSnapshotResult, StatusOutcome, StatusResult,
+    SettingsMutationResult, SettingsSnapshotResult, StatusOutcome, StatusResult,
 };
 
-use crate::{CrossnetConnectArgs, CrossnetHostArgs, CrossnetLeaseMode, CrossnetStatusArgs};
+use crate::{
+    CrossnetConnectArgs, CrossnetHostArgs, CrossnetLeaseMode, CrossnetSettingsSetArgs,
+    CrossnetStatusArgs,
+};
 
 impl From<CrossnetLeaseMode> for LeaseMode {
     fn from(mode: CrossnetLeaseMode) -> Self {
@@ -53,6 +56,57 @@ pub(crate) async fn status(args: CrossnetStatusArgs) -> Result<()> {
 pub(crate) async fn settings(as_json: bool) -> Result<()> {
     let result = skybridge_crossnet_client::settings_snapshot().await?;
     print_settings(&result, as_json)
+}
+
+pub(crate) async fn settings_set(args: CrossnetSettingsSetArgs) -> Result<()> {
+    let value = parse_setting_value(&args.value);
+    let result = skybridge_crossnet_client::settings_set(&args.id, value).await?;
+    print_settings_mutation(&result, args.output.json)
+}
+
+/// Maps the operator-typed argument onto a wire value.
+///
+/// `true`/`false` become booleans so boolean settings work without quoting;
+/// everything else stays a string and the Mac app validates the domain. Numbers
+/// are intentionally not inferred — no allowlisted mutable setting is numeric, and
+/// guessing would turn a typo into a silently different type.
+fn parse_setting_value(raw: &str) -> Value {
+    match raw {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        other => Value::String(other.to_owned()),
+    }
+}
+
+fn settings_mutation_payload(result: &SettingsMutationResult) -> Value {
+    json!({
+        "runtime_target": result.runtime_target,
+        "control_effect": result.control_effect,
+        "id": result.id,
+        "value_type": result.value_type,
+        "requested_value": result.requested_value,
+        "observed_value": result.observed_value,
+        "runtime_applied": result.runtime_applied,
+        "note": result.note,
+    })
+}
+
+fn print_settings_mutation(result: &SettingsMutationResult, as_json: bool) -> Result<()> {
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&settings_mutation_payload(result))?
+        );
+        return Ok(());
+    }
+    println!(
+        "Setting `{}` applied to the Mac app runtime; observed={} runtime_applied={}",
+        result.id, result.observed_value, result.runtime_applied
+    );
+    if let Some(note) = &result.note {
+        println!("Note: {note}");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
