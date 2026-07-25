@@ -169,6 +169,13 @@ fi
 if [[ -z "${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE+x}" ]]; then
     export SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session
 fi
+# The shipping production app must never link the testing-only SkyBridgeSmokeSupport
+# module. Exclude it from the production library/app targets for every sub-build
+# (SwiftPM main executable + Xcode Widget/app target) unless a caller has
+# explicitly overridden the flag. Smoke-host executables keep the module.
+if [[ -z "${SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT+x}" ]]; then
+    export SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT=1
+fi
 
 log_info() {
     echo "ℹ️  $1"

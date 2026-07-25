@@ -36,6 +36,43 @@ func shouldEnableApplePQCSDK() -> Bool {
 }
 
 let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
+
+// SkyBridgeSmokeSupport is a testing-only module (smoke-status file appender used
+// by the real-device smoke lanes). It must never be linked into the shipping
+// production app: all production call sites are guarded by #if DEBUG ||
+// SKYBRIDGE_TESTING, but SwiftPM would still link the module's public symbols if
+// the production targets declared it as an unconditional dependency.
+//
+// The production release producer (Scripts/build_dmg.sh) sets
+// SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT=1 so SkyBridgeCore and SkyBridgeCompassApp
+// drop the dependency entirely; every other build (DEBUG, swift test, iOS lanes,
+// smoke hosts) keeps it so the guarded code and the smoke-host executables build
+// unchanged. If a release build ever forgets the flag, the readiness gate's
+// test/smoke-surface scan fails closed.
+func shouldExcludeSmokeSupportFromRelease() -> Bool {
+    guard let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased(),
+        !rawOverride.isEmpty
+    else {
+        return false
+    }
+
+    switch rawOverride {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        fatalError("Invalid SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT value: \(rawOverride)")
+    }
+}
+
+// Production library/app targets depend on the smoke-support module only when the
+// release exclusion is not requested. Smoke-host executables always keep it.
+let smokeSupportProductionDependencies: [Target.Dependency] =
+    shouldExcludeSmokeSupportFromRelease() ? [] : ["SkyBridgeSmokeSupport"]
+
 let swiftPMProductRootRPath = "@loader_path/../../.."
 
 func metalResource(_ path: String) -> Resource {
@@ -318,7 +355,6 @@ let package = Package(
                 "SkyBridgeAppleTransport",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
-                "SkyBridgeSmokeSupport",
                 .target(name: "FreeRDPBridge", condition: .when(platforms: [.macOS])),
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
@@ -330,7 +366,7 @@ let package = Package(
                 "OQSRAII",
                 "SkyBridgeQPeriaptRuntime",
                 "SkyBridgeWidgetShared"
-            ],
+            ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCore",
             // 排除文档文件，避免未处理文件警告 - 符合 Swift 6.3 最佳实践
             exclude: [
@@ -479,9 +515,8 @@ let package = Package(
                 "SkyBridgeCore",
                 "SkyBridgeUI",
                 "SkyBridgeVisualParity",
-                "SkyBridgeSmokeSupport",
                 .product(name: "OrderedCollections", package: "swift-collections")
-            ],
+            ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCompassApp",
             // 排除配置文件和文档 - 符合 Swift 6.3 最佳实践
             exclude: [
