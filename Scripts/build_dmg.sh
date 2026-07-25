@@ -991,6 +991,23 @@ verify_app_embedded_privacy_info_plist "$APP_BUNDLE"
 verify_app_release_features "$APP_BUNDLE"
 
 if [[ "$SKIP_SIGN" == false ]]; then
+    # Strip debug symbol stabs (OSO/SO) from our first-party Mach-O binaries before
+    # the hardened-runtime re-sign, so the shipping release carries no build-time
+    # object map or source-file names (e.g. RemoteControlSmokeStatusWriter.swift) in
+    # its symbol table. The release readiness binary-surface gate scans `nm -a` and
+    # rejects such markers. Debug info stays in the .o files for optional dSYM
+    # extraction. Only first-party executables are stripped; vendor frameworks/dylibs
+    # are left untouched. sign_app.sh re-signs everything afterwards.
+    log_step "步骤 2.5: 去除发布二进制调试符号表 (strip -S)"
+    strip -S "$APP_BUNDLE/Contents/MacOS/"* 2>/dev/null || true
+    while IFS= read -r -d '' stripped_macho; do
+        strip -S "$stripped_macho" 2>/dev/null || true
+    done < <(
+        find "$APP_BUNDLE/Contents/PlugIns" "$APP_BUNDLE/Contents/Library/LaunchDaemons" \
+            -type f -perm -111 -print0 2>/dev/null
+    )
+    log_success "发布二进制调试符号表已去除"
+
     if [[ -z "$SIGNING_IDENTITY" ]]; then
         if ! SIGNING_IDENTITY="$(select_identity)"; then
             log_error "无法确定唯一的签名身份，已停止发布（见上方候选列表）。"
