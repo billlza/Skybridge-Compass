@@ -258,6 +258,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../operator_capabilities.rs"),
     ),
     (
+        "operator_capabilities/tests.rs",
+        include_str!("../../operator_capabilities/tests.rs"),
+    ),
+    (
         "performance_report_target.rs",
         include_str!("../../performance_report_target.rs"),
     ),
