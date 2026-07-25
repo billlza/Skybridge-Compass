@@ -462,6 +462,62 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
         }
     }
 
+    /// The release binary surface gate in `Scripts/check_macos_release_readiness.sh`
+    /// rejects any symbol matching `*SmokeStatusWriter` in the shipping binary.
+    /// `RemoteControlSmokeStatusWriter.append(_:)` is allowed to keep an ungated
+    /// declaration only because its entire body sits behind the test gate, so a
+    /// Release build erases it at every call site. Any other member carrying
+    /// executable code outside that gate emits a forbidden symbol and fails the
+    /// gate, which is exactly how `fieldValue(_:)` used to leak into the DMG.
+    func testSmokeStatusWriterKeepsEveryMemberButItsNoOpEntryPointBehindTheTestGate() throws {
+        let relativePath = "Sources/SkyBridgeCore/RemoteControl/RemoteControlSmokeStatusWriter.swift"
+        let source = try repositorySource(relativePath)
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let stacks = conditionalStacks(for: lines)
+
+        for lineIndex in lines.indices {
+            let trimmed = lines[lineIndex].trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("func "), !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///") else {
+                continue
+            }
+            if trimmed.hasPrefix("static func append(") {
+                continue
+            }
+            XCTAssertTrue(
+                hasExplicitTestGate(stacks[lineIndex]),
+                "\(relativePath):\(lineIndex + 1) declares a member outside "
+                    + "#if DEBUG || SKYBRIDGE_TESTING. Every member except the no-op "
+                    + "append(_:) entry point must stay gated, otherwise the Release "
+                    + "binary carries a forbidden *SmokeStatusWriter symbol."
+            )
+        }
+
+        XCTAssertFalse(
+            source.contains("func fieldValue("),
+            "Structured-evidence field sanitizing belongs to the production "
+                + "DiagnosticFieldSanitizer, not to a smoke-named type that must not "
+                + "appear in the release binary symbol table."
+        )
+    }
+
+    /// Counterpart to the invariant above: the extracted sanitizer is production log
+    /// hygiene and must compile into Release builds, so it must carry no test gate.
+    func testDiagnosticFieldSanitizerIsUngatedProductionCode() throws {
+        let relativePath = "Sources/SkyBridgeCore/Diagnostics/DiagnosticFieldSanitizer.swift"
+        let source = try repositorySource(relativePath)
+
+        XCTAssertTrue(source.contains("enum DiagnosticFieldSanitizer"))
+        XCTAssertTrue(source.contains("static func fieldValue(_ raw: String?) -> String"))
+        XCTAssertFalse(
+            source.contains("#if DEBUG"),
+            "\(relativePath) must not be gated; release code paths emit structured diagnostics."
+        )
+        XCTAssertFalse(
+            source.contains("enum DiagnosticFieldSanitizer {\n#if"),
+            "\(relativePath) must expose its sanitizer unconditionally."
+        )
+    }
+
     func testSecurityEventEmitterHasOneCompleteTestResetAndNoPartialResetSurface() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift")
 

@@ -4,13 +4,13 @@ import XCTest
 import SkyBridgeRealtimeMedia
 
 final class RemoteControlSecurityNoticeTests: XCTestCase {
-    func testSmokeStatusFieldValueSanitizesStructuredEvidence() {
+    func testDiagnosticFieldSanitizerSanitizesStructuredEvidence() {
         XCTAssertEqual(
-            RemoteControlSmokeStatusWriter.fieldValue(" id:device-1\nspoof=value "),
+            DiagnosticFieldSanitizer.fieldValue(" id:device-1\nspoof=value "),
             "id:device-1_spoof_value"
         )
-        XCTAssertEqual(RemoteControlSmokeStatusWriter.fieldValue("  "), "missing")
-        XCTAssertEqual(RemoteControlSmokeStatusWriter.fieldValue(nil), "missing")
+        XCTAssertEqual(DiagnosticFieldSanitizer.fieldValue("  "), "missing")
+        XCTAssertEqual(DiagnosticFieldSanitizer.fieldValue(nil), "missing")
     }
 
     func testSecurityNoticeLocalizationContractCoversCodeShellGateAndAllLocales() throws {
@@ -1118,9 +1118,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
             "X-Wing establishment evidence must bind the transport peer to the authenticated remote device id."
         )
         XCTAssertTrue(
-            manager.contains("RemoteControlSmokeStatusWriter.fieldValue(") &&
+            manager.contains("DiagnosticFieldSanitizer.fieldValue(") &&
                 manager.contains("peer.handshakePeer?.deviceId"),
-            "The target-bound establishment marker must pass its device id through the smoke field sanitizer."
+            "The target-bound establishment marker must pass its device id through the diagnostic field sanitizer."
         )
     }
 

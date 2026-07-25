@@ -5294,7 +5294,7 @@ public class P2PDiscoveryService: BaseManager {
     ) {
         guard let path = connection.currentPath else {
             RemoteControlSmokeStatusWriter.append(
-                "p2p-connection-ready-path deviceId=\(RemoteControlSmokeStatusWriter.fieldValue(deviceId)) endpointClass=\(smokeEndpointClass(endpoint)) pathStatus=missing usedInterfaceTypes=missing usedInterfaceNames=missing routeClass=other attached=0 linkLocal=0"
+                "p2p-connection-ready-path deviceId=\(DiagnosticFieldSanitizer.fieldValue(deviceId)) endpointClass=\(smokeEndpointClass(endpoint)) pathStatus=missing usedInterfaceTypes=missing usedInterfaceNames=missing routeClass=other attached=0 linkLocal=0"
             )
             return
         }
@@ -5318,7 +5318,7 @@ public class P2PDiscoveryService: BaseManager {
             pathDescription: String(describing: path)
         )
         RemoteControlSmokeStatusWriter.append(
-            "p2p-connection-ready-path deviceId=\(RemoteControlSmokeStatusWriter.fieldValue(deviceId)) endpointClass=\(smokeEndpointClass(endpoint)) pathStatus=\(path.status == .satisfied ? "satisfied" : "unsatisfied") usedInterfaceTypes=\(RemoteControlSmokeStatusWriter.fieldValue(usedTypeTokens.joined(separator: ","))) usedInterfaceNames=\(RemoteControlSmokeStatusWriter.fieldValue(usedInterfaceNames.joined(separator: ","))) routeClass=\(classification.routeClass) attached=\(classification.attached ? 1 : 0) linkLocal=\(classification.linkLocal ? 1 : 0)"
+            "p2p-connection-ready-path deviceId=\(DiagnosticFieldSanitizer.fieldValue(deviceId)) endpointClass=\(smokeEndpointClass(endpoint)) pathStatus=\(path.status == .satisfied ? "satisfied" : "unsatisfied") usedInterfaceTypes=\(DiagnosticFieldSanitizer.fieldValue(usedTypeTokens.joined(separator: ","))) usedInterfaceNames=\(DiagnosticFieldSanitizer.fieldValue(usedInterfaceNames.joined(separator: ","))) routeClass=\(classification.routeClass) attached=\(classification.attached ? 1 : 0) linkLocal=\(classification.linkLocal ? 1 : 0)"
         )
     }
 

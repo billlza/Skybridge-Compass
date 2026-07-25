@@ -2068,7 +2068,7 @@ public final class RemoteControlManager: BaseManager {
             )
             if installed {
                 logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
-                let remoteDeviceId = RemoteControlSmokeStatusWriter.fieldValue(
+                let remoteDeviceId = DiagnosticFieldSanitizer.fieldValue(
                     peer.handshakePeer?.deviceId
                 )
                 emitSmokeTrace(

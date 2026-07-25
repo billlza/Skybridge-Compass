@@ -43,17 +43,6 @@ enum RemoteControlSmokeStatusWriter {
 #endif
     }
 
-    static func fieldValue(_ raw: String?) -> String {
-        guard let raw else { return "missing" }
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".:-_"))
-        let sanitized = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .unicodeScalars
-            .map { allowed.contains($0) ? $0.description : "_" }
-            .joined()
-        return sanitized.isEmpty ? "missing" : sanitized
-    }
-
 #if DEBUG || SKYBRIDGE_TESTING
     private static func smokeStatusURL() -> URL? {
         guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
