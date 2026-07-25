@@ -121,6 +121,21 @@ struct PreflightState {
 
 const MAC_GUI_CONTROL_RELEASE_GATE: &str = "signed_mac_app_socket_smoke_required";
 
+/// Mutating methods the Mac app actually implements today.
+///
+/// Reported explicitly because `mutation_methods_enabled` is a single bool and
+/// the truth is per-method: refusing to enumerate would let an operator read
+/// "enabled" and assume `crossnet connect` works.
+const ENABLED_MUTATION_METHODS: &[&str] = &["crossnet.settings.set"];
+
+/// Mutating methods that still fail closed with `method_not_enabled`.
+const DISABLED_MUTATION_METHODS: &[&str] = &[
+    "crossnet.host",
+    "crossnet.connect",
+    "crossnet.disconnect",
+    "crossnet.status.watch",
+];
+
 fn preflight_state(result: &HelloResult) -> PreflightState {
     if result.proto != CONTROL_PROTOCOL_VERSION {
         return PreflightState {
@@ -154,11 +169,13 @@ fn preflight_state(result: &HelloResult) -> PreflightState {
     }
     PreflightState {
         preconditions_ready: true,
-        mutation_methods_enabled: false,
-        ready_for_mutation: false,
+        // Some mutating methods are implemented now, so a blanket `false` would
+        // deny a live code path. The enabled/disabled lists carry the detail.
+        mutation_methods_enabled: !ENABLED_MUTATION_METHODS.is_empty(),
+        ready_for_mutation: !ENABLED_MUTATION_METHODS.is_empty(),
         failure_code: None,
         failure_class: None,
-        next_required_action: "signed Mac app socket smoke must prove live mutation before GUI-bound crossnet mutation commands are enabled",
+        next_required_action: "settings mutation is live; session mutation still needs signed Mac app socket smoke before it is enabled",
     }
 }
 
@@ -177,6 +194,8 @@ fn preflight_payload(result: &HelloResult) -> serde_json::Value {
         "tenant_bound": result.tenant_bound,
         "preconditions_ready": state.preconditions_ready,
         "mutation_methods_enabled": state.mutation_methods_enabled,
+        "enabled_mutation_methods": ENABLED_MUTATION_METHODS,
+        "disabled_mutation_methods": DISABLED_MUTATION_METHODS,
         "ready_for_mutation": state.ready_for_mutation,
         "release_gate": MAC_GUI_CONTROL_RELEASE_GATE,
         "failure_code": state.failure_code,
@@ -420,8 +439,36 @@ mod tests {
         assert_eq!(payload["control_effect"], "read_only");
         assert_eq!(payload["mac_gui_control_protocol"], "crossnet-control/1");
         assert_eq!(payload["preconditions_ready"].as_bool(), Some(true));
-        assert_eq!(payload["mutation_methods_enabled"].as_bool(), Some(false));
-        assert_eq!(payload["ready_for_mutation"].as_bool(), Some(false));
+        // Settings mutation is implemented, so a blanket `false` would deny a live
+        // code path; the enumerated lists keep the per-method truth explicit so
+        // "enabled" is never read as "connect works".
+        assert_eq!(payload["mutation_methods_enabled"].as_bool(), Some(true));
+        assert_eq!(payload["ready_for_mutation"].as_bool(), Some(true));
+        assert_eq!(
+            payload["enabled_mutation_methods"],
+            serde_json::json!(["crossnet.settings.set"])
+        );
+        let disabled = payload["disabled_mutation_methods"]
+            .as_array()
+            .expect("disabled mutation methods must be enumerated")
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        for still_disabled in [
+            "crossnet.host",
+            "crossnet.connect",
+            "crossnet.disconnect",
+            "crossnet.status.watch",
+        ] {
+            assert!(
+                disabled.iter().any(|entry| entry == still_disabled),
+                "{still_disabled} must stay reported as disabled: {payload}"
+            );
+        }
+        assert!(
+            !disabled.iter().any(|entry| entry == "crossnet.settings.set"),
+            "settings.set must not be reported both enabled and disabled: {payload}"
+        );
         assert_eq!(
             payload["release_gate"],
             "signed_mac_app_socket_smoke_required"
