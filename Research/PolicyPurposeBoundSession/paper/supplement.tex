@@ -8,10 +8,10 @@
 \usepackage[hyphens]{url}
 \usepackage[hidelinks]{hyperref}
 
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\input{generated/manuscript-metadata}
+\PaperConfigureSupplementDocument
 
-\title{Supplementary Material for ``Policy-to-Purpose-to-Byte Continuity for Post-Quantum Peer-to-Peer Sessions''}
-\author{Anonymous Author(s)}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 
 \begin{document}
 \maketitle
@@ -74,7 +74,7 @@ result. Static checks, simulator runs, physical devices, bare-metal hosts, and
 published artifacts will be labeled as different evidence classes.
 
 \section{Reproduction}
-The anonymous review artifact will provide one entry point that validates the
+The review artifact will provide one entry point that validates the
 claim ledger and manifest, rebuilds formal reports, compiles the normative core
 and adapters in isolated checkouts, runs the bounded portable tests, and
 regenerates every submitted table and figure from raw inputs. Hardware-dependent

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "title": "Policy-to-Purpose-to-Byte Continuity for Post-Quantum Peer-to-Peer Sessions",
+  "review_policy": {
+    "model": "single-anonymized",
+    "checked_at": "2026-07-29",
+    "source": "https://signalprocessingsociety.org/publications-resources/information-authors"
+  },
+  "authors": [
+    {
+      "display_name": "Zi'ang Li",
+      "academic_role": "student",
+      "degree": "MSc by Research (MScR)",
+      "institution": "Durham University",
+      "city": "Durham",
+      "country": "United Kingdom",
+      "email": "2403871950@qq.com",
+      "email_status": "confirmed_current",
+      "corresponding": true
+    }
+  ]
+}

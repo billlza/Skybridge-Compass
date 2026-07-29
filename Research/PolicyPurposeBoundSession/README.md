@@ -42,10 +42,35 @@ resolved. IEEE policy does not permit substantially overlapping manuscripts to
 be under active consideration concurrently. A TIFS submission must also disclose
 the prior TDSC rejection and include the required review-response document.
 
+## Authorship and review metadata
+
+`submission/manuscript-metadata.json` is the only manually maintained source for
+the title, author count, author identity, academic status, affiliation,
+correspondence status, and review model. A correspondence address is rendered
+only after it is explicitly marked as confirmed current; an inherited address is
+not published by default. Do not copy these values into either TeX source.
+
+`paper/generated/manuscript-metadata.tex` is derived from the JSON and is shared
+by the main manuscript and supplement. After changing the JSON, regenerate it
+and inspect the diff:
+
+```sh
+make metadata
+```
+
+The SPS review model, source, and check date are recorded in the canonical JSON.
+Recheck that external policy before submission. The repository does not maintain
+a second anonymous-author build path.
+
+The validator proves consistency between that source, TeX, and PDF artifacts; it
+does not independently attest a person's identity. Before submission, inspect
+the canonical JSON and keep it, the generated TeX, and both PDFs in the same
+reviewed commit.
+
 ## Directory layout
 
 ```text
-paper/       Independent main manuscript, supplement, and bibliography
+paper/       Independent main manuscript, supplement, generated metadata, and bibliography
 protocol/    Normative design contract for BoundSessionV1
 formal/      Proof responsibilities and composition boundary
 artifact/    Machine-readable claim ledger and its validator
@@ -70,8 +95,14 @@ cd Research/PolicyPurposeBoundSession
 make check
 ```
 
-`make check` validates the claim ledger, runs its unit tests, builds both PDFs,
-and fails on LaTeX warnings or bad boxes.
+`make check` validates the claim ledger and canonical manuscript metadata, runs
+their unit tests, builds both PDFs, and fails on LaTeX warnings, bad boxes,
+identity drift, empty PDF identity fields, or stale output copies.
+
+Before treating the draft as a submission artifact, run `make submission-check`.
+That stricter target fails until a current correspondence address has been
+explicitly confirmed in the canonical metadata; the ordinary draft build never
+publishes an unconfirmed inherited address.
 
 ## TIFS length budget
 

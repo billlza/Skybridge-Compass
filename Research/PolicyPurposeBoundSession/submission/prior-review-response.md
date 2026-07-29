@@ -15,6 +15,13 @@ The new manuscript is maintained independently. It is not presented as an
 unmodified resubmission, but it is derived from related prior work and therefore
 must disclose the rejection and explain the technical delta.
 
+## Submission identity boundary
+
+The canonical author count, author identity, affiliation, academic status,
+correspondence status (and address once confirmed), and SPS review model are maintained only in
+`submission/manuscript-metadata.json`. The main manuscript, supplement, PDF
+metadata, and eventual submission-portal record must agree with that source.
+
 ## Review-driven requirements
 
 | Prior concern | Root cause | Required response in the new manuscript | Evidence gate |
