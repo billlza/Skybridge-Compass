@@ -1,0 +1,93 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage[hyphens]{url}
+\usepackage[hidelinks]{hyperref}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{Supplementary Material for ``Policy-to-Purpose-to-Byte Continuity for Post-Quantum Peer-to-Peer Sessions''}
+\author{Anonymous Author(s)}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This supplement is intentionally subordinate to the main manuscript. It will
+hold detailed encodings, derivations of theorems stated in the main text,
+extended evidence tables, and reproduction instructions. It will not introduce
+an unreferenced theorem, a new protocol, or a separate contribution track.
+
+\section{Normative Encoding Inventory}
+The final version will give field identifiers, canonical order, type, length
+bound, validation rule, transcript projection, model symbol, implementation
+symbol, and negative vector for every field in
+\textsf{AuthenticatedPolicySnapshot}, each endpoint's
+\textsf{LocalAuthenticatedDecision}, its peer-visible
+\textsf{wireDecisionDigest} projection,
+\textsf{LocalEffectScopeSet},
+\textsf{BoundSessionContextV1}, Message A, Message B, Finished,
+\textsf{GrantReadyV1}, \textsf{sharedGrantId},
+\textsf{bilateralReadyDigest}, abort/revoke messages, the opaque grant handle and
+service record, each typed trusted-effect outcome, journal state, and
+purpose-specific receipt.
+
+\begin{table}[H]
+\caption{Example traceability columns. Values remain pending until the normative codec exists.}
+\label{tab:traceability-columns}
+\centering
+\small
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{}L{0.20\columnwidth}L{0.22\columnwidth}L{0.15\columnwidth}L{0.27\columnwidth}@{}}
+\toprule
+Object & Specification & Formal event & Code/evidence \\
+\midrule
+Policy snapshot & Pending & Pending & Pending \\
+Local decision & Pending & Pending & Pending \\
+Effect scope & Pending & Pending & Pending \\
+Purpose context & Pending & Pending & Pending \\
+Owner transaction & Pending & Pending & Pending \\
+Ready set & Pending & Pending & Pending \\
+Session grant & Pending & Pending & Pending \\
+Trusted effect & Pending & Pending & Pending \\
+Effect receipt & Pending & Pending & Pending \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Formal Artifact Inventory}
+For every main-text property, the final supplement will list the exact theorem or
+lemma name, model revision, tool and version, assumptions, compromise escapes,
+executability lemma, negative control, report digest, and the main-text claim it
+supports. EasyCrypt, Tamarin, ProVerif, and the state model will remain separate
+rows because their abstractions and conclusions differ.
+
+\section{Extended Evaluation Matrix}
+The final matrix will identify experimental unit, endpoint and binary identity,
+transport, purpose, suite, policy, attack or ablation, batch structure, primary
+metric, confidence interval, raw-data path, and generator for each reported
+result. Static checks, simulator runs, physical devices, bare-metal hosts, and
+published artifacts will be labeled as different evidence classes.
+
+\section{Reproduction}
+The anonymous review artifact will provide one entry point that validates the
+claim ledger and manifest, rebuilds formal reports, compiles the normative core
+and adapters in isolated checkouts, runs the bounded portable tests, and
+regenerates every submitted table and figure from raw inputs. Hardware-dependent
+lanes will have separate commands and will not be reported as reproduced when
+only their historical transcripts are present.
+
+\section{Open Evidence Items}
+At this draft stage, the integrated codec, formal theories, state model,
+bilateral-ready implementation, trusted effect committers, cross-language
+corpus, final binaries, physical-device sessions, non-Apple interoperability,
+application receipts, raw performance data, and immutable
+evidence manifest are all pending. This section will be removed only as each item
+is replaced by source-bound evidence and the claim ledger validates the state
+transition.
+
+\end{document}

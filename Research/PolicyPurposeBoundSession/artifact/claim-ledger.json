@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "research_line": "policy-purpose-bound-session",
+  "source_inputs": {
+    "skybridge": {
+      "revision": "ca51e8ea80063a818152549412e22232ed597f0f",
+      "role": "reference_only",
+      "boundary": "This clean worktree base is not the current dirty product tree and is not integrated-system evidence."
+    },
+    "q_periapt": {
+      "revision": "4652f69540c6353f9a7ffd8de00e987e08541135",
+      "role": "reference_only",
+      "boundary": "Component proofs and release artifacts remain upstream evidence and do not establish BoundSessionV1."
+    }
+  },
+  "claims": [
+    {
+      "id": "BS-CANONICAL-CONTEXT",
+      "title": "BoundSessionContextV1 has one canonical, prefix-free encoding",
+      "status": "design_only",
+      "required_evidence_classes": ["design", "conformance"],
+      "claim": "All supported implementations encode and reject BoundSessionContextV1 identically.",
+      "boundary": "The field set and rejection rules are specified, but no normative codec, vectors, or differential execution exists.",
+      "evidence_refs": [
+        "protocol/BOUND_SESSION_V1.md"
+      ],
+      "negative_evidence": [
+        "No integrated Rust codec exists.",
+        "No independent decoder or cross-language vector set exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-POLICY-DECISION-ORIGIN",
+      "title": "Every product handshake decision originates at the trusted policy boundary",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "conformance", "runtime"],
+      "claim": "A business-capable handshake cannot use a decision forged or re-selected outside the trusted policy boundary.",
+      "boundary": "The current component ABI decision is a trusted-caller value, not an authorization capability against hostile same-process code.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No isolated policy service or equivalent capability owner has been implemented.",
+        "Existing product selection and signed-policy paths are separate control planes."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-POLICY-MONOTONICITY",
+      "title": "Policy state is monotonic across concurrency, crash, and restart",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "Within a fixed trust-root namespace, accepted policy state cannot regress or accept equal-version equivocation.",
+      "boundary": "Whole-device rollback, store deletion, and global freshness require an external witness or stronger platform assumption.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No integrated crash/restart state model exists.",
+        "Policy update semantics for active sessions are undefined."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-PURPOSE-AUTHORIZATION",
+      "title": "Each local decision authorizes the exact caller, peer, purpose, owner, and local effect scope",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "A trusted policy service creates a session decision only when its policy snapshot authorizes the authenticated caller, expected peer, canonical PurposeV1, current LocalOwnerBinding, and endpoint-private typed LocalEffectScopeSet.",
+      "boundary": "A peer signature proves an endpoint assertion, not remote hardware attestation or execution of the asserted policy.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 policy service, local-effect-scope authority, or purpose-authorization model exists.",
+        "The current component decision does not bind a product peer, purpose, or local owner."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-LOCAL-PROVIDER-REFINEMENT",
+      "title": "Each local decision refines to one compliant local provider for the agreed wire profile",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "conformance", "runtime"],
+      "claim": "After a local decision is created, no other product path re-selects its protocol version, suite, hybrid profile, key format, or provider, and the selected provider implements the agreed wire profile.",
+      "boundary": "The protocol establishes agreement on wire cryptographic semantics; it does not prove that heterogeneous peers execute byte-identical providers.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "Existing signed-policy and product provider-selection paths remain separate authorities.",
+        "No final provider-to-wire traceability proof exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-LOCAL-CALLER-ISOLATION",
+      "title": "Untrusted local callers cannot forge, transfer, replay, or widen a decision handle",
+      "status": "pending",
+      "required_evidence_classes": ["implementation", "runtime", "artifact"],
+      "claim": "The trusted service authenticates the IPC caller and binds each non-serializable server-side handle to a principal, peer, purpose, owner, local effect scope, epoch, expiry, and one-time operation sequence.",
+      "boundary": "An honest-host same-process implementation does not satisfy this claim; OS or trusted-service compromise remains out of scope.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No isolated service, authenticated IPC protocol, or server-side BoundSession handle table exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-SERVICE-BOUND-AGREEMENT",
+      "title": "Accepted effects agree injectively on the peer-visible session and bilateral authorization tuple",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "conformance"],
+      "claim": "Every accepted purpose-specific effect has one unique matching peer run over the same policy, wire profile, purpose, context, transcript, peer session, shared grant, bilateral-ready digest, and key identity, plus a separately authorized local decision and owner transaction.",
+      "boundary": "Local provider and owner identities are endpoint-private; existing component models use different message grammars and cannot be combined as this theorem.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 Tamarin theory exists.",
+        "No anti-vacuity or field-removal controls exist."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-HYBRID-SECRECY",
+      "title": "The integrated session key remains secret if either hybrid component remains secure",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "conformance"],
+      "claim": "Under explicit identity and component-compromise conditions, an active network attacker does not learn the BoundSessionV1 root key when one PQ/T component holds.",
+      "boundary": "Upstream combiner binding is not an AKE secrecy theorem, and no complete computational AKE proof is claimed.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No integrated secrecy theorem exists.",
+        "A static Q suite does not provide forward secrecy after KEM private-key compromise."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-NO-POLICY-BOUND-FALLBACK",
+      "title": "A policy-bound PQ/T attempt cannot yield a business-capable classic session",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "Network, timeout, overload, cancellation, parse, identity, ABI, and provider failures terminate a policy-bound attempt without business fallback.",
+      "boundary": "A separately identified compatibility protocol may exist, but its declaration authenticates an endpoint assertion rather than proving a local failure fact.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No single product authority currently covers both signed policy and provider/fallback selection."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-NO-CROSS-PURPOSE-KEY-REUSE",
+      "title": "Keys and grants for one purpose cannot authorize another purpose or channel",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "The key schedule, grant, channel API, and receipt authentication separate purposes, logical channels, roles, and directions.",
+      "boundary": "Purpose separation does not establish metadata privacy or safety after endpoint compromise.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No integrated purpose-separated key schedule, grant type, or negative cross-purpose corpus exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-CURRENT-OWNER-PUBLICATION",
+      "title": "Only the exact current local owner can commit and publish a grant",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "The authorization transaction and the later bilateral-enable transaction each compare-and-swap caller principal, connection generation, operation token, driver identity, arbiter lease, and decision epoch before a grant can be published.",
+      "boundary": "The peer-agreed session identifier is distinct from each endpoint's private local owner generation.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 transaction or crash/ABA state model exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-AUTHORIZATION-BEFORE-PUBLICATION",
+      "title": "The exact local authorization record is transactionally stored before grant publication",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime"],
+      "claim": "A BoundSessionGrant cannot be published or used until one local transaction validates the exact owner and stores both the pending authorized grant state and matching diagnostic authorization record, followed by a distinct owner-validated bilateral-enable transition.",
+      "boundary": "The record means local grant authorization, not application success; it is not durable, non-repudiable, or root-resistant without separately evidenced storage and witnesses.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "The current product success path resumes its caller before beginning the audit session.",
+        "The current established event routes under a redacted identifier rather than the new exact session chain."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-BILATERAL-GRANT-READINESS",
+      "title": "Both endpoints authenticate one shared grant and bilateral-ready set before local enablement",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "conformance", "runtime"],
+      "claim": "Each endpoint persists monotonic authorization/ready/enable states, derives the same domain-separated sharedGrantId, authenticates both role-ordered GrantReadyV1 values, stores one bilateralReadyDigest, and revalidates its private local owner immediately before enabling the grant.",
+      "boundary": "Local grant identifiers, decision epochs, authorization transaction identifiers, and owner bindings remain endpoint-private; a peer ready value authenticates a service assertion rather than remotely attesting its implementation or storage.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No bilateral-ready state model, normative codec, integrated implementation, or replay/crash corpus exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-TRUSTED-EFFECT-COMMITTER",
+      "title": "Untrusted application code cannot mint a successful application-effect receipt",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime", "device"],
+      "claim": "Only a sealed PresentationCommitter, InputCommitter, or DurableFileCommitter can consume a one-use operation capability for an authorized LocalEffectScopeSet target, execute or directly verify the named platform completion event, and authorize the receipt service to MAC its derived canonical outcome.",
+      "boundary": "A software completion event does not prove human perception, a later physical consequence, remote hardware state, or durability stronger than the named platform primitive.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No isolated effect committer, authenticated outcome channel, protected receipt-key path, or effect-bound negative corpus exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-RECEIPT-EFFECT-CORRESPONDENCE",
+      "title": "Every accepted purpose receipt corresponds to the exact authenticated application effect",
+      "status": "pending",
+      "required_evidence_classes": ["formal", "implementation", "runtime", "device"],
+      "claim": "A verified receipt binds sharedGrantId, bilateralReadyDigest, the issuer authorization commitment, purpose, context, transcript, role-relative direction, operation identifier, monotonic sequence, trusted result, and effect digest to one uniquely journaled application effect.",
+      "boundary": "A missing receipt after a potentially applied operation is ambiguous; network submission or an authorization record is not application success.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No normative receipt codec, state model, idempotency store, or final-device effect capture exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-CODE-CONFORMANCE",
+      "title": "Final implementations conform to the normative encodings and modeled enforcement points",
+      "status": "pending",
+      "required_evidence_classes": ["conformance"],
+      "claim": "Rust, C, Swift, and Kotlin faces produce identical normative values and enforce the modeled checks at mapped code boundaries.",
+      "boundary": "KATs, differential tests, source hashes, and traceability are not a mechanized specification-to-binary refinement theorem.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 implementation or cross-language corpus exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-FINAL-BINARY-CT",
+      "title": "The final integrated hybrid implementation passes two-ISA binary constant-time discrimination",
+      "status": "pending",
+      "required_evidence_classes": ["artifact", "runtime"],
+      "claim": "Final release binaries on x86-64 and aarch64 produce zero genuine-secret findings while detecting the planted-leak positive control.",
+      "boundary": "Dynamic discrimination is not a complete constant-time proof or coverage of every platform and microarchitecture.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "Existing component captures are historical relative to later backend or source changes."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-APPLE-PHYSICAL-E2E",
+      "title": "Final-source Apple endpoints complete purpose-bound physical-device sessions",
+      "status": "pending",
+      "required_evidence_classes": ["runtime", "device", "artifact"],
+      "claim": "Named physical Apple endpoints complete authenticated BoundSessionV1 handshakes and bidirectional purpose-specific receipts from final-source binaries.",
+      "boundary": "Build, simulator, primitive benchmark, discovery, and TCP reachability evidence do not satisfy this claim.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 physical-device run exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-NONAPPLE-INTEROP",
+      "title": "A real non-Apple endpoint interoperates with the same final protocol core",
+      "status": "pending",
+      "required_evidence_classes": ["runtime", "device", "artifact"],
+      "claim": "At least one physical or bare-metal non-Apple endpoint completes the same authenticated wire protocol and application receipts with an Apple endpoint.",
+      "boundary": "Static contract checks, cross-compilation, package construction, emulator-only checks, and TCP payload proxies are insufficient.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No final BoundSessionV1 non-Apple endpoint exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-REMOTE-DESKTOP-RECEIPT",
+      "title": "Remote desktop success is bound to trusted presentation completion and owner-authenticated control receipt",
+      "status": "pending",
+      "required_evidence_classes": ["implementation", "runtime", "device", "artifact"],
+      "claim": "A remote desktop trial succeeds only after the intended endpoint's trusted renderer observes the defined presentation completion and, for interactive mode, the trusted input committer returns an authenticated OS-acceptance receipt for an owner-bound control action.",
+      "boundary": "UI connected state, a local socket, a decoded synthetic frame, one-way control submission, human perception, and later physical consequences are outside this completion claim.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No purpose-bound final-source trial exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-FILE-DURABLE-RECEIPT",
+      "title": "File-transfer success is bound to direction, length, content digest, and durable receiver receipt",
+      "status": "pending",
+      "required_evidence_classes": ["implementation", "runtime", "device", "artifact"],
+      "claim": "A file-transfer trial succeeds only after the receiver durably commits the declared bytes and returns an authenticated matching SHA-256 receipt.",
+      "boundary": "Network submission, sender completion, or receiver memory buffering is not durable success.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No BoundSessionV1 file-transfer trial exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-PERFORMANCE-NONINFERIORITY",
+      "title": "Purpose binding has bounded cost against matched hybrid baselines",
+      "status": "pending",
+      "required_evidence_classes": ["performance", "artifact"],
+      "claim": "On predeclared primary metrics, the final integrated system stays within application-relevant non-inferiority margins against matched final-source PQ/T baselines.",
+      "boundary": "Single-host primitive timings, unmatched endpoints, historical backends, and failure to reject a null hypothesis do not establish non-inferiority.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No final protocol, margins, or matched raw measurements exist."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-ARTIFACT-BINDING",
+      "title": "All submitted claims and results bind to one immutable evidence root",
+      "status": "pending",
+      "required_evidence_classes": ["artifact", "conformance"],
+      "claim": "Every theorem, test, binary, device run, raw sample, table, and figure is selected by one final immutable source and evidence manifest.",
+      "boundary": "A local clean worktree or hash list alone is not a remote trust anchor, binary attestation, or independently reproduced result.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "No final implementation or evidence manifest exists."
+      ],
+      "last_verified_at": null
+    },
+    {
+      "id": "BS-PUBLICATION",
+      "title": "The research has been submitted or published",
+      "status": "not_started",
+      "required_evidence_classes": ["publication"],
+      "claim": "A submission or publication record exists for this independent manuscript.",
+      "boundary": "Drafting, local compilation, preprints, and repository branches are not peer-reviewed publication.",
+      "evidence_refs": [],
+      "negative_evidence": [
+        "The manuscript is not submission-ready and has not been submitted."
+      ],
+      "last_verified_at": null
+    }
+  ]
+}
