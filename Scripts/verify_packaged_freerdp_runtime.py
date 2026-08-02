@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -65,12 +66,52 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+MH_MAGIC_64 = 0xFEEDFACF
+LC_SEGMENT_64 = 0x19
+
+
+def normalize_linkedit_vmsize(macho: Path, source_label: str) -> None:
+    """Zero the ``__LINKEDIT`` segment's ``vmsize`` in place.
+
+    Signing grows ``__LINKEDIT`` to hold the signature blob and rounds
+    ``vmsize`` up to a page boundary; ``codesign --remove-signature`` restores
+    ``filesize`` but leaves the rounded ``vmsize`` behind. The residue depends
+    on the size of whichever signature the file carried last (ad-hoc vs
+    Developer ID + timestamp), so it is not part of the artifact's identity.
+    Zeroing the field on both comparison sides keeps every other byte
+    significant.
+    """
+    data = bytearray(macho.read_bytes())
+    if len(data) < 32 or struct.unpack_from("<I", data, 0)[0] != MH_MAGIC_64:
+        fail(
+            f"{source_label} is not a thin 64-bit Mach-O; the closure gate "
+            "only supports the vendored thin-arm64 layout"
+        )
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    offset = 32
+    patched = False
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmdsize < 8 or offset + cmdsize > len(data):
+            fail(f"{source_label} has a corrupt Mach-O load command table")
+        if cmd == LC_SEGMENT_64:
+            segment_name = bytes(data[offset + 8 : offset + 24]).rstrip(b"\0")
+            if segment_name == b"__LINKEDIT":
+                struct.pack_into("<Q", data, offset + 32, 0)
+                patched = True
+        offset += cmdsize
+    if not patched:
+        fail(f"{source_label} has no __LINKEDIT segment to normalize")
+    macho.write_bytes(bytes(data))
+
+
 def signature_stripped_sha256(dylib: Path, scratch: Path) -> str:
     """Hash of the Mach-O with any code signature removed.
 
     ``codesign`` refuses to edit files in place safely for our purposes, so
     the file is copied into the scratch directory first. An unsigned input is
-    a valid state (already stripped) and is hashed as-is.
+    a valid state (already stripped) and is hashed after the same
+    normalization.
     """
     working_copy = scratch / f"stripped-{dylib.name}"
     shutil.copyfile(dylib, working_copy)
@@ -83,6 +124,7 @@ def signature_stripped_sha256(dylib: Path, scratch: Path) -> str:
     )
     if probe.returncode != 0:
         if "not signed at all" in (probe.stderr or ""):
+            normalize_linkedit_vmsize(working_copy, str(dylib))
             return sha256_of(working_copy)
         fail(
             "unable to inspect code signature of "
@@ -100,6 +142,7 @@ def signature_stripped_sha256(dylib: Path, scratch: Path) -> str:
             "unable to strip code signature of "
             f"{dylib}: {removal.stderr.strip() or removal.returncode}"
         )
+    normalize_linkedit_vmsize(working_copy, str(dylib))
     return sha256_of(working_copy)
 
 

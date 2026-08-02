@@ -104,6 +104,47 @@ class PackagedFreeRDPRuntimeClosureTests(unittest.TestCase):
         self.assertIn("outside the pinned set", result.stderr)
         self.assertIn("libssl.3.dylib", result.stderr)
 
+    def test_passes_when_signature_growth_left_linkedit_vmsize_residue(self) -> None:
+        """Developer ID + timestamp signatures are larger than the vendored
+        ad-hoc ones, so codesign rounds __LINKEDIT vmsize up and the residue
+        survives --remove-signature. The gate must treat that as
+        identity-preserving."""
+        import struct
+
+        app_path = self.make_app()
+        target = app_path / "Contents/Frameworks/libcrypto.4.dylib"
+        data = bytearray(target.read_bytes())
+        self.assertEqual(struct.unpack_from("<I", data, 0)[0], 0xFEEDFACF)
+        ncmds = struct.unpack_from("<I", data, 16)[0]
+        offset = 32
+        patched = False
+        for _ in range(ncmds):
+            cmd, cmdsize = struct.unpack_from("<II", data, offset)
+            if cmd == 0x19 and bytes(data[offset + 8 : offset + 24]).rstrip(b"\0") == b"__LINKEDIT":
+                vmsize = struct.unpack_from("<Q", data, offset + 32)[0]
+                struct.pack_into("<Q", data, offset + 32, vmsize + 0x4000)
+                patched = True
+            offset += cmdsize
+        self.assertTrue(patched)
+        target.write_bytes(bytes(data))
+        subprocess.run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                "test.release.libcrypto.4.dylib",
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = run_verifier(app_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("closure member verified: libcrypto.4.dylib", result.stdout)
+
     def test_fails_when_packaged_bytes_are_tampered(self) -> None:
         app_path = self.make_app()
         target = app_path / "Contents/Frameworks/libjansson.4.dylib"
