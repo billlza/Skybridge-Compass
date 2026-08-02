@@ -263,10 +263,20 @@ final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
     func testSharedRuntimeRoundTripAndFrozenSnapshotSurviveSettingsFlipAndRegistryReset() async throws {
         QPeriaptIOSRuntime.resetForTesting()
         defer { QPeriaptIOSRuntime.resetForTesting() }
+        // The shipped production registry provisions a real signed-policy
+        // session end to end (verification, durable CAS, native probe).
         let productionPreparation = try await QPeriaptIOSRuntime.prepareProductionSession()
-        XCTAssertEqual(productionPreparation, .unprovisioned)
-        XCTAssertNil(QPeriaptIOSRuntime.currentSession)
+        XCTAssertEqual(productionPreparation, .activated)
+        let productionSession = try XCTUnwrap(QPeriaptIOSRuntime.currentSession)
+        XCTAssertEqual(productionSession.policyVersion, 1)
+        XCTAssertTrue(
+            productionSession.authProfile.hasPrefix("q-periapt-abi2-policy-v1/")
+        )
 
+        // The rest of this test exercises the fixture root; trust-root
+        // replacement is forbidden inside one registry lifecycle, so start a
+        // fresh lifecycle exactly as the production reset flow would.
+        QPeriaptIOSRuntime.resetForTesting()
         let fixture = try loadSignedPolicyFixture()
         try await QPeriaptIOSRuntime.activateSignedPolicyForTesting(
             policyTOML: Data(fixture.policyTOML.utf8),

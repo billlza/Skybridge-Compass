@@ -11,6 +11,9 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     case unexpectedError(OSStatus)
     case decodingError
     case itemChangedDuringReconciliation
+    case immutableStateCorrupt(String)
+    case immutableStateCycleRejected
+    case immutableStateTransitionLimitExceeded(maximum: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +25,12 @@ public enum KeychainError: Error, LocalizedError, Sendable {
             return "Keychain item could not be decoded"
         case .itemChangedDuringReconciliation:
             return "Keychain item changed during legacy reconciliation"
+        case .immutableStateCorrupt(let detail):
+            return "Immutable keychain state is corrupt: \(detail)"
+        case .immutableStateCycleRejected:
+            return "Immutable keychain state transition would create a cycle"
+        case .immutableStateTransitionLimitExceeded(let maximum):
+            return "Immutable keychain state exceeded \(maximum) transitions; re-enrollment required"
         }
     }
 }
@@ -1531,4 +1540,244 @@ extension KeychainManager {
         return loadKeyData(service: "SkyBridge.PeerSigningPub", account: peerId)
     }
 
+}
+
+@available(macOS 14.0, *)
+extension KeychainManager {
+    // MARK: - Q-Periapt immutable persistence
+    //
+    // Byte-compatible port of the iOS trusted-state store: an append-only chain
+    // of generic-password transitions whose accounts are derived only from the
+    // authenticated root-key fingerprint and SHA-256(expected state). The
+    // registry label never enters the Keychain namespace, and `SecItemAdd` is
+    // the cross-process CAS commit point.
+
+    /// Maximum number of monotonic policy transitions retained for one root.
+    /// Crossing the bound is a controlled re-enrollment condition, not a signal
+    /// to scan or mutate an unbounded Keychain history.
+    private nonisolated static var qPeriaptMaximumTrustedStateTransitions: Int { 64 }
+    private nonisolated static var qPeriaptTrustedStateLength: Int { 36 }
+    private nonisolated static var qPeriaptTrustedStateService: String {
+        "com.skybridge.compass.qperiapt.trusted-state.v1"
+    }
+
+    /// Reads the current state by following the append-only transition chain.
+    public nonisolated func loadQPeriaptTrustedState(
+        rootFingerprint: Data
+    ) throws -> Data? {
+        try qPeriaptTrustedStateSnapshot(rootFingerprint: rootFingerprint).state
+    }
+
+    private nonisolated func qPeriaptTrustedStateSnapshot(
+        rootFingerprint: Data
+    ) throws -> (state: Data?, transitionCount: Int, visitedStateDigests: Set<Data>) {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+
+        var currentState: Data?
+        var visitedStateDigests = Set<Data>()
+        for transitionIndex in 0..<Self.qPeriaptMaximumTrustedStateTransitions {
+            guard let nextState = try loadQPeriaptItem(
+                service: Self.qPeriaptTrustedStateService,
+                account: Self.qPeriaptTransitionAccount(
+                    rootFingerprint: rootFingerprint,
+                    expectedState: currentState
+                )
+            ) else {
+                return (currentState, transitionIndex, visitedStateDigests)
+            }
+            guard nextState.count == Self.qPeriaptTrustedStateLength else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt trusted-state transition has \(nextState.count) bytes"
+                )
+            }
+            let nextDigest = Data(SHA256.hash(data: nextState))
+            guard visitedStateDigests.insert(nextDigest).inserted else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt trusted-state transition chain contains a cycle"
+                )
+            }
+            currentState = nextState
+        }
+
+        let overflowTransition = try loadQPeriaptItem(
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: currentState
+            )
+        )
+        guard overflowTransition == nil else {
+            throw KeychainError.immutableStateTransitionLimitExceeded(
+                maximum: Self.qPeriaptMaximumTrustedStateTransitions
+            )
+        }
+        return (
+            currentState,
+            Self.qPeriaptMaximumTrustedStateTransitions,
+            visitedStateDigests
+        )
+    }
+
+    /// Cross-process add-only CAS for monotonic trusted state. `SecItemAdd` is
+    /// the commit point: two contenders for the same expected-state account
+    /// cannot both win. Replaying the already-current state is an idempotent
+    /// success, while attempting to return to any older state is rejected
+    /// before the append-only record is written.
+    public nonisolated func compareAndSwapQPeriaptTrustedState(
+        expectedPreviousState: Data?,
+        newState: Data,
+        rootFingerprint: Data
+    ) throws -> Bool {
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        if let expectedPreviousState {
+            guard expectedPreviousState.count == Self.qPeriaptTrustedStateLength else {
+                throw KeychainError.immutableStateCorrupt(
+                    "Q-Periapt expected trusted state has \(expectedPreviousState.count) bytes"
+                )
+            }
+        }
+        guard newState.count == Self.qPeriaptTrustedStateLength else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt candidate trusted state has \(newState.count) bytes"
+            )
+        }
+
+        let snapshot = try qPeriaptTrustedStateSnapshot(rootFingerprint: rootFingerprint)
+        guard snapshot.state == expectedPreviousState else { return false }
+        guard snapshot.state != newState else { return true }
+        let newStateDigest = Data(SHA256.hash(data: newState))
+        guard !snapshot.visitedStateDigests.contains(newStateDigest) else {
+            throw KeychainError.immutableStateCycleRejected
+        }
+        guard snapshot.transitionCount < Self.qPeriaptMaximumTrustedStateTransitions else {
+            throw KeychainError.immutableStateTransitionLimitExceeded(
+                maximum: Self.qPeriaptMaximumTrustedStateTransitions
+            )
+        }
+
+        return try insertQPeriaptItemIfAbsent(
+            data: newState,
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: expectedPreviousState
+            )
+        ) == .inserted
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    /// Injects one append-only transition into the in-memory XCTest backend so
+    /// corruption and cycle handling can be exercised without touching a real
+    /// device Keychain. Production builds expose no mutation bypass.
+    nonisolated func insertQPeriaptTrustedStateTransitionForTesting(
+        rootFingerprint: Data,
+        expectedState: Data?,
+        storedState: Data
+    ) throws -> KeychainInsertResult {
+        guard Self.useInMemoryKeychain else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt test transition injection requires the in-memory Keychain"
+            )
+        }
+        try Self.validateQPeriaptRootFingerprint(rootFingerprint)
+        if let expectedState,
+           expectedState.count != Self.qPeriaptTrustedStateLength {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt test expected state has an invalid length"
+            )
+        }
+        return try insertQPeriaptItemIfAbsent(
+            data: storedState,
+            service: Self.qPeriaptTrustedStateService,
+            account: Self.qPeriaptTransitionAccount(
+                rootFingerprint: rootFingerprint,
+                expectedState: expectedState
+            )
+        )
+    }
+    #endif
+
+    private nonisolated func loadQPeriaptItem(
+        service: String,
+        account: String
+    ) throws -> Data? {
+        if Self.useInMemoryKeychain {
+            let key = "qperiapt|\(service)|\(account)"
+            return Self.inMemoryLock.withLock { Self.inMemoryStore[key] }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(query as CFDictionary, &item) {
+        case errSecItemNotFound:
+            return nil
+        case errSecSuccess:
+            guard let data = item as? Data else { throw KeychainError.decodingError }
+            return data
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    private nonisolated func insertQPeriaptItemIfAbsent(
+        data: Data,
+        service: String,
+        account: String
+    ) throws -> KeychainInsertResult {
+        guard !data.isEmpty else { throw KeychainError.decodingError }
+        if Self.useInMemoryKeychain {
+            let key = "qperiapt|\(service)|\(account)"
+            return Self.inMemoryLock.withLock {
+                guard Self.inMemoryStore[key] == nil else { return .alreadyExists }
+                Self.inMemoryStore[key] = data
+                return .inserted
+            }
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: data
+        ]
+        switch SecItemAdd(query as CFDictionary, nil) {
+        case errSecSuccess:
+            return .inserted
+        case errSecDuplicateItem:
+            return .alreadyExists
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+    private nonisolated static func qPeriaptTransitionAccount(
+        rootFingerprint: Data,
+        expectedState: Data?
+    ) -> String {
+        let expectedDigest = Data(SHA256.hash(data: expectedState ?? Data()))
+        return "\(qPeriaptHex(rootFingerprint)).\(qPeriaptHex(expectedDigest))"
+    }
+
+    private nonisolated static func validateQPeriaptRootFingerprint(
+        _ rootFingerprint: Data
+    ) throws {
+        guard rootFingerprint.count == SHA256.byteCount else {
+            throw KeychainError.immutableStateCorrupt(
+                "Q-Periapt root-key fingerprint has \(rootFingerprint.count) bytes"
+            )
+        }
+    }
+
+    private nonisolated static func qPeriaptHex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
 }

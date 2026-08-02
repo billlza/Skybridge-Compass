@@ -2060,6 +2060,11 @@ public actor DeviceIdentityKeyManager {
                 return .malformedAttributes
             case .unexpectedError(let status):
                 return legacyResidueInspectionFailureReason(for: status)
+            case .immutableStateCorrupt, .immutableStateCycleRejected,
+                 .immutableStateTransitionLimitExceeded:
+                // Q-Periapt trusted-state failures cannot originate from
+                // identity residue inspection; they must propagate untouched.
+                return nil
             }
         }
         if let keyError = error as? DeviceIdentityKeyError {
@@ -3205,7 +3210,11 @@ public actor DeviceIdentityKeyManager {
                 return DeviceIdentityKeyError.incompleteKeyMaterial(
                     "ML-DSA-65 canonical Keychain item could not be decoded"
                 )
-            case .itemChangedDuringReconciliation:
+            case .itemChangedDuringReconciliation,
+                 .immutableStateCorrupt,
+                 .immutableStateCycleRejected,
+                 .immutableStateTransitionLimitExceeded:
+                // Not ML-DSA storage semantics; propagate untranslated.
                 return keychainError
             }
         }

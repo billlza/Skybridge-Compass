@@ -1,0 +1,23 @@
+[package]
+name = "qperiapt-policy-ceremony"
+description = "Offline signing ceremony for the SkyBridge Q-Periapt ABI2 production policy"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Standalone on purpose: the ceremony binary links the reviewed upstream
+# primitives directly and must not join the product Rust workspace, whose
+# dependency migrations move independently of the pinned suite.
+[workspace]
+
+[dependencies]
+q-periapt-backends = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-backends" }
+q-periapt-policy = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-policy" }
+q-periapt-sig = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-sig" }
+# OS randomness for the root seed and hedged signing nonce. The suite keeps
+# randomness at the product boundary, so the ceremony supplies it explicitly.
+getrandom = "0.3"
+# SHA-256 for the independently pinned verification-key digest (the Swift side
+# pins with CryptoKit SHA256; both ends must agree byte-for-byte).
+sha2 = "0.10"

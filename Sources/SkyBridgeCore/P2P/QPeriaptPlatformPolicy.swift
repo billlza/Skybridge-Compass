@@ -44,11 +44,34 @@ public enum QPeriaptPlatformPolicy {
         runtimeSessionRegistry.snapshot() != nil
     }
 
-    /// Existing settings initialization calls this method before a product
-    /// policy has necessarily been provisioned. It is intentionally fail-closed;
-    /// only `activateRuntimeSession` can install an authenticated session.
+    /// Settings initialization calls this once per launch. It drives the
+    /// production provisioning chain (signed-policy verification, durable
+    /// Keychain CAS, native probe, immutable registry install) and stays
+    /// fail-closed: on any failure the suite remains dark and the failure is
+    /// logged, because a policy that cannot be verified must never surface as
+    /// a supported capability.
     public static func prepareLocalRuntimeSupport() async -> Bool {
-        isLocalRuntimeSupported
+        #if os(macOS)
+        do {
+            switch try await QPeriaptProductionRuntime.prepareProductionSession() {
+            case .unprovisioned:
+                SkyBridgeLogger.p2p.info(
+                    "Q-Periapt ABI2 未配置生产信任根；套件 0x0012 保持停用且不广告"
+                )
+            case .alreadyActive:
+                break
+            case .activated:
+                SkyBridgeLogger.p2p.info("Q-Periapt ABI2 生产策略会话已激活")
+            }
+        } catch is CancellationError {
+            SkyBridgeLogger.p2p.info("Q-Periapt ABI2 启动准备已取消；套件保持停用")
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Q-Periapt ABI2 生产策略会话激活失败；套件保持停用: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        #endif
+        return isLocalRuntimeSupported
     }
 
     /// Activates one session only after signed-policy verification, durable

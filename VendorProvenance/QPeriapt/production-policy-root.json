@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "family": "q-periapt-production-policy-root",
+  "algorithm": "ML-DSA-65",
+  "trust_root_identifier": "skybridge/production/q-periapt-abi2/v1",
+  "verification_key_sha256_pin": "5558bc505c17dee85e9346553386ae51cf8ed7fad87df5b340022db402890844",
+  "policy_version": 2,
+  "policy_digest": "35185e32882ea548c16708e9d1285085a7a09abde90ac6121bcfe293a6055db0",
+  "selected_suite_code": 1,
+  "selected_profile": "ContextBound",
+  "generated_at_utc": "2026-08-02T07:46:34Z",
+  "signing_key_location": "Artifacts/qperiapt-ceremony/signing-key.bin (gitignored; never commit)",
+  "notes": "Public verification material only. The ML-DSA-65 signing key remains outside the repository and is required only for future policy rotations."
+}

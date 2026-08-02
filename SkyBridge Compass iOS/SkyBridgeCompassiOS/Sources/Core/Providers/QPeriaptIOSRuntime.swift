@@ -40,10 +40,18 @@ struct QPeriaptProductionTrustRootEntry: Sendable {
 }
 
 enum QPeriaptProductionTrustRootRegistry {
-    /// Intentionally empty until real production policy material and its
-    /// independently reviewed root-key pin are provisioned. An empty registry
-    /// is a normal fail-closed state and can never advertise suite 0x0012.
-    static let entries: [QPeriaptProductionTrustRootEntry] = []
+    /// The single production entry, built from the ceremony-generated shared
+    /// material (`QPeriaptProductionTrustRootMaterial`, one copy for every
+    /// platform). Fresh installs are explicitly authorized first enrollments:
+    /// the material and its pin ship inside the signed app, which is the
+    /// enrollment authorization boundary, and the monotonic Keychain CAS
+    /// prevents any later rollback.
+    static let entries: [QPeriaptProductionTrustRootEntry] = [
+        QPeriaptProductionTrustRootEntry(
+            material: QPeriaptProductionTrustRootMaterial.makeSignedPolicyMaterial(),
+            enrollmentMode: .explicitlyAuthorizedFirstEnrollment
+        )
+    ]
 }
 
 /// Immutable admission identity captured when a handshake driver is created.
@@ -424,6 +432,7 @@ enum QPeriaptIOSRuntime {
     }
 
     static func prepareProductionSession() async throws -> QPeriaptIOSRuntimePreparationResult {
+        guard currentSession == nil else { return .activated }
         let entries = QPeriaptProductionTrustRootRegistry.entries
         guard !entries.isEmpty else { return .unprovisioned }
         guard entries.count == 1, let entry = entries.first else {

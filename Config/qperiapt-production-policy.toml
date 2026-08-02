@@ -1,0 +1,7 @@
+schema_version = 1
+policy_version = 1
+min_nist_level = 3
+default_profile = "ContextBound"
+allowed_kems = ["ML-KEM-768", "X25519"]
+allowed_sigs = ["ML-DSA-65"]
+deprecated = []
