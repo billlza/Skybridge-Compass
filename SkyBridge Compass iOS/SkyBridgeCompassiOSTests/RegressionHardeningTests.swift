@@ -5066,15 +5066,20 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testOfflineQueueCleanupRemovesExpiredPendingAndFailedMessages() throws {
-    let queue = OfflineMessageQueue.shared
-    try queue.clear()
-    defer {
-      do {
-        try queue.clear()
-      } catch {
-        XCTFail("Failed to clear offline queue after test: \(error)")
-      }
-    }
+    // The shared queue runs on the unified SQLite repository, whose
+    // synchronous JSON-backend API intentionally fails closed. Cleanup
+    // semantics are exercised on an isolated queue with an injected
+    // in-memory backend, following DeviceMessagingServiceTests.
+    var stored: OfflineMessageQueue.StoredMessages?
+    let queue = OfflineMessageQueue(
+      testingPersistence: MessagingPersistence(
+        load: { stored },
+        save: { stored = $0 },
+        quarantine: { stored = nil }
+      ),
+      now: { Date() },
+      startRetryTimer: false
+    )
 
     let expiredPending = OfflineMessage(
       id: "expired-pending-\(UUID().uuidString)",
