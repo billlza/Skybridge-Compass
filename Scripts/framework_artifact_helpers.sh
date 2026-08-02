@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-_skybridge_framework_helpers_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]:-$0} keeps this sourceable from both bash and zsh
+# (package_app.sh is zsh); zsh resolves $0 to the sourced file path.
+_skybridge_framework_helpers_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 _skybridge_native_dependency_lock="${_skybridge_framework_helpers_dir}/../Config/native-dependencies.lock.json"
 if ! SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256="$(
   python3 - "${_skybridge_native_dependency_lock}" <<'PY'

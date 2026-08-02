@@ -54,6 +54,18 @@ die() {
   exit 1
 }
 
+# Homebrew's opt symlink tracks the installed fastlane version; Cellar paths
+# break on every `brew upgrade fastlane`.
+FASTLANE_GEM_HOME="/opt/homebrew/opt/fastlane/libexec"
+HOMEBREW_RUBY="/opt/homebrew/opt/ruby/bin/ruby"
+
+require_fastlane_runtime() {
+  [[ -x "${HOMEBREW_RUBY}" ]] \
+    || die "Homebrew ruby not found at ${HOMEBREW_RUBY} (brew install ruby)"
+  [[ -d "${FASTLANE_GEM_HOME}/gems" ]] \
+    || die "fastlane gem bundle not found at ${FASTLANE_GEM_HOME} (brew install fastlane)"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --create)
@@ -209,6 +221,27 @@ print(",".join(groups))
 PY
 }
 
+entitlements_request_aps_environment() {
+  local entitlements_path="$1"
+
+  python3 - "${entitlements_path}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+with path.open("rb") as fh:
+    entitlements = plistlib.load(fh)
+requested = (
+    str(entitlements.get("com.apple.developer.aps-environment") or "").strip()
+    or str(entitlements.get("aps-environment") or "").strip()
+)
+raise SystemExit(0 if requested else 1)
+PY
+}
+
 load_api_key_env() {
   skybridge_notarytool_maybe_source_local_env || true
 
@@ -262,12 +295,19 @@ create_or_refresh_profile() {
   local entitlements_path="$2"
   local profile_name="$3"
   local app_groups_csv="$4"
+  local enable_push=0
+
+  if entitlements_request_aps_environment "${entitlements_path}"; then
+    enable_push=1
+  fi
 
   load_api_key_env
+  require_fastlane_runtime
   mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
 
-  GEM_HOME=/opt/homebrew/Cellar/fastlane/2.230.0_1/libexec \
-  GEM_PATH=/opt/homebrew/Cellar/fastlane/2.230.0_1/libexec \
+  GEM_HOME="${FASTLANE_GEM_HOME}" \
+  GEM_PATH="${FASTLANE_GEM_HOME}" \
+  ENABLE_PUSH_NOTIFICATIONS="${enable_push}" \
   ASC_API_KEY_JSON="${ASC_API_KEY_JSON}" \
   ASC_KEY_PATH="${ASC_KEY_PATH}" \
   ASC_KEY_ID="${ASC_KEY_ID}" \
@@ -278,7 +318,7 @@ create_or_refresh_profile() {
   CERT_SHA1="${DEVELOPER_ID_SHA1}" \
   OUTPUT_DIR="${HOME}/Library/MobileDevice/Provisioning Profiles" \
   ENABLE_APP_GROUPS="$([[ -n "${app_groups_csv}" ]] && echo 1 || echo 0)" \
-  /opt/homebrew/opt/ruby/bin/ruby <<'RUBY'
+  "${HOMEBREW_RUBY}" <<'RUBY'
 require 'base64'
 require 'digest'
 require 'fileutils'
@@ -303,6 +343,7 @@ profile_name = ENV.fetch('PROFILE_NAME')
 cert_sha1 = ENV.fetch('CERT_SHA1', '').delete(':').upcase
 output_dir = File.expand_path(ENV.fetch('OUTPUT_DIR'))
 enable_app_groups = ENV.fetch('ENABLE_APP_GROUPS') == '1'
+enable_push_notifications = ENV.fetch('ENABLE_PUSH_NOTIFICATIONS') == '1'
 
 bundle = Spaceship::ConnectAPI::BundleId.find(bundle_id)
 unless bundle
@@ -315,12 +356,19 @@ unless bundle
   puts "created bundle id #{bundle.identifier}"
 end
 
+required_capabilities = []
 if enable_app_groups
-  type = Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-  cap = bundle.get_capabilities.find { |candidate| candidate.is_type?(type) }
-  unless cap
+  required_capabilities << ['App Groups', Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS]
+end
+if enable_push_notifications
+  required_capabilities << ['Push Notifications', Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS]
+end
+unless required_capabilities.empty?
+  existing_capabilities = bundle.get_capabilities
+  required_capabilities.each do |label, type|
+    next if existing_capabilities.any? { |candidate| candidate.is_type?(type) }
     bundle.create_capability(type, settings: [])
-    puts "enabled App Groups capability for #{bundle_id}"
+    puts "enabled #{label} capability for #{bundle_id}"
   end
 end
 
@@ -371,14 +419,17 @@ associate_app_groups_for_bundle() {
     DEVELOPER_APPLE_ID="$(sed -n 's/^[[:space:]]*apple_id("\([^"]*\)").*/\1/p' "${PROJECT_ROOT}/fastlane/Appfile" | head -n 1)"
   fi
   [[ -n "${DEVELOPER_APPLE_ID}" ]] || die "Missing Apple ID for Portal App Group association. Pass --apple-id or set FASTLANE_USER."
+  require_fastlane_runtime
 
-  GEM_HOME=/opt/homebrew/Cellar/fastlane/2.230.0_1/libexec \
-  GEM_PATH=/opt/homebrew/Cellar/fastlane/2.230.0_1/libexec \
+  # Program is passed on fd 3 so stdin stays available for spaceship's
+  # interactive 2FA prompt (a stdin heredoc would starve it).
+  GEM_HOME="${FASTLANE_GEM_HOME}" \
+  GEM_PATH="${FASTLANE_GEM_HOME}" \
   DEVELOPER_APPLE_ID="${DEVELOPER_APPLE_ID}" \
   TEAM_ID="${TEAM_ID}" \
   BUNDLE_ID="${bundle_id}" \
   APP_GROUPS_CSV="${app_groups_csv}" \
-  /opt/homebrew/opt/ruby/bin/ruby <<'RUBY'
+  "${HOMEBREW_RUBY}" /dev/fd/3 3<<'RUBY'
 require 'spaceship'
 
 apple_id = ENV.fetch('DEVELOPER_APPLE_ID')
@@ -443,7 +494,14 @@ ensure_target_profile() {
     return 0
   fi
 
-  if [[ "${ASSOCIATE_APP_GROUPS}" == "1" && -n "${app_groups_csv}" ]]; then
+  local fresh_profile="${HOME}/Library/MobileDevice/Provisioning Profiles/${bundle_id}.provisionprofile"
+  local app_groups_missing=0
+  if [[ -n "${app_groups_csv}" ]] \
+    && ! skybridge_profile_supports_requested_application_groups "${fresh_profile}" "${entitlements_path}" >/dev/null 2>&1; then
+    app_groups_missing=1
+  fi
+
+  if [[ "${ASSOCIATE_APP_GROUPS}" == "1" && "${app_groups_missing}" == "1" ]]; then
     log "${label} profile still lacks requested App Groups; associating groups in Developer Portal"
     associate_app_groups_for_bundle "${bundle_id}" "${app_groups_csv}"
     create_or_refresh_profile "${bundle_id}" "${entitlements_path}" "${profile_name}" "${app_groups_csv}"
@@ -451,13 +509,17 @@ ensure_target_profile() {
       log "${label} profile OK after App Group association: ${found_profile}"
       return 0
     fi
+    if ! skybridge_profile_supports_requested_application_groups "${fresh_profile}" "${entitlements_path}" >/dev/null 2>&1; then
+      die "${label} profile still does not cover App Groups (${app_groups_csv}) after Portal association."
+    fi
+    app_groups_missing=0
   fi
 
-  if [[ -n "${app_groups_csv}" ]]; then
+  if [[ "${app_groups_missing}" == "1" ]]; then
     die "${label} profile was created but still does not cover App Groups (${app_groups_csv}). Run once with --associate-app-groups to bind the concrete group ids, then rerun DMG packaging."
   fi
 
-  die "${label} profile was created but failed strict validation."
+  die "${label} profile was created but does not cover all restricted entitlements requested by ${entitlements_path}. Compare the profile's Entitlements dictionary against the requested keys (e.g. aps-environment requires the Push Notifications capability on the bundle id)."
 }
 
 ensure_target_profile \

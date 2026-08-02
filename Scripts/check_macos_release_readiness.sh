@@ -53,6 +53,7 @@ Checks:
   - Apple 登录产品开关保持与源 Info.plist 一致，且签名产物的 Apple 登录模式与发布策略一致
   - Widget appex 已嵌入、签名、带 profile，并与主应用共享一致的 App Groups
   - codesign identity, signed entitlements, embedded profiles, and source entitlements stay consistent
+  - packaged FreeRDP/OpenSSL runtime closure is byte-bound to FreeRDPRuntime.provenance.json and the native dependency lock
   - Gatekeeper/notarization status is surfaced with warnings or failures
   - Mac/iOS connectivity matrix artifacts cover PQC-XWing, PQC, and Classic interop paths
   - Rust CLI operator check-surface coverage is at least 88%
@@ -801,6 +802,16 @@ if [[ "${SCAN_RELEASE_BINARIES_ONLY}" == "1" ]]; then
   log_info "Binary scan-only mode passed; all other release readiness checks were intentionally not run"
   exit 0
 fi
+
+validate_freerdp_runtime_closure() {
+  local app_path="$1"
+  command -v python3 >/dev/null 2>&1 \
+    || fail "python3 is required for the FreeRDP runtime closure provenance gate"
+  python3 "${PROJECT_ROOT}/Scripts/verify_packaged_freerdp_runtime.py" \
+    --app-path "${app_path}" \
+    || fail "packaged FreeRDP/OpenSSL runtime closure is not bound to FreeRDPRuntime.provenance.json and Config/native-dependencies.lock.json"
+  log_info "FreeRDP/OpenSSL runtime closure provenance gate passed"
+}
 
 extract_helper_version() {
   local bin_path="$1"
@@ -1647,6 +1658,7 @@ if otool -L "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@rpath/WebRTC.framew
     fail "main executable links WebRTC.framework but is missing @executable_path/../Frameworks rpath"
   fi
 fi
+validate_freerdp_runtime_closure "${APP_PATH}"
 [[ -d "${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle" ]] \
   || fail "missing SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; Bundle.module app resources were not packaged"
 APP_MODULE_RESOURCES_DIR="${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle/Contents/Resources"

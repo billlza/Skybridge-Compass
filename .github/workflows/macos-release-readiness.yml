@@ -98,6 +98,9 @@ jobs:
       - name: Self-Test iOS Distribution Product Boundary
         run: python3 Scripts/test_verify_ios_distribution_product.py
 
+      - name: Self-Test FreeRDP Runtime Closure Provenance Gate
+        run: python3 Scripts/test_verify_packaged_freerdp_runtime.py
+
       - name: Self-Test Real-Device Evidence Workflow Contract
         run: python3 Scripts/test_real_device_release_workflow_contract.py
 

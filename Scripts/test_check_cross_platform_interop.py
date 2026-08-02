@@ -1,15 +1,67 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
+import sys
 import unittest
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from check_cross_platform_interop import (
     _ubuntu_bonjour_checks,
     failed_contract_blockers,
+    parse_csharp_readonly_identifier_array,
+    parse_csharp_string_constants,
     parse_rust_identifier_array,
     parse_rust_string_constants,
+    resolve_csharp_readonly_string_array,
     source_tokens_are_ordered,
     swift_signature_selection_contract,
 )
+
+
+class CSharpBonjourSourceParsingTests(unittest.TestCase):
+    SOURCE = """
+    internal static class ProtocolConstants
+    {
+        public const string Control = "_skybridge._tcp";
+        public const string Transfer = "_skybridge-xfer._tcp";
+        public static IReadOnlyList<string> QueryOrder { get; } = Array.AsReadOnly(
+            new[]
+            {
+                Control,
+                Transfer
+            });
+    }
+    """
+
+    def test_resolves_readonly_array_through_declared_constants(self) -> None:
+        self.assertEqual(
+            parse_csharp_string_constants(self.SOURCE),
+            {
+                "Control": "_skybridge._tcp",
+                "Transfer": "_skybridge-xfer._tcp",
+            },
+        )
+        self.assertEqual(
+            parse_csharp_readonly_identifier_array(self.SOURCE, "QueryOrder"),
+            ["Control", "Transfer"],
+        )
+        self.assertEqual(
+            resolve_csharp_readonly_string_array(self.SOURCE, "QueryOrder"),
+            ["_skybridge._tcp", "_skybridge-xfer._tcp"],
+        )
+
+    def test_unknown_array_constant_fails_closed(self) -> None:
+        mutated = self.SOURCE.replace("Transfer\n", "Missing\n")
+        with self.assertRaisesRegex(ValueError, "unknown string constants"):
+            resolve_csharp_readonly_string_array(mutated, "QueryOrder")
+
+    def test_string_literal_or_comment_cannot_replace_identifier_evidence(self) -> None:
+        mutated = self.SOURCE.replace("Transfer\n", '"_skybridge-xfer._tcp"\n')
+        with self.assertRaisesRegex(ValueError, "only constant identifiers"):
+            parse_csharp_readonly_identifier_array(mutated, "QueryOrder")
 
 
 class SwiftSignatureSelectionContractTests(unittest.TestCase):

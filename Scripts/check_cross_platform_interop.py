@@ -223,15 +223,44 @@ def add_check(checks: Dict[str, dict], name: str, ok: bool, detail: str) -> None
     checks[name] = {"ok": ok, "detail": detail}
 
 
-def parse_csharp_string_array(text: str, field_name: str) -> List[str]:
+def parse_csharp_string_constants(text: str) -> Dict[str, str]:
     pattern = re.compile(
-        rf"{re.escape(field_name)}\s*=\s*\{{(?P<body>.*?)\}}",
+        r"\bconst\s+string\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\"([^\"]+)\"\s*;"
+    )
+    constants: Dict[str, str] = {}
+    for name, value in pattern.findall(text):
+        if name in constants:
+            raise ValueError(f"C# string constant {name} must have one definition")
+        constants[name] = value
+    return constants
+
+
+def parse_csharp_readonly_identifier_array(text: str, property_name: str) -> List[str]:
+    pattern = re.compile(
+        rf"\b{re.escape(property_name)}\b\s*\{{\s*get\s*;\s*\}}\s*=\s*"
+        r"Array\.AsReadOnly\s*\(\s*new\s*\[\s*\]\s*\{(?P<body>.*?)\}\s*\)\s*;",
         flags=re.S,
     )
-    match = pattern.search(text)
-    if not match:
-        return []
-    return re.findall(r'"([^"]+)"', match.group("body"))
+    matches = list(pattern.finditer(text))
+    if len(matches) != 1:
+        raise ValueError(f"C# array {property_name} must have one definition")
+    raw_items = [item.strip() for item in matches[0].group("body").split(",")]
+    if not raw_items or any(not item for item in raw_items):
+        raise ValueError(f"C# array {property_name} contains an empty item")
+    if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", item) for item in raw_items):
+        raise ValueError(f"C# array {property_name} must contain only constant identifiers")
+    return raw_items
+
+
+def resolve_csharp_readonly_string_array(text: str, property_name: str) -> List[str]:
+    constants = parse_csharp_string_constants(text)
+    identifiers = parse_csharp_readonly_identifier_array(text, property_name)
+    missing = [identifier for identifier in identifiers if identifier not in constants]
+    if missing:
+        raise ValueError(
+            f"C# array {property_name} references unknown string constants: {missing}"
+        )
+    return [constants[identifier] for identifier in identifiers]
 
 
 @dataclass(frozen=True)
@@ -1518,6 +1547,12 @@ def run_bonjour_contract_check(
         / "device-discovery/src/main/kotlin/com/skybridge/compass/discovery/data/interop/AppleBonjourInterop.kt",
         "android_bonjour_routes": android_root
         / "device-discovery/src/main/kotlin/com/skybridge/compass/discovery/data/interop/AppleBonjourPeerRoutes.kt",
+        "android_product_route_protocol": android_root
+        / "shared/src/main/kotlin/com/skybridge/compass/shared/productsession/ProductSessionAuthorityStore.kt",
+        "android_bonjour_advertiser": android_root
+        / "device-discovery/src/main/kotlin/com/skybridge/compass/discovery/data/datasources/BonjourAdvertiserDataSource.kt",
+        "android_local_node": android_root
+        / "device-discovery/src/main/kotlin/com/skybridge/compass/discovery/data/services/P2PLocalNodeService.kt",
         "android_action_projection": android_root
         / "app/src/main/kotlin/com/skybridge/compass/android/discovery/DiscoveryPeerActionProjection.kt",
         "ubuntu_bonjour_discovery": ubuntu_root
@@ -1527,6 +1562,8 @@ def run_bonjour_contract_check(
         "ubuntu_app_startup": ubuntu_root / "skybridge-app/src/main.rs",
         "windows_discovery_browser": windows_root
         / "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
+        "windows_protocol_constants": windows_root
+        / "windows/Skybridge.WinClient/Services/SkyBridgeProtocolConstants.cs",
         "windows_product_action_targets": windows_root
         / "windows/Skybridge.WinClient/Services/ProductSessionActionTargetProjection.cs",
         "windows_product_action_gate": windows_root
@@ -1660,11 +1697,15 @@ def run_bonjour_contract_check(
     apple_text = read_source("apple_protocol_contract")
     android_interop_text = read_source("android_bonjour_interop")
     android_routes_text = read_source("android_bonjour_routes")
+    android_product_route_protocol_text = read_source("android_product_route_protocol")
+    android_bonjour_advertiser_text = read_source("android_bonjour_advertiser")
+    android_local_node_text = read_source("android_local_node")
     android_action_projection_text = read_source("android_action_projection")
     ubuntu_discovery_text = read_source("ubuntu_bonjour_discovery")
     ubuntu_types_text = read_source("ubuntu_discovery_types")
     ubuntu_app_text = read_source("ubuntu_app_startup")
     windows_browser_text = read_source("windows_discovery_browser")
+    windows_protocol_constants_text = read_source("windows_protocol_constants")
     windows_product_action_text = read_source("windows_product_action_targets")
     windows_product_action_gate_text = read_source("windows_product_action_gate")
     windows_command_gate_text = read_source("windows_command_gate")
@@ -1688,10 +1729,18 @@ def run_bonjour_contract_check(
         f"missing={apple_missing}",
     )
 
+    android_contract_text = "\n".join(
+        (
+            android_interop_text,
+            android_product_route_protocol_text,
+            android_bonjour_advertiser_text,
+            android_local_node_text,
+        )
+    )
     android_missing = [
         token
         for token in expected_apple_services + expected_capability_tokens + expected_txt_tokens
-        if token not in android_interop_text
+        if token not in android_contract_text
     ]
     add_check(
         checks,
@@ -1704,7 +1753,13 @@ def run_bonjour_contract_check(
         "resolvedPort > 0" in android_interop_text
         and "return 0" in android_interop_text
         and "resolveTxtPort" not in android_interop_text
-        and "capability strings as proof of a dialable route" in android_routes_text
+        and re.search(
+            r"val\s+port\s*=\s*directPort\s*\?:\s*indexedPort\s*\?:\s*return\s+null",
+            android_routes_text,
+        )
+        is not None
+        and "hasConnectablePortHint(" not in android_routes_text
+        and "preferredPort(" not in android_routes_text
     )
     add_check(
         checks,
@@ -1768,12 +1823,29 @@ def run_bonjour_contract_check(
     )
     checks.update(linux_checks)
 
-    windows_order = parse_csharp_string_array(windows_browser_text, "DefaultQueryOrder")
+    try:
+        windows_order = resolve_csharp_readonly_string_array(
+            windows_protocol_constants_text,
+            "WindowsDnsSdQueryOrder",
+        )
+        windows_query_order_is_consumed = bool(
+            re.search(
+                r"\bDefaultQueryOrder\s*=\s*"
+                r"SkyBridgeProtocolConstants\.WindowsDnsSdQueryOrder\s*;",
+                windows_browser_text,
+            )
+        )
+        windows_order_error = None
+    except ValueError as error:
+        windows_order = []
+        windows_query_order_is_consumed = False
+        windows_order_error = str(error)
     add_check(
         checks,
         "windows_discovery_query_order",
-        windows_order == expected_windows_services,
-        f"expected={expected_windows_services}, actual={windows_order}",
+        windows_order == expected_windows_services and windows_query_order_is_consumed,
+        f"expected={expected_windows_services}, actual={windows_order}, "
+        f"browser_consumes_constants={windows_query_order_is_consumed}, error={windows_order_error}",
     )
 
     rust_missing = [
@@ -2241,7 +2313,8 @@ def main() -> int:
     swift_route_binding_codec = (
         "authenticatedRouteBinding" in ios_webrtc_codec_text
         and "dropUntilPQCRekey" in ios_webrtc_policy_text
-        and "case .clipboard, .textMessage, .authenticatedRouteBinding" in ios_webrtc_policy_text
+        and "case .clipboard, .textMessage, .textMessageReceipt, .authenticatedRouteBinding"
+        in ios_webrtc_policy_text
     )
     android_route_binding_schema = all(token in android_app_message_text for token in route_binding_schema_tokens)
     android_route_binding_consumer = all(
