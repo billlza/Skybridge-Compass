@@ -118,13 +118,13 @@ actor IOSUnifiedDeviceMessagingRuntime {
     func stageOutgoing(
         message: PersistedMessageRecord,
         intent: PersistedDeliveryIntent
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().stageOutgoing(message: message, intent: intent)
     }
 
     func recordIncoming(
         _ message: PersistedMessageRecord
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().recordIncoming(message)
     }
 
@@ -133,7 +133,7 @@ actor IOSUnifiedDeviceMessagingRuntime {
         ownerToken: UUID,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) async throws -> MessageDeliveryClaim? {
+    ) async throws -> MessageDeliveryPollOutcome {
         try await requiredRepository().claimNextReady(
             targetDeviceID: targetDeviceID,
             ownerToken: ownerToken,
@@ -147,24 +147,24 @@ actor IOSUnifiedDeviceMessagingRuntime {
         disposition: MessageDeliveryDisposition,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryMutationOutcome {
         let repository = try await requiredRepository()
         do {
-            return try await repository.resolve(
+            return .change(try await repository.resolve(
                 claim,
                 disposition: disposition,
                 retryPolicy: retryPolicy,
                 now: now
-            )
+            ))
         } catch let firstError {
             if try await repository.isClaimCurrent(claim) {
                 do {
-                    return try await repository.resolve(
+                    return .change(try await repository.resolve(
                         claim,
                         disposition: disposition,
                         retryPolicy: retryPolicy,
                         now: now
-                    )
+                    ))
                 } catch {
                     guard !(try await repository.isClaimCurrent(claim)) else {
                         throw error
@@ -175,20 +175,20 @@ actor IOSUnifiedDeviceMessagingRuntime {
             guard Self.snapshot(snapshot, reflects: disposition, for: claim) else {
                 throw firstError
             }
-            return snapshot
+            return .snapshot(snapshot)
         }
     }
 
     func confirmAuthenticatedReceipt(
         _ receipt: AuthenticatedMessageReceipt
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().confirmAuthenticatedReceipt(receipt)
     }
 
     func requeueExpiredReceipts(
         now: Date = Date(),
         retryPolicy: MessageDeliveryRetryPolicy
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().requeueExpiredReceipts(
             now: now,
             retryPolicy: retryPolicy
@@ -197,27 +197,27 @@ actor IOSUnifiedDeviceMessagingRuntime {
 
     func clearConversation(
         _ conversationFingerprint: String
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().clearConversation(conversationFingerprint)
     }
 
-    func cancelDelivery(queueID: String) async throws -> MessageRepositorySnapshot {
+    func cancelDelivery(queueID: String) async throws -> MessageRepositoryChange {
         try await requiredRepository().cancelDelivery(queueID: queueID)
     }
 
     func cancelDeliveries(
         targetDeviceID: String
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().cancelDeliveries(targetDeviceID: targetDeviceID)
     }
 
-    func clearDeliveries() async throws -> MessageRepositorySnapshot {
+    func clearDeliveries() async throws -> MessageRepositoryChange {
         try await requiredRepository().clearDeliveries()
     }
 
     func retryFailedDeliveries(
         now: Date = Date()
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         try await requiredRepository().retryFailedDeliveries(now: now)
     }
 
@@ -486,12 +486,6 @@ actor IOSUnifiedDeviceMessagingRuntime {
         defaults: UserDefaults
     ) throws -> LoadedLegacySource<Value>? {
         guard let rawData = defaults.data(forKey: defaultsKey) else { return nil }
-        guard rawData.count <= LegacyJSONMigrationReader.maximumPayloadBytes else {
-            throw DeviceMessagingRepositoryError.legacyPayloadTooLarge(
-                actualBytes: rawData.count,
-                maximumBytes: LegacyJSONMigrationReader.maximumPayloadBytes
-            )
-        }
         let value: Value = try LegacyJSONMigrationReader.decode(
             from: rawData,
             sourceLabel: sourceID
@@ -679,10 +673,13 @@ actor IOSUnifiedDeviceMessagingRuntime {
         case .retryable(let code):
             return (intent?.state == .pending || intent?.state == .failed)
                 && intent?.failureCode == code
+                && (message?.deliveryState == .pending || message?.deliveryState == .failed)
         case .permanentFailure(let code):
-            return intent?.state == .failed && intent?.failureCode == code
+            return intent?.state == .failed
+                && intent?.failureCode == code
+                && message?.deliveryState == .failed
         case .interrupted:
-            return intent?.state == .pending
+            return intent?.state == .pending && message?.deliveryState == .pending
         }
     }
 }

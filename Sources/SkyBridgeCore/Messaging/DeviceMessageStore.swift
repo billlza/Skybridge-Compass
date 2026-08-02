@@ -7,6 +7,20 @@ enum UnifiedDeviceMessageStoreMutation: Sendable {
     case clearConversation(String)
 }
 
+/// How one repository change landed on a MainActor projection.
+enum UnifiedProjectionApplication: Sendable, Equatable {
+    /// The change applied cleanly on top of the projection's generation.
+    case applied
+    /// The change does not advance past the projection's generation, so its
+    /// rows are provably already reflected; it was ignored.
+    case alreadyReflected
+    /// The change's basis is ahead of the projection, or the projection's
+    /// content diverged from the rows the change expects. The caller must
+    /// fetch a full snapshot from the repository and reapply it; that
+    /// resynchronization is the defined repair protocol, not a fallback.
+    case requiresResynchronization
+}
+
 public enum DeviceMessageStoreError: Error, LocalizedError, Sendable, Equatable {
     case invalidConversationFingerprint
     case messageNotFound(UUID)
@@ -571,7 +585,7 @@ public final class DeviceMessageStore: ObservableObject {
         let text = try DeviceTextMessagePolicy.validatedText(rawText)
         let fingerprint = try normalizedFingerprint(rawFingerprint)
         if usesUnifiedRepository {
-            let snapshot = try await UnifiedDeviceMessagingRuntime.shared.recordIncoming(
+            let change = try await UnifiedDeviceMessagingRuntime.shared.recordIncoming(
                 PersistedMessageRecord(
                     id: messageID,
                     conversationFingerprint: fingerprint,
@@ -582,7 +596,11 @@ public final class DeviceMessageStore: ObservableObject {
                     deliveryState: .delivered
                 )
             )
-            try applyUnifiedSnapshot(snapshot)
+            if try applyUnifiedChange(change) == .requiresResynchronization {
+                try applyUnifiedSnapshot(
+                    try await UnifiedDeviceMessagingRuntime.shared.currentSnapshot()
+                )
+            }
             return
         }
         try await applyRepositoryMutation {
@@ -675,26 +693,8 @@ public final class DeviceMessageStore: ObservableObject {
         guard snapshot.generation >= latestGeneration else { return }
         var next: [String: [Message]] = [:]
         for record in snapshot.messages {
-            let direction: Direction
-            switch record.direction {
-            case .incoming: direction = .incoming
-            case .outgoing: direction = .outgoing
-            }
-            let deliveryState: DeliveryState
-            switch record.deliveryState {
-            case .pending: deliveryState = .pending
-            case .sent: deliveryState = .sent
-            case .delivered: deliveryState = .delivered
-            case .failed: deliveryState = .failed
-            }
-            next[record.conversationFingerprint, default: []].append(Message(
-                id: record.id,
-                direction: direction,
-                text: record.text,
-                timestamp: record.timestamp,
-                deliveryState: deliveryState,
-                targetDeviceID: record.targetDeviceID
-            ))
+            next[record.conversationFingerprint, default: []]
+                .append(Self.projectedMessage(from: record))
         }
         guard next.values.allSatisfy({ $0.count <= 500 }) else {
             throw DeviceMessageStoreError.conversationCapacityExceeded
@@ -703,5 +703,105 @@ public final class DeviceMessageStore: ObservableObject {
         conversations = next
         migrationIssues = snapshot.migrationIssues
         persistenceState = .ready
+    }
+
+    /// Applies the exact rows one committed repository transaction changed.
+    /// Repository generations advance monotonically, so a change whose basis
+    /// matches the projection is applied, a change that does not advance past
+    /// the projection is already reflected, and anything else requires a full
+    /// snapshot resynchronization. Migration issues never change after
+    /// bootstrap, so they are left untouched here.
+    func applyUnifiedChange(
+        _ change: MessageRepositoryChange
+    ) throws -> UnifiedProjectionApplication {
+        guard change.basisGeneration == latestGeneration else {
+            return change.generation <= latestGeneration
+                ? .alreadyReflected
+                : .requiresResynchronization
+        }
+        guard change.generation > change.basisGeneration || change.isEmpty else {
+            return .requiresResynchronization
+        }
+        var next = conversations
+        var touchedFingerprints = Set<String>()
+        for removal in change.removedMessages {
+            guard var thread = next[removal.conversationFingerprint],
+                  let index = thread.firstIndex(where: { $0.id == removal.id }) else {
+                return .requiresResynchronization
+            }
+            thread.remove(at: index)
+            if thread.isEmpty {
+                next.removeValue(forKey: removal.conversationFingerprint)
+            } else {
+                next[removal.conversationFingerprint] = thread
+            }
+            touchedFingerprints.insert(removal.conversationFingerprint)
+        }
+        for record in change.upsertedMessages {
+            var thread = next[record.conversationFingerprint] ?? []
+            if let index = thread.firstIndex(where: { $0.id == record.id }) {
+                thread.remove(at: index)
+            }
+            let message = Self.projectedMessage(from: record)
+            thread.insert(message, at: Self.orderedInsertionIndex(of: message, in: thread))
+            next[record.conversationFingerprint] = thread
+            touchedFingerprints.insert(record.conversationFingerprint)
+        }
+        guard touchedFingerprints.allSatisfy({ (next[$0]?.count ?? 0) <= 500 }) else {
+            throw DeviceMessageStoreError.conversationCapacityExceeded
+        }
+        latestGeneration = change.generation
+        conversations = next
+        persistenceState = .ready
+        return .applied
+    }
+
+    private static func projectedMessage(from record: PersistedMessageRecord) -> Message {
+        let direction: Direction
+        switch record.direction {
+        case .incoming: direction = .incoming
+        case .outgoing: direction = .outgoing
+        }
+        let deliveryState: DeliveryState
+        switch record.deliveryState {
+        case .pending: deliveryState = .pending
+        case .sent: deliveryState = .sent
+        case .delivered: deliveryState = .delivered
+        case .failed: deliveryState = .failed
+        }
+        return Message(
+            id: record.id,
+            direction: direction,
+            text: record.text,
+            timestamp: record.timestamp,
+            deliveryState: deliveryState,
+            targetDeviceID: record.targetDeviceID
+        )
+    }
+
+    /// Binary search for the position that keeps the thread ordered exactly
+    /// like the repository projection: timestamp, then identifier. Hex UUID
+    /// strings order identically regardless of letter case, so comparing
+    /// `uuidString` matches SQLite ordering the canonical lowercase form.
+    private static func orderedInsertionIndex(
+        of message: Message,
+        in thread: [Message]
+    ) -> Int {
+        var low = 0
+        var high = thread.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Self.orderedBefore(thread[mid], message) {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private static func orderedBefore(_ lhs: Message, _ rhs: Message) -> Bool {
+        if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }

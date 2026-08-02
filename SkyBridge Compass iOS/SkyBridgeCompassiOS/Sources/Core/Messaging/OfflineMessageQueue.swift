@@ -884,42 +884,131 @@ public final class OfflineMessageQueue: ObservableObject {
         var pending: [OfflineMessage] = []
         var failed: [OfflineMessage] = []
         for intent in snapshot.deliveryIntents {
-            guard let type = OfflineMessageType(rawValue: intent.messageType) else {
-                throw OfflineMessageQueueError.stateConflict
-            }
-            let status: OfflineMessageStatus
-            switch intent.state {
-            case .pending: status = .pending
-            case .sending: status = .sending
-            case .awaitingReceipt: status = .awaitingReceipt
-            case .failed: status = .failed
-            }
-            let failureCode = intent.failureCode.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
-                ?? (intent.failureCode == nil ? nil : .stateConflict)
-            let message = OfflineMessage(
-                id: intent.queueID,
-                targetDeviceId: intent.targetDeviceID,
-                messageType: type,
-                payload: intent.payload,
-                createdAt: intent.createdAt,
-                expiresAt: intent.expiresAt,
-                retryCount: intent.retryCount,
-                lastRetryAt: intent.lastAttemptAt,
-                status: status,
-                lastFailureCode: failureCode
-            )
-            if status == .failed {
+            let message = try Self.projectedOfflineMessage(from: intent)
+            if message.status == .failed {
                 failed.append(message)
             } else {
                 pending.append(message)
             }
         }
         latestRepositoryGeneration = snapshot.generation
-        pendingMessages = pending.sorted { $0.createdAt < $1.createdAt }
-        failedMessages = failed.sorted { $0.createdAt < $1.createdAt }
+        pendingMessages = pending.sorted(by: Self.unifiedProjectionOrder)
+        failedMessages = failed.sorted(by: Self.unifiedProjectionOrder)
         totalCount = pendingMessages.count + failedMessages.count
         lastPersistenceError = nil
         isPersistenceBlocked = false
+    }
+
+    /// Applies the exact rows one committed repository transaction changed.
+    /// A change whose basis matches the projection applies incrementally; a
+    /// change that does not advance past the projection is already reflected;
+    /// a generation gap or diverged content requires the caller to reapply a
+    /// full snapshot, which is the defined repair protocol, not a fallback.
+    func applyUnifiedChange(
+        _ change: MessageRepositoryChange
+    ) throws -> UnifiedProjectionApplication {
+        guard change.basisGeneration == latestRepositoryGeneration else {
+            return change.generation <= latestRepositoryGeneration
+                ? .alreadyReflected
+                : .requiresResynchronization
+        }
+        guard change.generation > change.basisGeneration || change.isEmpty else {
+            return .requiresResynchronization
+        }
+        var pending = pendingMessages
+        var failed = failedMessages
+        for queueID in change.removedDeliveryIntentQueueIDs {
+            if let index = pending.firstIndex(where: { $0.id == queueID }) {
+                pending.remove(at: index)
+            } else if let index = failed.firstIndex(where: { $0.id == queueID }) {
+                failed.remove(at: index)
+            } else {
+                return .requiresResynchronization
+            }
+        }
+        for intent in change.upsertedDeliveryIntents {
+            let message = try Self.projectedOfflineMessage(from: intent)
+            if let index = pending.firstIndex(where: { $0.id == message.id }) {
+                pending.remove(at: index)
+            } else if let index = failed.firstIndex(where: { $0.id == message.id }) {
+                failed.remove(at: index)
+            }
+            if message.status == .failed {
+                failed.insert(
+                    message,
+                    at: Self.orderedInsertionIndex(of: message, in: failed)
+                )
+            } else {
+                pending.insert(
+                    message,
+                    at: Self.orderedInsertionIndex(of: message, in: pending)
+                )
+            }
+        }
+        latestRepositoryGeneration = change.generation
+        pendingMessages = pending
+        failedMessages = failed
+        totalCount = pending.count + failed.count
+        lastPersistenceError = nil
+        isPersistenceBlocked = false
+        return .applied
+    }
+
+    private static func projectedOfflineMessage(
+        from intent: PersistedDeliveryIntent
+    ) throws -> OfflineMessage {
+        guard let type = OfflineMessageType(rawValue: intent.messageType) else {
+            throw OfflineMessageQueueError.stateConflict
+        }
+        let status: OfflineMessageStatus
+        switch intent.state {
+        case .pending: status = .pending
+        case .sending: status = .sending
+        case .awaitingReceipt: status = .awaitingReceipt
+        case .failed: status = .failed
+        }
+        let failureCode = intent.failureCode.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
+            ?? (intent.failureCode == nil ? nil : .stateConflict)
+        return OfflineMessage(
+            id: intent.queueID,
+            targetDeviceId: intent.targetDeviceID,
+            messageType: type,
+            payload: intent.payload,
+            createdAt: intent.createdAt,
+            expiresAt: intent.expiresAt,
+            retryCount: intent.retryCount,
+            lastRetryAt: intent.lastAttemptAt,
+            status: status,
+            lastFailureCode: failureCode
+        )
+    }
+
+    /// The repository projects delivery intents ordered by creation time and
+    /// then queue identifier. Keeping the identical total order here makes an
+    /// incremental change land exactly where a full snapshot rebuild would.
+    private static func unifiedProjectionOrder(
+        _ lhs: OfflineMessage,
+        _ rhs: OfflineMessage
+    ) -> Bool {
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.id < rhs.id
+    }
+
+    private static func orderedInsertionIndex(
+        of message: OfflineMessage,
+        in messages: [OfflineMessage]
+    ) -> Int {
+        var low = 0
+        var high = messages.count
+        while low < high {
+            let mid = (low + high) / 2
+            if unifiedProjectionOrder(messages[mid], message) {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
     }
 
     private func normalizedLoadedState(_ stored: StoredMessages) throws -> StoredMessages {

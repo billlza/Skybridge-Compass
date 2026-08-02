@@ -21,28 +21,46 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             message: pair.message,
             intent: pair.intent
         )
-        XCTAssertEqual(staged.messages, [pair.message])
-        XCTAssertEqual(staged.deliveryIntents, [pair.intent])
+        XCTAssertEqual(staged.upsertedMessages, [pair.message])
+        XCTAssertEqual(staged.upsertedDeliveryIntents, [pair.intent])
+        XCTAssertTrue(staged.removedMessages.isEmpty)
+        XCTAssertTrue(staged.removedDeliveryIntentQueueIDs.isEmpty)
+        XCTAssertGreaterThan(staged.generation, staged.basisGeneration)
+        let stagedSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(stagedSnapshot.messages, [pair.message])
+        XCTAssertEqual(stagedSnapshot.deliveryIntents, [pair.intent])
+        XCTAssertEqual(stagedSnapshot.generation, staged.generation)
 
         let owner = UUID()
-        let claim = try await repository.claim(
+        let claimOutcome = try await repository.claim(
             messageID: pair.message.id,
             ownerToken: owner,
             now: pair.intent.createdAt
         )
-        let claimIsCurrent = try await repository.isClaimCurrent(claim)
+        XCTAssertEqual(
+            claimOutcome.change.upsertedDeliveryIntents.map(\.queueID),
+            [pair.intent.queueID]
+        )
+        XCTAssertGreaterThan(
+            claimOutcome.change.generation,
+            claimOutcome.change.basisGeneration
+        )
+        let claimIsCurrent = try await repository.isClaimCurrent(claimOutcome.claim)
         XCTAssertTrue(claimIsCurrent)
 
         let submitted = try await repository.resolve(
-            claim,
+            claimOutcome.claim,
             disposition: .submitted(
                 receiptDeadline: pair.intent.createdAt.addingTimeInterval(30)
             ),
             retryPolicy: retryPolicy,
             now: pair.intent.createdAt.addingTimeInterval(1)
         )
-        XCTAssertEqual(submitted.messages.first?.deliveryState, .sent)
-        XCTAssertEqual(submitted.deliveryIntents.first?.state, .awaitingReceipt)
+        XCTAssertEqual(submitted.upsertedMessages.map(\.deliveryState), [.sent])
+        XCTAssertEqual(submitted.upsertedDeliveryIntents.map(\.state), [.awaitingReceipt])
+        let submittedSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(submittedSnapshot.messages.first?.deliveryState, .sent)
+        XCTAssertEqual(submittedSnapshot.deliveryIntents.first?.state, .awaitingReceipt)
 
         let delivered = try await repository.confirmAuthenticatedReceipt(
             AuthenticatedMessageReceipt(
@@ -52,8 +70,11 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
                 receivedAt: pair.intent.createdAt.addingTimeInterval(2)
             )
         )
-        XCTAssertEqual(delivered.messages.first?.deliveryState, .delivered)
-        XCTAssertTrue(delivered.deliveryIntents.isEmpty)
+        XCTAssertEqual(delivered.upsertedMessages.map(\.deliveryState), [.delivered])
+        XCTAssertEqual(delivered.removedDeliveryIntentQueueIDs, [pair.intent.queueID])
+        let deliveredSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(deliveredSnapshot.messages.first?.deliveryState, .delivered)
+        XCTAssertTrue(deliveredSnapshot.deliveryIntents.isEmpty)
     }
 
     func testConversationFingerprintAcceptsExactly64LowercaseASCIIHexBytes() async throws {
@@ -64,11 +85,13 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let fingerprint = String(repeating: "0123456789abcdef", count: 4)
         let pair = makeOutgoing(conversationFingerprint: fingerprint)
 
-        let snapshot = try await repository.stageOutgoing(
+        let staged = try await repository.stageOutgoing(
             message: pair.message,
             intent: pair.intent
         )
 
+        XCTAssertEqual(staged.upsertedMessages.first?.conversationFingerprint, fingerprint)
+        let snapshot = try await repository.currentSnapshot()
         XCTAssertEqual(snapshot.messages.first?.conversationFingerprint, fingerprint)
     }
 
@@ -152,6 +175,9 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             message: canonical.message,
             intent: canonical.intent
         )
+        XCTAssertEqual(staged.upsertedMessages, [canonical.message])
+        XCTAssertEqual(staged.upsertedDeliveryIntents, [canonical.intent])
+        let stagedSnapshot = try await repository.currentSnapshot()
         let alias = makeOutgoing(queueID: queueID.uuidString.uppercased())
 
         do {
@@ -165,7 +191,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         }
 
         let snapshot = try await repository.currentSnapshot()
-        XCTAssertEqual(snapshot, staged)
+        XCTAssertEqual(snapshot, stagedSnapshot)
         XCTAssertFalse(snapshot.messages.contains { $0.id == alias.message.id })
 
         var projectedByCanonicalQueueID: [String: PersistedDeliveryIntent] = [:]
@@ -201,11 +227,16 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             receivedAt: pair.intent.createdAt.addingTimeInterval(1)
         )
         let delivered = try await repository.confirmAuthenticatedReceipt(receipt)
-        XCTAssertEqual(delivered.messages.first?.deliveryState, .delivered)
-        XCTAssertTrue(delivered.deliveryIntents.isEmpty)
+        XCTAssertEqual(delivered.upsertedMessages.map(\.deliveryState), [.delivered])
+        XCTAssertEqual(delivered.removedDeliveryIntentQueueIDs, [pair.intent.queueID])
+        let deliveredSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(deliveredSnapshot.messages.first?.deliveryState, .delivered)
+        XCTAssertTrue(deliveredSnapshot.deliveryIntents.isEmpty)
 
         let duplicate = try await repository.confirmAuthenticatedReceipt(receipt)
-        XCTAssertEqual(duplicate, delivered)
+        XCTAssertTrue(duplicate.isEmpty)
+        let duplicateSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(duplicateSnapshot, deliveredSnapshot)
 
         do {
             _ = try await repository.confirmAuthenticatedReceipt(
@@ -250,7 +281,9 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let reopened = SQLiteDeviceMessagingRepository(databaseURL: fixture.databaseURL)
         _ = try await reopened.bootstrap()
         let duplicate = try await reopened.confirmAuthenticatedReceipt(receipt)
-        XCTAssertEqual(duplicate.messages.first?.deliveryState, .delivered)
+        XCTAssertTrue(duplicate.isEmpty)
+        let reopenedSnapshot = try await reopened.currentSnapshot()
+        XCTAssertEqual(reopenedSnapshot.messages.first?.deliveryState, .delivered)
         do {
             _ = try await reopened.confirmAuthenticatedReceipt(
                 AuthenticatedMessageReceipt(
@@ -274,13 +307,13 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let pair = makeOutgoing()
         _ = try await repository.stageOutgoing(message: pair.message, intent: pair.intent)
         let owner = UUID()
-        let claim = try await repository.claim(
+        let claimOutcome = try await repository.claim(
             messageID: pair.message.id,
             ownerToken: owner,
             now: pair.intent.createdAt
         )
         _ = try await repository.resolve(
-            claim,
+            claimOutcome.claim,
             disposition: .submitted(
                 receiptDeadline: pair.intent.createdAt.addingTimeInterval(30)
             ),
@@ -322,12 +355,12 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         )
         _ = try await repository?.bootstrap()
         _ = try await repository?.stageOutgoing(message: pair.message, intent: pair.intent)
-        let optionalClaim = try await repository?.claim(
+        let optionalClaimOutcome = try await repository?.claim(
             messageID: pair.message.id,
             ownerToken: UUID(),
             now: createdAt
         )
-        let claim = try XCTUnwrap(optionalClaim)
+        let claim = try XCTUnwrap(optionalClaimOutcome).claim
         let deadline = createdAt.addingTimeInterval(30)
         _ = try await repository?.resolve(
             claim,
@@ -346,15 +379,21 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             now: deadline.addingTimeInterval(-1),
             retryPolicy: retryPolicy
         )
-        XCTAssertEqual(early.deliveryIntents.first?.state, .awaitingReceipt)
+        XCTAssertTrue(early.isEmpty)
+        let earlySnapshot = try await reopened.currentSnapshot()
+        XCTAssertEqual(earlySnapshot.deliveryIntents.first?.state, .awaitingReceipt)
 
         let expired = try await reopened.requeueExpiredReceipts(
             now: deadline,
             retryPolicy: retryPolicy
         )
-        XCTAssertEqual(expired.deliveryIntents.first?.state, .pending)
-        XCTAssertEqual(expired.deliveryIntents.first?.retryCount, 1)
-        XCTAssertEqual(expired.messages.first?.deliveryState, .pending)
+        XCTAssertEqual(expired.upsertedDeliveryIntents.first?.state, .pending)
+        XCTAssertEqual(expired.upsertedDeliveryIntents.first?.retryCount, 1)
+        XCTAssertEqual(expired.upsertedMessages.first?.deliveryState, .pending)
+        let expiredSnapshot = try await reopened.currentSnapshot()
+        XCTAssertEqual(expiredSnapshot.deliveryIntents.first?.state, .pending)
+        XCTAssertEqual(expiredSnapshot.deliveryIntents.first?.retryCount, 1)
+        XCTAssertEqual(expiredSnapshot.messages.first?.deliveryState, .pending)
     }
 
     func testInterruptedSendingClaimRecoversWithoutDroppingIntent() async throws {
@@ -385,7 +424,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             retryPolicy: retryPolicy,
             now: pair.intent.createdAt.addingTimeInterval(2)
         )
-        XCTAssertEqual(replacement?.generation, 2)
+        XCTAssertEqual(replacement.claim?.generation, 2)
     }
 
     func testSecondLiveRepositoryDoesNotRecoverFirstRepositoryClaim() async throws {
@@ -396,7 +435,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         _ = try await first.bootstrap()
         let pair = makeOutgoing()
         _ = try await first.stageOutgoing(message: pair.message, intent: pair.intent)
-        let claim = try await first.claim(
+        let claimOutcome = try await first.claim(
             messageID: pair.message.id,
             ownerToken: UUID(),
             now: pair.intent.createdAt
@@ -404,7 +443,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
 
         let secondSnapshot = try await second.bootstrap()
         XCTAssertEqual(secondSnapshot.deliveryIntents.first?.state, .sending)
-        let claimIsCurrent = try await first.isClaimCurrent(claim)
+        let claimIsCurrent = try await first.isClaimCurrent(claimOutcome.claim)
         XCTAssertTrue(claimIsCurrent)
         do {
             _ = try await second.claim(
@@ -444,8 +483,8 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             retryPolicy: retryPolicy,
             now: pair.intent.createdAt.addingTimeInterval(1)
         )
-        XCTAssertEqual(replacement?.intent.messageID, pair.message.id)
-        XCTAssertEqual(replacement?.generation, 2)
+        XCTAssertEqual(replacement.claim?.intent.messageID, pair.message.id)
+        XCTAssertEqual(replacement.claim?.generation, 2)
     }
 
     func testSnapshotGenerationTracksWritesFromAnotherRepositoryInstance() async throws {
@@ -466,10 +505,12 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
                 timestamp: Date(timeIntervalSince1970: Double(offset)),
                 deliveryState: .delivered
             )
-            _ = try await writer.recordIncoming(incoming)
+            let change = try await writer.recordIncoming(incoming)
+            XCTAssertEqual(change.upsertedMessages, [incoming])
             let snapshot = try await reader.currentSnapshot()
             XCTAssertEqual(snapshot.messages.count, offset)
             XCTAssertEqual(snapshot.generation, UInt64(offset))
+            XCTAssertEqual(snapshot.generation, change.generation)
         }
     }
 
@@ -482,13 +523,19 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         _ = try await repository.bootstrap()
         _ = try await repository.stageOutgoing(message: pair.message, intent: pair.intent)
 
-        let claim = try await repository.claimNextReady(
+        let outcome = try await repository.claimNextReady(
             targetDeviceID: pair.intent.targetDeviceID,
             ownerToken: UUID(),
             retryPolicy: retryPolicy,
             now: createdAt.addingTimeInterval(11)
         )
-        XCTAssertNil(claim)
+        XCTAssertNil(outcome.claim)
+        XCTAssertEqual(outcome.change.upsertedMessages.map(\.deliveryState), [.failed])
+        XCTAssertEqual(outcome.change.upsertedDeliveryIntents.map(\.state), [.failed])
+        XCTAssertEqual(
+            outcome.change.upsertedDeliveryIntents.first?.failureCode,
+            "message_expired"
+        )
 
         let snapshot = try await repository.currentSnapshot()
         XCTAssertEqual(snapshot.messages.first?.deliveryState, .failed)
@@ -504,13 +551,13 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let repository = SQLiteDeviceMessagingRepository(databaseURL: fixture.databaseURL)
         _ = try await repository.bootstrap()
         _ = try await repository.stageOutgoing(message: pair.message, intent: pair.intent)
-        let claim = try await repository.claim(
+        let claimOutcome = try await repository.claim(
             messageID: pair.message.id,
             ownerToken: UUID(),
             now: createdAt
         )
         _ = try await repository.resolve(
-            claim,
+            claimOutcome.claim,
             disposition: .submitted(
                 receiptDeadline: createdAt.addingTimeInterval(30)
             ),
@@ -518,10 +565,14 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             now: createdAt
         )
 
-        let snapshot = try await repository.requeueExpiredReceipts(
+        let requeued = try await repository.requeueExpiredReceipts(
             now: createdAt.addingTimeInterval(30),
             retryPolicy: retryPolicy
         )
+        XCTAssertEqual(requeued.upsertedMessages.first?.deliveryState, .failed)
+        XCTAssertEqual(requeued.upsertedDeliveryIntents.first?.state, .failed)
+        XCTAssertEqual(requeued.upsertedDeliveryIntents.first?.failureCode, "message_expired")
+        let snapshot = try await repository.currentSnapshot()
         XCTAssertEqual(snapshot.messages.first?.deliveryState, .failed)
         XCTAssertEqual(snapshot.deliveryIntents.first?.state, .failed)
         XCTAssertEqual(snapshot.deliveryIntents.first?.failureCode, "message_expired")
@@ -540,12 +591,22 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         XCTAssertNotEqual(pending.intent.queueID, pending.message.id.uuidString.lowercased())
         _ = try await repository.stageOutgoing(message: pending.message, intent: pending.intent)
         let cancelled = try await repository.cancelDelivery(queueID: pending.intent.queueID)
-        XCTAssertTrue(cancelled.messages.isEmpty)
-        XCTAssertTrue(cancelled.deliveryIntents.isEmpty)
+        XCTAssertEqual(cancelled.removedMessages, [
+            MessageRepositoryMessageRemoval(
+                id: pending.message.id,
+                conversationFingerprint: pending.message.conversationFingerprint
+            )
+        ])
+        XCTAssertEqual(cancelled.removedDeliveryIntentQueueIDs, [pending.intent.queueID])
+        XCTAssertTrue(cancelled.upsertedMessages.isEmpty)
+        XCTAssertTrue(cancelled.upsertedDeliveryIntents.isEmpty)
+        let cancelledSnapshot = try await repository.currentSnapshot()
+        XCTAssertTrue(cancelledSnapshot.messages.isEmpty)
+        XCTAssertTrue(cancelledSnapshot.deliveryIntents.isEmpty)
 
         let inFlight = makeOutgoing(targetDeviceID: "device-target-0002")
         _ = try await repository.stageOutgoing(message: inFlight.message, intent: inFlight.intent)
-        let claim = try await repository.claim(
+        let claimOutcome = try await repository.claim(
             messageID: inFlight.message.id,
             ownerToken: UUID(),
             now: inFlight.intent.createdAt
@@ -565,7 +626,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         XCTAssertEqual(unchanged.deliveryIntents.first?.state, .sending)
 
         _ = try await repository.resolve(
-            claim,
+            claimOutcome.claim,
             disposition: .interrupted,
             retryPolicy: retryPolicy,
             now: inFlight.intent.createdAt
@@ -573,19 +634,32 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let finallyCancelled = try await repository.cancelDeliveries(
             targetDeviceID: inFlight.intent.targetDeviceID
         )
-        XCTAssertTrue(finallyCancelled.deliveryIntents.isEmpty)
-        XCTAssertTrue(finallyCancelled.messages.isEmpty)
+        XCTAssertEqual(finallyCancelled.removedMessages, [
+            MessageRepositoryMessageRemoval(
+                id: inFlight.message.id,
+                conversationFingerprint: inFlight.message.conversationFingerprint
+            )
+        ])
+        XCTAssertEqual(
+            finallyCancelled.removedDeliveryIntentQueueIDs,
+            [inFlight.intent.queueID]
+        )
+        XCTAssertTrue(finallyCancelled.upsertedMessages.isEmpty)
+        XCTAssertTrue(finallyCancelled.upsertedDeliveryIntents.isEmpty)
+        let finallyCancelledSnapshot = try await repository.currentSnapshot()
+        XCTAssertTrue(finallyCancelledSnapshot.deliveryIntents.isEmpty)
+        XCTAssertTrue(finallyCancelledSnapshot.messages.isEmpty)
 
         let awaiting = makeOutgoing(targetDeviceID: "device-target-0003")
         _ = try await repository.stageOutgoing(message: awaiting.message, intent: awaiting.intent)
         let receiptOwner = UUID()
-        let awaitingClaim = try await repository.claim(
+        let awaitingClaimOutcome = try await repository.claim(
             messageID: awaiting.message.id,
             ownerToken: receiptOwner,
             now: awaiting.intent.createdAt
         )
         _ = try await repository.resolve(
-            awaitingClaim,
+            awaitingClaimOutcome.claim,
             disposition: .submitted(
                 receiptDeadline: awaiting.intent.createdAt.addingTimeInterval(30)
             ),
@@ -612,18 +686,20 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
                 receivedAt: awaiting.intent.createdAt.addingTimeInterval(2)
             )
         )
-        XCTAssertEqual(delivered.messages, [
-            PersistedMessageRecord(
-                id: awaiting.message.id,
-                conversationFingerprint: awaiting.message.conversationFingerprint,
-                targetDeviceID: awaiting.message.targetDeviceID,
-                direction: awaiting.message.direction,
-                text: awaiting.message.text,
-                timestamp: awaiting.message.timestamp,
-                deliveryState: .delivered
-            )
-        ])
-        XCTAssertTrue(delivered.deliveryIntents.isEmpty)
+        let expectedDelivered = PersistedMessageRecord(
+            id: awaiting.message.id,
+            conversationFingerprint: awaiting.message.conversationFingerprint,
+            targetDeviceID: awaiting.message.targetDeviceID,
+            direction: awaiting.message.direction,
+            text: awaiting.message.text,
+            timestamp: awaiting.message.timestamp,
+            deliveryState: .delivered
+        )
+        XCTAssertEqual(delivered.upsertedMessages, [expectedDelivered])
+        XCTAssertEqual(delivered.removedDeliveryIntentQueueIDs, [awaiting.intent.queueID])
+        let deliveredSnapshot = try await repository.currentSnapshot()
+        XCTAssertEqual(deliveredSnapshot.messages, [expectedDelivered])
+        XCTAssertTrue(deliveredSnapshot.deliveryIntents.isEmpty)
     }
 
     func testClearDeliveriesIsAtomicWhenAnyDeliveryIsInFlight() async throws {
@@ -637,18 +713,18 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         _ = try await repository.stageOutgoing(message: first.message, intent: first.intent)
         _ = try await repository.stageOutgoing(message: second.message, intent: second.intent)
         _ = try await repository.stageOutgoing(message: failed.message, intent: failed.intent)
-        let failedClaim = try await repository.claim(
+        let failedClaimOutcome = try await repository.claim(
             messageID: failed.message.id,
             ownerToken: UUID(),
             now: failed.intent.createdAt
         )
         _ = try await repository.resolve(
-            failedClaim,
+            failedClaimOutcome.claim,
             disposition: .permanentFailure(failureCode: "transport_failure"),
             retryPolicy: retryPolicy,
             now: failed.intent.createdAt
         )
-        let claim = try await repository.claim(
+        let claimOutcome = try await repository.claim(
             messageID: second.message.id,
             ownerToken: UUID(),
             now: second.intent.createdAt
@@ -669,14 +745,34 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         XCTAssertEqual(unchanged.messages.filter { $0.deliveryState == .failed }.count, 1)
 
         _ = try await repository.resolve(
-            claim,
+            claimOutcome.claim,
             disposition: .interrupted,
             retryPolicy: retryPolicy,
             now: second.intent.createdAt
         )
         let cleared = try await repository.clearDeliveries()
-        XCTAssertTrue(cleared.deliveryIntents.isEmpty)
-        XCTAssertEqual(cleared.messages, [
+        XCTAssertEqual(
+            Set(cleared.removedDeliveryIntentQueueIDs),
+            Set([first.intent.queueID, second.intent.queueID, failed.intent.queueID])
+        )
+        XCTAssertEqual(
+            Set(cleared.removedMessages),
+            Set([
+                MessageRepositoryMessageRemoval(
+                    id: first.message.id,
+                    conversationFingerprint: first.message.conversationFingerprint
+                ),
+                MessageRepositoryMessageRemoval(
+                    id: second.message.id,
+                    conversationFingerprint: second.message.conversationFingerprint
+                ),
+            ])
+        )
+        XCTAssertTrue(cleared.upsertedMessages.isEmpty)
+        XCTAssertTrue(cleared.upsertedDeliveryIntents.isEmpty)
+        let clearedSnapshot = try await repository.currentSnapshot()
+        XCTAssertTrue(clearedSnapshot.deliveryIntents.isEmpty)
+        XCTAssertEqual(clearedSnapshot.messages, [
             PersistedMessageRecord(
                 id: failed.message.id,
                 conversationFingerprint: failed.message.conversationFingerprint,
@@ -774,13 +870,13 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             _ = try await repository.stageOutgoing(message: pair.message, intent: pair.intent)
             let owner = UUID()
             originalOwners[pair.message.id] = owner
-            let claim = try await repository.claim(
+            let claimOutcome = try await repository.claim(
                 messageID: pair.message.id,
                 ownerToken: owner,
                 now: createdAt
             )
             _ = try await repository.resolve(
-                claim,
+                claimOutcome.claim,
                 disposition: .permanentFailure(failureCode: "transport_failure"),
                 retryPolicy: retryPolicy,
                 now: createdAt
@@ -790,7 +886,22 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         let retried = try await repository.retryFailedDeliveries(
             now: createdAt.addingTimeInterval(20)
         )
-        let intents = Dictionary(uniqueKeysWithValues: retried.deliveryIntents.map {
+        XCTAssertEqual(
+            retried.upsertedDeliveryIntents.map(\.messageID),
+            [retryable.message.id]
+        )
+        let retriedIntent = try XCTUnwrap(retried.upsertedDeliveryIntents.first)
+        XCTAssertEqual(retriedIntent.state, .pending)
+        XCTAssertEqual(retriedIntent.retryCount, 0)
+        XCTAssertNil(retriedIntent.failureCode)
+        XCTAssertEqual(retriedIntent.claimGeneration, 1)
+        XCTAssertEqual(retried.upsertedMessages.map(\.id), [retryable.message.id])
+        XCTAssertEqual(retried.upsertedMessages.first?.deliveryState, .pending)
+        XCTAssertTrue(retried.removedMessages.isEmpty)
+        XCTAssertTrue(retried.removedDeliveryIntentQueueIDs.isEmpty)
+
+        let snapshot = try await repository.currentSnapshot()
+        let intents = Dictionary(uniqueKeysWithValues: snapshot.deliveryIntents.map {
             ($0.messageID, $0)
         })
         XCTAssertEqual(intents[retryable.message.id]?.state, .pending)
@@ -799,7 +910,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         XCTAssertEqual(intents[retryable.message.id]?.claimGeneration, 1)
         XCTAssertEqual(intents[expired.message.id]?.state, .failed)
         XCTAssertEqual(intents[expired.message.id]?.failureCode, "transport_failure")
-        let messages = Dictionary(uniqueKeysWithValues: retried.messages.map { ($0.id, $0) })
+        let messages = Dictionary(uniqueKeysWithValues: snapshot.messages.map { ($0.id, $0) })
         XCTAssertEqual(messages[retryable.message.id]?.deliveryState, .pending)
         XCTAssertEqual(messages[expired.message.id]?.deliveryState, .failed)
 
@@ -809,7 +920,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             ownerToken: replacementOwner,
             now: createdAt.addingTimeInterval(21)
         )
-        XCTAssertEqual(replacementClaim.generation, 2)
+        XCTAssertEqual(replacementClaim.claim.generation, 2)
         do {
             _ = try await repository.confirmAuthenticatedReceipt(
                 AuthenticatedMessageReceipt(
@@ -849,9 +960,22 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             databaseURL: fixture.databaseURL
         )
         _ = try await repository?.bootstrap(legacyMigration: migration)
-        let cleared = try await repository?.clearDeliveries()
-        XCTAssertTrue(try XCTUnwrap(cleared).messages.isEmpty)
-        XCTAssertEqual(cleared?.migrationIssues, [issue])
+        let clearedChange = try await repository?.clearDeliveries()
+        let cleared = try XCTUnwrap(clearedChange)
+        XCTAssertEqual(cleared.removedMessages, [
+            MessageRepositoryMessageRemoval(
+                id: pair.message.id,
+                conversationFingerprint: pair.message.conversationFingerprint
+            )
+        ])
+        XCTAssertEqual(cleared.removedDeliveryIntentQueueIDs, [pair.intent.queueID])
+        XCTAssertTrue(cleared.upsertedMessages.isEmpty)
+        XCTAssertTrue(cleared.upsertedDeliveryIntents.isEmpty)
+        let optionalClearedSnapshot = try await repository?.currentSnapshot()
+        let clearedSnapshot = try XCTUnwrap(optionalClearedSnapshot)
+        XCTAssertTrue(clearedSnapshot.messages.isEmpty)
+        XCTAssertTrue(clearedSnapshot.deliveryIntents.isEmpty)
+        XCTAssertEqual(clearedSnapshot.migrationIssues, [issue])
         repository = nil
 
         let reopened = SQLiteDeviceMessagingRepository(databaseURL: fixture.databaseURL)
@@ -1084,8 +1208,19 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             timestamp: createdAt.addingTimeInterval(500),
             deliveryState: .delivered
         )
-        let snapshot = try await repository.recordIncoming(newest)
+        let change = try await repository.recordIncoming(newest)
 
+        XCTAssertEqual(change.upsertedMessages, [newest])
+        XCTAssertEqual(change.removedMessages, [
+            MessageRepositoryMessageRemoval(
+                id: retainedMessages[0].id,
+                conversationFingerprint: pair.message.conversationFingerprint
+            )
+        ])
+        XCTAssertTrue(change.upsertedDeliveryIntents.isEmpty)
+        XCTAssertTrue(change.removedDeliveryIntentQueueIDs.isEmpty)
+
+        let snapshot = try await repository.currentSnapshot()
         XCTAssertEqual(snapshot.messages.count, 500)
         XCTAssertTrue(snapshot.messages.contains { $0.id == failedMessage.id })
         XCTAssertTrue(snapshot.messages.contains { $0.id == newest.id })
@@ -1115,15 +1250,37 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
             createdAt: createdAt.addingTimeInterval(2),
             targetDeviceID: "capacity-device"
         )
-        let snapshot = try await repository.stageOutgoing(
+        let change = try await repository.stageOutgoing(
             message: admitted.message,
             intent: admitted.intent
         )
 
+        XCTAssertEqual(
+            change.upsertedDeliveryIntents.filter { $0.state == .failed }.count,
+            100
+        )
+        XCTAssertEqual(
+            change.upsertedDeliveryIntents.filter { $0.state == .pending },
+            [admitted.intent]
+        )
+        XCTAssertEqual(
+            change.upsertedMessages.filter { $0.deliveryState == .failed }.count,
+            100
+        )
+        XCTAssertEqual(
+            change.upsertedMessages.filter { $0.deliveryState == .pending },
+            [admitted.message]
+        )
+        XCTAssertTrue(change.removedMessages.isEmpty)
+        XCTAssertTrue(change.removedDeliveryIntentQueueIDs.isEmpty)
+        XCTAssertEqual(change.basisGeneration, 0)
+        XCTAssertGreaterThan(change.generation, change.basisGeneration)
+
+        let snapshot = try await repository.currentSnapshot()
         XCTAssertEqual(snapshot.deliveryIntents.filter { $0.state == .failed }.count, 100)
         XCTAssertEqual(snapshot.deliveryIntents.filter { $0.state == .pending }, [admitted.intent])
         XCTAssertEqual(snapshot.messages.filter { $0.deliveryState == .failed }.count, 100)
-        XCTAssertEqual(snapshot.generation, 1)
+        XCTAssertEqual(snapshot.generation, change.generation)
     }
 
     func testBootstrapRejectsForeignKeyCorruption() async throws {
@@ -1201,16 +1358,20 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         XCTAssertEqual(decoded, value)
         XCTAssertEqual(try Data(contentsOf: legacyURL), original)
 
-        XCTAssertThrowsError(try LegacyJSONMigrationReader.decode(
-            [String].self,
+        let optionalRawData = try LegacyJSONMigrationReader.readData(
             from: legacyURL,
-            containedIn: fixture.rootURL,
-            maximumPayloadBytes: 4 * 1_024 * 1_024
-        )) { error in
-            guard case DeviceMessagingRepositoryError.legacyPayloadTooLarge = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-        }
+            containedIn: fixture.rootURL
+        )
+        let rawData = try XCTUnwrap(optionalRawData)
+        XCTAssertEqual(rawData, original)
+        XCTAssertEqual(
+            try LegacyJSONMigrationReader.decode(
+                [String].self,
+                from: rawData,
+                sourceLabel: legacyURL.lastPathComponent
+            ),
+            value
+        )
     }
 
     func testLegacyReaderRejectsSymlinkAndHardlinkWithoutChangingTarget() throws {
@@ -1349,12 +1510,12 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         )
     }
 
-    func testLegacyDataArchiveRejectsOversizedExistingArchiveBeforeReadingIt() throws {
+    func testLegacyDataArchiveRejectsMismatchedOversizedExistingArchiveWithoutRewritingIt() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let archiveURL = fixture.rootURL.appendingPathComponent("legacy.archive")
         XCTAssertTrue(FileManager.default.createFile(atPath: archiveURL.path, contents: nil))
-        let oversizedByteCount = LegacyJSONMigrationReader.maximumPayloadBytes + 1
+        let oversizedByteCount = 4 * 1_024 * 1_024 + 1
         let archiveHandle = try FileHandle(forWritingTo: archiveURL)
         try archiveHandle.truncate(atOffset: UInt64(oversizedByteCount))
         try archiveHandle.close()
@@ -1367,10 +1528,7 @@ final class SQLiteDeviceMessagingRepositoryTests: XCTestCase {
         )) { error in
             XCTAssertEqual(
                 error as? DeviceMessagingRepositoryError,
-                .legacyPayloadTooLarge(
-                    actualBytes: oversizedByteCount,
-                    maximumBytes: LegacyJSONMigrationReader.maximumPayloadBytes
-                )
+                .legacySourceConflict("legacy")
             )
         }
         let attributes = try FileManager.default.attributesOfItem(atPath: archiveURL.path)

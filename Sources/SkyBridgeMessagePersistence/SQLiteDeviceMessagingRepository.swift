@@ -190,6 +190,74 @@ private final class SQLiteRepositoryProcessCoordinator: @unchecked Sendable {
     }
 }
 
+/// Collects the exact rows one write transaction touches. Later records for
+/// the same key replace earlier ones, and a removal cancels a pending upsert
+/// (and vice versa), so the emitted change always reflects the transaction's
+/// net effect in a deterministic order.
+private struct RepositoryChangeCollector {
+    private var messageUpserts: [UUID: PersistedMessageRecord] = [:]
+    private var messageRemovals: [UUID: String] = [:]
+    private var intentUpserts: [String: PersistedDeliveryIntent] = [:]
+    private var intentRemovals: Set<String> = []
+
+    var hasRows: Bool {
+        !messageUpserts.isEmpty || !messageRemovals.isEmpty
+            || !intentUpserts.isEmpty || !intentRemovals.isEmpty
+    }
+
+    mutating func upsert(_ message: PersistedMessageRecord) {
+        messageRemovals.removeValue(forKey: message.id)
+        messageUpserts[message.id] = message
+    }
+
+    mutating func removeMessage(id: UUID, conversationFingerprint: String) {
+        messageUpserts.removeValue(forKey: id)
+        messageRemovals[id] = conversationFingerprint
+    }
+
+    mutating func upsert(_ intent: PersistedDeliveryIntent) {
+        intentRemovals.remove(intent.queueID)
+        intentUpserts[intent.queueID] = intent
+    }
+
+    mutating func removeIntent(queueID: String) {
+        intentUpserts.removeValue(forKey: queueID)
+        intentRemovals.insert(queueID)
+    }
+
+    func change(
+        basisGeneration: UInt64,
+        generation: UInt64
+    ) -> MessageRepositoryChange {
+        MessageRepositoryChange(
+            upsertedMessages: messageUpserts.values.sorted { lhs, rhs in
+                if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+                return lhs.id.uuidString < rhs.id.uuidString
+            },
+            removedMessages: messageRemovals
+                .map {
+                    MessageRepositoryMessageRemoval(
+                        id: $0.key,
+                        conversationFingerprint: $0.value
+                    )
+                }
+                .sorted { lhs, rhs in
+                    if lhs.conversationFingerprint != rhs.conversationFingerprint {
+                        return lhs.conversationFingerprint < rhs.conversationFingerprint
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                },
+            upsertedDeliveryIntents: intentUpserts.values.sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                return lhs.queueID < rhs.queueID
+            },
+            removedDeliveryIntentQueueIDs: intentRemovals.sorted(),
+            basisGeneration: basisGeneration,
+            generation: generation
+        )
+    }
+}
+
 /// The single durable authority for conversation history and delivery intent.
 ///
 /// SQLite owns crash recovery and cross-table atomicity. The actor owns the
@@ -200,9 +268,20 @@ public actor SQLiteDeviceMessagingRepository {
     private static let maximumPayloadBytes = 1_024 * 1_024
     private static let maximumIdentifierBytes = 512
     private static let maximumFailureCodeBytes = 128
-    private static let maximumMessagesPerConversation = 500
-    private static let maximumActiveDeliveryIntents = 1_000
-    private static let maximumActiveDeliveryIntentsPerDevice = 100
+    static let maximumMessagesPerConversation = 500
+    static let maximumActiveDeliveryIntents = 1_000
+    static let maximumActiveDeliveryIntentsPerDevice = 100
+    /// Global bounds. Conversation count and terminal history grow with normal
+    /// use and previously had no ceiling, and failed intents are excluded from
+    /// the active-intent budget so they previously accumulated forever.
+    /// Compaction runs inside the same write transaction that would exceed a
+    /// bound and only ever evicts fully terminal, intent-free rows (or, for
+    /// the failed-intent bound, the oldest failed intents while their failed
+    /// messages stay visible). If nothing is evictable the write fails closed.
+    static let maximumConversations = 128
+    static let maximumTotalMessageRows = 20_000
+    static let maximumFailedDeliveryIntents = 256
+    static let maximumMigrationIssues = 512
 
     private let databaseURL: URL
     private let instanceIdentifier = UUID()
@@ -237,6 +316,7 @@ public actor SQLiteDeviceMessagingRepository {
             ) {
                 try configureDatabase()
                 try applyFileProtection()
+                try ensureIncrementalVacuum()
                 try createOrValidateSchema()
                 try runIntegrityCheck()
                 try applyLegacyMigrationIfNeeded(legacyMigration ?? .empty)
@@ -341,6 +421,72 @@ public actor SQLiteDeviceMessagingRepository {
         try execute("PRAGMA fullfsync = ON")
         try execute("PRAGMA trusted_schema = OFF")
         try execute("PRAGMA recursive_triggers = OFF")
+    }
+
+    /// Compaction deletes rows; incremental auto-vacuum lets the freed pages
+    /// return to the filesystem in small bounded steps after each compacting
+    /// commit instead of the file growing forever. Databases created before
+    /// this policy require one full VACUUM to adopt it; that runs once during
+    /// bootstrap, outside any transaction, while this process holds the
+    /// exclusive sidecar lock.
+    private func ensureIncrementalVacuum() throws {
+        let incrementalMode = 2
+        guard try scalarInt("PRAGMA auto_vacuum", bindings: []) != incrementalMode else {
+            return
+        }
+        try execute("PRAGMA auto_vacuum = INCREMENTAL")
+        try execute("VACUUM")
+        guard try scalarInt("PRAGMA auto_vacuum", bindings: []) == incrementalMode else {
+            throw DeviceMessagingRepositoryError.invalidRecord(
+                reasonCode: "auto_vacuum_conversion_failed"
+            )
+        }
+    }
+
+    /// Returns freed pages to the filesystem after a commit that removed rows.
+    /// The page budget bounds the extra I/O added to any one mutation.
+    private func reclaimStorage(after change: MessageRepositoryChange) throws {
+        guard !change.removedMessages.isEmpty
+            || !change.removedDeliveryIntentQueueIDs.isEmpty else {
+            return
+        }
+        try execute("PRAGMA incremental_vacuum(256)")
+    }
+
+    /// Runs one write transaction and returns the caller's value together with
+    /// the exact change the transaction committed. The generation is read
+    /// inside the transaction, so the change is provably paired with the basis
+    /// it applies to even when other repository instances interleave writes.
+    private func withChangeTransaction<Value>(
+        _ operation: (inout RepositoryChangeCollector) throws -> Value
+    ) throws -> (value: Value, change: MessageRepositoryChange) {
+        var collector = RepositoryChangeCollector()
+        let outcome: (value: Value, basis: UInt64, result: UInt64) =
+            try withTransaction(mode: "IMMEDIATE") {
+                let basis = try readGeneration()
+                let value = try operation(&collector)
+                let result = try readGeneration()
+                guard result > basis || !collector.hasRows else {
+                    throw DeviceMessagingRepositoryError.invalidRecord(
+                        reasonCode: "change_without_generation_advance"
+                    )
+                }
+                return (value, basis, result)
+            }
+        let change = collector.change(
+            basisGeneration: outcome.basis,
+            generation: outcome.result
+        )
+        try reclaimStorage(after: change)
+        return (outcome.value, change)
+    }
+
+    private func withChangeTransaction(
+        _ operation: (inout RepositoryChangeCollector) throws -> Void
+    ) throws -> MessageRepositoryChange {
+        let outcome: (value: Void, change: MessageRepositoryChange) =
+            try withChangeTransaction(operation)
+        return outcome.change
     }
 
     private func createOrValidateSchema() throws {
@@ -635,6 +781,12 @@ public actor SQLiteDeviceMessagingRepository {
         }
     }
 
+    /// Synthetic source for issues the repository itself generates while
+    /// bounding an imported legacy store. Exact eviction counts live in
+    /// `schema_metadata` under the `legacy_*_compacted_count` and
+    /// `migration_issue_overflow_count` keys.
+    static let compactionIssueSourceID = "repository_compaction"
+
     private func applyLegacyMigrationIfNeeded(
         _ migration: LegacyMessageMigration
     ) throws {
@@ -650,15 +802,167 @@ public actor SQLiteDeviceMessagingRepository {
                     "partially_initialized_database"
                 )
             }
+
+            // A valid legacy store predates the global bounds, so the bounds
+            // are applied to it here, exactly once, with the same deterministic
+            // eviction rules the runtime uses, instead of failing the import.
+            let failedIntents = migration.deliveryIntents
+                .filter { $0.state == .failed }
+                .sorted { lhs, rhs in
+                    if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                    return lhs.queueID > rhs.queueID
+                }
+            let droppedFailedIntentQueueIDs = Set(
+                failedIntents.dropFirst(Self.maximumFailedDeliveryIntents).map(\.queueID)
+            )
+
             for message in migration.messages {
                 try insertMessage(message)
             }
-            for intent in migration.deliveryIntents {
+            for intent in migration.deliveryIntents
+            where !droppedFailedIntentQueueIDs.contains(intent.queueID) {
                 try insertIntent(intent, claimOwner: nil)
             }
-            for issue in migration.issues {
+
+            // Pre-existing active state is never dropped: when the excess is
+            // not evictable the import keeps it and records the exact overage,
+            // and the strict bounds then apply to every write that follows.
+            var compactionCollector = RepositoryChangeCollector()
+
+            var evictedConversationMessages = 0
+            var conversationMessagesOverCapacity = 0
+            for overflowing in try loadOverCapacityConversations() {
+                let excess = overflowing.rowCount - Self.maximumMessagesPerConversation
+                let removals = try loadEvictableTerminalMessages(
+                    conversationFingerprint: overflowing.fingerprint,
+                    limit: excess
+                )
+                try evictTerminalMessages(removals, into: &compactionCollector)
+                evictedConversationMessages += removals.count
+                conversationMessagesOverCapacity += excess - removals.count
+            }
+
+            var evictedConversations = 0
+            var conversationsOverCapacity = 0
+            let conversationCount = try scalarInt(
+                "SELECT COUNT(DISTINCT conversation_fingerprint) FROM messages",
+                bindings: []
+            )
+            if conversationCount > Self.maximumConversations {
+                let excess = conversationCount - Self.maximumConversations
+                let evictable = try loadEvictableConversationFingerprints(limit: excess)
+                try evictConversations(evictable, into: &compactionCollector)
+                evictedConversations = evictable.count
+                conversationsOverCapacity = excess - evictable.count
+            }
+            var evictedMessages = 0
+            var messagesOverCapacity = 0
+            let totalRows = try rowCount(table: "messages")
+            if totalRows > Self.maximumTotalMessageRows {
+                let excess = totalRows - Self.maximumTotalMessageRows
+                let removals = try loadEvictableTerminalMessages(
+                    conversationFingerprint: nil,
+                    limit: excess
+                )
+                try evictTerminalMessages(removals, into: &compactionCollector)
+                evictedMessages = removals.count
+                messagesOverCapacity = excess - removals.count
+            }
+
+            // Active delivery intents are user messages that have not been
+            // delivered; they are imported whole even beyond the runtime
+            // admission bounds, with the exact overage recorded. The strict
+            // bounds then gate every admission that follows.
+            let activeIntentCount = try scalarInt(
+                "SELECT COUNT(*) FROM delivery_intents WHERE state IN (0, 1, 2)",
+                bindings: []
+            )
+            let activeIntentsOverCapacity = max(
+                0,
+                activeIntentCount - Self.maximumActiveDeliveryIntents
+            )
+            let deviceActiveIntentsOverCapacity = try scalarInt(
+                """
+                SELECT COALESCE(SUM(excess), 0) FROM (
+                    SELECT COUNT(*) - ? AS excess
+                      FROM delivery_intents
+                     WHERE state IN (0, 1, 2)
+                     GROUP BY target_device_id
+                    HAVING COUNT(*) > ?
+                )
+                """,
+                bindings: [
+                    .integer(Self.maximumActiveDeliveryIntentsPerDevice),
+                    .integer(Self.maximumActiveDeliveryIntentsPerDevice),
+                ]
+            )
+
+            let retainedIssues = migration.issues.prefix(Self.maximumMigrationIssues)
+            let truncatedIssueCount = migration.issues.count - retainedIssues.count
+            for issue in retainedIssues {
                 try insertMigrationIssue(issue)
             }
+            let compactionCounts: [(key: String, count: Int, reasonCode: String)] = [
+                (
+                    "legacy_failed_intents_compacted_count",
+                    droppedFailedIntentQueueIDs.count,
+                    "legacy_failed_intents_compacted"
+                ),
+                (
+                    "legacy_conversation_messages_compacted_count",
+                    evictedConversationMessages,
+                    "legacy_conversation_messages_compacted"
+                ),
+                (
+                    "legacy_conversation_messages_over_capacity_count",
+                    conversationMessagesOverCapacity,
+                    "legacy_conversation_messages_over_capacity"
+                ),
+                (
+                    "legacy_active_intents_over_capacity_count",
+                    activeIntentsOverCapacity,
+                    "legacy_active_intents_over_capacity"
+                ),
+                (
+                    "legacy_device_active_intents_over_capacity_count",
+                    deviceActiveIntentsOverCapacity,
+                    "legacy_device_active_intents_over_capacity"
+                ),
+                (
+                    "legacy_conversations_compacted_count",
+                    evictedConversations,
+                    "legacy_conversations_compacted"
+                ),
+                (
+                    "legacy_messages_compacted_count",
+                    evictedMessages,
+                    "legacy_messages_compacted"
+                ),
+                (
+                    "legacy_conversations_over_capacity_count",
+                    conversationsOverCapacity,
+                    "legacy_conversations_over_capacity"
+                ),
+                (
+                    "legacy_messages_over_capacity_count",
+                    messagesOverCapacity,
+                    "legacy_messages_over_capacity"
+                ),
+                (
+                    "migration_issue_overflow_count",
+                    truncatedIssueCount,
+                    "migration_issue_overflow"
+                ),
+            ]
+            for entry in compactionCounts where entry.count > 0 {
+                try setMetadataValue(String(entry.count), for: entry.key)
+                try insertMigrationIssue(MessageRepositoryMigrationIssue(
+                    sourceID: Self.compactionIssueSourceID,
+                    messageID: nil,
+                    reasonCode: entry.reasonCode
+                ))
+            }
+
             for source in migration.sources.sorted(by: { $0.sourceID < $1.sourceID }) {
                 let statement = try prepare(
                     "INSERT INTO migration_sources(source_id, content_digest) VALUES(?, ?)"
@@ -700,29 +1004,22 @@ public actor SQLiteDeviceMessagingRepository {
             }
         }
 
+        // Capacity is deliberately not validated here: a legacy store predates
+        // every bound, so the import transaction compacts evictable overflow
+        // and records what remains over capacity instead of stranding the
+        // user's history behind a fail-closed size gate.
         var messageIDs = Set<UUID>()
         var messagesByID: [UUID: PersistedMessageRecord] = [:]
-        var messagesPerConversation: [String: Int] = [:]
         for message in migration.messages {
             try validateMessage(message)
             guard messageIDs.insert(message.id).inserted else {
                 throw DeviceMessagingRepositoryError.duplicateMessage(message.id)
             }
             messagesByID[message.id] = message
-            messagesPerConversation[message.conversationFingerprint, default: 0] += 1
-        }
-        guard messagesPerConversation.values.allSatisfy({
-            $0 <= Self.maximumMessagesPerConversation
-        }) else {
-            throw DeviceMessagingRepositoryError.invalidRecord(
-                reasonCode: "conversation_capacity_exceeded"
-            )
         }
 
         var queueIDs = Set<String>()
         var intentMessageIDs = Set<UUID>()
-        var activeIntentCount = 0
-        var activeIntentsPerDevice: [String: Int] = [:]
         for intent in migration.deliveryIntents {
             try validateIntent(intent)
             guard intent.state == .pending || intent.state == .failed else {
@@ -739,18 +1036,6 @@ public actor SQLiteDeviceMessagingRepository {
                     || (intent.state == .failed && message.deliveryState == .failed) else {
                 throw DeviceMessagingRepositoryError.legacySourceConflict(intent.queueID)
             }
-            if intent.state != .failed {
-                activeIntentCount += 1
-                activeIntentsPerDevice[intent.targetDeviceID, default: 0] += 1
-            }
-        }
-        guard activeIntentCount <= Self.maximumActiveDeliveryIntents,
-              activeIntentsPerDevice.values.allSatisfy({
-                  $0 <= Self.maximumActiveDeliveryIntentsPerDevice
-              }) else {
-            throw DeviceMessagingRepositoryError.invalidRecord(
-                reasonCode: "delivery_intent_capacity_exceeded"
-            )
         }
 
         for message in migration.messages {
@@ -813,7 +1098,7 @@ public actor SQLiteDeviceMessagingRepository {
     public func stageOutgoing(
         message: PersistedMessageRecord,
         intent: PersistedDeliveryIntent
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateMessage(message)
         try validateIntent(intent)
@@ -831,7 +1116,7 @@ public actor SQLiteDeviceMessagingRepository {
             )
         }
 
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             if try messageExists(message.id) {
                 throw DeviceMessagingRepositoryError.duplicateMessage(message.id)
             }
@@ -840,21 +1125,27 @@ public actor SQLiteDeviceMessagingRepository {
             }
             try admitDeliveryIntent(
                 targetDeviceID: intent.targetDeviceID,
-                admissionTime: intent.createdAt
+                admissionTime: intent.createdAt,
+                into: &collector
             )
-            try makeRoomForMessage(in: message.conversationFingerprint)
+            try makeRoomForMessage(
+                in: message.conversationFingerprint,
+                into: &collector
+            )
+            _ = try compactGlobalMessageHistory(admitting: message, into: &collector)
             try insertMessage(message)
+            collector.upsert(message)
             try insertIntent(intent, claimOwner: nil)
+            collector.upsert(intent)
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Inserts an incoming message idempotently. Reusing an identifier with
     /// different content is a state conflict, not a duplicate success.
     public func recordIncoming(
         _ message: PersistedMessageRecord
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateMessage(message)
         guard message.direction == .incoming,
@@ -865,29 +1156,33 @@ public actor SQLiteDeviceMessagingRepository {
             )
         }
 
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             if let existing = try loadMessage(id: message.id) {
                 guard existing == message else {
                     throw DeviceMessagingRepositoryError.duplicateMessage(message.id)
                 }
                 return
             }
-            try makeRoomForMessage(in: message.conversationFingerprint)
+            try makeRoomForMessage(
+                in: message.conversationFingerprint,
+                into: &collector
+            )
+            _ = try compactGlobalMessageHistory(admitting: message, into: &collector)
             try insertMessage(message)
+            collector.upsert(message)
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     public func claim(
         messageID: UUID,
         ownerToken: UUID,
         now: Date = Date()
-    ) throws -> MessageDeliveryClaim {
+    ) throws -> MessageDeliveryClaimOutcome {
         try requireBootstrapped()
         try validateDate(now, reasonCode: "invalid_claim_time")
-        return try withTransaction(mode: "IMMEDIATE") {
-            _ = try recoverInterruptedClaimsWithinTransaction()
+        let outcome = try withChangeTransaction { collector in
+            _ = try recoverInterruptedClaimsWithinTransaction(into: &collector)
             guard var intent = try loadIntent(messageID: messageID) else {
                 throw DeviceMessagingRepositoryError.messageNotFound(messageID)
             }
@@ -906,6 +1201,7 @@ public actor SQLiteDeviceMessagingRepository {
             intent.receiptDeadline = nil
             intent.claimGeneration = next.partialValue
             try updateIntent(intent, claimOwner: ownerToken)
+            collector.upsert(intent)
             try advanceGeneration()
             return MessageDeliveryClaim(
                 intent: intent,
@@ -913,6 +1209,7 @@ public actor SQLiteDeviceMessagingRepository {
                 generation: intent.claimGeneration
             )
         }
+        return MessageDeliveryClaimOutcome(claim: outcome.value, change: outcome.change)
     }
 
     public func claimNextReady(
@@ -920,14 +1217,15 @@ public actor SQLiteDeviceMessagingRepository {
         ownerToken: UUID,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) throws -> MessageDeliveryClaim? {
+    ) throws -> MessageDeliveryPollOutcome {
         try requireBootstrapped()
         try validateIdentifier(targetDeviceID, reasonCode: "invalid_target_device_id")
         try validateRetryPolicy(retryPolicy)
         try validateDate(now, reasonCode: "invalid_claim_time")
 
-        return try withTransaction(mode: "IMMEDIATE") {
-            _ = try recoverInterruptedClaimsWithinTransaction()
+        let outcome = try withChangeTransaction {
+            collector -> MessageDeliveryClaim? in
+            _ = try recoverInterruptedClaimsWithinTransaction(into: &collector)
             var candidates = try loadPendingIntents(targetDeviceID: targetDeviceID)
             let expired = candidates.filter { intent in
                 intent.expiresAt.map { $0 < now } == true
@@ -938,13 +1236,16 @@ public actor SQLiteDeviceMessagingRepository {
                 intent.receiptDeadline = nil
                 intent.failureCode = "message_expired"
                 try updateIntent(intent, claimOwner: nil)
-                try updateMessageState(
+                collector.upsert(intent)
+                let failedMessage = try updateMessageState(
                     id: intent.messageID,
                     state: .failed,
                     expectedDirection: .outgoing
                 )
+                collector.upsert(failedMessage)
             }
             if !expired.isEmpty {
+                try compactFailedDeliveryIntents(into: &collector)
                 let expiredIDs = Set(expired.map(\.queueID))
                 candidates.removeAll { expiredIDs.contains($0.queueID) }
             }
@@ -955,6 +1256,8 @@ public actor SQLiteDeviceMessagingRepository {
                     * pow(retryPolicy.backoffFactor, Double(exponent))
                 return delay.isFinite && now >= lastAttemptAt.addingTimeInterval(delay)
             }) else {
+                // Interrupted-claim recovery advances the generation itself;
+                // only an expiry settled here needs its own advance.
                 if !expired.isEmpty { try advanceGeneration() }
                 return nil
             }
@@ -971,6 +1274,7 @@ public actor SQLiteDeviceMessagingRepository {
             claimed.receiptDeadline = nil
             claimed.claimGeneration = next.partialValue
             try updateIntent(claimed, claimOwner: ownerToken)
+            collector.upsert(claimed)
             try advanceGeneration()
             return MessageDeliveryClaim(
                 intent: claimed,
@@ -978,6 +1282,7 @@ public actor SQLiteDeviceMessagingRepository {
                 generation: claimed.claimGeneration
             )
         }
+        return MessageDeliveryPollOutcome(claim: outcome.value, change: outcome.change)
     }
 
     public func isClaimCurrent(_ claim: MessageDeliveryClaim) throws -> Bool {
@@ -999,12 +1304,12 @@ public actor SQLiteDeviceMessagingRepository {
         disposition: MessageDeliveryDisposition,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateRetryPolicy(retryPolicy)
         try validateDate(now, reasonCode: "invalid_resolution_time")
 
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             guard var stored = try loadIntentWithOwner(queueID: claim.intent.queueID),
                   stored.intent.state == .sending,
                   stored.intent.messageID == claim.intent.messageID,
@@ -1025,11 +1330,12 @@ public actor SQLiteDeviceMessagingRepository {
                 stored.intent.receiptDeadline = receiptDeadline
                 stored.intent.failureCode = nil
                 try updateIntent(stored.intent, claimOwner: claim.ownerToken)
-                try updateMessageState(
+                collector.upsert(stored.intent)
+                collector.upsert(try updateMessageState(
                     id: stored.intent.messageID,
                     state: .sent,
                     expectedDirection: .outgoing
-                )
+                ))
 
             case .retryable(let failureCode):
                 try validateFailureCode(failureCode)
@@ -1043,22 +1349,18 @@ public actor SQLiteDeviceMessagingRepository {
                 stored.intent.lastAttemptAt = now
                 stored.intent.receiptDeadline = nil
                 stored.intent.failureCode = failureCode
-                if stored.intent.retryCount >= retryPolicy.maximumRetryCount {
-                    stored.intent.state = .failed
-                    try updateMessageState(
-                        id: stored.intent.messageID,
-                        state: .failed,
-                        expectedDirection: .outgoing
-                    )
-                } else {
-                    stored.intent.state = .pending
-                    try updateMessageState(
-                        id: stored.intent.messageID,
-                        state: .pending,
-                        expectedDirection: .outgoing
-                    )
-                }
+                let exhausted = stored.intent.retryCount >= retryPolicy.maximumRetryCount
+                stored.intent.state = exhausted ? .failed : .pending
+                collector.upsert(try updateMessageState(
+                    id: stored.intent.messageID,
+                    state: exhausted ? .failed : .pending,
+                    expectedDirection: .outgoing
+                ))
                 try updateIntent(stored.intent, claimOwner: nil)
+                collector.upsert(stored.intent)
+                if exhausted {
+                    try compactFailedDeliveryIntents(into: &collector)
+                }
 
             case .permanentFailure(let failureCode):
                 try validateFailureCode(failureCode)
@@ -1067,25 +1369,27 @@ public actor SQLiteDeviceMessagingRepository {
                 stored.intent.receiptDeadline = nil
                 stored.intent.failureCode = failureCode
                 try updateIntent(stored.intent, claimOwner: nil)
-                try updateMessageState(
+                collector.upsert(stored.intent)
+                collector.upsert(try updateMessageState(
                     id: stored.intent.messageID,
                     state: .failed,
                     expectedDirection: .outgoing
-                )
+                ))
+                try compactFailedDeliveryIntents(into: &collector)
 
             case .interrupted:
                 stored.intent.state = .pending
                 stored.intent.receiptDeadline = nil
                 try updateIntent(stored.intent, claimOwner: nil)
-                try updateMessageState(
+                collector.upsert(stored.intent)
+                collector.upsert(try updateMessageState(
                     id: stored.intent.messageID,
                     state: .pending,
                     expectedDirection: .outgoing
-                )
+                ))
             }
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Confirms remote processing only from an authenticated frame that echoes
@@ -1094,7 +1398,7 @@ public actor SQLiteDeviceMessagingRepository {
     /// `.awaitingReceipt` for the same owner.
     public func confirmAuthenticatedReceipt(
         _ receipt: AuthenticatedMessageReceipt
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateConversationFingerprint(
             receipt.conversationFingerprint,
@@ -1102,7 +1406,7 @@ public actor SQLiteDeviceMessagingRepository {
         )
         try validateDate(receipt.receivedAt, reasonCode: "invalid_receipt_time")
 
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             guard let message = try loadMessage(id: receipt.messageID),
                   message.direction == .outgoing,
                   message.conversationFingerprint == receipt.conversationFingerprint else {
@@ -1128,16 +1432,16 @@ public actor SQLiteDeviceMessagingRepository {
                     receipt.messageID
                 )
             }
-            try updateMessageState(
+            collector.upsert(try updateMessageState(
                 id: receipt.messageID,
                 state: .delivered,
                 expectedDirection: .outgoing
-            )
+            ))
             try insertReceiptConfirmation(receipt)
             try deleteIntent(queueID: stored.intent.queueID)
+            collector.removeIntent(queueID: stored.intent.queueID)
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Receipt timeouts become retryable with the same stable message ID. This
@@ -1147,17 +1451,21 @@ public actor SQLiteDeviceMessagingRepository {
         now: Date = Date(),
         failureCode: String = "receipt_timeout",
         retryPolicy: MessageDeliveryRetryPolicy
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateDate(now, reasonCode: "invalid_receipt_recovery_time")
         try validateFailureCode(failureCode)
         try validateRetryPolicy(retryPolicy)
-        try withTransaction(mode: "IMMEDIATE") {
-            let expired = try loadIntents().filter { intent in
-                intent.state == .awaitingReceipt
-                    && intent.receiptDeadline.map { $0 <= now } == true
-            }
+        return try withChangeTransaction { collector in
+            let expired = try loadIntents(
+                where: "state = ? AND receipt_deadline IS NOT NULL AND receipt_deadline <= ?",
+                bindings: [
+                    .integer(Int(PersistedDeliveryIntentState.awaitingReceipt.rawValue)),
+                    .double(now.timeIntervalSince1970),
+                ]
+            )
             guard !expired.isEmpty else { return }
+            var anyTerminal = false
             for var intent in expired {
                 let nextRetry = intent.retryCount.addingReportingOverflow(1)
                 guard !nextRetry.overflow else {
@@ -1176,27 +1484,31 @@ public actor SQLiteDeviceMessagingRepository {
                     intent.failureCode = "message_expired"
                 }
                 intent.state = terminal ? .failed : .pending
+                anyTerminal = anyTerminal || terminal
                 try updateIntent(intent, claimOwner: nil)
-                try updateMessageState(
+                collector.upsert(intent)
+                collector.upsert(try updateMessageState(
                     id: intent.messageID,
                     state: terminal ? .failed : .pending,
                     expectedDirection: .outgoing
-                )
+                ))
+            }
+            if anyTerminal {
+                try compactFailedDeliveryIntents(into: &collector)
             }
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     public func clearConversation(
         _ conversationFingerprint: String
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateConversationFingerprint(
             conversationFingerprint,
             reasonCode: "invalid_conversation_fingerprint"
         )
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             let pending = try scalarInt(
                 """
                 SELECT COUNT(*)
@@ -1213,6 +1525,53 @@ public actor SQLiteDeviceMessagingRepository {
                     reasonCode: "pending_messages_prevent_clear"
                 )
             }
+            // Failed intents referencing this conversation are removed by the
+            // foreign-key cascade, so the change must name them explicitly.
+            let cascadedIntents = try prepare(
+                """
+                SELECT intent.queue_id
+                  FROM delivery_intents AS intent
+                  JOIN messages AS message
+                    ON message.message_id = intent.message_id
+                 WHERE message.conversation_fingerprint = ?
+                """
+            )
+            defer { sqlite3_finalize(cascadedIntents) }
+            try bind(conversationFingerprint, to: cascadedIntents, index: 1)
+            var cascadedQueueIDs: [String] = []
+            loadCascadedIntents: while true {
+                switch sqlite3_step(cascadedIntents) {
+                case SQLITE_ROW:
+                    cascadedQueueIDs.append(requiredTextColumn(cascadedIntents, index: 0))
+                case SQLITE_DONE:
+                    break loadCascadedIntents
+                default:
+                    throw currentSQLiteError(operation: "load_cascaded_intents")
+                }
+            }
+            let members = try prepare(
+                "SELECT message_id FROM messages WHERE conversation_fingerprint = ?"
+            )
+            defer { sqlite3_finalize(members) }
+            try bind(conversationFingerprint, to: members, index: 1)
+            var memberIDs: [UUID] = []
+            loadMembers: while true {
+                switch sqlite3_step(members) {
+                case SQLITE_ROW:
+                    guard let memberID = UUID(
+                        uuidString: requiredTextColumn(members, index: 0)
+                    ) else {
+                        throw DeviceMessagingRepositoryError.invalidRecord(
+                            reasonCode: "invalid_persisted_message_id"
+                        )
+                    }
+                    memberIDs.append(memberID)
+                case SQLITE_DONE:
+                    break loadMembers
+                default:
+                    throw currentSQLiteError(operation: "load_cleared_conversation")
+                }
+            }
             let statement = try prepare(
                 "DELETE FROM messages WHERE conversation_fingerprint = ?"
             )
@@ -1220,10 +1579,18 @@ public actor SQLiteDeviceMessagingRepository {
             try bind(conversationFingerprint, to: statement, index: 1)
             try stepDone(statement, operation: "clear_conversation")
             if sqlite3_changes(requiredDatabase()) > 0 {
+                for memberID in memberIDs {
+                    collector.removeMessage(
+                        id: memberID,
+                        conversationFingerprint: conversationFingerprint
+                    )
+                }
+                for queueID in cascadedQueueIDs {
+                    collector.removeIntent(queueID: queueID)
+                }
                 try advanceGeneration()
             }
         }
-        return try makeSnapshot()
     }
 
     /// Cancels one delivery that has not crossed the local network side-effect
@@ -1231,10 +1598,10 @@ public actor SQLiteDeviceMessagingRepository {
     /// first be resolved by their exact worker or receipt timeout.
     public func cancelDelivery(
         queueID: String
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateIdentifier(queueID, reasonCode: "invalid_queue_id")
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             guard let intent = try loadIntentWithOwner(queueID: queueID)?.intent else {
                 throw DeviceMessagingRepositoryError.intentNotFound(queueID)
             }
@@ -1243,10 +1610,9 @@ public actor SQLiteDeviceMessagingRepository {
                     reasonCode: "in_flight_delivery_prevents_cancel"
                 )
             }
-            try removeCancelledDelivery(intent)
+            try removeCancelledDelivery(intent, into: &collector)
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Cancels every non-in-flight delivery for one target as one transaction.
@@ -1254,11 +1620,14 @@ public actor SQLiteDeviceMessagingRepository {
     /// already entered the network side-effect boundary.
     public func cancelDeliveries(
         targetDeviceID: String
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateIdentifier(targetDeviceID, reasonCode: "invalid_target_device_id")
-        try withTransaction(mode: "IMMEDIATE") {
-            let intents = try loadIntents().filter { $0.targetDeviceID == targetDeviceID }
+        return try withChangeTransaction { collector in
+            let intents = try loadIntents(
+                where: "target_device_id = ?",
+                bindings: [.text(targetDeviceID)]
+            )
             guard intents.allSatisfy({ $0.state == .pending || $0.state == .failed }) else {
                 throw DeviceMessagingRepositoryError.invalidRecord(
                     reasonCode: "in_flight_delivery_prevents_cancel"
@@ -1266,19 +1635,18 @@ public actor SQLiteDeviceMessagingRepository {
             }
             guard !intents.isEmpty else { return }
             for intent in intents {
-                try removeCancelledDelivery(intent)
+                try removeCancelledDelivery(intent, into: &collector)
             }
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Clears the delivery queue without inventing a transport failure. Pending
     /// messages are removed with their intents; genuine failed history remains
     /// visible while its retry intent is removed.
-    public func clearDeliveries() throws -> MessageRepositorySnapshot {
+    public func clearDeliveries() throws -> MessageRepositoryChange {
         try requireBootstrapped()
-        try withTransaction(mode: "IMMEDIATE") {
+        return try withChangeTransaction { collector in
             let intents = try loadIntents()
             guard intents.allSatisfy({ $0.state == .pending || $0.state == .failed }) else {
                 throw DeviceMessagingRepositoryError.invalidRecord(
@@ -1287,11 +1655,10 @@ public actor SQLiteDeviceMessagingRepository {
             }
             guard !intents.isEmpty else { return }
             for intent in intents {
-                try removeCancelledDelivery(intent)
+                try removeCancelledDelivery(intent, into: &collector)
             }
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     /// Reactivates non-expired failed deliveries and their visible messages in
@@ -1299,19 +1666,21 @@ public actor SQLiteDeviceMessagingRepository {
     /// receipts can never become current again.
     public func retryFailedDeliveries(
         now: Date = Date()
-    ) throws -> MessageRepositorySnapshot {
+    ) throws -> MessageRepositoryChange {
         try requireBootstrapped()
         try validateDate(now, reasonCode: "invalid_retry_time")
-        try withTransaction(mode: "IMMEDIATE") {
-            let intents = try loadIntents()
-            let retryable = intents.filter {
-                $0.state == .failed && ($0.expiresAt.map { now <= $0 } ?? true)
-            }
+        return try withChangeTransaction { collector in
+            let failed = try loadIntents(
+                where: "state = ?",
+                bindings: [.integer(Int(PersistedDeliveryIntentState.failed.rawValue))]
+            )
+            let retryable = failed.filter { $0.expiresAt.map { now <= $0 } ?? true }
             guard !retryable.isEmpty else { return }
 
-            let active = intents.filter {
-                $0.state == .pending || $0.state == .sending || $0.state == .awaitingReceipt
-            }
+            let active = try loadIntents(
+                where: "state IN (0, 1, 2)",
+                bindings: []
+            )
             let activeTotal = active.count + retryable.count
             var activePerDevice: [String: Int] = [:]
             for intent in active + retryable {
@@ -1333,15 +1702,15 @@ public actor SQLiteDeviceMessagingRepository {
                 intent.receiptDeadline = nil
                 intent.failureCode = nil
                 try updateIntent(intent, claimOwner: nil)
-                try updateMessageState(
+                collector.upsert(intent)
+                collector.upsert(try updateMessageState(
                     id: intent.messageID,
                     state: .pending,
                     expectedDirection: .outgoing
-                )
+                ))
             }
             try advanceGeneration()
         }
-        return try makeSnapshot()
     }
 
     // MARK: - Snapshot decoding
@@ -1385,6 +1754,16 @@ public actor SQLiteDeviceMessagingRepository {
     }
 
     private func loadIntents() throws -> [PersistedDeliveryIntent] {
+        try loadIntents(where: nil, bindings: [])
+    }
+
+    /// The filter must be a compile-time constant WHERE clause with `?`
+    /// placeholders; every value flows through `bindings`.
+    private func loadIntents(
+        where filter: String?,
+        bindings: [ScalarBinding]
+    ) throws -> [PersistedDeliveryIntent] {
+        let whereClause = filter.map { "WHERE \($0)" } ?? ""
         let statement = try prepare(
             """
             SELECT queue_id, message_id, target_device_id, message_type,
@@ -1392,10 +1771,21 @@ public actor SQLiteDeviceMessagingRepository {
                    retry_count, last_attempt_at, receipt_deadline,
                    failure_code, claim_generation
               FROM delivery_intents
+             \(whereClause)
              ORDER BY created_at, queue_id
             """
         )
         defer { sqlite3_finalize(statement) }
+        for (offset, binding) in bindings.enumerated() {
+            switch binding {
+            case .text(let value):
+                try bind(value, to: statement, index: Int32(offset + 1))
+            case .integer(let value):
+                try bind(value, to: statement, index: Int32(offset + 1))
+            case .double(let value):
+                try bind(value, to: statement, index: Int32(offset + 1))
+            }
+        }
         var result: [PersistedDeliveryIntent] = []
         while true {
             switch sqlite3_step(statement) {
@@ -1768,11 +2158,14 @@ public actor SQLiteDeviceMessagingRepository {
         )
     }
 
+    /// Returns the post-update row so callers can report the exact projected
+    /// record in a change without a full snapshot read.
+    @discardableResult
     private func updateMessageState(
         id: UUID,
         state: PersistedMessageDeliveryState,
         expectedDirection: PersistedMessageDirection
-    ) throws {
+    ) throws -> PersistedMessageRecord {
         let statement = try prepare(
             "UPDATE messages SET delivery_state = ? WHERE message_id = ? AND direction = ?"
         )
@@ -1781,9 +2174,11 @@ public actor SQLiteDeviceMessagingRepository {
         try bind(canonicalUUID(id), to: statement, index: 2)
         try bind(Int(expectedDirection.rawValue), to: statement, index: 3)
         try stepDone(statement, operation: "update_message_state")
-        guard sqlite3_changes(requiredDatabase()) == 1 else {
+        guard sqlite3_changes(requiredDatabase()) == 1,
+              let updated = try loadMessage(id: id) else {
             throw DeviceMessagingRepositoryError.messageNotFound(id)
         }
+        return updated
     }
 
     private func deleteIntent(queueID: String) throws {
@@ -1796,9 +2191,15 @@ public actor SQLiteDeviceMessagingRepository {
         }
     }
 
-    private func removeCancelledDelivery(_ intent: PersistedDeliveryIntent) throws {
+    private func removeCancelledDelivery(
+        _ intent: PersistedDeliveryIntent,
+        into collector: inout RepositoryChangeCollector
+    ) throws {
         switch intent.state {
         case .pending:
+            guard let message = try loadMessage(id: intent.messageID) else {
+                throw DeviceMessagingRepositoryError.messageNotFound(intent.messageID)
+            }
             let statement = try prepare(
                 "DELETE FROM messages WHERE message_id = ? AND direction = ?"
             )
@@ -1810,8 +2211,14 @@ public actor SQLiteDeviceMessagingRepository {
                 throw DeviceMessagingRepositoryError.messageNotFound(intent.messageID)
             }
             // ON DELETE CASCADE removes the paired delivery intent atomically.
+            collector.removeMessage(
+                id: message.id,
+                conversationFingerprint: message.conversationFingerprint
+            )
+            collector.removeIntent(queueID: intent.queueID)
         case .failed:
             try deleteIntent(queueID: intent.queueID)
+            collector.removeIntent(queueID: intent.queueID)
         case .sending, .awaitingReceipt:
             throw DeviceMessagingRepositoryError.invalidRecord(
                 reasonCode: "in_flight_delivery_prevents_cancel"
@@ -1853,11 +2260,16 @@ public actor SQLiteDeviceMessagingRepository {
 
     private func recoverInterruptedClaims() throws -> Int {
         try withTransaction(mode: "IMMEDIATE") {
-            try recoverInterruptedClaimsWithinTransaction()
+            // Bootstrap discards the collector: its caller returns a full
+            // snapshot that already contains every recovered row.
+            var collector = RepositoryChangeCollector()
+            return try recoverInterruptedClaimsWithinTransaction(into: &collector)
         }
     }
 
-    private func recoverInterruptedClaimsWithinTransaction() throws -> Int {
+    private func recoverInterruptedClaimsWithinTransaction(
+        into collector: inout RepositoryChangeCollector
+    ) throws -> Int {
         guard let processLease, let processLockPath else {
             throw DeviceMessagingRepositoryError.notBootstrapped
         }
@@ -1926,11 +2338,13 @@ public actor SQLiteDeviceMessagingRepository {
                 index: 3
             )
             try stepDone(recovery, operation: "recover_interrupted_claim")
-            guard sqlite3_changes(requiredDatabase()) == 1 else {
+            guard sqlite3_changes(requiredDatabase()) == 1,
+                  let recovered = try loadIntentWithOwner(queueID: queueID)?.intent else {
                 throw DeviceMessagingRepositoryError.invalidRecord(
                     reasonCode: "interrupted_claim_recovery_conflict"
                 )
             }
+            collector.upsert(recovered)
         }
         let changed = interruptedQueueIDs.count
         if changed > 0 { try advanceGeneration() }
@@ -1953,9 +2367,10 @@ public actor SQLiteDeviceMessagingRepository {
 
     private func admitDeliveryIntent(
         targetDeviceID: String,
-        admissionTime: Date
+        admissionTime: Date,
+        into collector: inout RepositoryChangeCollector
     ) throws {
-        try expirePendingDeliveryIntents(asOf: admissionTime)
+        try expirePendingDeliveryIntents(asOf: admissionTime, into: &collector)
         let activeTotal = try scalarInt(
             "SELECT COUNT(*) FROM delivery_intents WHERE state IN (0, 1, 2)",
             bindings: []
@@ -1979,7 +2394,21 @@ public actor SQLiteDeviceMessagingRepository {
     /// whole admission decision is deterministic and replayable during tests
     /// or migration. Expired rows remain visible as failed history but no
     /// longer consume active global/per-device queue capacity.
-    private func expirePendingDeliveryIntents(asOf now: Date) throws {
+    private func expirePendingDeliveryIntents(
+        asOf now: Date,
+        into collector: inout RepositoryChangeCollector
+    ) throws {
+        // The affected set is fixed before the bulk updates run; nothing can
+        // interleave inside the surrounding IMMEDIATE transaction.
+        let expiring = try loadIntents(
+            where: "state = ? AND expires_at IS NOT NULL AND expires_at < ?",
+            bindings: [
+                .integer(Int(PersistedDeliveryIntentState.pending.rawValue)),
+                .double(now.timeIntervalSince1970),
+            ]
+        )
+        guard !expiring.isEmpty else { return }
+
         let messages = try prepare(
             """
             UPDATE messages
@@ -2011,21 +2440,58 @@ public actor SQLiteDeviceMessagingRepository {
         try bind(Int(PersistedDeliveryIntentState.pending.rawValue), to: intents, index: 4)
         try bind(now.timeIntervalSince1970, to: intents, index: 5)
         try stepDone(intents, operation: "expire_pending_intents_for_admission")
+
+        for expired in expiring {
+            guard let updatedIntent = try loadIntentWithOwner(
+                queueID: expired.queueID
+            )?.intent,
+                  let updatedMessage = try loadMessage(id: expired.messageID) else {
+                throw DeviceMessagingRepositoryError.intentNotFound(expired.queueID)
+            }
+            collector.upsert(updatedIntent)
+            collector.upsert(updatedMessage)
+        }
+        try compactFailedDeliveryIntents(into: &collector)
     }
 
-    private func makeRoomForMessage(in conversationFingerprint: String) throws {
+    private func makeRoomForMessage(
+        in conversationFingerprint: String,
+        into collector: inout RepositoryChangeCollector
+    ) throws {
         let currentCount = try scalarInt(
             "SELECT COUNT(*) FROM messages WHERE conversation_fingerprint = ?",
             bindings: [.text(conversationFingerprint)]
         )
         guard currentCount >= Self.maximumMessagesPerConversation else { return }
         let requiredRemovalCount = currentCount - Self.maximumMessagesPerConversation + 1
+        let removals = try loadEvictableTerminalMessages(
+            conversationFingerprint: conversationFingerprint,
+            limit: requiredRemovalCount
+        )
+        guard removals.count == requiredRemovalCount else {
+            throw DeviceMessagingRepositoryError.invalidRecord(
+                reasonCode: "conversation_capacity_exceeded"
+            )
+        }
+        try evictTerminalMessages(removals, into: &collector)
+    }
+
+    /// Fully terminal, intent-free rows in deterministic eviction order.
+    /// Passing nil scans every conversation for the global bound.
+    private func loadEvictableTerminalMessages(
+        conversationFingerprint: String?,
+        limit: Int
+    ) throws -> [MessageRepositoryMessageRemoval] {
+        guard limit > 0 else { return [] }
+        let conversationFilter = conversationFingerprint == nil
+            ? ""
+            : "AND message.conversation_fingerprint = ?"
         let statement = try prepare(
             """
-            SELECT message.message_id
+            SELECT message.message_id, message.conversation_fingerprint
               FROM messages AS message
-             WHERE message.conversation_fingerprint = ?
-               AND message.delivery_state IN (2, 3)
+             WHERE message.delivery_state IN (2, 3)
+               \(conversationFilter)
                AND NOT EXISTS (
                     SELECT 1 FROM delivery_intents AS intent
                      WHERE intent.message_id = message.message_id
@@ -2035,40 +2501,285 @@ public actor SQLiteDeviceMessagingRepository {
             """
         )
         defer { sqlite3_finalize(statement) }
-        try bind(conversationFingerprint, to: statement, index: 1)
-        try bind(requiredRemovalCount, to: statement, index: 2)
-        var removableIDs: [String] = []
+        if let conversationFingerprint {
+            try bind(conversationFingerprint, to: statement, index: 1)
+            try bind(limit, to: statement, index: 2)
+        } else {
+            try bind(limit, to: statement, index: 1)
+        }
+        var removals: [MessageRepositoryMessageRemoval] = []
         loadRemovableMessages: while true {
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
-                guard let messageID = textColumn(statement, index: 0) else {
+                guard let rawID = textColumn(statement, index: 0),
+                      let messageID = UUID(uuidString: rawID),
+                      let fingerprint = textColumn(statement, index: 1) else {
                     throw DeviceMessagingRepositoryError.invalidRecord(
                         reasonCode: "invalid_persisted_message_id"
                     )
                 }
-                removableIDs.append(messageID)
+                removals.append(MessageRepositoryMessageRemoval(
+                    id: messageID,
+                    conversationFingerprint: fingerprint
+                ))
             case SQLITE_DONE:
                 break loadRemovableMessages
             default:
                 throw currentSQLiteError(operation: "load_capacity_evictions")
             }
         }
-        guard removableIDs.count == requiredRemovalCount else {
-            throw DeviceMessagingRepositoryError.invalidRecord(
-                reasonCode: "conversation_capacity_exceeded"
-            )
-        }
-        for messageID in removableIDs {
+        return removals
+    }
+
+    private func evictTerminalMessages(
+        _ removals: [MessageRepositoryMessageRemoval],
+        into collector: inout RepositoryChangeCollector
+    ) throws {
+        for removal in removals {
             let deletion = try prepare("DELETE FROM messages WHERE message_id = ?")
             defer { sqlite3_finalize(deletion) }
-            try bind(messageID, to: deletion, index: 1)
+            try bind(canonicalUUID(removal.id), to: deletion, index: 1)
             try stepDone(deletion, operation: "evict_terminal_message")
             guard sqlite3_changes(requiredDatabase()) == 1 else {
                 throw DeviceMessagingRepositoryError.invalidRecord(
                     reasonCode: "capacity_eviction_conflict"
                 )
             }
+            collector.removeMessage(
+                id: removal.id,
+                conversationFingerprint: removal.conversationFingerprint
+            )
         }
+    }
+
+    /// Enforces the global conversation-count and total-row bounds before one
+    /// new message row is admitted. Whole conversations are evicted least
+    /// recently active first, and only when every row in them is terminal and
+    /// intent-free; single terminal rows across all conversations absorb the
+    /// total-row bound. An unmeetable bound fails the write closed.
+    private func compactGlobalMessageHistory(
+        admitting message: PersistedMessageRecord,
+        into collector: inout RepositoryChangeCollector
+    ) throws -> (evictedConversations: Int, evictedMessages: Int) {
+        var evictedConversations = 0
+        let conversationExists = try scalarInt(
+            "SELECT COUNT(*) FROM messages WHERE conversation_fingerprint = ?",
+            bindings: [.text(message.conversationFingerprint)]
+        ) > 0
+        if !conversationExists {
+            let conversationCount = try scalarInt(
+                "SELECT COUNT(DISTINCT conversation_fingerprint) FROM messages",
+                bindings: []
+            )
+            if conversationCount >= Self.maximumConversations {
+                evictedConversations = try evictOldestTerminalConversations(
+                    count: conversationCount - Self.maximumConversations + 1,
+                    into: &collector
+                )
+            }
+        }
+        var evictedMessages = 0
+        let totalRows = try scalarInt("SELECT COUNT(*) FROM messages", bindings: [])
+        if totalRows >= Self.maximumTotalMessageRows {
+            let required = totalRows - Self.maximumTotalMessageRows + 1
+            let removals = try loadEvictableTerminalMessages(
+                conversationFingerprint: nil,
+                limit: required
+            )
+            guard removals.count == required else {
+                throw DeviceMessagingRepositoryError.invalidRecord(
+                    reasonCode: "global_message_capacity_exceeded"
+                )
+            }
+            try evictTerminalMessages(removals, into: &collector)
+            evictedMessages = removals.count
+        }
+        return (evictedConversations, evictedMessages)
+    }
+
+    /// Conversations whose imported row count exceeds the per-conversation
+    /// bound, in deterministic order. Only legacy migration can produce these;
+    /// runtime writes enforce the bound before every insert.
+    private func loadOverCapacityConversations() throws
+        -> [(fingerprint: String, rowCount: Int)] {
+        let statement = try prepare(
+            """
+            SELECT conversation_fingerprint, COUNT(*)
+              FROM messages
+             GROUP BY conversation_fingerprint
+            HAVING COUNT(*) > ?
+             ORDER BY conversation_fingerprint
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(Self.maximumMessagesPerConversation, to: statement, index: 1)
+        var overflowing: [(fingerprint: String, rowCount: Int)] = []
+        loadOverflowingConversations: while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                overflowing.append((
+                    fingerprint: requiredTextColumn(statement, index: 0),
+                    rowCount: Int(sqlite3_column_int64(statement, 1))
+                ))
+            case SQLITE_DONE:
+                break loadOverflowingConversations
+            default:
+                throw currentSQLiteError(operation: "load_over_capacity_conversations")
+            }
+        }
+        return overflowing
+    }
+
+    /// Least-recently-active conversations in which every message is terminal
+    /// and no delivery intent (active or failed) references any row.
+    private func loadEvictableConversationFingerprints(limit: Int) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let statement = try prepare(
+            """
+            SELECT candidate.conversation_fingerprint
+              FROM messages AS candidate
+             GROUP BY candidate.conversation_fingerprint
+            HAVING SUM(CASE WHEN candidate.delivery_state IN (0, 1) THEN 1 ELSE 0 END) = 0
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM delivery_intents AS intent
+                      JOIN messages AS referenced
+                        ON referenced.message_id = intent.message_id
+                     WHERE referenced.conversation_fingerprint
+                           = candidate.conversation_fingerprint
+               )
+             ORDER BY MAX(candidate.timestamp), candidate.conversation_fingerprint
+             LIMIT ?
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(limit, to: statement, index: 1)
+        var fingerprints: [String] = []
+        loadEvictableConversations: while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                fingerprints.append(requiredTextColumn(statement, index: 0))
+            case SQLITE_DONE:
+                break loadEvictableConversations
+            default:
+                throw currentSQLiteError(operation: "load_evictable_conversations")
+            }
+        }
+        return fingerprints
+    }
+
+    /// Evicts exactly `count` least-recently-active fully terminal
+    /// conversations. Anything less evictable fails the write closed.
+    @discardableResult
+    private func evictOldestTerminalConversations(
+        count: Int,
+        into collector: inout RepositoryChangeCollector
+    ) throws -> Int {
+        guard count > 0 else { return 0 }
+        let fingerprints = try loadEvictableConversationFingerprints(limit: count)
+        guard fingerprints.count == count else {
+            throw DeviceMessagingRepositoryError.invalidRecord(
+                reasonCode: "global_conversation_capacity_exceeded"
+            )
+        }
+        try evictConversations(fingerprints, into: &collector)
+        return fingerprints.count
+    }
+
+    private func evictConversations(
+        _ fingerprints: [String],
+        into collector: inout RepositoryChangeCollector
+    ) throws {
+        for fingerprint in fingerprints {
+            let members = try prepare(
+                "SELECT message_id FROM messages WHERE conversation_fingerprint = ?"
+            )
+            defer { sqlite3_finalize(members) }
+            try bind(fingerprint, to: members, index: 1)
+            var memberIDs: [UUID] = []
+            loadMembers: while true {
+                switch sqlite3_step(members) {
+                case SQLITE_ROW:
+                    guard let memberID = UUID(
+                        uuidString: requiredTextColumn(members, index: 0)
+                    ) else {
+                        throw DeviceMessagingRepositoryError.invalidRecord(
+                            reasonCode: "invalid_persisted_message_id"
+                        )
+                    }
+                    memberIDs.append(memberID)
+                case SQLITE_DONE:
+                    break loadMembers
+                default:
+                    throw currentSQLiteError(operation: "load_evicted_conversation_members")
+                }
+            }
+            let deletion = try prepare(
+                "DELETE FROM messages WHERE conversation_fingerprint = ?"
+            )
+            defer { sqlite3_finalize(deletion) }
+            try bind(fingerprint, to: deletion, index: 1)
+            try stepDone(deletion, operation: "evict_terminal_conversation")
+            guard sqlite3_changes(requiredDatabase()) == memberIDs.count else {
+                throw DeviceMessagingRepositoryError.invalidRecord(
+                    reasonCode: "capacity_eviction_conflict"
+                )
+            }
+            for memberID in memberIDs {
+                collector.removeMessage(
+                    id: memberID,
+                    conversationFingerprint: fingerprint
+                )
+            }
+        }
+    }
+
+    /// Bounds retained failed intents. The oldest failed intents are deleted
+    /// first; their failed messages stay visible as history and become
+    /// evictable by the message bounds afterwards.
+    @discardableResult
+    private func compactFailedDeliveryIntents(
+        into collector: inout RepositoryChangeCollector
+    ) throws -> Int {
+        let failedState = Int(PersistedDeliveryIntentState.failed.rawValue)
+        let failedCount = try scalarInt(
+            "SELECT COUNT(*) FROM delivery_intents WHERE state = ?",
+            bindings: [.integer(failedState)]
+        )
+        guard failedCount > Self.maximumFailedDeliveryIntents else { return 0 }
+        let excess = failedCount - Self.maximumFailedDeliveryIntents
+        let statement = try prepare(
+            """
+            SELECT queue_id FROM delivery_intents
+             WHERE state = ?
+             ORDER BY created_at, queue_id
+             LIMIT ?
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(failedState, to: statement, index: 1)
+        try bind(excess, to: statement, index: 2)
+        var queueIDs: [String] = []
+        loadCompactableIntents: while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                queueIDs.append(requiredTextColumn(statement, index: 0))
+            case SQLITE_DONE:
+                break loadCompactableIntents
+            default:
+                throw currentSQLiteError(operation: "load_compactable_failed_intents")
+            }
+        }
+        guard queueIDs.count == excess else {
+            throw DeviceMessagingRepositoryError.invalidRecord(
+                reasonCode: "capacity_eviction_conflict"
+            )
+        }
+        for queueID in queueIDs {
+            try deleteIntent(queueID: queueID)
+            collector.removeIntent(queueID: queueID)
+        }
+        return queueIDs.count
     }
 
     // MARK: - Validation

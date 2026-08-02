@@ -86,7 +86,9 @@ final class DeviceMessagingHardeningTests: XCTestCase {
         await fixture.queue.deviceOnline("peer-one")
         await fixture.queue.deviceOnline("peer-one")
         try await waitUntil {
-            probe.queueSendCount == 1 && fixture.queue.statistics.totalMessages == 0
+            probe.queueSendCount == 1
+                && fixture.queue.statistics.totalMessages == 0
+                && !fixture.queue.isProcessing
         }
 
         XCTAssertEqual(probe.queueSendCount, 1)

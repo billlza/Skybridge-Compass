@@ -173,6 +173,98 @@ public struct MessageRepositorySnapshot: Sendable, Equatable {
     }
 }
 
+/// Identifies one removed message together with the conversation it left, so a
+/// projection keyed by conversation can apply the removal without a lookup
+/// table or a full snapshot read.
+public struct MessageRepositoryMessageRemoval: Sendable, Equatable, Hashable {
+    public let id: UUID
+    public let conversationFingerprint: String
+
+    public init(id: UUID, conversationFingerprint: String) {
+        self.id = id
+        self.conversationFingerprint = conversationFingerprint
+    }
+}
+
+/// The exact rows one committed repository transaction changed.
+///
+/// A change applies on top of `basisGeneration` and produces `generation`.
+/// One transaction may advance the generation more than once (for example a
+/// claim that first recovers interrupted claims); the change then carries every
+/// row affected across that whole span. Removals apply before upserts.
+/// Migration issues are only written during bootstrap migration and therefore
+/// never appear in a change; projections receive them from full snapshots.
+public struct MessageRepositoryChange: Sendable, Equatable {
+    public let upsertedMessages: [PersistedMessageRecord]
+    public let removedMessages: [MessageRepositoryMessageRemoval]
+    public let upsertedDeliveryIntents: [PersistedDeliveryIntent]
+    public let removedDeliveryIntentQueueIDs: [String]
+    public let basisGeneration: UInt64
+    public let generation: UInt64
+
+    public init(
+        upsertedMessages: [PersistedMessageRecord],
+        removedMessages: [MessageRepositoryMessageRemoval],
+        upsertedDeliveryIntents: [PersistedDeliveryIntent],
+        removedDeliveryIntentQueueIDs: [String],
+        basisGeneration: UInt64,
+        generation: UInt64
+    ) {
+        self.upsertedMessages = upsertedMessages
+        self.removedMessages = removedMessages
+        self.upsertedDeliveryIntents = upsertedDeliveryIntents
+        self.removedDeliveryIntentQueueIDs = removedDeliveryIntentQueueIDs
+        self.basisGeneration = basisGeneration
+        self.generation = generation
+    }
+
+    /// A committed transaction that touched no projected rows and therefore
+    /// did not advance the generation.
+    public var isEmpty: Bool {
+        upsertedMessages.isEmpty
+            && removedMessages.isEmpty
+            && upsertedDeliveryIntents.isEmpty
+            && removedDeliveryIntentQueueIDs.isEmpty
+            && basisGeneration == generation
+    }
+}
+
+/// A granted delivery claim together with the projected rows the claim
+/// transaction changed (the claimed intent, plus any expired or recovered
+/// rows the same transaction settled).
+public struct MessageDeliveryClaimOutcome: Sendable, Equatable {
+    public let claim: MessageDeliveryClaim
+    public let change: MessageRepositoryChange
+
+    public init(claim: MessageDeliveryClaim, change: MessageRepositoryChange) {
+        self.claim = claim
+        self.change = change
+    }
+}
+
+/// The result of polling for the next ready delivery. The poll may settle
+/// expired or interrupted rows even when no claim is granted, so the change
+/// must be applied to projections regardless of whether `claim` is present.
+public struct MessageDeliveryPollOutcome: Sendable, Equatable {
+    public let claim: MessageDeliveryClaim?
+    public let change: MessageRepositoryChange
+
+    public init(claim: MessageDeliveryClaim?, change: MessageRepositoryChange) {
+        self.claim = claim
+        self.change = change
+    }
+}
+
+/// How one committed mutation reaches projections. Mutations normally carry
+/// their exact change; a mutation whose effect had to be verified against the
+/// full store instead (for example a delivery resolution that raced an
+/// interruption and was confirmed already applied) carries the authoritative
+/// snapshot the verification read, which projections must adopt wholesale.
+public enum MessageRepositoryMutationOutcome: Sendable, Equatable {
+    case change(MessageRepositoryChange)
+    case snapshot(MessageRepositorySnapshot)
+}
+
 public struct MessageDeliveryClaim: Sendable, Equatable {
     public let intent: PersistedDeliveryIntent
     public let ownerToken: UUID
@@ -250,7 +342,6 @@ public enum DeviceMessagingRepositoryError: Error, LocalizedError, Sendable, Equ
     case receiptBindingMismatch(UUID)
     case legacySourceConflict(String)
     case legacySourceChanged(String)
-    case legacyPayloadTooLarge(actualBytes: Int, maximumBytes: Int)
     case legacyPayloadUnreadable(String)
     case schemaVersionUnsupported(Int)
     case transactionOutcomeUnknown
@@ -280,8 +371,6 @@ public enum DeviceMessagingRepositoryError: Error, LocalizedError, Sendable, Equ
             return "Legacy device messaging sources conflict"
         case .legacySourceChanged:
             return "Legacy device messaging source changed after migration"
-        case .legacyPayloadTooLarge(let actualBytes, let maximumBytes):
-            return "Legacy device messaging payload is \(actualBytes) bytes; migration maximum is \(maximumBytes) bytes"
         case .legacyPayloadUnreadable:
             return "Legacy device messaging payload could not be read or decoded"
         case .schemaVersionUnsupported(let version):

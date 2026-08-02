@@ -351,7 +351,7 @@ public final class DeviceMessagingService: ObservableObject {
         let conversationFingerprint = try validConversationFingerprint(rawFingerprint)
         if usesUnifiedRepository {
             do {
-                try applyUnifiedSnapshot(
+                try await applyUnifiedChange(
                     try await unifiedRuntime.recordIncoming(PersistedMessageRecord(
                         id: payload.id,
                         conversationFingerprint: conversationFingerprint,
@@ -384,7 +384,7 @@ public final class DeviceMessagingService: ObservableObject {
         }
         let fingerprint = try validConversationFingerprint(rawFingerprint)
         do {
-            try applyUnifiedSnapshot(
+            try await applyUnifiedChange(
                 try await unifiedRuntime.confirmAuthenticatedReceipt(
                     AuthenticatedMessageReceipt(
                         messageID: payload.messageID,
@@ -473,7 +473,7 @@ public final class DeviceMessagingService: ObservableObject {
                 }
                 guard let self else { return }
                 do {
-                    try self.applyUnifiedSnapshot(
+                    try await self.applyUnifiedChange(
                         try await self.unifiedRuntime.requeueExpiredReceipts(
                             retryPolicy: self.unifiedRetryPolicy
                         )
@@ -495,7 +495,7 @@ public final class DeviceMessagingService: ObservableObject {
     ) async throws {
         let mutationToken = try beginUnifiedQueueMutation()
         do {
-            let snapshot: MessageRepositorySnapshot
+            let change: MessageRepositoryChange
             switch mutation {
             case .cancel(let queueID):
                 let current = try await unifiedRuntime.currentSnapshot()
@@ -504,17 +504,17 @@ public final class DeviceMessagingService: ObservableObject {
                 })?.targetDeviceID {
                     try await quiesceUnifiedWorkers(for: Set([targetDeviceID]))
                 }
-                snapshot = try await unifiedRuntime.cancelDelivery(queueID: queueID)
+                change = try await unifiedRuntime.cancelDelivery(queueID: queueID)
 
             case .cancelAll(let targetDeviceID):
                 try await quiesceUnifiedWorkers(for: Set([targetDeviceID]))
-                snapshot = try await unifiedRuntime.cancelDeliveries(
+                change = try await unifiedRuntime.cancelDeliveries(
                     targetDeviceID: targetDeviceID
                 )
 
             case .clear:
                 try await quiesceUnifiedWorkers(for: nil)
-                snapshot = try await unifiedRuntime.clearDeliveries()
+                change = try await unifiedRuntime.clearDeliveries()
 
             case .retryFailed(let now):
                 let current = try await unifiedRuntime.currentSnapshot()
@@ -524,10 +524,10 @@ public final class DeviceMessagingService: ObservableObject {
                         .map(\.targetDeviceID)
                 )
                 try await quiesceUnifiedWorkers(for: failedDeviceIDs)
-                snapshot = try await unifiedRuntime.retryFailedDeliveries(now: now)
+                change = try await unifiedRuntime.retryFailedDeliveries(now: now)
             }
 
-            try applyUnifiedSnapshot(snapshot)
+            try await applyUnifiedChange(change)
         } catch {
             finishUnifiedQueueMutation(mutationToken)
             throw error
@@ -577,7 +577,7 @@ public final class DeviceMessagingService: ObservableObject {
     func clearUnifiedConversation(_ fingerprint: String) async throws {
         guard usesUnifiedRepository else { throw DeviceMessagingError.persistenceFailed }
         let normalized = try validConversationFingerprint(fingerprint)
-        try applyUnifiedSnapshot(
+        try await applyUnifiedChange(
             try await unifiedRuntime.clearConversation(normalized)
         )
     }
@@ -643,7 +643,7 @@ public final class DeviceMessagingService: ObservableObject {
             expiresAt: payload.sentAt.addingTimeInterval(24 * 60 * 60)
         )
         do {
-            try applyUnifiedSnapshot(
+            try await applyUnifiedChange(
                 try await unifiedRuntime.stageOutgoing(message: message, intent: intent)
             )
         } catch {
@@ -690,16 +690,17 @@ public final class DeviceMessagingService: ObservableObject {
             let claim: MessageDeliveryClaim
             do {
                 let deliveryAttemptID = UUID()
-                guard let next = try await unifiedRuntime.claimNextReady(
+                let poll = try await unifiedRuntime.claimNextReady(
                     targetDeviceID: deviceId,
                     ownerToken: deliveryAttemptID,
                     retryPolicy: unifiedRetryPolicy
-                ) else {
-                    try applyUnifiedSnapshot(try await unifiedRuntime.currentSnapshot())
-                    return
-                }
+                )
+                // The poll's change carries the claimed intent and any rows it
+                // settled (expiries, recovered claims), so no snapshot read is
+                // needed per delivery.
+                try await applyUnifiedChange(poll.change)
+                guard let next = poll.claim else { return }
                 claim = next
-                try applyUnifiedSnapshot(try await unifiedRuntime.currentSnapshot())
             } catch {
                 SkyBridgeLogger.shared.error("Unified device-message claim failed")
                 return
@@ -707,7 +708,7 @@ public final class DeviceMessagingService: ObservableObject {
 
             let disposition = await submitUnifiedClaim(claim)
             do {
-                try applyUnifiedSnapshot(
+                try await applyUnifiedMutationOutcome(
                     try await unifiedRuntime.resolve(
                         claim,
                         disposition: disposition,
@@ -787,6 +788,31 @@ public final class DeviceMessagingService: ObservableObject {
     private func applyUnifiedSnapshot(_ snapshot: MessageRepositorySnapshot) throws {
         try messageStore.applyUnifiedSnapshot(snapshot)
         try offlineQueue.applyUnifiedSnapshot(snapshot)
+    }
+
+    /// Applies one committed change to both projections. A projection that
+    /// reports a generation gap or diverged content is repaired by reapplying
+    /// one full authoritative snapshot to both facades; snapshot application
+    /// is generation-gated, so the repair is idempotent for the facade that
+    /// already applied the change.
+    private func applyUnifiedChange(_ change: MessageRepositoryChange) async throws {
+        let storeResult = try messageStore.applyUnifiedChange(change)
+        let queueResult = try offlineQueue.applyUnifiedChange(change)
+        if storeResult == .requiresResynchronization
+            || queueResult == .requiresResynchronization {
+            try applyUnifiedSnapshot(try await unifiedRuntime.currentSnapshot())
+        }
+    }
+
+    private func applyUnifiedMutationOutcome(
+        _ outcome: MessageRepositoryMutationOutcome
+    ) async throws {
+        switch outcome {
+        case .change(let change):
+            try await applyUnifiedChange(change)
+        case .snapshot(let snapshot):
+            try applyUnifiedSnapshot(snapshot)
+        }
     }
 
     private func deliverQueuedMessage(

@@ -202,13 +202,13 @@ final class UnifiedDeviceMessagingRuntimeTests: XCTestCase {
             expiresAt: sentAt.addingTimeInterval(86_400)
         )
         _ = try await runtime.stageOutgoing(message: message, intent: intent)
-        let failedClaim = try await runtime.claim(
+        let failedClaimOutcome = try await runtime.claim(
             messageID: message.id,
             ownerToken: UUID(),
             now: sentAt
         )
-        _ = try await runtime.resolve(
-            failedClaim,
+        let resolveOutcome = try await runtime.resolve(
+            failedClaimOutcome.claim,
             disposition: .permanentFailure(failureCode: "transport_failure"),
             retryPolicy: MessageDeliveryRetryPolicy(
                 maximumRetryCount: 3,
@@ -217,6 +217,11 @@ final class UnifiedDeviceMessagingRuntimeTests: XCTestCase {
             ),
             now: sentAt
         )
+        guard case .change(let failedChange) = resolveOutcome else {
+            return XCTFail("An uncontended resolution must produce an exact change")
+        }
+        XCTAssertEqual(failedChange.upsertedDeliveryIntents.map(\.state), [.failed])
+        XCTAssertEqual(failedChange.upsertedMessages.map(\.deliveryState), [.failed])
 
         let projections = try ProjectionFixture()
         defer { projections.remove() }

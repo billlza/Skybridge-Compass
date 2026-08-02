@@ -2016,7 +2016,7 @@ final class DeviceMessagingServiceTests: XCTestCase {
             expiresAt: sentAt.addingTimeInterval(86_400)
         )
         _ = try await runtime.stageOutgoing(message: message, intent: intent)
-        let failedClaim = try await runtime.claimNextReady(
+        let failedPoll = try await runtime.claimNextReady(
             targetDeviceID: targetDeviceID,
             ownerToken: UUID(),
             retryPolicy: MessageDeliveryRetryPolicy(
@@ -2026,8 +2026,8 @@ final class DeviceMessagingServiceTests: XCTestCase {
             ),
             now: sentAt
         )
-        _ = try await runtime.resolve(
-            try XCTUnwrap(failedClaim),
+        let resolved = try await runtime.resolve(
+            try XCTUnwrap(failedPoll.claim),
             disposition: .permanentFailure(failureCode: "transport_failure"),
             retryPolicy: MessageDeliveryRetryPolicy(
                 maximumRetryCount: 3,
@@ -2035,6 +2035,15 @@ final class DeviceMessagingServiceTests: XCTestCase {
                 backoffFactor: 2
             ),
             now: sentAt
+        )
+        guard case .change(let failedChange) = resolved else {
+            return XCTFail("An uncontested resolve must report its exact change")
+        }
+        XCTAssertEqual(failedChange.upsertedMessages.map(\.deliveryState), [.failed])
+        XCTAssertEqual(failedChange.upsertedDeliveryIntents.map(\.state), [.failed])
+        XCTAssertEqual(
+            failedChange.upsertedDeliveryIntents.first?.failureCode,
+            "transport_failure"
         )
 
         let queue = makeQueue()

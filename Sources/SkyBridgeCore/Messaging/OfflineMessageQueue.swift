@@ -757,39 +757,85 @@ public final class OfflineMessageQueue: ObservableObject {
         var mapped: [UUID: QueuedMessage] = [:]
         mapped.reserveCapacity(snapshot.deliveryIntents.count)
         for intent in snapshot.deliveryIntents {
-            guard let id = UUID(uuidString: intent.queueID),
-                  let messageType = OfflineMessageType(rawValue: intent.messageType),
-                  let priority = MessagePriority(rawValue: intent.priority) else {
-                throw OfflineQueueError.persistenceBlocked(.stateConflict)
-            }
-            let status: MessageDeliveryStatus
-            switch intent.state {
-            case .pending: status = .pending
-            case .sending: status = .sending
-            case .awaitingReceipt: status = .awaitingReceipt
-            case .failed: status = .failed
-            }
-            let failureCode = intent.failureCode.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
-                ?? (intent.failureCode == nil ? nil : .stateConflict)
-            mapped[id] = QueuedMessage(
-                id: id,
-                targetDeviceID: intent.targetDeviceID,
-                messageType: messageType,
-                priority: priority,
-                payload: intent.payload,
-                createdAt: intent.createdAt,
-                expiresAt: intent.expiresAt ?? .distantFuture,
-                status: status,
-                retryCount: intent.retryCount,
-                lastAttemptAt: intent.lastAttemptAt,
-                lastFailureCode: failureCode
-            )
+            let message = try Self.projectedQueuedMessage(from: intent)
+            mapped[message.id] = message
         }
         latestRepositoryGeneration = snapshot.generation
         unifiedMessages = mapped
-        statistics = Self.unifiedStatistics(Array(mapped.values))
-        isProcessing = snapshot.deliveryIntents.contains { $0.state == .sending }
+        refreshUnifiedProjectionOutputs()
+    }
+
+    /// Applies the exact rows one committed repository transaction changed.
+    /// A change whose basis matches the projection applies incrementally; a
+    /// change that does not advance past the projection is already reflected;
+    /// a generation gap or diverged content requires the caller to reapply a
+    /// full snapshot, which is the defined repair protocol, not a fallback.
+    func applyUnifiedChange(
+        _ change: MessageRepositoryChange
+    ) throws -> UnifiedProjectionApplication {
+        guard change.basisGeneration == latestRepositoryGeneration else {
+            return change.generation <= latestRepositoryGeneration
+                ? .alreadyReflected
+                : .requiresResynchronization
+        }
+        guard change.generation > change.basisGeneration || change.isEmpty else {
+            return .requiresResynchronization
+        }
+        var mapped = unifiedMessages
+        for queueID in change.removedDeliveryIntentQueueIDs {
+            guard let id = UUID(uuidString: queueID) else {
+                throw OfflineQueueError.persistenceBlocked(.stateConflict)
+            }
+            guard mapped.removeValue(forKey: id) != nil else {
+                return .requiresResynchronization
+            }
+        }
+        for intent in change.upsertedDeliveryIntents {
+            let message = try Self.projectedQueuedMessage(from: intent)
+            mapped[message.id] = message
+        }
+        latestRepositoryGeneration = change.generation
+        unifiedMessages = mapped
+        refreshUnifiedProjectionOutputs()
+        return .applied
+    }
+
+    private func refreshUnifiedProjectionOutputs() {
+        statistics = Self.unifiedStatistics(Array(unifiedMessages.values))
+        isProcessing = unifiedMessages.values.contains { $0.status == .sending }
         persistenceState = .ready
+    }
+
+    private static func projectedQueuedMessage(
+        from intent: PersistedDeliveryIntent
+    ) throws -> QueuedMessage {
+        guard let id = UUID(uuidString: intent.queueID),
+              let messageType = OfflineMessageType(rawValue: intent.messageType),
+              let priority = MessagePriority(rawValue: intent.priority) else {
+            throw OfflineQueueError.persistenceBlocked(.stateConflict)
+        }
+        let status: MessageDeliveryStatus
+        switch intent.state {
+        case .pending: status = .pending
+        case .sending: status = .sending
+        case .awaitingReceipt: status = .awaitingReceipt
+        case .failed: status = .failed
+        }
+        let failureCode = intent.failureCode.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
+            ?? (intent.failureCode == nil ? nil : .stateConflict)
+        return QueuedMessage(
+            id: id,
+            targetDeviceID: intent.targetDeviceID,
+            messageType: messageType,
+            priority: priority,
+            payload: intent.payload,
+            createdAt: intent.createdAt,
+            expiresAt: intent.expiresAt ?? .distantFuture,
+            status: status,
+            retryCount: intent.retryCount,
+            lastAttemptAt: intent.lastAttemptAt,
+            lastFailureCode: failureCode
+        )
     }
 
     private static func unifiedDeliveryOrder(

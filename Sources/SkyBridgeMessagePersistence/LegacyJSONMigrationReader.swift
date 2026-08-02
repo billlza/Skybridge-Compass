@@ -8,26 +8,24 @@ import Glibc
 import UIKit
 #endif
 
-/// Bounded, read-only access for the previous JSON stores.
+/// Read-only access for the previous JSON stores.
 ///
-/// The production JSON stores cap normal operation at 4 MiB. Migration uses a
-/// separate 64 MiB ceiling so a previously valid oversized store can be
-/// imported without deleting or rewriting it. Inputs beyond this explicit
-/// safety boundary fail closed and remain untouched.
+/// The production JSON stores cap normal operation at 4 MiB, but a legacy
+/// store is imported whole no matter how large it grew: rejecting it would
+/// strand the user's history forever, because the source file is never
+/// rewritten. Reads are memory-mapped, so peak resident memory is bounded by
+/// the decoded rows rather than the raw file, and the store-level capacity
+/// bounds are applied by the repository during the import transaction.
 public enum LegacyJSONMigrationReader {
-    public static let maximumPayloadBytes = 64 * 1_024 * 1_024
-
     public static func decode<Value: Decodable>(
         _ type: Value.Type = Value.self,
         from fileURL: URL,
         containedIn rootDirectoryURL: URL,
-        maximumPayloadBytes: Int = maximumPayloadBytes,
         decoder: JSONDecoder = JSONDecoder()
     ) throws -> Value? {
         guard let data = try readData(
             from: fileURL,
-            containedIn: rootDirectoryURL,
-            maximumPayloadBytes: maximumPayloadBytes
+            containedIn: rootDirectoryURL
         ) else {
             return nil
         }
@@ -50,17 +48,12 @@ public enum LegacyJSONMigrationReader {
 
     /// Reads the exact legacy bytes once so callers can both hash and decode the
     /// same immutable payload. The source is never rewritten by this operation.
+    /// The mapping is read-only and uncached, so file size does not translate
+    /// into sustained resident memory.
     public static func readData(
         from fileURL: URL,
-        containedIn rootDirectoryURL: URL,
-        maximumPayloadBytes: Int = maximumPayloadBytes
+        containedIn rootDirectoryURL: URL
     ) throws -> Data? {
-        guard maximumPayloadBytes > 0 else {
-            throw DeviceMessagingRepositoryError.invalidRecord(
-                reasonCode: "invalid_migration_payload_limit"
-            )
-        }
-
         let fileManager = FileManager.default
         let unresolvedRoot = rootDirectoryURL.standardizedFileURL
         let unresolvedFile = fileURL.standardizedFileURL
@@ -86,26 +79,12 @@ public enum LegacyJSONMigrationReader {
                 unresolvedFile.lastPathComponent
             )
         }
-        let declaredSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
-        guard declaredSize <= maximumPayloadBytes else {
-            throw DeviceMessagingRepositoryError.legacyPayloadTooLarge(
-                actualBytes: declaredSize,
-                maximumBytes: maximumPayloadBytes
-            )
-        }
-
         let data: Data
         do {
             data = try Data(contentsOf: unresolvedFile, options: [.mappedIfSafe, .uncached])
         } catch {
             throw DeviceMessagingRepositoryError.legacyPayloadUnreadable(
                 unresolvedFile.lastPathComponent
-            )
-        }
-        guard data.count <= maximumPayloadBytes else {
-            throw DeviceMessagingRepositoryError.legacyPayloadTooLarge(
-                actualBytes: data.count,
-                maximumBytes: maximumPayloadBytes
             )
         }
         return data
@@ -119,12 +98,6 @@ public enum LegacyJSONMigrationReader {
         containedIn rootDirectoryURL: URL,
         sourceLabel: String
     ) throws -> Bool {
-        guard expectedData.count <= maximumPayloadBytes else {
-            throw DeviceMessagingRepositoryError.legacyPayloadTooLarge(
-                actualBytes: expectedData.count,
-                maximumBytes: maximumPayloadBytes
-            )
-        }
         guard let archivedData = try readData(
             from: archiveURL,
             containedIn: rootDirectoryURL

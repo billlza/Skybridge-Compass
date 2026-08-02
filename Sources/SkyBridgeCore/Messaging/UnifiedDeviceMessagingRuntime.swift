@@ -131,14 +131,14 @@ actor UnifiedDeviceMessagingRuntime {
     func stageOutgoing(
         message: PersistedMessageRecord,
         intent: PersistedDeliveryIntent
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.stageOutgoing(message: message, intent: intent)
     }
 
     func recordIncoming(
         _ message: PersistedMessageRecord
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.recordIncoming(message)
     }
@@ -147,7 +147,7 @@ actor UnifiedDeviceMessagingRuntime {
         messageID: UUID,
         ownerToken: UUID,
         now: Date = Date()
-    ) async throws -> MessageDeliveryClaim {
+    ) async throws -> MessageDeliveryClaimOutcome {
         let repository = try await requiredRepository()
         return try await repository.claim(
             messageID: messageID,
@@ -161,7 +161,7 @@ actor UnifiedDeviceMessagingRuntime {
         ownerToken: UUID,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) async throws -> MessageDeliveryClaim? {
+    ) async throws -> MessageDeliveryPollOutcome {
         let repository = try await requiredRepository()
         return try await repository.claimNextReady(
             targetDeviceID: targetDeviceID,
@@ -181,24 +181,24 @@ actor UnifiedDeviceMessagingRuntime {
         disposition: MessageDeliveryDisposition,
         retryPolicy: MessageDeliveryRetryPolicy,
         now: Date = Date()
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryMutationOutcome {
         let repository = try await requiredRepository()
         do {
-            return try await repository.resolve(
+            return .change(try await repository.resolve(
                 claim,
                 disposition: disposition,
                 retryPolicy: retryPolicy,
                 now: now
-            )
+            ))
         } catch let firstError {
             if try await repository.isClaimCurrent(claim) {
                 do {
-                    return try await repository.resolve(
+                    return .change(try await repository.resolve(
                         claim,
                         disposition: disposition,
                         retryPolicy: retryPolicy,
                         now: now
-                    )
+                    ))
                 } catch {
                     guard !(try await repository.isClaimCurrent(claim)) else {
                         throw error
@@ -213,14 +213,14 @@ actor UnifiedDeviceMessagingRuntime {
             ) else {
                 throw firstError
             }
-            return snapshot
+            return .snapshot(snapshot)
         }
     }
 
     func requeueExpiredReceipts(
         now: Date = Date(),
         retryPolicy: MessageDeliveryRetryPolicy
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.requeueExpiredReceipts(
             now: now,
@@ -230,38 +230,38 @@ actor UnifiedDeviceMessagingRuntime {
 
     func confirmAuthenticatedReceipt(
         _ receipt: AuthenticatedMessageReceipt
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.confirmAuthenticatedReceipt(receipt)
     }
 
     func clearConversation(
         _ conversationFingerprint: String
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.clearConversation(conversationFingerprint)
     }
 
-    func cancelDelivery(queueID: String) async throws -> MessageRepositorySnapshot {
+    func cancelDelivery(queueID: String) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.cancelDelivery(queueID: queueID)
     }
 
     func cancelDeliveries(
         targetDeviceID: String
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.cancelDeliveries(targetDeviceID: targetDeviceID)
     }
 
-    func clearDeliveries() async throws -> MessageRepositorySnapshot {
+    func clearDeliveries() async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.clearDeliveries()
     }
 
     func retryFailedDeliveries(
         now: Date = Date()
-    ) async throws -> MessageRepositorySnapshot {
+    ) async throws -> MessageRepositoryChange {
         let repository = try await requiredRepository()
         return try await repository.retryFailedDeliveries(now: now)
     }
@@ -578,12 +578,6 @@ actor UnifiedDeviceMessagingRuntime {
         defaults: UserDefaults
     ) throws -> LoadedLegacySource<Value>? {
         guard let rawData = defaults.data(forKey: defaultsKey) else { return nil }
-        guard rawData.count <= LegacyJSONMigrationReader.maximumPayloadBytes else {
-            throw DeviceMessagingRepositoryError.legacyPayloadTooLarge(
-                actualBytes: rawData.count,
-                maximumBytes: LegacyJSONMigrationReader.maximumPayloadBytes
-            )
-        }
         let value: Value = try LegacyJSONMigrationReader.decode(
             from: rawData,
             sourceLabel: sourceID

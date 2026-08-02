@@ -104,6 +104,10 @@ let package = Package(
         .executable(name: "LocalLanSmokeSourceHost", targets: ["LocalLanSmokeSourceHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "CurrentPathProbe", targets: ["CurrentPathProbe"]),
+        .executable(
+            name: "MessagingRepositoryLockProbe",
+            targets: ["MessagingRepositoryLockProbe"]
+        ),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
@@ -269,6 +273,17 @@ let package = Package(
                 "SkyBridgeAppleTransport"
             ],
             path: "Sources/CurrentPathProbe",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        // Real second-OS-process probe for the messaging repository sidecar
+        // lock. The persistence test target depends on it so `swift test`
+        // always builds it before the cross-process lock tests run.
+        .executableTarget(
+            name: "MessagingRepositoryLockProbe",
+            dependencies: ["SkyBridgeMessagePersistence"],
+            path: "Sources/MessagingRepositoryLockProbe",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ]
@@ -509,7 +524,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SkyBridgeMessagePersistenceTests",
-            dependencies: ["SkyBridgeMessagePersistence"],
+            dependencies: [
+                "SkyBridgeMessagePersistence",
+                "MessagingRepositoryLockProbe"
+            ],
             path: "Tests/SkyBridgeMessagePersistenceTests",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
